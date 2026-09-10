@@ -406,8 +406,9 @@ def test_framework_modes_cleanup_on_failure_preserves_cleanup_error(tmp_path, mo
 
 
 def _run_reference_cleanup_case(tmp_path, monkeypatch, capsys, mode, consumption, failure=None):
-    import click
     from unittest.mock import AsyncMock
+
+    import click
 
     from almanak.framework.cli import run_helpers
     from almanak.framework.cli.run import run
@@ -526,3 +527,57 @@ def _run_reference_cleanup_case(tmp_path, monkeypatch, capsys, mode, consumption
         assert "cleanup failed" in output.err
     elif consumption == "unused":
         assert "unconsumed" in output.err
+
+
+@pytest.mark.parametrize("intent_type", ["SWAP", "LP_OPEN"])
+def test_receipt_withholding_selects_validated_intent(intent_type):
+    doc = document()
+    doc.update(withhold_execution_receipts_once=True, withhold_execution_receipts_intent=intent_type)
+    assert parse_scenario(json.dumps(doc)).withhold_execution_receipts_intent == intent_type
+
+
+@pytest.mark.parametrize("intent_type", ["LP_CLOSE", "swap", None, 1, []])
+def test_receipt_withholding_rejects_unsupported_intent(intent_type):
+    doc = document()
+    doc.update(withhold_execution_receipts_once=True, withhold_execution_receipts_intent=intent_type)
+    with pytest.raises(ScenarioParseError):
+        parse_scenario(json.dumps(doc))
+
+
+def test_receipt_target_cannot_be_silently_unused():
+    doc = document()
+    doc["withhold_execution_receipts_intent"] = "LP_OPEN"
+    with pytest.raises(ScenarioParseError, match="requires receipt withholding"):
+        parse_scenario(json.dumps(doc))
+
+
+def test_receipt_only_frames_preserve_real_reference_reads_with_explicit_chain():
+    client, market = client_and_market()
+    events = parse_scenario(
+        json.dumps({"reference_events": [{"scenario_at": AT.isoformat(), "references": []}]})
+    ).reference_events
+    control = ReferenceScenarioHook(events, network="anvil", managed=True, client=client, chain="bsc")
+    control(market)
+    result = market._gateway_client.market.GetReferencePrice(pb.ReferencePriceRequest(instrument="GOOGL", chain="bsc"))
+    assert result == client.market.GetReferencePrice.return_value
+    client.market.GetReferencePrice.assert_called_once()
+    control.assert_consumed()
+    assert client.rpc.Call.call_args.args[0].chain == "bsc"
+
+
+def test_explicit_chain_cannot_override_reference_observation_chain():
+    client, _ = client_and_market()
+    events = parse_scenario(json.dumps(document())).reference_events
+    with pytest.raises(ValueError, match="exactly one chain"):
+        ReferenceScenarioHook(events, network="anvil", managed=True, client=client, chain="ethereum")
+    client.rpc.Call.assert_not_called()
+
+
+def test_empty_reference_frames_still_require_chain_identity():
+    client, _ = client_and_market()
+    events = parse_scenario(
+        json.dumps({"reference_events": [{"scenario_at": AT.isoformat(), "references": []}]})
+    ).reference_events
+    with pytest.raises(ValueError, match="exactly one chain"):
+        ReferenceScenarioHook(events, network="anvil", managed=True, client=client)
+    client.rpc.Call.assert_not_called()

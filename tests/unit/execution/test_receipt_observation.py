@@ -177,3 +177,17 @@ async def test_plan_observation_cancellation_precedes_sibling_error():
             submitted_tx_ids=[TX, "0x" + "56" * 32],
             evidence=[],
         )
+
+
+@pytest.mark.parametrize("prefix", ["", "0x", "0X"])
+def test_observed_receipt_hashes_use_json_rpc_identity_format(prefix):
+    reply = response()
+    raw = json.loads(reply.canonical_receipt)
+    raw["tx_hash"] = prefix + TX[2:].upper()
+    raw["block_hash"] = prefix + "AB" * 32
+    reply.canonical_receipt = json.dumps(raw).encode()
+    receipt = decode_canonical_receipt(reply, TX)
+    assert receipt.tx_hash == TX
+    assert receipt.block_hash == "0x" + "ab" * 32
+    assert receipt.to_dict()["tx_hash"] == TX
+    assert receipt.to_dict()["block_hash"] == "0x" + "ab" * 32

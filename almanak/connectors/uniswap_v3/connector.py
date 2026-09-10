@@ -139,6 +139,7 @@ _VOLUME_SUBGRAPH_URLS = {
 CONNECTOR = Connector(
     name="uniswap_v3",
     kind=ProtocolKind.LP,
+    supports_receipt_lp_open_recovery=True,
     external_ids={"defillama": "uniswap-v3"},
     dex_volume=DexVolumeDecl(
         chains=("ethereum", "arbitrum", "base", "optimism", "polygon"),

@@ -94,3 +94,19 @@ def test_malformed_bundle_does_not_replace_gateway_response(tmp_path, success, p
     marker = tmp_path / "c"
     assert wrapper(delegate, marker).Execute(req) is delegate.execution.Execute.return_value
     assert not marker.exists()
+
+
+def test_lp_open_target_preserves_funding_swap_and_binds_consumption(tmp_path):
+    delegate = client()
+    marker = tmp_path / "c"
+    hook = wrapper(delegate, marker, intent_type="LP_OPEN")
+    assert hook.Execute(request()).success
+    assert not marker.exists()
+    mint = request()
+    mint.action_bundle = b'{"intent_type":"LP_OPEN"}'
+    assert not hook.Execute(mint).success
+    assert wrapper(delegate, marker, intent_type="LP_OPEN").Execute(mint).success
+    before = delegate.execution.Execute.call_count
+    with pytest.raises(ValueError, match="differs from its consumed marker"):
+        wrapper(delegate, marker).Execute(request())
+    assert delegate.execution.Execute.call_count == before

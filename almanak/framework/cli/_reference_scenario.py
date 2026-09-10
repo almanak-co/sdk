@@ -195,7 +195,15 @@ class _ReferenceClient:
 class ReferenceScenarioHook:
     """Consume one explicit event per runner snapshot; exhaustion fails closed."""
 
-    def __init__(self, events: tuple[ReferenceScenarioEvent, ...], *, network: str, managed: bool, client: Any):
+    def __init__(
+        self,
+        events: tuple[ReferenceScenarioEvent, ...],
+        *,
+        network: str,
+        managed: bool,
+        client: Any,
+        chain: str | None = None,
+    ):
         require_reference_test_runtime(network=network, managed=managed)
         self._network = network
         self._managed = managed
@@ -209,6 +217,10 @@ class ReferenceScenarioHook:
         chains = {
             gateway_pb2.ReferencePriceResponse.FromString(raw).chain for event in events for raw in event.responses
         }
+        if chain is not None:
+            if not isinstance(chain, str) or not chain:
+                raise ValueError("reference scenario requires an explicit chain")
+            chains.add(chain)
         if len(chains) != 1:
             raise ValueError("reference scenario requires observations on exactly one chain")
         self._chain = next(iter(chains))

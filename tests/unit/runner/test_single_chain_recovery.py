@@ -22,7 +22,7 @@ from almanak.framework.runner.runner_models import (
     IterationResult,
     IterationStatus,
 )
-from almanak.framework.runner.single_chain_recovery import recover_pending_swap
+from almanak.framework.runner.single_chain_recovery import recover_pending_single_chain
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
 from almanak.framework.state.state_manager import StateManager, StateManagerConfig
 from almanak.framework.state.strategy_state import replace_strategy_persistent_state
@@ -50,10 +50,11 @@ class RecoverableStrategy(IntentStrategy):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("intent_kind", ["swap", "lp_open", "lp_open_v4", "lp_open_unsupported", "lp_close"])
 @pytest.mark.parametrize(
     "outcome", ["confirmed", "pending", "repair_failure", "wrong_plan", "claim_failure", "reverted", "legacy"]
 )
-async def test_recovery_claim_precedes_original_state_finalization(tmp_path, outcome):
+async def test_recovery_claim_precedes_original_state_finalization(tmp_path, outcome, intent_kind):
     manager = StateManager(
         StateManagerConfig(load_state_on_startup=False),
         warm_backend=SQLiteStore(SQLiteConfig(db_path=str(tmp_path / "recovery.sqlite"))),
@@ -63,7 +64,27 @@ async def test_recovery_claim_precedes_original_state_finalization(tmp_path, out
     strategy._deployment_id, strategy._chain, strategy._wallet_address = DEPLOYMENT, "bsc", WALLET
     strategy._state_manager = manager
     strategy.restored = []
-    intent = Intent.swap(from_token=TOKEN_IN, to_token=TOKEN_OUT, amount=Decimal("1"), chain="bsc")
+    intent = (
+        Intent.swap(from_token=TOKEN_IN, to_token=TOKEN_OUT, amount=Decimal("1"), chain="bsc")
+        if intent_kind == "swap"
+        else Intent.lp_open(
+            pool="0x" + "66" * 20,
+            amount0=Decimal("1"),
+            amount1=Decimal("0.003"),
+            range_lower=Decimal("300"),
+            range_upper=Decimal("380"),
+            protocol=(
+                "uniswap_v4"
+                if intent_kind == "lp_open_v4"
+                else "aerodrome"
+                if intent_kind == "lp_open_unsupported"
+                else "pancakeswap_v3"
+            ),
+            chain="bsc",
+        )
+    )
+    if intent_kind == "lp_close":
+        intent = Intent.lp_close(pool=intent.pool, position_id="2730353", protocol="pancakeswap_v3", chain="bsc")
     context = ExecutionRecoveryContext.capture(
         plan_hash="a" * 64,
         execution=ExecutionContext(
@@ -126,6 +147,7 @@ async def test_recovery_claim_precedes_original_state_finalization(tmp_path, out
         assert get_cycle_id() == "original-cycle"
         assert state.pre_snapshot.balances[TOKEN_IN] == Decimal("10")
         assert state.price_oracle[TOKEN_OUT] == Decimal("338.161")
+        assert state.intent.serialize() == intent.serialize()
         assert state.last_execution_context.intent_id == intent.intent_id
         assert state.last_bundle_metadata == {"original_pool": "exact-pool"}
         if outcome == "repair_failure":
@@ -146,8 +168,16 @@ async def test_recovery_claim_precedes_original_state_finalization(tmp_path, out
         manager.save_state = AsyncMock(side_effect=OSError("state persistence failed"))
     set_cycle_id("current-observation-cycle")
     try:
-        result = await recover_pending_swap(runner, strategy, progress, datetime.now(UTC))
-        if outcome in {"pending", "wrong_plan", "claim_failure", "reverted", "legacy"}:
+        result = await recover_pending_single_chain(runner, strategy, progress, datetime.now(UTC))
+        if intent_kind in {"lp_close", "lp_open_v4", "lp_open_unsupported"}:
+            durable = await manager.load_state(DEPLOYMENT)
+            assert durable.state["execution_progress"]["barrier_phase"] == "reconciliation_required"
+            assert result.status is IterationStatus.EXECUTION_PENDING
+            assert result.execution_pending_reason
+            assert not strategy.restored
+            orchestrator.get_completed_plan_receipts.assert_not_awaited()
+            runner._single_chain_handle_success.assert_not_awaited()
+        elif outcome in {"pending", "wrong_plan", "claim_failure", "reverted", "legacy"}:
             if outcome == "claim_failure":
                 assert result.status is IterationStatus.ACCOUNTING_FAILED
             elif outcome in {"reverted", "legacy"}:
@@ -167,7 +197,7 @@ async def test_recovery_claim_precedes_original_state_finalization(tmp_path, out
             assert runner._last_cycle_id == "original-cycle"
             durable = await manager.load_state(DEPLOYMENT)
             assert (
-                await recover_pending_swap(
+                await recover_pending_single_chain(
                     runner,
                     strategy,
                     ExecutionProgress.from_dict(durable.state["execution_progress"]),
@@ -180,3 +210,17 @@ async def test_recovery_claim_precedes_original_state_finalization(tmp_path, out
         client.execution.Execute.assert_not_called()
     finally:
         await manager.close()
+
+
+def test_lp_recovery_requires_explicit_connector_opt_in():
+    from dataclasses import replace
+
+    from almanak.connectors._connector import CONNECTOR_REGISTRY
+
+    eligible = {connector.name for connector in CONNECTOR_REGISTRY.all() if connector.supports_receipt_lp_open_recovery}
+    assert eligible == {"uniswap_v3", "pancakeswap_v3"}
+    connector = CONNECTOR_REGISTRY.get("uniswap_v4")
+    assert connector is not None
+    assert not connector.supports_receipt_lp_open_recovery
+    with pytest.raises(ValueError, match="must be a bool"):
+        replace(connector, supports_receipt_lp_open_recovery="true")

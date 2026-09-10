@@ -1393,6 +1393,9 @@ class Connector:
     vault_tool_connector: ImportRef | None = None
     vault_tool_connectors: tuple[ImportRef, ...] = field(default_factory=tuple)
     runner_hook_connector: ImportRef | None = None
+    # Opt in only when original LP mint amounts and identity are recoverable
+    # from canonical receipts without using present position state.
+    supports_receipt_lp_open_recovery: bool = False
     protocol_metadata: ImportRef | None = None
     principal_token_market_reader: ImportRef | None = None
     swap_route_inference: ImportRef | None = None
@@ -1513,6 +1516,8 @@ class Connector:
         self._validate_agent_read_connectors()
         self._validate_vault_tool_connectors()
         self._validate_runner_hook_connector()
+        if not isinstance(self.supports_receipt_lp_open_recovery, bool):
+            raise ValueError("Connector.supports_receipt_lp_open_recovery must be a bool")
         self._validate_protocol_metadata()
         self._validate_principal_token_market_reader()
         self._validate_swap_route_inference()

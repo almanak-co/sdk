@@ -42,7 +42,20 @@ def _publish_once(path: Path, payload: dict) -> bool:
 
 
 class _ExecutionObservations:
-    def __init__(self, client: Any, *, network: str, managed: bool, chain: str, marker: Path, digest: str):
+    def __init__(
+        self,
+        client: Any,
+        *,
+        network: str,
+        managed: bool,
+        chain: str,
+        marker: Path,
+        digest: str,
+        intent_type: str = "SWAP",
+    ):
+        if intent_type not in {"SWAP", "LP_OPEN"}:
+            raise ValueError("Unsupported receipt observation intent")
+        self._intent_type = intent_type
         self._client = client
         self._network, self._managed, self._chain = network, managed, chain
         self._marker, self._digest = marker, digest
@@ -58,6 +71,7 @@ class _ExecutionObservations:
             if (
                 consumed.get("scenario_sha256") != self._digest
                 or consumed.get("deployment_id") != request.deployment_id
+                or consumed.get("intent_type", "SWAP") != self._intent_type
             ):
                 raise ValueError("Receipt observation scenario differs from its consumed marker")
             return self._client.execution.Execute(request, **kwargs)
@@ -74,10 +88,11 @@ class _ExecutionObservations:
             bundle = json.loads(request.action_bundle)
         except (TypeError, ValueError):
             return response
-        if not isinstance(bundle, dict) or str(bundle.get("intent_type", "")).upper() != "SWAP":
+        if not isinstance(bundle, dict) or str(bundle.get("intent_type", "")).upper() != self._intent_type:
             return response
         evidence = {
             "synthetic": True,
+            "intent_type": self._intent_type,
             "scenario_sha256": self._digest,
             "deployment_id": request.deployment_id,
             "chain": self._chain,
@@ -115,6 +130,7 @@ def install_receipt_observation_scenario(
     managed: bool,
     working_dir: str,
     digest: str,
+    intent_type: str = "SWAP",
 ) -> None:
     require_reference_test_runtime(network=network, managed=managed)
     orchestrator = runner.execution_orchestrator
@@ -132,5 +148,6 @@ def install_receipt_observation_scenario(
         chain=orchestrator._chain,
         marker=directory / "receipt-observation-consumed.json",
         digest=digest,
+        intent_type=intent_type,
     )
     orchestrator._client = cast("GatewayClient", _ObservationClient(client, execution))

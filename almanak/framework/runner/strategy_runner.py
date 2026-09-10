@@ -10771,9 +10771,9 @@ class StrategyRunner:
             return None
 
         if saved_progress.is_reconciliation_required:
-            from .single_chain_recovery import recover_pending_swap
+            from .single_chain_recovery import recover_pending_single_chain
 
-            recovered = await recover_pending_swap(self, strategy, saved_progress, start_time)
+            recovered = await recover_pending_single_chain(self, strategy, saved_progress, start_time)
             if recovered is not None:
                 return recovered
             error = saved_progress.failure_error or (

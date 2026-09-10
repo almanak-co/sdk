@@ -35,6 +35,8 @@ def decode_canonical_receipt(response: Any, tx_hash: str) -> TransactionReceipt:
             or response.gas_used != receipt.gas_used
         ):
             raise ValueError("canonical receipt contradicts status envelope")
+        receipt.tx_hash = HexBytes(receipt.tx_hash).to_0x_hex()
+        receipt.block_hash = HexBytes(receipt.block_hash).to_0x_hex()
         return receipt
     except (AttributeError, TypeError, ValueError) as exc:
         raise SubmissionError(

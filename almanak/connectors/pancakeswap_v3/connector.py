@@ -78,6 +78,7 @@ def _production_lifecycle_declarations():
 CONNECTOR = Connector(
     name="pancakeswap_v3",
     kind=ProtocolKind.LP,
+    supports_receipt_lp_open_recovery=True,
     external_ids={"defillama": "pancakeswap-amm-v3"},
     dex_volume=DexVolumeDecl(
         chains=("ethereum", "arbitrum", "bsc", "base"),

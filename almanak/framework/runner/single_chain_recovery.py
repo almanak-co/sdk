@@ -1,4 +1,4 @@
-"""Finish a pending swap from its original checkpoint without redispatch."""
+"""Finish a pending swap or LP open from its original checkpoint without redispatch."""
 
 from __future__ import annotations
 
@@ -8,10 +8,11 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
+from almanak.connectors._connector import CONNECTOR_REGISTRY
 from almanak.framework.execution.gateway_orchestrator import GatewayExecutionOrchestrator, GatewayExecutionResult
 from almanak.framework.execution.interfaces import TransactionRevertedError
 from almanak.framework.execution.plan_completion import PlanCompletionUnproven
-from almanak.framework.intents.vocabulary import Intent, SwapIntent
+from almanak.framework.intents.vocabulary import Intent, LPOpenIntent, SwapIntent
 from almanak.framework.observability.context import clear_cycle_id, get_cycle_id, set_cycle_id
 from almanak.framework.state.state_manager import StateConflictError
 from almanak.framework.state.strategy_state import StateValuePreconditionError
@@ -24,7 +25,7 @@ from .runner_recovery import claim_observed_single_chain_recovery
 logger = logging.getLogger(__name__)
 
 
-def _has_original_swap_context(context: ExecutionRecoveryContext | None, progress: ExecutionProgress) -> bool:
+def _has_original_execution_context(context: ExecutionRecoveryContext | None, progress: ExecutionProgress) -> bool:
     return not (
         context is None
         or context.strategy_checkpoint is None
@@ -39,7 +40,7 @@ def _has_original_swap_context(context: ExecutionRecoveryContext | None, progres
     )
 
 
-def _original_swap(strategy: Any, progress: ExecutionProgress) -> SwapIntent | None:
+def _original_intent(strategy: Any, progress: ExecutionProgress) -> SwapIntent | LPOpenIntent | None:
     context = progress.recovery_context
     if (
         not isinstance(strategy, IntentStrategy)
@@ -47,7 +48,7 @@ def _original_swap(strategy: Any, progress: ExecutionProgress) -> SwapIntent | N
         or progress.effective_barrier_phase is not ExecutionBarrierPhase.RECONCILIATION_REQUIRED
         or progress.total_steps != 1
         or len(progress.submission_evidence) != 1
-        or not _has_original_swap_context(context, progress)
+        or not _has_original_execution_context(context, progress)
     ):
         return None
     execution = cast(ExecutionRecoveryContext, context).execution
@@ -59,8 +60,14 @@ def _original_swap(strategy: Any, progress: ExecutionProgress) -> SwapIntent | N
     ):
         return None
     intent = Intent.deserialize(cast(list[dict[str, Any]], progress.serialized_intents)[0])
-    if not isinstance(intent, SwapIntent) or intent.intent_id != execution.intent_id:
+    if not isinstance(intent, SwapIntent | LPOpenIntent) or intent.intent_id != execution.intent_id:
         return None
+    # Other LP finalizers may require live position reads that cannot measure
+    # the original mint after a restart or subsequent pool movement.
+    if isinstance(intent, LPOpenIntent):
+        connector = CONNECTOR_REGISTRY.get(intent.protocol)
+        if connector is None or not connector.supports_receipt_lp_open_recovery:
+            return None
     if intent.chain is not None and intent.chain != execution.chain:
         return None
     return intent
@@ -80,7 +87,7 @@ def _operator_reconciliation(
     )
 
 
-async def recover_pending_swap(
+async def recover_pending_single_chain(
     runner: Any,
     strategy: Any,
     progress: ExecutionProgress,
@@ -98,10 +105,10 @@ async def recover_pending_swap(
     if getattr(strategy, "_state_manager", None) is not runner.state_manager:
         return None
     try:
-        intent = _original_swap(strategy, progress)
+        intent = _original_intent(strategy, progress)
         if intent is None:
             return _operator_reconciliation(
-                runner, progress, start_time, "Checkpoint is not eligible for automatic SWAP recovery"
+                runner, progress, start_time, "Checkpoint is not eligible for automatic SWAP or LP_OPEN recovery"
             )
         context = progress.recovery_context
         assert context is not None
@@ -123,16 +130,16 @@ async def recover_pending_swap(
     except PlanCompletionUnproven as exc:
         return _operator_reconciliation(runner, progress, start_time, str(exc))
     except Exception as exc:
-        logger.info("Swap recovery remains pending (%s)", type(exc).__name__)
+        logger.info("Execution recovery remains pending (%s)", type(exc).__name__)
         return None
     try:
         await runner._flush_strategy_pending_save_strict(strategy)
         claimed, state_version = await claim_observed_single_chain_recovery(runner, progress, receipts)
     except (PlanCompletionUnproven, StateValuePreconditionError, StateConflictError) as exc:
-        logger.info("Swap recovery ownership refused (%s)", type(exc).__name__)
+        logger.info("Execution recovery ownership refused (%s)", type(exc).__name__)
         return None
     except Exception as exc:
-        logger.exception("Swap recovery checkpoint persistence failed")
+        logger.exception("Execution recovery checkpoint persistence failed")
         return IterationResult(
             status=IterationStatus.ACCOUNTING_FAILED,
             intent=intent,
@@ -182,11 +189,11 @@ async def recover_pending_swap(
         )
         return await runner._single_chain_handle_success(state)
     except Exception as exc:
-        logger.exception("Recovered swap requires downstream accounting/state repair")
+        logger.exception("Recovered execution requires downstream accounting/state repair")
         return IterationResult(
             status=IterationStatus.ACCOUNTING_FAILED,
             intent=intent,
-            error=f"Recovered swap completion failed: {type(exc).__name__}",
+            error=f"Recovered execution completion failed: {type(exc).__name__}",
             execution_result=result,
             deployment_id=progress.deployment_id,
             duration_ms=runner._calculate_duration_ms(start_time),
