@@ -34,7 +34,7 @@ def client(status=1):
     eth.wait_for_transaction_receipt = AsyncMock(return_value=receipt)
     eth.get_transaction_receipt = AsyncMock(return_value=receipt)
     eth.get_block = AsyncMock(return_value={"hash": HexBytes(BLOCK), "transactions": [HexBytes(TX)]})
-    return SimpleNamespace(eth=eth)
+    return SimpleNamespace(eth=eth, middleware_onion=MagicMock())
 
 
 @pytest.mark.asyncio
@@ -126,7 +126,7 @@ async def test_cancelled_observation_propagates():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_stage", ["rpc_url", "provider", "web3", "disconnect"])
+@pytest.mark.parametrize("failure_stage", ["rpc_url", "provider", "web3", "middleware", "disconnect"])
 async def test_gateway_status_service_failure_is_sanitized_and_unmeasured(failure_stage, caplog):
     service = ExecutionServiceServicer(MagicMock(network="anvil"))
     context = MagicMock()
@@ -137,9 +137,13 @@ async def test_gateway_status_service_failure_is_sanitized_and_unmeasured(failur
         patch("web3.AsyncHTTPProvider", return_value=provider) as make_provider,
         patch("web3.AsyncWeb3", return_value=client()) as make_web3,
     ):
-        {"rpc_url": resolve, "provider": make_provider, "web3": make_web3, "disconnect": provider.disconnect}[
-            failure_stage
-        ].side_effect = failure
+        {
+            "rpc_url": resolve,
+            "provider": make_provider,
+            "web3": make_web3,
+            "middleware": make_web3.return_value.middleware_onion.inject,
+            "disconnect": provider.disconnect,
+        }[failure_stage].side_effect = failure
         response = await service.GetTransactionStatus(gateway_pb2.TxStatusRequest(tx_hash=TX, chain="bsc"), context)
     assert response.status == "unknown"
     assert not response.canonical_receipt
@@ -147,7 +151,7 @@ async def test_gateway_status_service_failure_is_sanitized_and_unmeasured(failur
     context.set_code.assert_called_once_with(grpc.StatusCode.INTERNAL)
     context.set_details.assert_called_once_with(response.error)
     assert "secret" not in caplog.text
-    if failure_stage in {"web3", "disconnect"}:
+    if failure_stage in {"web3", "middleware", "disconnect"}:
         provider.disconnect.assert_awaited_once()
     else:
         provider.disconnect.assert_not_awaited()
@@ -168,3 +172,48 @@ async def test_gateway_cancelled_observation_disconnects_and_propagates():
         await service.GetTransactionStatus(gateway_pb2.TxStatusRequest(tx_hash=TX, chain="bsc"), context)
     provider.disconnect.assert_awaited_once()
     context.set_code.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chain,chain_id,expected", [("bsc", 56, "confirmed"), ("ethereum", 1, "unknown")])
+async def test_status_service_formats_actual_web3_poa_blocks_only_for_declared_chains(chain, chain_id, expected):
+    from web3 import AsyncHTTPProvider
+
+    provider = AsyncHTTPProvider("https://unused.invalid")
+    raw_receipt = {
+        "transactionHash": TX,
+        "blockHash": BLOCK,
+        "blockNumber": "0x7",
+        "transactionIndex": "0x0",
+        "status": "0x1",
+        "gasUsed": "0x5208",
+        "effectiveGasPrice": "0x6",
+        "logs": [],
+    }
+    raw_block = {"hash": BLOCK, "number": "0x7", "transactions": [TX], "extraData": "0x" + "ab" * 97}
+
+    async def request(method, params):
+        responses = {
+            "eth_chainId": hex(chain_id),
+            "eth_blockNumber": "0x7",
+            "eth_getTransactionReceipt": raw_receipt,
+            "eth_getBlockByNumber": raw_block,
+        }
+        return {"jsonrpc": "2.0", "id": 1, "result": responses[method]}
+
+    service = ExecutionServiceServicer(MagicMock(network="mainnet"))
+    with (
+        patch.object(provider, "make_request", side_effect=request),
+        patch.object(provider, "disconnect", new=AsyncMock()) as disconnect,
+        patch("web3.AsyncHTTPProvider", return_value=provider),
+        patch("almanak.gateway.utils.get_rpc_url", return_value="https://unused.invalid"),
+    ):
+        response = await service.GetTransactionStatus(gateway_pb2.TxStatusRequest(tx_hash=TX, chain=chain), MagicMock())
+    assert response.status == expected
+    if expected == "confirmed":
+        receipt = json.loads(response.canonical_receipt)
+        assert receipt["tx_hash"].removeprefix("0x") == TX[2:]
+        assert receipt["block_hash"].removeprefix("0x") == BLOCK[2:]
+    else:
+        assert not response.canonical_receipt
+    disconnect.assert_awaited_once()

@@ -1669,15 +1669,16 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             from web3 import AsyncHTTPProvider, AsyncWeb3
 
             from almanak.gateway.data.transaction_status import observe_evm_transaction
-            from almanak.gateway.utils import get_rpc_url
+            from almanak.gateway.utils import get_rpc_url, inject_poa_middleware
             from almanak.gateway.utils.ssl_context import build_ssl_context
 
             rpc_url = get_rpc_url(chain, network=self.settings.network)
             provider = AsyncHTTPProvider(rpc_url, request_kwargs={"ssl": build_ssl_context()})
             try:
-                return await observe_evm_transaction(
-                    AsyncWeb3(provider), tx_hash, chain_id=ChainRegistry.resolve(chain).chain_id
-                )
+                descriptor = ChainRegistry.resolve(chain)
+                web3 = AsyncWeb3(provider)
+                inject_poa_middleware(web3, chain)
+                return await observe_evm_transaction(web3, tx_hash, chain_id=descriptor.chain_id)
             finally:
                 await provider.disconnect()
         except Exception as exc:
