@@ -426,6 +426,7 @@ def _known_config_fields() -> set[str]:
         "duration_days",
         "estimated_ticks",
         "trading_days_per_year",
+        "strategy_comparison",
         "_metadata",
         "_meta",
     }

@@ -897,6 +897,10 @@ def create_market_snapshot_from_state(
         "run's lending config (set_lending_rate) are served, and a live gateway read would leak "
         "today's rate into a historical tick"
     )
+    snapshot._liquidity_depth_refusal_detail = (
+        "no historical tick-level liquidity-depth plane in this backtest snapshot; "
+        "daily pool TVL cannot satisfy concentrated-liquidity depth guards"
+    )
     # reference_price has no timestamped provider behind it in backtest:
     # neither a historical plane nor a safe live fallback exists, since a
     # reachable sidecar would answer a HISTORICAL tick with TODAY's price.
@@ -2306,17 +2310,24 @@ class BacktestPoolAnalyticsReader:
         target_chain: str,
         protocol: str,
         timestamp: datetime,
+        required_days: int = 0,
+        required_fields: frozenset[str] = frozenset(),
     ) -> tuple[Any, list[Any | None]]:
         newest_day = (timestamp - timedelta(days=1)).date()
-        rows = [
-            self._provider.daily_history(
-                pool_address=pool_address,
-                chain=target_chain,
-                protocol=protocol,
-                day=newest_day - timedelta(days=offset),
-            )
-            for offset in range(7)
-        ]
+        read_required = getattr(self._provider, "required_daily_history", None)
+        rows = []
+        for offset in range(7):
+            kwargs = {
+                "pool_address": pool_address,
+                "chain": target_chain,
+                "protocol": protocol,
+                "day": newest_day - timedelta(days=offset),
+            }
+            if offset < required_days and callable(read_required):
+                fields_for_day = required_fields if offset == 0 else frozenset({"volume_24h"})
+                rows.append(read_required(**kwargs, required_fields=fields_for_day))
+            else:
+                rows.append(self._provider.daily_history(**kwargs))
         return newest_day, rows
 
     @staticmethod
@@ -2459,12 +2470,24 @@ class BacktestPoolAnalyticsReader:
         pool_address: str,
         chain: str,
         protocol: str | None = None,
+        required_fields: frozenset[str] | None = None,
     ) -> Any:
         from almanak.framework.data.models import DataClassification, DataEnvelope
 
         timestamp, target_chain, validated_protocol = self._validated_context(chain, protocol)
         state_tvl = self._read_exact_state_tvl(pool_address, target_chain, validated_protocol)
-        newest_day, rows = self._completed_history(pool_address, target_chain, validated_protocol, timestamp)
+        daily_fields = (required_fields or frozenset()) - ({"tvl_usd"} if state_tvl is not None else set())
+        required_days = 7 if "volume_7d_usd" in daily_fields else 1 if daily_fields else 0
+        field_names = {"tvl_usd": "tvl", "volume_24h_usd": "volume_24h", "volume_7d_usd": "volume_24h"}
+        required_daily_fields = frozenset(field_names.get(name, name) for name in daily_fields)
+        newest_day, rows = self._completed_history(
+            pool_address,
+            target_chain,
+            validated_protocol,
+            timestamp,
+            required_days,
+            required_daily_fields,
+        )
         newest = rows[0]
         self._require_measured_pool(
             pool_address,
@@ -4124,6 +4147,7 @@ class PnLBacktester:
         repr=False,
     )
     _prepared_perp_declared_targets: tuple[Any, ...] = field(default_factory=tuple, init=False, repr=False)
+    _prepared_historical_dependencies: tuple[Any, ...] | None = field(default=None, init=False, repr=False)
     _prepared_perp_hint_targets: tuple[Any, ...] = field(default_factory=tuple, init=False, repr=False)
     #: Exact funding identities registered/materialized after the funding
     #: source is bound. Kept inside the preparation boundary so repeated

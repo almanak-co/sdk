@@ -67,7 +67,8 @@ def _fallback_with_history(by_resolution: dict[str, tuple[list[PoolSnapshot] | N
 
     def fake_get_history(*, resolution: str, **_kwargs):
         fallback._calls.append(resolution)  # type: ignore[attr-defined]
-        return by_resolution.get(resolution, (None, ""))
+        rows, source = by_resolution.get(resolution, (None, ""))
+        return rows, source, "transient_provider_failure" if rows is None else None
 
     fallback._get_history = fake_get_history  # type: ignore[method-assign]
     return fallback
@@ -171,26 +172,24 @@ def test_daily_result_and_miss_are_cached():
 # =============================================================================
 
 
-def test_service_disabled_memoizes_process_wide():
+@pytest.mark.parametrize("reason", ["PoolHistoryService not yet enabled", "unsupported (chain, protocol) pair"])
+def test_only_compound_unsupported_results_memoize_per_protocol_chain(reason):
     fallback = PoolHistoryFallback()
-    fallback._classify_miss(
-        "gateway error: PoolHistoryService not yet enabled - see VIB-4728", chain="base", protocol="aerodrome"
-    )
-    assert fallback._disabled_reason == "service disabled"
-    fallback._calls = []  # type: ignore[attr-defined]
-    fallback._get_history = lambda **_: pytest.fail("disabled fallback must not fetch")  # type: ignore[method-assign]
+    assert fallback._classify_miss(reason, chain="base", protocol="aerodrome") == "unsupported_capability"
+    assert not fallback._unsupported_pairs
+    calls = []
+
+    def unavailable(**kwargs):
+        calls.append(kwargs["resolution"])
+        return None, "", fallback._classify_miss(reason, chain=kwargs["chain"], protocol=kwargs["protocol"])
+
+    fallback._get_history = unavailable
     assert fallback.daily_history(pool_address=_POOL, chain="base", protocol="aerodrome", day=_DAY) is None
-
-
-def test_unsupported_pair_memoizes_per_protocol_chain():
-    fallback = PoolHistoryFallback()
-    fallback._classify_miss(
-        "gateway error: unsupported (chain, protocol) pair: ('optimism', 'curve')", chain="optimism", protocol="curve"
-    )
-    assert ("curve", "optimism") in fallback._unsupported_pairs
-    assert fallback._disabled_reason is None  # pair memo never disables globally
-    fallback._get_history = lambda **_: pytest.fail("memoized pair must not fetch")  # type: ignore[method-assign]
+    assert calls == ["1d", "1h"]
+    assert fallback.daily_history(pool_address=_POOL, chain="base", protocol="aerodrome", day=_DAY) is None
+    assert calls == ["1d", "1h"]
     assert fallback.daily_history(pool_address=_POOL, chain="optimism", protocol="curve", day=_DAY) is None
+    assert calls == ["1d", "1h", "1d", "1h"]
 
 
 def test_transport_streak_disables_after_two_and_resets_on_success():
@@ -198,7 +197,7 @@ def test_transport_streak_disables_after_two_and_resets_on_success():
     fallback._classify_miss(
         "gateway error: StatusCode.UNAVAILABLE: connect refused", chain="base", protocol="aerodrome"
     )
-    assert fallback._disabled_reason is None
+    assert not fallback._unsupported_pairs
 
     # An interleaved SUCCESSFUL _get_history call must reset the streak —
     # exercised through the real reader path, not by mutating the counter
@@ -215,7 +214,7 @@ def test_transport_streak_disables_after_two_and_resets_on_success():
         ),
         patch("almanak.framework.data.pools.history.PoolHistoryReader", return_value=reader),
     ):
-        rows, source = fallback._get_history(
+        rows, source, _ = fallback._get_history(
             pool_address=_POOL, chain="base", protocol="aerodrome", start=_DAY_START, end=_DAY_START, resolution="1d"
         )
     assert rows is not None and source == "defillama"
@@ -230,7 +229,7 @@ def test_transport_streak_disables_after_two_and_resets_on_success():
     # Transient breaker PAUSES (a deadline is set) rather than permanently
     # disabling — the singleton must not poison every later backtest.
     assert fallback._transport_disabled_until is not None
-    assert fallback._disabled_reason is None  # never the permanent config-disable
+    assert not fallback._unsupported_pairs  # never the permanent config-disable
 
 
 def test_structured_transport_flag_counts_toward_streak():
@@ -245,19 +244,28 @@ def test_structured_transport_flag_counts_toward_streak():
     assert fallback._transport_disabled_until is not None
 
 
-def test_transport_pause_self_heals_after_cooldown():
+def test_transport_pause_self_heals_after_cooldown(monkeypatch):
     """The transport breaker is transient: once the cooldown elapses the next
     lookup re-arms with a fresh streak and retries (a permanent disable would
     poison every later backtest sharing this process-wide singleton)."""
     from datetime import timedelta
 
-    fallback = _fallback_with_history({"1d": ([_snap(_DAY_START, tvl=Decimal("1"), volume=Decimal("2"))], "the_graph")})
+    from tests.unit.backtesting.providers.test_pool_history_required_fields import _envelope, _gateway_reader
+
+    calls = []
+
+    def read(**kwargs):
+        calls.append(kwargs["resolution"])
+        return _envelope([_snap(_DAY_START, tvl=Decimal("1"), volume=Decimal("2"))])
+
+    _gateway_reader(monkeypatch, read)
+    fallback = PoolHistoryFallback()
     # Trip the breaker (2 strikes) — the ladder pauses.
     for _ in range(2):
         fallback._classify_miss("gateway client not connected: channel is None", chain="base", protocol="aerodrome")
     assert fallback._transport_disabled_until is not None
     assert fallback.daily_history(pool_address=_POOL, chain="base", protocol="aerodrome", day=_DAY) is None
-    assert fallback._calls == []  # type: ignore[attr-defined]  # paused: no fetch
+    assert calls == []
 
     # Force the cooldown into the past → the next lookup re-arms and fetches.
     fallback._transport_disabled_until = datetime.now(UTC) - timedelta(seconds=1)
@@ -265,7 +273,7 @@ def test_transport_pause_self_heals_after_cooldown():
     assert result is not None and result.tvl == Decimal("1")
     assert fallback._transport_disabled_until is None  # cleared
     assert fallback._transport_failure_streak == 0  # fresh streak
-    assert fallback._calls == ["1d"]  # type: ignore[attr-defined]  # retried after cooldown
+    assert calls == ["1d"]
 
 
 def test_served_upstream_miss_is_not_transport():
@@ -277,7 +285,7 @@ def test_served_upstream_miss_is_not_transport():
         protocol="aerodrome",
     )
     assert fallback._transport_failure_streak == 0
-    assert fallback._disabled_reason is None
+    assert not fallback._unsupported_pairs
 
 
 def test_served_non_transport_response_resets_transport_streak():
@@ -322,8 +330,12 @@ def test_tvl_only_partial_from_failed_hourly_leg_is_retried_not_cached():
     def fake_get_history(*, resolution: str, **_kwargs):
         fallback._calls.append(resolution)  # type: ignore[attr-defined]
         if resolution == "1d":
-            return [_snap(_DAY_START, tvl=Decimal("50"))], "defillama"
-        return (None, "") if state["hourly_fails"] else (hourly_ok, "coingecko_onchain")
+            return [_snap(_DAY_START, tvl=Decimal("50"))], "defillama", None
+        return (
+            (None, "", "transient_provider_failure")
+            if state["hourly_fails"]
+            else (hourly_ok, "coingecko_onchain", None)
+        )
 
     fallback._get_history = fake_get_history  # type: ignore[method-assign]
 
@@ -395,11 +407,11 @@ def test_failed_daily_leg_is_retried_not_cached():
         fallback._calls.append(resolution)  # type: ignore[attr-defined]
         if resolution == "1d":
             return (
-                (None, "")
+                (None, "", "transient_provider_failure")
                 if state["daily_fails"]
-                else ([_snap(_DAY_START, tvl=Decimal("7"), volume=Decimal("9"))], "the_graph")
+                else ([_snap(_DAY_START, tvl=Decimal("7"), volume=Decimal("9"))], "the_graph", None)
             )
-        return [], ""
+        return [], "", None
 
     fallback._get_history = fake_get_history  # type: ignore[method-assign]
     assert fallback.daily_history(pool_address=_POOL, chain="base", protocol="aerodrome", day=_DAY) is None
@@ -790,7 +802,7 @@ def test_waiters_share_a_non_cacheable_outcome():
         fallback._calls.append("fetch")  # type: ignore[attr-defined]
         entered.set()  # owner is inside the fetch; waiters must coalesce
         release.wait(timeout=5)
-        return None, False  # retryable miss: not memoized in the day cache
+        return DailyPoolHistoryOutcome(None, False, "transient_provider_failure")
 
     fallback._fetch_daily = failing_fetch  # type: ignore[method-assign]
 

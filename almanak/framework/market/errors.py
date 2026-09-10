@@ -258,6 +258,13 @@ class LiquidityDepthUnavailableError(MarketSnapshotError):
     _positional_fields = ("pool_address", "reason")
 
 
+class HistoricalLiquidityDepthUnavailableError(LiquidityDepthUnavailableError):
+    """The historical snapshot has no tick-depth serving capability."""
+
+    severity = "critical"
+    retryable = False
+
+
 class SlippageEstimateUnavailableError(MarketSnapshotError):
     severity = "warning"
     retryable = True

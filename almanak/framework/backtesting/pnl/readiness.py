@@ -28,6 +28,9 @@ class BacktestReadinessResult:
     blockers: tuple[dict[str, Any], ...] = ()
     warnings: tuple[str, ...] = ()
     observations_checked: int = 0
+    strategy_comparison: str = "original_guards"
+    altered_guards: dict[str, str] = field(default_factory=dict)
+    dependency_coverage: tuple[dict[str, Any], ...] = ()
     schema_version: int = field(default=1, init=False)
 
     @property
@@ -44,6 +47,9 @@ class BacktestReadinessResult:
             "blockers": list(self.blockers),
             "warnings": list(self.warnings),
             "observations_checked": self.observations_checked,
+            "strategy_comparison": self.strategy_comparison,
+            "altered_guards": dict(self.altered_guards),
+            "dependency_coverage": list(self.dependency_coverage),
         }
 
 
@@ -126,6 +132,76 @@ def _readiness_warnings(
     return tuple(dict.fromkeys(warnings))
 
 
+def _failed_dependency_coverage(
+    exc: BaseException, dependency_coverage: tuple[Any, ...], altered_guards: frozenset[str] = frozenset()
+) -> tuple[dict[str, Any], ...]:
+    from almanak.framework.backtesting.pnl.dependencies import (
+        HistoricalCoverage,
+        HistoricalCoverageState,
+        analytics_target,
+    )
+    from almanak.framework.backtesting.pnl.providers.snapshot_pool_analytics import (
+        HistoricalAnalyticsCoverageError,
+    )
+    from almanak.framework.data.interfaces import DataSourceUnavailable
+
+    cause: BaseException | None = exc
+    transient = False
+    unsupported = False
+    unclassified = False
+    affected_target = None
+    while cause is not None:
+        if isinstance(cause, HistoricalAnalyticsCoverageError):
+            affected_target = cause.target
+        unsupported |= getattr(cause, "code", None) == "unsupported_capability"
+        unclassified |= getattr(cause, "code", None) == "unknown_provider_failure"
+        transient |= getattr(cause, "code", None) == "transient_provider_failure"
+        transient |= isinstance(cause, TimeoutError | ConnectionError) or (
+            isinstance(cause, DataSourceUnavailable) and cause.transport
+        )
+        cause = cause.__cause__
+
+    def affected(item: HistoricalCoverage) -> bool:
+        if affected_target is None or item.state is not None or item.dependency.dependency_id in altered_guards:
+            return False
+        target = analytics_target(item.dependency)
+        return (
+            affected_target is not None
+            and target is not None
+            and target.key == affected_target.key
+            and bool(target.required_fields & affected_target.required_fields)
+        )
+
+    return tuple(
+        HistoricalCoverage(
+            item.dependency,
+            HistoricalCoverageState.UNSUPPORTED,
+            "Historical serving source reports unsupported capability",
+        ).to_dict()
+        if unsupported and affected(item) and item.state is None
+        else HistoricalCoverage(
+            item.dependency,
+            HistoricalCoverageState.TRANSIENT_FAILURE,
+            "Historical coverage could not be checked due to provider transport failure",
+        ).to_dict()
+        if transient and affected(item) and item.state is None
+        else HistoricalCoverage(
+            item.dependency,
+            None,
+            "Provider failed without a classified cause; historical coverage remains unverified",
+        ).to_dict()
+        if unclassified and affected(item)
+        else HistoricalCoverage(
+            item.dependency,
+            HistoricalCoverageState.INCOMPLETE,
+            "Canonical historical serving source could not satisfy the required field",
+        ).to_dict()
+        if affected(item) and item.state is None
+        else item.to_dict()
+        for item in getattr(exc, "coverage", dependency_coverage)
+    )
+
+
 async def check_backtest_readiness(
     backtester: PnLBacktester,
     strategy: BacktestableStrategy,
@@ -141,6 +217,13 @@ async def check_backtest_readiness(
     """
     from almanak.framework.backtesting.pnl import _engine_helpers
     from almanak.framework.backtesting.pnl.data_broker import data_broker_scope
+    from almanak.framework.backtesting.pnl.dependencies import (
+        HistoricalCoverage,
+        HistoricalCoverageState,
+        HistoricalGridCoverage,
+        check_declared_dependencies,
+        declared_dependencies,
+    )
     from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import SnapshotFundingRateSource
 
     checked_at = datetime.now(UTC)
@@ -171,8 +254,11 @@ async def check_backtest_readiness(
     # sweep run. Pool discoveries are job-scoped, so begin from constructor
     # replay pins and let this readiness config merge through preflight.
     backtester.resolved_pool_descriptors = dict(backtester._seed_pool_descriptors)
+    dependency_coverage: tuple[HistoricalCoverage, ...] = ()
     try:
         try:
+            dependencies = declared_dependencies(strategy, readiness_config)
+            dependency_coverage = await check_declared_dependencies(strategy, readiness_config, dependencies)
             await _engine_helpers.prepare_perp_price_history(
                 backtester=backtester,
                 strategy=strategy,
@@ -185,6 +271,7 @@ async def check_backtest_readiness(
                 config=readiness_config,
                 bt_logger=bt_logger,
                 strategy=strategy,
+                dependencies=dependencies,
             )
             state = _engine_helpers.initialize_backtest(
                 backtester=backtester,
@@ -229,6 +316,7 @@ async def check_backtest_readiness(
                     state.strategy_config,
                     readiness_config,
                     state.data_broker.manifest,
+                    dependencies=dependencies,
                 )
                 await _engine_helpers._prepare_declared_historical_pool_ohlcv(
                     strategy,
@@ -241,13 +329,17 @@ async def check_backtest_readiness(
                     strategy,
                     state.strategy_config,
                     readiness_config,
+                    dependencies=dependencies,
                 )
                 from almanak.framework.backtesting.pnl.data_broker import pool_history_provider
                 from almanak.framework.backtesting.pnl.engine import BacktestPoolAnalyticsReader
 
                 analytics_reader = BacktestPoolAnalyticsReader(pool_history_provider(), readiness_config.chain)
+                coverage_grid = HistoricalGridCoverage(readiness_config) if dependency_coverage else None
 
                 async for timestamp, market_state in backtester.data_provider.iterate(state.data_config):
+                    if coverage_grid is not None:
+                        coverage_grid.observe(timestamp)
                     if token_addresses:
                         market_state.register_symbol_aliases(token_addresses)
                     for token in state.data_config.tokens:
@@ -283,6 +375,8 @@ async def check_backtest_readiness(
                         analytics_targets,
                         timestamp,
                     )
+                if coverage_grid is not None:
+                    coverage_grid.finish()
             warnings = _readiness_warnings(
                 preflight_report,
                 strategy,
@@ -291,12 +385,32 @@ async def check_backtest_readiness(
                 twap_source=twap_source,
                 pool_state_source=pool_state_source,
             )
+            if config.altered_backtest_guards:
+                warnings += (
+                    "Explicitly altered guards ("
+                    + ", ".join(sorted(config.altered_backtest_guards))
+                    + "): this backtest does not evaluate those live strategy guards.",
+                )
             return BacktestReadinessResult(
                 status="ready_with_warnings" if warnings else "ready",
                 checked_at=checked_at,
                 checks=checks,
                 warnings=warnings,
                 observations_checked=observations_checked,
+                strategy_comparison="altered_guards_not_live_equivalent"
+                if config.altered_backtest_guards
+                else "original_guards",
+                altered_guards=dict(config.altered_backtest_guards),
+                dependency_coverage=tuple(
+                    HistoricalCoverage(
+                        item.dependency,
+                        HistoricalCoverageState.VERIFIED,
+                        "Canonical historical serving source validated every run tick",
+                    ).to_dict()
+                    if item.state is None and item.dependency.dependency_id not in config.altered_backtest_guards
+                    else item.to_dict()
+                    for item in dependency_coverage
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - structured fail-closed boundary
             return BacktestReadinessResult(
@@ -304,6 +418,13 @@ async def check_backtest_readiness(
                 checked_at=checked_at,
                 checks=checks,
                 blockers=(_blocker(exc),),
+                strategy_comparison="altered_guards_not_live_equivalent"
+                if config.altered_backtest_guards
+                else "original_guards",
+                altered_guards=dict(config.altered_backtest_guards),
+                dependency_coverage=_failed_dependency_coverage(
+                    exc, dependency_coverage, frozenset(config.altered_backtest_guards)
+                ),
             )
     finally:
         if backtester.data_config is not None and original_strict_historical is not None:

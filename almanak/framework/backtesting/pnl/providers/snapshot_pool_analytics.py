@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import Any, cast
 
 from almanak.framework.backtesting.pnl.data_provider import is_address_like
+from almanak.framework.backtesting.pnl.error_handling import PreflightValidationError
 
 _SUPPORTED_FIELDS = frozenset({"tvl_usd", "volume_24h_usd", "volume_7d_usd", "fee_apr", "fee_apy"})
 
@@ -54,6 +55,23 @@ class HistoricalPoolAnalyticsTarget:
         return f"{self.chain}:{self.protocol}:{self.pool_address}:fields={fields}"
 
 
+class HistoricalAnalyticsCoverageError(PreflightValidationError):
+    """A failed coverage check bound to the exact pool and required fields."""
+
+    def __init__(self, target: HistoricalPoolAnalyticsTarget, cause: BaseException) -> None:
+        self.target = target
+        super().__init__(
+            message=f"Historical pool-analytics preflight failed: {cause}",
+            failed_checks=["historical_pool_analytics"],
+            recommendations=[
+                "Ensure pool history measures every required field throughout the requested range. "
+                "TVL additionally requires exact archive state and historical USD prices for a pool token."
+            ],
+            error_count=1,
+            warning_count=0,
+        )
+
+
 def _typed_declarations(strategy: Any) -> object | None:
     getter = getattr(strategy, "get_backtest_pool_analytics_targets", None)
     if callable(getter):
@@ -97,6 +115,7 @@ def validate_historical_pool_analytics(
             pool_address=target.pool_address,
             chain=target.chain,
             protocol=target.protocol,
+            required_fields=target.required_fields,
         )
         unmeasured = target.required_fields & envelope.value.unmeasured_fields
         if unmeasured:

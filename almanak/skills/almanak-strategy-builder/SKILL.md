@@ -1550,6 +1550,14 @@ models for you — prefer it unless you need custom providers.
 
 ### Backtesting Limitations
 
+Historical `market.liquidity_depth()` is unsupported and stops a PnL backtest.
+A strategy using a depth guard must declare its historical dependency; it may
+explicitly support a named altered-guard branch for comparison, but that result
+is not evidence for the live guarded strategy. See [the backtesting guide](../../../docs/api/backtesting.md)
+for declaration and `altered_backtest_guards` configuration. Never substitute
+scalar TVL for historical ticks or silently remove a risk guard.
+
+
 - **OHLCV data**: The PnL backtester uses historical close prices from CoinGecko. Indicators that require OHLCV data (ATR, Stochastic, Ichimoku) need a paid CoinGecko tier or an external data source.
 - **RPC for paper trading**: Paper trading requires an RPC endpoint. Alchemy free tier is recommended for performance; public RPCs work but are slow.
 - **No CWD auto-discovery**: Backtest CLI commands (`backtest pnl`, `backtest paper`, `backtest sweep`) require an explicit `-s strategy_name` flag. They do not auto-discover strategies from the current directory like `strat run` does.

@@ -1,16 +1,12 @@
 """Run-scoped backtest data broker — lifecycle skeleton (ALM-2943).
 
-Today the data lanes construct their providers ad hoc: the pool-history
-ladder is a process-wide singleton reached directly, funding providers are
-built inside the perp adapter, APY providers live inside the lending
-adapter's calculator. The broker introduces ONE seam that owns provider
-ACCESS for a run:
+The broker owns provider access for a run. Pool history and funding providers
+are shared between consumers within that run; legacy access outside a run and
+the remaining lending adapters retain their own construction paths.
 
-* **Process-wide caches stay process-wide where they are correctness-
-  relevant.** ``PoolHistoryFallback``'s definitive-miss memo, unsupported-
-  pair table, and transport breaker deliberately outlive a run (they gate a
-  gateway service, not a run's data) — the broker routes access to the
-  same singleton rather than re-owning the cache.
+* **Pool-history capabilities and caches belong to one run.** A gateway's
+  disabled-service response, unsupported-pair table, or provider failure must
+  not certify another run's gateway or survive a changed service configuration.
 * **Run-scoped construction is memoized on the broker.** Funding-history
   providers are coalesced per ``(protocol, chain)`` for the run, so two
   adapters in one run share one instance.
@@ -77,15 +73,18 @@ class BacktestDataBroker:
         # the caller's (protocol, chain)-shaped key. Failed builds are NOT
         # cached here (the perp adapter's own tried-memo handles those).
         self._funding_providers: dict[Any, Any] = {}
+        self._pool_history: PoolHistoryFallback | None = None
         # TODO(ALM-2943): self._lending_apy_providers — lending seam.
-        # Exact historical pool state is run-scoped by SnapshotPoolStateSource;
-        # unlike pool-history fallbacks it has no process-global construction.
+        # Exact historical pool state is owned separately by SnapshotPoolStateSource.
 
     def pool_history(self) -> PoolHistoryFallback:
-        """The pool-history ladder helper (process-wide by design, see module doc)."""
-        from almanak.framework.backtesting.pnl.providers.pool_history_fallback import get_pool_history_fallback
+        """Coalesce consumers within this run without sharing capability verdicts."""
+        from almanak.framework.backtesting.pnl.providers.pool_history_fallback import PoolHistoryFallback
 
-        return get_pool_history_fallback()
+        with self._lock:
+            if self._pool_history is None:
+                self._pool_history = PoolHistoryFallback()
+            return self._pool_history
 
     def funding_provider(self, key: Any, build: Callable[[], Any]) -> Any:
         """Return the run's funding provider for ``key``, building it once.

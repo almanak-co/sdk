@@ -175,6 +175,66 @@ class TestRunBacktest:
         assert "BACKTEST ABORTED: PREFLIGHT VALIDATION FAILED" in captured.err
         assert "--allow-missing-prices" in captured.err
 
+    def test_dependency_preflight_preserves_blocker_and_requires_explicit_variant(self, capsys):
+        from almanak.framework.backtesting.pnl.dependencies import (
+            HistoricalCoverage,
+            HistoricalCoverageState,
+            HistoricalDataDependency,
+            HistoricalDependencyError,
+        )
+
+        config = _make_pnl_config()
+        dependency = HistoricalDataDependency(
+            dependency_id="depth_guard",
+            lane="liquidity_depth",
+            chain="ethereum",
+            pool_address="0x" + "11" * 20,
+            protocol="uniswap_v3",
+            start_time=config.start_time,
+            end_time=config.end_time,
+            required_fidelity="tick_depth",
+        )
+        blocker = HistoricalDependencyError(
+            (HistoricalCoverage(dependency, HistoricalCoverageState.UNSUPPORTED, "Historical ticks unavailable"),)
+        )
+        backtester = MagicMock()
+        backtester.backtest = AsyncMock(side_effect=blocker)
+
+        with pytest.raises(SystemExit) as exc_info:
+            _run_backtest(backtester, MagicMock(), config)
+
+        assert exc_info.value.code == 2
+        error = capsys.readouterr().err
+        assert "BACKTEST ABORTED: PREFLIGHT VALIDATION FAILED" in error
+        assert "depth_guard" in error
+        assert "unsupported_capability" in error
+        assert "Historical ticks unavailable" in error
+        assert "altered backtest guard variant" in error
+        assert "reason for each changed dependency" in error
+        assert "--allow-missing-prices" not in error
+
+    def test_invalid_dependency_declaration_requires_correction(self, capsys):
+        from almanak.framework.backtesting.pnl.error_handling import PreflightValidationError
+
+        backtester = MagicMock()
+        backtester.backtest = AsyncMock(
+            side_effect=PreflightValidationError(
+                "Malformed pool address in depth_guard",
+                code="HISTORICAL_DATA_DECLARATION",
+                failed_checks=["historical_data_dependencies"],
+                error_count=1,
+            )
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            _run_backtest(backtester, MagicMock(), _make_pnl_config())
+
+        assert exc_info.value.code == 2
+        error = capsys.readouterr().err
+        assert "Malformed pool address in depth_guard" in error
+        assert "declaration identity, fields, and time window" in error
+        assert "--allow-missing-prices" not in error
+        assert "altered backtest guard variant" not in error
+
     def test_timeframe_mismatch_is_not_presented_as_bypassable(self, capsys: pytest.CaptureFixture[str]) -> None:
         """A structural indicator/data mismatch remains a hard stop."""
         from almanak.framework.backtesting.pnl.error_handling import PreflightValidationError

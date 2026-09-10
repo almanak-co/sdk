@@ -50,6 +50,7 @@ from almanak.framework.backtesting.exceptions import (
     NoAcceptableDataSourceError,
     UnsupportedIntentError,
 )
+from almanak.framework.market.errors import HistoricalLiquidityDepthUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,12 @@ class _ErrorPattern(NamedTuple):
 
 # Typed fail-loud errors: classified UNKNOWN -> FATAL -> stop, never pattern-matched
 # into a recoverable bucket by message keywords.
-_FAIL_LOUD_DATA_ERRORS = (NoAcceptableDataSourceError, HistoricalDataUnavailableError, UnsupportedIntentError)
+_FAIL_LOUD_DATA_ERRORS = (
+    NoAcceptableDataSourceError,
+    HistoricalDataUnavailableError,
+    UnsupportedIntentError,
+    HistoricalLiquidityDepthUnavailableError,
+)
 
 _ERROR_PATTERNS = (
     _ErrorPattern(ErrorType.RATE_LIMIT, ("rate limit", "too many requests", "429", "throttl")),

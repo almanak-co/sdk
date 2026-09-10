@@ -673,6 +673,8 @@ class MarketSnapshot:
         # answer a HISTORICAL tick with TODAY's price (look-ahead bias).
         # None on live snapshots keeps the transport semantics.
         self._reference_price_refusal_detail: str | None = None
+        self._liquidity_depth_refusal_detail: str | None = None
+        self._altered_backtest_guards: frozenset[str] = frozenset()
 
         # Per-indicator caches (tuple keys for timeframe-aware caching)
         self._macd_cache: dict[tuple[str, OHLCVTimeframe, int, int, int], MACDData] = {}
@@ -5638,6 +5640,15 @@ class MarketSnapshot:
                 f"Failed to fetch pool history for {pool_address} on {target_chain}: {e}",
             ) from e
 
+    def backtest_guard_enabled(self, dependency_id: str) -> bool:
+        """Keep a live guard unless a backtest explicitly declares its alteration.
+
+        The engine validates IDs against strategy dependency declarations and
+        persists every alteration and reason in result configuration. This method
+        never changes the data API's refusal behavior.
+        """
+        return dependency_id not in self._altered_backtest_guards
+
     def liquidity_depth(
         self,
         pool_address: str,
@@ -5656,7 +5667,14 @@ class MarketSnapshot:
             ValueError: If no liquidity depth reader is configured.
             LiquidityDepthUnavailableError: If liquidity data cannot be read.
         """
+        from almanak.framework.data.interfaces import DataSourceUnavailable
         from almanak.framework.data.market_snapshot import LiquidityDepthUnavailableError
+        from almanak.framework.market.errors import HistoricalLiquidityDepthUnavailableError
+
+        detail = self._liquidity_depth_refusal_detail
+        if detail:
+            self._record_critical_data_failure("liquidity_depth", "backtest_no_historical_plane", detail)
+            raise HistoricalLiquidityDepthUnavailableError(pool_address, detail)
 
         if self._liquidity_depth_reader is None:
             self._record_critical_data_failure(
@@ -5670,6 +5688,10 @@ class MarketSnapshot:
                 pool_address=pool_address,
                 chain=target_chain,
             )
+        except DataSourceUnavailable as exc:
+            if exc.reason == "backtest":
+                self._record_critical_data_failure("liquidity_depth", "backtest_no_historical_plane", str(exc))
+            raise LiquidityDepthUnavailableError(pool_address, str(exc)) from exc
         except LiquidityDepthUnavailableError:
             raise
         except Exception as e:  # noqa: BLE001

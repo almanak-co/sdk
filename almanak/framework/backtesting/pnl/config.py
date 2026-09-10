@@ -219,6 +219,12 @@ class PnLBacktestConfig:
     complete window. A canonical explicit value (``"5m"``, ``"1h"``, ...)
     never silently downgrades.
     """
+    altered_backtest_guards: dict[str, str] = field(default_factory=dict, kw_only=True)
+    """Explicit dependency IDs and reasons for evaluating an altered strategy.
+
+    This only authorizes a strategy's explicit ``backtest_guard_enabled`` branch;
+    data reads still refuse unsupported inputs. Results are never live-equivalent.
+    """
     resolved_timeframe: str | None = field(default=None, kw_only=True)
     """Effective native timeframe recorded after provider negotiation."""
 
@@ -544,6 +550,7 @@ class PnLBacktestConfig:
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
+        self.validate_altered_backtest_guards()
         self.resolved_pool_descriptors = _normalize_resolved_pool_descriptors(self.resolved_pool_descriptors)
         self._validate_time_config()
         self._validate_token_funding_config()
@@ -554,6 +561,14 @@ class PnLBacktestConfig:
         self._validate_reconciliation_config()
         self._validate_data_quality_config()
         self._apply_institutional_mode_defaults()
+
+    def validate_altered_backtest_guards(self) -> None:
+        """Validate the mutable audit record before consumption or persistence."""
+        if not isinstance(self.altered_backtest_guards, dict) or any(
+            not isinstance(key, str) or not key.strip() or not isinstance(reason, str) or not reason.strip()
+            for key, reason in self.altered_backtest_guards.items()
+        ):
+            raise ValueError("altered_backtest_guards must map dependency IDs to nonempty reasons")
 
     def _validate_time_config(self) -> None:
         if self.end_time <= self.start_time:
@@ -739,12 +754,17 @@ class PnLBacktestConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
+        self.validate_altered_backtest_guards()
         return {
             "start_time": self.start_time.isoformat(),
             "end_time": self.end_time.isoformat(),
             "interval_seconds": self.interval_seconds,
             "timeframe": self.timeframe,
             "resolved_timeframe": self.resolved_timeframe,
+            "altered_backtest_guards": dict(self.altered_backtest_guards),
+            "strategy_comparison": "altered_guards_not_live_equivalent"
+            if self.altered_backtest_guards
+            else "original_guards",
             "token_funding": _token_funding_for_hash(self.token_funding),
             "fee_model": self.fee_model,
             "slippage_model": self.slippage_model,
@@ -854,6 +874,7 @@ class PnLBacktestConfig:
         """
         # Build a dictionary of hashable config values
         # Use to_dict() but exclude computed properties and metadata
+        self.validate_altered_backtest_guards()
         hash_dict = {
             "start_time": self.start_time.isoformat(),
             "end_time": self.end_time.isoformat(),
@@ -897,6 +918,8 @@ class PnLBacktestConfig:
             "preflight_validation": self.preflight_validation,
             "fail_on_preflight_error": self.fail_on_preflight_error,
         }
+        if self.altered_backtest_guards:
+            hash_dict["altered_backtest_guards"] = dict(self.altered_backtest_guards)
         if self.resolved_pool_descriptors:
             hash_dict["resolved_pool_descriptors"] = [
                 descriptor.to_dict() for descriptor in self.resolved_pool_descriptors
@@ -991,6 +1014,9 @@ class PnLBacktestConfig:
             interval_seconds=data.get("interval_seconds", 3600),
             timeframe=data.get("timeframe"),
             resolved_timeframe=data.get("resolved_timeframe"),
+            altered_backtest_guards={}
+            if data.get("altered_backtest_guards") is None
+            else data["altered_backtest_guards"],
             token_funding=data.get("token_funding"),
             fee_model=data.get("fee_model", "realistic"),
             slippage_model=data.get("slippage_model", "realistic"),

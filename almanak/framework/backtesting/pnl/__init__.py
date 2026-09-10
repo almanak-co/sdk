@@ -67,6 +67,7 @@ from .data_provider import (
     HistoricalDataProvider,
     MarketState,
 )
+from .dependencies import HistoricalDataDependency
 
 # Engine
 from .engine import (
@@ -270,6 +271,7 @@ __all__ = [
     "CascadeRiskWarning",
     # Configuration
     "PnLBacktestConfig",
+    "HistoricalDataDependency",
     # Config loading
     "ConfigLoadError",
     "ConfigLoadResult",

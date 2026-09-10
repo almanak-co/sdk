@@ -32,6 +32,7 @@ from ...backtesting.exceptions import NoAcceptableDataSourceError
 from ...backtesting.models import BacktestResult
 from ...backtesting.pnl.config_loader import ConfigLoadError, load_config_from_result
 from ...backtesting.pnl.data_provider import TokenRef, token_ref_display
+from ...backtesting.pnl.dependencies import HistoricalDependencyError
 from ...backtesting.pnl.error_handling import PreflightValidationError
 from ...backtesting.pnl.logging_utils import configure_backtest_logging
 from ...backtesting.visualization import save_chart
@@ -509,6 +510,38 @@ def _apply_strategy_token_funding(ctx: PnLBacktestContext, strategy_config: dict
     ctx.pnl_config.token_funding = token_funding
 
 
+def _apply_strategy_guard_overrides(
+    ctx: PnLBacktestContext,
+    strategy_config: dict[str, Any],
+    *,
+    explicit_config_file: bool,
+) -> None:
+    """Apply explicit guard variants while preserving replay's recorded choices."""
+    if ctx.loaded_from_result:
+        if (
+            explicit_config_file
+            and "altered_backtest_guards" in strategy_config
+            and strategy_config["altered_backtest_guards"] != ctx.pnl_config.altered_backtest_guards
+        ):
+            raise click.UsageError(
+                "--config-file altered_backtest_guards conflicts with the recorded --from-result configuration. "
+                "Start a new backtest to evaluate different guards."
+            )
+    else:
+        ctx.pnl_config.altered_backtest_guards = strategy_config.get("altered_backtest_guards", {})
+    try:
+        ctx.pnl_config.validate_altered_backtest_guards()
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    ctx.pnl_config.altered_backtest_guards = dict(ctx.pnl_config.altered_backtest_guards)
+    if ctx.pnl_config.altered_backtest_guards:
+        click.echo(
+            "Warning: altered_guards_not_live_equivalent — this run evaluates explicitly changed guards.", err=True
+        )
+        for dependency_id, reason in sorted(ctx.pnl_config.altered_backtest_guards.items()):
+            click.echo(f"  {dependency_id}: {reason}", err=True)
+
+
 def _create_pnl_strategy_instance(ctx: PnLBacktestContext, strategy_config: dict[str, Any]) -> Any:
     strategy_class = get_strategy(ctx.strategy)
     strategy_instance = _create_backtest_strategy(strategy_class, strategy_config, ctx.pnl_config.chain)
@@ -844,9 +877,28 @@ def _run_backtest(
         click.echo("BACKTEST ABORTED: PREFLIGHT VALIDATION FAILED", err=True)
         click.echo("=" * 60, err=True)
         click.echo(str(e), err=True)
-        if "indicator_timeframe_compatibility" in e.failed_checks:
+        if isinstance(e, HistoricalDependencyError):
+            click.echo(
+                "\nSelect historical data that satisfies the declared dependencies, or explicitly configure "
+                "an altered backtest guard variant in --config-file using altered_backtest_guards "
+                "with a nonempty reason for each changed dependency. "
+                "The strategy must explicitly implement the altered branch.",
+                err=True,
+            )
+        elif e.code == "HISTORICAL_DATA_DECLARATION":
+            click.echo(
+                "\nCorrect the historical dependency declaration identity, fields, and time window before retrying.",
+                err=True,
+            )
+        elif "indicator_timeframe_compatibility" in e.failed_checks:
             click.echo(
                 "\nThis structural timeframe mismatch cannot be bypassed with --allow-missing-prices.",
+                err=True,
+            )
+        elif set(e.failed_checks) & {"historical_pool_analytics", "historical_pool_analytics_grid"}:
+            click.echo(
+                "\nRestore the required historical pool analytics for the complete run window, or choose a supported "
+                "configuration. --allow-missing-prices only relaxes token-price checks; it cannot bypass this guard.",
                 err=True,
             )
         else:
@@ -1273,7 +1325,7 @@ def _generate_html_report(
     "--config-file",
     type=click.Path(exists=True),
     default=None,
-    help="Path to strategy config JSON file",
+    help="Path to strategy config JSON file; altered_backtest_guards maps explicitly changed guard IDs to reasons",
 )
 @click.option(
     "--warm-cache",
@@ -1488,6 +1540,7 @@ def pnl_backtest(
     # Phase 5: load runtime strategy config and seed token funding before the
     # banner/dry-run path so missing funding fails before simulation starts.
     strategy_config = _load_strategy_runtime_config(ctx, config_file)
+    _apply_strategy_guard_overrides(ctx, strategy_config, explicit_config_file=config_file is not None)
     _apply_strategy_token_funding(ctx, strategy_config)
 
     # Phase 5b: display configuration banner

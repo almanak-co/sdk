@@ -913,6 +913,8 @@ async def _prepare_declared_historical_pool_state(
     strategy_config: Mapping[str, Any],
     config: PnLBacktestConfig,
     manifest: Any | None,
+    *,
+    dependencies: tuple[Any, ...] | None = None,
 ) -> Any | None:
     """Prewarm exact-address archive pool state before simulation tick 1."""
     from almanak.framework.backtesting.pnl.providers.snapshot_pool_analytics import (
@@ -959,11 +961,13 @@ async def _prepare_declared_historical_pool_state(
             warning_count=0,
         ) from exc
     try:
+        from almanak.framework.backtesting.pnl.dependencies import declared_analytics_targets
+
         analytics_targets = declared_historical_pool_analytics_targets(
             strategy,
             strategy_config,
             default_chain=config.chain,
-        )
+        ) + declared_analytics_targets(strategy, config, dependencies)
     except ValueError as exc:
         raise PreflightValidationError(
             message=f"Historical pool-analytics declaration is invalid: {exc}",
@@ -1165,7 +1169,10 @@ def _declared_historical_pool_analytics(
     strategy: BacktestableStrategy,
     strategy_config: Mapping[str, Any],
     config: PnLBacktestConfig,
+    *,
+    dependencies: tuple[Any, ...] | None = None,
 ) -> tuple[Any, ...]:
+    from almanak.framework.backtesting.pnl.dependencies import declared_analytics_targets
     from almanak.framework.backtesting.pnl.providers.snapshot_pool_analytics import (
         declared_historical_pool_analytics_targets,
     )
@@ -1175,7 +1182,7 @@ def _declared_historical_pool_analytics(
             strategy,
             strategy_config,
             default_chain=config.chain,
-        )
+        ) + declared_analytics_targets(strategy, config, dependencies)
     except ValueError as exc:
         raise PreflightValidationError(
             message=f"Historical pool-analytics declaration is invalid: {exc}",
@@ -1192,22 +1199,17 @@ def _validate_declared_historical_pool_analytics(
     timestamp: datetime,
 ) -> int:
     from almanak.framework.backtesting.pnl.providers.snapshot_pool_analytics import (
+        HistoricalAnalyticsCoverageError,
         validate_historical_pool_analytics,
     )
 
-    try:
-        return validate_historical_pool_analytics(reader, targets, timestamp)
-    except (DataSourceError, PoolPriceUnavailableError, ValueError) as exc:
-        raise PreflightValidationError(
-            message=f"Historical pool-analytics preflight failed: {exc}",
-            failed_checks=["historical_pool_analytics"],
-            recommendations=[
-                "Ensure pool history measures every required field throughout the requested range. "
-                "TVL additionally requires exact archive state and historical USD prices for a pool token."
-            ],
-            error_count=1,
-            warning_count=0,
-        ) from exc
+    checked = 0
+    for target in targets:
+        try:
+            checked += validate_historical_pool_analytics(reader, (target,), timestamp)
+        except (DataSourceError, PoolPriceUnavailableError, ValueError) as exc:
+            raise HistoricalAnalyticsCoverageError(target, exc) from exc
+    return checked
 
 
 async def _spool_validated_historical_pool_analytics_grid(
@@ -1220,9 +1222,13 @@ async def _spool_validated_historical_pool_analytics_grid(
     token_addresses: Mapping[str, tuple[str, str]],
 ) -> Any:
     """Validate and disk-spool the exact grid consumed by simulation."""
+    from almanak.framework.backtesting.pnl.dependencies import HistoricalGridCoverage
+
+    coverage_grid = HistoricalGridCoverage(data_config)
     spool = tempfile.TemporaryFile(mode="w+b")
     try:
         async for timestamp, market_state in backtester.data_provider.iterate(data_config):
+            coverage_grid.observe(timestamp)
             if token_addresses:
                 market_state.register_symbol_aliases(token_addresses)
             reader.bind(
@@ -1232,6 +1238,7 @@ async def _spool_validated_historical_pool_analytics_grid(
             )
             _validate_declared_historical_pool_analytics(reader, targets, timestamp)
             pickle.dump((timestamp, market_state), spool, protocol=pickle.HIGHEST_PROTOCOL)
+        coverage_grid.finish()
         spool.seek(0)
         return spool
     except BaseException:
@@ -1387,6 +1394,8 @@ async def run_preflight(
     config: PnLBacktestConfig,
     bt_logger: BacktestLogger,
     strategy: BacktestableStrategy | None = None,
+    *,
+    dependencies: tuple[Any, ...] | None = None,
 ) -> tuple[PreflightReport | None, bool]:
     """Execute configured validation plus mandatory explicit-pool admission.
 
@@ -1404,6 +1413,20 @@ async def run_preflight(
             is the only escape hatch), if explicit pool admission fails, or if
             ``config.fail_on_preflight_error`` is True and any check failed.
     """
+    from almanak.framework.backtesting.pnl.dependencies import check_declared_dependencies, declared_dependencies
+
+    try:
+        dependencies = declared_dependencies(strategy, config) if dependencies is None else dependencies
+        await check_declared_dependencies(strategy, config, dependencies)
+    except (TypeError, ValueError) as exc:
+        raise PreflightValidationError(
+            message=f"Historical data dependency declaration is invalid: {exc}",
+            failed_checks=["historical_data_dependencies"],
+            recommendations=["Correct the declared historical dependency identity, fields, and run window."],
+            error_count=1,
+            code="HISTORICAL_DATA_DECLARATION",
+        ) from exc
+    backtester._prepared_historical_dependencies = dependencies
     preflight_report: PreflightReport | None = None
     preflight_passed: bool = True  # Default to True if validation is disabled
     if config.preflight_validation:
@@ -2076,6 +2099,15 @@ async def _prepare_declared_historical_pool_ohlcv(
     return source
 
 
+def _historical_dependencies_for_run(
+    backtester: PnLBacktester, strategy: Any, config: PnLBacktestConfig
+) -> tuple[Any, ...]:
+    from almanak.framework.backtesting.pnl.dependencies import declared_dependencies
+
+    prepared = backtester._prepared_historical_dependencies
+    return declared_dependencies(strategy, config) if prepared is None else prepared
+
+
 async def execute_iteration_loop(
     backtester: PnLBacktester,
     strategy: BacktestableStrategy,
@@ -2097,6 +2129,8 @@ async def execute_iteration_loop(
     # Local import to avoid cyclic import at module load
     from almanak.framework.backtesting.pnl.engine import create_market_snapshot_from_state
     from almanak.framework.backtesting.pnl.providers.perp.snapshot_funding import SnapshotFundingRateSource
+
+    dependencies = _historical_dependencies_for_run(backtester, strategy, config)
 
     # Make the run's indicator plane available to first-use connector routes
     # before any pending fill can trigger lazy discovery.
@@ -2143,6 +2177,7 @@ async def execute_iteration_loop(
         state.strategy_config,
         config,
         state.data_broker.manifest if state.data_broker is not None else None,
+        dependencies=dependencies,
     )
     twap_source = _ensure_run_twap_source(twap_source, config, state)
     pool_state_source = _bind_run_pool_state_source(backtester, pool_state_source, config, state)
@@ -2163,7 +2198,9 @@ async def execute_iteration_loop(
         config=config,
     )
     _pin_manifest_pool_descriptors(state, config)
-    pool_analytics_targets = _declared_historical_pool_analytics(strategy, state.strategy_config, config)
+    pool_analytics_targets = _declared_historical_pool_analytics(
+        strategy, state.strategy_config, config, dependencies=dependencies
+    )
 
     # Credits must land on the funding identity plane (ALM-2960) — same map
     # the snapshot registers as symbol aliases.
@@ -2398,6 +2435,7 @@ async def execute_iteration_loop(
                 rate_history_reader=rate_history_reader,
                 soft_empty_noted=soft_empty_noted,
             )
+            snapshot._altered_backtest_guards = frozenset(config.altered_backtest_guards)
 
             # Cache available_tokens once per tick: the property returns a
             # fresh list on every access, and we use it in multiple loops

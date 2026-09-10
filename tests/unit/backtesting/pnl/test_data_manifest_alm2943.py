@@ -168,15 +168,16 @@ class TestRunDataManifest:
 
 
 class TestBacktestDataBroker:
-    def test_pool_history_routes_to_process_singleton(self):
+    def test_pool_history_is_reused_within_run_and_isolated_from_legacy_singleton(self):
         from almanak.framework.backtesting.pnl.providers.pool_history_fallback import get_pool_history_fallback
 
         broker = BacktestDataBroker()
-        assert broker.pool_history() is get_pool_history_fallback()
-        # And so does the module-level seam, with or without an active broker.
+        assert broker.pool_history() is broker.pool_history()
+        assert broker.pool_history() is not get_pool_history_fallback()
         assert pool_history_provider() is get_pool_history_fallback()
         with data_broker_scope(broker):
-            assert pool_history_provider() is get_pool_history_fallback()
+            assert pool_history_provider() is broker.pool_history()
+        assert pool_history_provider() is get_pool_history_fallback()
 
     def test_funding_provider_construction_is_coalesced(self):
         broker = BacktestDataBroker()
