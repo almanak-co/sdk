@@ -41,7 +41,8 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
             IntentType.LP_COLLECT_FEES,
         }
     )
-    chains: ClassVar[frozenset[str]] = frozenset({"ethereum", "arbitrum", "base"})
+    # RobinHood uses chain-specific deployments and exact PoolKey routing.
+    chains: ClassVar[frozenset[str]] = frozenset({"ethereum", "arbitrum", "base", "robinhood"})
 
     def compile(self, ctx: SwapCompilerContext, intent: Any) -> CompilationResult:
         invalid_ctx = self._check_context(ctx, intent)

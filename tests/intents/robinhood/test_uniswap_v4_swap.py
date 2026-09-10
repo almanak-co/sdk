@@ -28,6 +28,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
+from almanak.connectors.uniswap_v4.compiler import UniswapV4Compiler
 from almanak.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
@@ -46,6 +47,12 @@ from tests.intents.pool_helpers import fail_if_v4_pool_missing
 CHAIN_NAME = "robinhood"
 # The V4 adapter routes single-hop swaps through its default 0.30% tier.
 SWAP_FEE_TIER = 3000
+
+
+@pytest.mark.intent(IntentType.SWAP)
+def test_robinhood_is_enabled_in_the_v4_compiler():
+    """Keep the exact RobinHood V4 adapter path from regressing to unsupported."""
+    assert CHAIN_NAME in UniswapV4Compiler.chains
 
 
 @pytest.mark.robinhood

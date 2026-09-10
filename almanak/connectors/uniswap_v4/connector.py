@@ -74,9 +74,9 @@ def _production_lifecycle_declarations():
                 ),
             )
         )
-    # Robinhood carries its four-layer lane under tests/intents/robinhood/, but
-    # that lane has not yet executed against a 4663 fork, so every cell stays a
-    # tracked lane gap rather than claiming real-fork evidence it does not have.
+    # Keep the production lifecycle matrix gated until all declaration-grade
+    # RobinHood evidence is published. The compiler itself is enabled above
+    # for exact PoolKey specs.
     robinhood_intents = (IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES)
     for intent in robinhood_intents:
         cells.append(AmmCoreExecutionCell(chain=ROBINHOOD, intent=intent, lane_gap_ref="ALM-9996"))
