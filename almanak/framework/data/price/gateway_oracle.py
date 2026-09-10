@@ -95,6 +95,9 @@ class GatewayPriceOracle(PriceOracle):
                     "sources_failed": dict(response.sources_failed),
                     "outliers": list(response.outliers),
                 }
+            if response.observation_id:
+                source_details = source_details or {}
+                source_details["observation_id"] = response.observation_id
 
             return PriceResult(
                 price=Decimal(response.price),

@@ -754,6 +754,7 @@ class PriceResponse(_message.Message):
     SOURCES_OK_FIELD_NUMBER: _builtins.int
     SOURCES_FAILED_FIELD_NUMBER: _builtins.int
     OUTLIERS_FIELD_NUMBER: _builtins.int
+    OBSERVATION_ID_FIELD_NUMBER: _builtins.int
     price: _builtins.str
     """Decimal as string"""
     timestamp: _builtins.int
@@ -761,6 +762,8 @@ class PriceResponse(_message.Message):
     confidence: _builtins.float
     """0.0-1.0"""
     stale: _builtins.bool
+    observation_id: _builtins.str
+    """Content hash of the provider's immutable observation artifact; empty means unmeasured."""
     @_builtins.property
     def sources_ok(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
     @_builtins.property
@@ -778,8 +781,9 @@ class PriceResponse(_message.Message):
         sources_ok: _abc.Iterable[_builtins.str] | None = ...,
         sources_failed: _abc.Mapping[_builtins.str, _builtins.str] | None = ...,
         outliers: _abc.Iterable[_builtins.str] | None = ...,
+        observation_id: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["confidence", b"confidence", "outliers", b"outliers", "price", b"price", "source", b"source", "sources_failed", b"sources_failed", "sources_ok", b"sources_ok", "stale", b"stale", "timestamp", b"timestamp"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["confidence", b"confidence", "observation_id", b"observation_id", "outliers", b"outliers", "price", b"price", "source", b"source", "sources_failed", b"sources_failed", "sources_ok", b"sources_ok", "stale", b"stale", "timestamp", b"timestamp"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___PriceResponse: _TypeAlias = PriceResponse  # noqa: Y015

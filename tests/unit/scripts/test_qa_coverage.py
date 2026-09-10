@@ -299,6 +299,533 @@ def _write_minimal_official_quant_bundle(qa, bundle: Path) -> None:
     _write_quant_audit_decision(qa, bundle)
 
 
+@pytest.mark.parametrize("require_harness", [False, True])
+def test_diagnostic_quant_seal_retains_unmeasured_axes_without_product_green(modules, tmp_path, require_harness):
+    qa, _, _ = modules
+    bundle = tmp_path / "diagnostic"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    path = bundle / "lifecycle-contract.json"
+    contract = json.loads(path.read_text())
+    scope = {"required": ["strategy"], "not_applicable": [], "unmeasured": ["books", "dashboard", "harness"]}
+    if require_harness:
+        scope["required"].append("harness")
+        scope["unmeasured"].remove("harness")
+    contract["claim_scope"] = scope
+    path.write_text(json.dumps(contract))
+    coverage_path = bundle / "lifecycle-coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["contract_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    coverage_path.write_text(json.dumps(coverage))
+    _write_quant_audit_decision(qa, bundle, required_claims=scope["required"])
+    store = tmp_path / "store"
+    cell_id = "lp.uniswap_v3.arbitrum.simple.anvil.eoa"
+    if require_harness:
+        with pytest.raises(ValueError, match="Required Quant claim harness is unmeasured"):
+            qa.seal_bundle(
+                bundle=bundle,
+                store=store,
+                catalog_path=REAL_CATALOG,
+                cell_id=cell_id,
+                network="anvil",
+                exec_path="eoa",
+                lane="adhoc",
+                run_id="required-harness",
+            )
+        assert not qa._official_quant_records(store)
+        return
+    qa.seal_bundle(
+        bundle=bundle,
+        store=store,
+        catalog_path=REAL_CATALOG,
+        cell_id=cell_id,
+        network="anvil",
+        exec_path="eoa",
+        lane="adhoc",
+        run_id="diagnostic-unknown",
+    )
+    row = json.loads((store / "index/cell_latest.json").read_text())[cell_id]
+    assert row["admission"]["claim_scope"] == scope
+    assert row["derived_claims"]["strategy"]["status"] == "PASS"
+    for axis in scope["unmeasured"]:
+        assert row["derived_claims"][axis]["status"] == "UNMEASURED"
+    assert row["last_product_green_at"] is None
+    assert qa._load_history_module().verify_history(store)["status"] in {"PASS", "PASS_WITH_WARNINGS"}
+
+
+def test_empty_lifecycle_claim_cannot_hide_a_recorded_execution_without_report(modules, tmp_path):
+    qa, _, _ = modules
+    bundle = tmp_path / "empty-claim"
+    bundle.mkdir()
+    _write_state_database(bundle, ["0x" + "51" * 32])
+    with pytest.raises(ValueError, match="declares no lifecycle transaction"):
+        qa._confirm_lifecycle_in_state_db(bundle, {"lifecycle_transaction_ids": []})
+
+
+@pytest.mark.parametrize("field", ["all_tx_results", "sub_transactions"])
+@pytest.mark.parametrize(
+    "mutation", ["omitted_receipt", "failed", "missing_status", "malformed", "duplicate", "missing_hash"]
+)
+def test_quant_cannot_hide_recorded_submissions_behind_successful_primary(modules, tmp_path, mutation, field):
+    qa, _, _ = modules
+    bundle = tmp_path / "submissions"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    primary, approval = "0x" + "51" * 32, "0x" + "52" * 32
+    status_key, success, failure = (
+        ("success", True, False) if field == "all_tx_results" else ("status", "success", "failure")
+    )
+    legs = [{"tx_hash": primary, status_key: success}, {"tx_hash": approval, status_key: success}]
+    _write_receipt_reconciliation(bundle, [primary, approval])
+
+    def write_legs():
+        with sqlite3.connect(bundle / "db.sqlite") as db:
+            db.execute("UPDATE transaction_ledger SET extracted_data_json = ?", (json.dumps({field: legs}),))
+
+    write_legs()
+    assert qa.derive_quant_strategy_claim(bundle)["status"] == "PASS"
+    if mutation == "omitted_receipt":
+        _write_receipt_reconciliation(bundle, [primary])
+    elif mutation == "failed":
+        legs[1][status_key] = failure
+    elif mutation == "missing_status":
+        legs[1].pop(status_key)
+    elif mutation == "duplicate":
+        legs.append(dict(legs[1]))
+    elif mutation == "missing_hash":
+        legs[1].pop("tx_hash")
+    else:
+        legs[1] = "unmeasured"
+    write_legs()
+    claim = qa.derive_quant_strategy_claim(bundle)
+    assert claim["status"] != "PASS"
+    _write_quant_audit_decision(qa, bundle)
+    store = tmp_path / "store"
+    with pytest.raises(ValueError, match="Claim strategy was declared PASS but the sealer derived"):
+        qa.seal_bundle(
+            bundle=bundle,
+            store=store,
+            catalog_path=REAL_CATALOG,
+            cell_id="lp.uniswap_v3.arbitrum.simple.anvil.eoa",
+            network="anvil",
+            exec_path="eoa",
+            lane="adhoc",
+            run_id="hidden-submission",
+        )
+    assert not qa._official_quant_records(store)
+
+
+def test_quant_residual_policy_cannot_be_satisfied_by_producer_inventory(modules, tmp_path):
+    qa, _, _ = modules
+    bundle = tmp_path / "residual-bundle"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    assert qa.derive_quant_strategy_claim(bundle)["status"] == "PASS"
+    path = bundle / "lifecycle-contract.json"
+    contract = json.loads(path.read_text())
+    contract["residual_policy"] = {
+        "known_nft_liquidity_raw": "0",
+        "pending_orders": 0,
+        "wallet_policy": "inventory_all_tokens_and_reconcile_subject_transactions",
+    }
+    path.write_text(json.dumps(contract))
+    coverage_path = bundle / "lifecycle-coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["contract_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    coverage_path.write_text(json.dumps(coverage))
+    (bundle / "residual-inventory.json").write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "all_token_wallet_inventory": "PASS",
+                "pending_orders": 0,
+            }
+        )
+    )
+    claim = qa.derive_quant_strategy_claim(bundle)
+    assert claim["status"] == "UNMEASURED"
+    assert claim["evidence"]["state_database"]
+    assert claim["evidence"]["residual_policy"]["all_token_wallet_inventory"] == "UNMEASURED"
+    assert "subject_terminal_pending_inventory_absent" in claim["reason_codes"]
+    _write_quant_audit_decision(qa, bundle)
+    store = tmp_path / "store"
+    with pytest.raises(ValueError, match="Claim strategy was declared PASS but the sealer derived"):
+        qa.seal_bundle(
+            bundle=bundle,
+            store=store,
+            catalog_path=REAL_CATALOG,
+            cell_id="lp.uniswap_v3.arbitrum.simple.anvil.eoa",
+            network="anvil",
+            exec_path="eoa",
+            lane="adhoc",
+            run_id="unmeasured-residual",
+        )
+    assert not qa._official_quant_records(store)
+
+
+def test_quant_pass_cannot_skip_declared_nft_generation_scenario(modules, tmp_path):
+    qa, _, _ = modules
+    bundle = tmp_path / "generation-bundle"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    cell = next(
+        cell
+        for cell in qa.expanded_catalog(qa._load_catalog(REAL_CATALOG))
+        if cell["cell_id"] == "lp.uniswap_v3.arbitrum.complex.anvil.eoa"
+    )
+    assert qa.derive_quant_strategy_claim(bundle, catalog_cell=cell)["status"] == "PASS"
+    contract_path = bundle / "lifecycle-contract.json"
+    contract = json.loads(contract_path.read_text())
+    contract["nft_generation_scenario"] = "lp-dual-rebalance-v1"
+    contract_path.write_text(json.dumps(contract))
+    coverage_path = bundle / "lifecycle-coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["contract_sha256"] = hashlib.sha256(contract_path.read_bytes()).hexdigest()
+    coverage_path.write_text(json.dumps(coverage))
+    (bundle / "generation-predicates.json").write_text(json.dumps({"rebalance": {"status": "PASS"}}))
+    with pytest.raises(ValueError, match="requires positions-open.json"):
+        qa._validate_lifecycle_evidence(bundle, {"strategy": "PASS"}, catalog_cell=cell)
+    assert qa.derive_quant_strategy_claim(bundle, catalog_cell=cell)["status"] == "UNMEASURED"
+    _write_quant_audit_decision(qa, bundle)
+    store = tmp_path / "store"
+    with pytest.raises(ValueError, match="Claim strategy was declared PASS but the sealer derived"):
+        qa.seal_bundle(
+            bundle=bundle,
+            store=store,
+            catalog_path=REAL_CATALOG,
+            cell_id=cell["cell_id"],
+            network="anvil",
+            exec_path="eoa",
+            lane="adhoc",
+            run_id="generation-forgery",
+        )
+    assert not qa._official_quant_records(store)
+
+
+@pytest.mark.parametrize("obligation", ["rebalance_price_cycle", "stimulus_price_link"])
+def test_quant_rebalance_cycle_cannot_be_declared_without_consumed_evidence(modules, tmp_path, obligation):
+    from qa_lab.e2e_rebalance_input import POLICY
+    from qa_lab.e2e_stimulus_price import POLICY as STIMULUS_POLICY
+
+    qa, _, _ = modules
+    bundle = tmp_path / "rebalance-cycle"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    path = bundle / "lifecycle-contract.json"
+    contract = json.loads(path.read_text())
+    contract[obligation] = POLICY if obligation == "rebalance_price_cycle" else STIMULUS_POLICY
+    path.write_text(json.dumps(contract))
+    coverage_path = bundle / "lifecycle-coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["contract_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    coverage_path.write_text(json.dumps(coverage))
+    claim = qa.derive_quant_strategy_claim(bundle)
+    assert claim["status"] != "PASS"
+    expected = (
+        "validated price and generation evidence" if obligation == "rebalance_price_cycle" else "admitted quantities"
+    )
+    assert expected in claim["evidence"]["pass_validator_error"]
+    _write_quant_audit_decision(qa, bundle)
+    store = tmp_path / "store"
+    with pytest.raises(ValueError, match="Claim strategy was declared PASS but the sealer derived"):
+        qa.seal_bundle(
+            bundle=bundle,
+            store=store,
+            catalog_path=REAL_CATALOG,
+            cell_id="lp.uniswap_v3.arbitrum.simple.anvil.eoa",
+            network="anvil",
+            exec_path="eoa",
+            lane="adhoc",
+            run_id="unmeasured-rebalance-cycle",
+        )
+    assert not qa._official_quant_records(store)
+
+
+def test_quant_without_generation_obligation_does_not_cite_unread_position_files(modules, tmp_path):
+    qa, _, _ = modules
+    bundle = tmp_path / "ordinary-bundle"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    (bundle / "positions-open.json").write_text("diagnostic only")
+    authorities = qa._strategy_authorities(bundle)
+    assert "positions-open.json" not in {entry["source"] for entry in authorities}
+    assert qa.derive_quant_strategy_claim(bundle)["status"] == "PASS"
+
+
+@pytest.mark.parametrize("fault", ["missing", "directory", "symlink", "parent_symlink", "outside", "absolute"])
+def test_declared_strategy_authority_cannot_be_silently_omitted(modules, tmp_path, fault):
+    qa, _, _ = modules
+    bundle = tmp_path / "authority-bundle"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    name = "consumed.json"
+    if fault == "directory":
+        (bundle / name).mkdir()
+    elif fault == "symlink":
+        (bundle / name).symlink_to(bundle / "lifecycle-contract.json")
+    elif fault == "parent_symlink":
+        (bundle / "actual").mkdir()
+        (bundle / "actual/consumed.json").write_text("{}")
+        (bundle / "alias").symlink_to(bundle / "actual", target_is_directory=True)
+        name = "alias/consumed.json"
+    elif fault in {"outside", "absolute"}:
+        outside = tmp_path / name
+        outside.write_text("{}")
+        name = str(outside) if fault == "absolute" else "../consumed.json"
+    with pytest.raises(ValueError, match="[Aa]uthority"):
+        qa._strategy_authorities(bundle, extra_files=[name])
+
+
+def test_declared_strategy_authorities_are_deduplicated_but_never_optional(modules, tmp_path):
+    qa, _, _ = modules
+    bundle = tmp_path / "authority-bundle"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    proof = bundle / "consumed.json"
+    proof.write_text('{"measured": 0}')
+    authorities = qa._strategy_authorities(bundle, extra_files=[proof.name, proof.name])
+    matches = [item for item in authorities if item["source"] == proof.name]
+    assert len(matches) == 1
+    assert matches[0]["identity"] == hashlib.sha256(proof.read_bytes()).hexdigest()
+    proof.unlink()
+    with pytest.raises(ValueError, match="Required Strategy authority"):
+        qa._strategy_authorities(bundle, extra_files=[proof.name])
+
+
+def test_quant_seal_rejects_validator_claiming_a_missing_consumed_proof(modules, tmp_path, monkeypatch):
+    from qa_lab import e2e_quantities
+
+    qa, _, _ = modules
+    bundle = tmp_path / "authority-bundle"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    monkeypatch.setattr(
+        e2e_quantities,
+        "validate_quantity_contract",
+        lambda *args, **kwargs: {"status": "PASS", "source_artifacts": ["lost-consumed-proof.json"]},
+    )
+    assert qa.derive_quant_strategy_claim(bundle)["status"] != "PASS"
+    store = tmp_path / "store"
+    with pytest.raises(ValueError, match="Claim strategy was declared PASS but the sealer derived"):
+        qa.seal_bundle(
+            bundle=bundle,
+            store=store,
+            catalog_path=REAL_CATALOG,
+            cell_id="lp.uniswap_v3.arbitrum.simple.anvil.eoa",
+            network="anvil",
+            exec_path="eoa",
+            lane="adhoc",
+            run_id="missing-consumed-authority",
+        )
+    assert not qa._official_quant_records(store)
+
+
+def test_quant_cannot_promote_a_declared_hold_without_generation_evidence(modules, tmp_path):
+    qa, _, _ = modules
+    bundle = tmp_path / "hold-bundle"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    assert qa.derive_quant_strategy_claim(bundle)["status"] == "PASS"
+    path = bundle / "lifecycle-contract.json"
+    contract = json.loads(path.read_text())
+    contract["sampled_hold"] = {"schema_version": 1, "minimum_seconds": 21600, "maximum_gap_seconds": 180}
+    path.write_text(json.dumps(contract))
+    coverage_path = bundle / "lifecycle-coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["contract_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    coverage_path.write_text(json.dumps(coverage))
+    with pytest.raises(ValueError, match="Sampled hold requires the admitted dual-LP generation obligation"):
+        qa._validate_lifecycle_evidence(bundle, {"strategy": "PASS"})
+    _write_quant_audit_decision(qa, bundle)
+    store = tmp_path / "store"
+    with pytest.raises(ValueError, match="Claim strategy was declared PASS but the sealer derived"):
+        qa.seal_bundle(
+            bundle=bundle,
+            store=store,
+            catalog_path=REAL_CATALOG,
+            cell_id="lp.uniswap_v3.arbitrum.complex.anvil.eoa",
+            network="anvil",
+            exec_path="eoa",
+            lane="adhoc",
+            run_id="hold-declaration-control",
+            hold_target="6h",
+        )
+    assert not qa._official_quant_records(store)
+
+
+@pytest.mark.parametrize("wrong_deployment", [False, True])
+def test_quant_price_inputs_are_derived_and_bound_to_the_database(modules, tmp_path, wrong_deployment):
+    qa, _, _ = modules
+    bundle = tmp_path / "price-bundle"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    shutil.copytree(REPO_ROOT / "tests/fixtures/accounting/harness/lp-dual-price-input", bundle, dirs_exist_ok=True)
+    cell = next(
+        cell
+        for cell in qa.expanded_catalog(qa._load_catalog(REAL_CATALOG))
+        if cell["cell_id"] == "lp.uniswap_v3.arbitrum.complex.anvil.eoa"
+    )
+    contract_path = bundle / "lifecycle-contract.json"
+    contract = json.loads(contract_path.read_text())
+    contract["pool_price_inputs"] = {"schema_version": 1, "max_age_seconds": 60}
+    contract_path.write_text(json.dumps(contract))
+    coverage_path = bundle / "lifecycle-coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["contract_sha256"] = hashlib.sha256(contract_path.read_bytes()).hexdigest()
+    coverage_path.write_text(json.dumps(coverage))
+    if not wrong_deployment:
+        with sqlite3.connect(bundle / "db.sqlite") as db:
+            db.execute("UPDATE transaction_ledger SET deployment_id='deployment:4a9f5de1c786'")
+    _write_quant_audit_decision(qa, bundle)
+    store = tmp_path / "store"
+    arguments = {
+        "bundle": bundle,
+        "store": store,
+        "catalog_path": REAL_CATALOG,
+        "cell_id": cell["cell_id"],
+        "network": "anvil",
+        "exec_path": "eoa",
+        "lane": "adhoc",
+        "run_id": "price-lineage-control",
+    }
+    if wrong_deployment:
+        with pytest.raises(ValueError, match="Claim strategy was declared PASS but the sealer derived"):
+            qa.seal_bundle(**arguments)
+        assert not qa._official_quant_records(store)
+    else:
+        sealed = qa.seal_bundle(**arguments)
+        record = json.loads((sealed / "manifest.json").read_text())
+        claim = record["derived_claims"]["strategy"]
+        assert claim["evidence"]["pool_price_inputs"]["status"] == "PASS"
+        sources = {item["source"] for item in claim["admission_control"]["liveness"]["mutations"]}
+        assert {"run.log", "pool-input.json", "price-observations/binding.json"} <= sources
+        assert len([source for source in sources if source.startswith("price-observations/")]) == 3
+
+
+def test_quant_quantity_seal_challenges_every_consumed_raw_witness(modules, tmp_path):
+    qa, _, _ = modules
+    bundle = tmp_path / "quantity-positive"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    fixtures = REPO_ROOT / "tests/fixtures/accounting/harness"
+    captured = json.loads((fixtures / "lp-dual-quantities/captured.json").read_text())
+    (bundle / "db.sqlite").unlink()
+    columns = list(captured["rows"][0])
+    with sqlite3.connect(bundle / "db.sqlite") as db:
+        db.execute("CREATE TABLE transaction_ledger (" + ",".join(columns) + ")")
+        db.executemany(
+            "INSERT INTO transaction_ledger VALUES (" + ",".join("?" for _ in columns) + ")",
+            [[row[column] for column in columns] for row in captured["rows"]],
+        )
+    (bundle / "chain").mkdir(exist_ok=True)
+    for name, value in captured["witnesses"].items():
+        (bundle / "chain" / name).write_text(json.dumps(value))
+    for name in ("positions-open.json", "positions-terminal.json"):
+        shutil.copyfile(fixtures / "lp-dual-generations" / name, bundle / name)
+    path = bundle / "lifecycle-contract.json"
+    contract = json.loads(path.read_text())
+    contract["wallet_quantities"] = {"schema_version": 1, "model": "uniswap-v3-weth-usdc-v1"}
+    contract["requirements"] = [
+        {"id": kind, "phase": "runtime", "intent_type": kind, "min_executed": 2}
+        for kind in ("SWAP", "LP_OPEN", "LP_CLOSE")
+    ]
+    path.write_text(json.dumps(contract))
+    coverage_path = bundle / "lifecycle-coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["contract_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    coverage["observations"] = [
+        {
+            "requirement_id": kind,
+            "phase": "runtime",
+            "intent_type": kind,
+            "executed": 2,
+            "transaction_ids": [row["tx_hash"] for row in captured["rows"] if row["intent_type"] == kind],
+        }
+        for kind in ("SWAP", "LP_OPEN", "LP_CLOSE")
+    ]
+    coverage_path.write_text(json.dumps(coverage))
+    receipts = [value for name, value in captured["witnesses"].items() if name.startswith("receipt-")]
+    report = _write_receipt_reconciliation(bundle, [receipt["transactionHash"] for receipt in receipts])
+    by_hash = {receipt["transactionHash"]: receipt for receipt in receipts}
+    for transaction in report["intents"][0]["transactions"]:
+        transaction["raw_receipt"] = by_hash[transaction["tx_hash"]]
+    (bundle / "receipt-reconciliation.json").write_text(json.dumps(report))
+    _write_quant_audit_decision(qa, bundle)
+    sealed = qa.seal_bundle(
+        bundle=bundle,
+        store=tmp_path / "store",
+        catalog_path=REAL_CATALOG,
+        cell_id="lp.uniswap_v3.arbitrum.complex.anvil.eoa",
+        network="anvil",
+        exec_path="eoa",
+        lane="adhoc",
+        run_id="quantity-positive-control",
+    )
+    claim = json.loads((sealed / "manifest.json").read_text())["derived_claims"]["strategy"]
+    assert claim["evidence"]["wallet_quantities"]["status"] == "PASS"
+    challenged = {item["source"] for item in claim["admission_control"]["liveness"]["mutations"]}
+    assert set(claim["evidence"]["wallet_quantities"]["source_artifacts"]) <= challenged
+
+
+@pytest.mark.parametrize("obligation", ["sdk_lifecycle", "runner_continuity", "actor_terminal", "actor_quantities"])
+def test_quant_runtime_obligation_cannot_be_satisfied_by_producer_counts(modules, tmp_path, obligation):
+    qa, _, _ = modules
+    bundle = tmp_path / "phase-declaration"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    path = bundle / "lifecycle-contract.json"
+    contract = json.loads(path.read_text())
+    contract[obligation] = {
+        "sdk_lifecycle": {"schema_version": 1, "model": "local-dual-lp-cycles-v1"},
+        "runner_continuity": {"schema_version": 1, "maximum_gap_seconds": 180},
+        "actor_terminal": {"schema_version": 1, "model": "stimulus-weth-and-pending-v1"},
+        "actor_quantities": {"schema_version": 1, "model": "stimulus-two-swaps-v1"},
+    }[obligation]
+    path.write_text(json.dumps(contract))
+    coverage_path = bundle / "lifecycle-coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["contract_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    coverage_path.write_text(json.dumps(coverage))
+    _write_quant_audit_decision(qa, bundle)
+    store = tmp_path / "store"
+    with pytest.raises(ValueError, match="Claim strategy was declared PASS but the sealer derived"):
+        qa.seal_bundle(
+            bundle=bundle,
+            store=store,
+            catalog_path=REAL_CATALOG,
+            cell_id="lp.uniswap_v3.arbitrum.complex.anvil.eoa",
+            network="anvil",
+            exec_path="eoa",
+            lane="adhoc",
+            run_id="sdk-phase-control",
+        )
+    assert not qa._official_quant_records(store)
+
+
+def test_quant_cannot_promote_declared_wallet_quantities_without_raw_evidence(modules, tmp_path):
+    qa, _, _ = modules
+    bundle = tmp_path / "quantity-bundle"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    cell = next(
+        cell
+        for cell in qa.expanded_catalog(qa._load_catalog(REAL_CATALOG))
+        if cell["cell_id"] == "lp.uniswap_v3.arbitrum.complex.anvil.eoa"
+    )
+    path = bundle / "lifecycle-contract.json"
+    contract = json.loads(path.read_text())
+    contract["wallet_quantities"] = {"schema_version": 1, "model": "uniswap-v3-weth-usdc-v1"}
+    path.write_text(json.dumps(contract))
+    coverage_path = bundle / "lifecycle-coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["contract_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    coverage_path.write_text(json.dumps(coverage))
+    (bundle / "wallet-quantities.json").write_text(json.dumps({"status": "PASS", "rows": 6}))
+    claim = qa.derive_quant_strategy_claim(bundle, catalog_cell=cell)
+    assert claim["status"] != "PASS"
+    assert "positions-open.json" in claim["evidence"]["pass_validator_error"]
+    _write_quant_audit_decision(qa, bundle)
+    store = tmp_path / "store"
+    with pytest.raises(ValueError, match="Claim strategy was declared PASS but the sealer derived"):
+        qa.seal_bundle(
+            bundle=bundle,
+            store=store,
+            catalog_path=REAL_CATALOG,
+            cell_id=cell["cell_id"],
+            network="anvil",
+            exec_path="eoa",
+            lane="adhoc",
+            run_id="quantity-declaration-control",
+        )
+    assert not qa._official_quant_records(store)
+
+
 def _write_dedicated_evidence(bundle: Path, *, status: str = "FAIL") -> dict:
     chain = bundle / "chain"
     chain.mkdir(parents=True, exist_ok=True)
@@ -4423,3 +4950,36 @@ function triageMarker(){return ''}
     assert f'data-cell="{cell_id}"' in rendered["html"]
     assert "No Intent rows match" not in rendered["html"]
     assert rendered["state"]["key"] != "pass"
+
+
+def test_quant_cannot_promote_declared_fork_shutdown_without_gateway_proofs(modules, tmp_path):
+    from qa_lab.e2e_fork_shutdown import CONTRACT
+
+    qa, _, _ = modules
+    bundle = tmp_path / "shutdown-bundle"
+    _write_minimal_official_quant_bundle(qa, bundle)
+    assert qa.derive_quant_strategy_claim(bundle)["status"] == "PASS"
+    path = bundle / "lifecycle-contract.json"
+    contract = json.loads(path.read_text())
+    contract["fork_shutdown"] = CONTRACT
+    path.write_text(json.dumps(contract))
+    coverage_path = bundle / "lifecycle-coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["contract_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    coverage_path.write_text(json.dumps(coverage))
+    (bundle / "fork-shutdown.json").write_text(json.dumps({"processes_stopped": True, "observation_complete": True}))
+    assert qa.derive_quant_strategy_claim(bundle)["status"] != "PASS"
+    _write_quant_audit_decision(qa, bundle)
+    store = tmp_path / "store"
+    with pytest.raises(ValueError, match="Claim strategy was declared PASS but the sealer derived"):
+        qa.seal_bundle(
+            bundle=bundle,
+            store=store,
+            catalog_path=REAL_CATALOG,
+            cell_id="lp.uniswap_v3.arbitrum.simple.anvil.eoa",
+            network="anvil",
+            exec_path="eoa",
+            lane="adhoc",
+            run_id="unwitnessed-fork-shutdown",
+        )
+    assert not qa._official_quant_records(store)

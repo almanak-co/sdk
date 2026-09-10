@@ -251,11 +251,14 @@ def test_seal_retry_commits_once_without_reobserving(run_request, tmp_path, monk
 def test_recovery_context_environment_excludes_operator_secrets(tmp_path, monkeypatch):
     import types
 
+    from qa_lab import qa_execution_context
+
     root = tmp_path / "acceptance"
     context = types.SimpleNamespace(root=root, store=root / "store")
-    monkeypatch.setitem(
-        sys.modules, "qa_lab.qa_execution_context", types.SimpleNamespace(active_context=lambda: context)
-    )
+    monkeypatch.setattr(qa_execution_context, "active_context", lambda: context)
+    runs = tmp_path / "runs"
+    runs.mkdir(mode=0o700)
+    monkeypatch.setenv(qa_execution_context.RUNS_ROOT_ENV, str(runs))
     monkeypatch.setenv("ALMANAK_QA_FORK_CONTEXT", str(tmp_path / "descriptor.json"))
     monkeypatch.setenv("ALMANAK_PRIVATE_KEY", "secret-must-not-propagate")
     monkeypatch.setenv("ARBITRUM_RPC_URL", "https://secret-must-not-propagate.example")
@@ -264,6 +267,7 @@ def test_recovery_context_environment_excludes_operator_secrets(tmp_path, monkey
     assert "secret-must-not-propagate" not in json.dumps(env)
     assert env["HOME"] == str(root / "home")
     assert env["ALMANAK_QA_STORE"] == str(root / "store")
+    assert env[qa_execution_context.RUNS_ROOT_ENV] == str(runs)
 
 
 def test_interruption_before_attempt_marker_preserves_first_observations(run_request, tmp_path, monkeypatch):

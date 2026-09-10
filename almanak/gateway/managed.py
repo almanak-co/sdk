@@ -198,6 +198,7 @@ class ManagedGateway:
         keep_anvil: bool = False,
     ):
         self.settings = settings
+        self._qa_custody_release_wait = False
         # Normalize chain names (e.g., "bnb" -> "bsc") via central resolver
         raw_chains = anvil_chains or []
         raw_ports = external_anvil_ports or {}
@@ -668,18 +669,50 @@ class ManagedGateway:
                 "Managed Anvil funding could not provision every requested asset; "
                 "refusing to start an under-funded fork. Failures: " + "; ".join(funding_failures)
             )
+        await self._fund_qa_pool_stimulus(managers_to_fund, wallet)
+
+    async def _fund_qa_pool_stimulus(self, managers: dict, subject_wallet: str) -> None:
+        if getattr(self.settings, "qa_pool_price_manifest", None) is None:
+            return
+        from almanak.core.chains import ChainRegistry
+        from almanak.gateway.data.price.qa_pool import PoolInputRoute
+
+        route = PoolInputRoute(self.settings)
+        chain = next(iter(managers), None)
+        if chain is None or chain != ChainRegistry.by_id(42161).name:
+            raise ValueError("Pool stimulus provisioning requires an owned managed Arbitrum fork")
+        await route.provision_stimulus(managers[chain], subject_wallet)
+        from almanak.gateway.qa_fork_custody import ForkCustody
+
+        if route.manifest.stimulus_wallet is not None:
+            self._qa_fork_custody = ForkCustody(route)
+            self._qa_custody_release_wait = True
 
     async def _stop_anvil_forks(self, *, force: bool = False) -> None:
         """Stop all managed Anvil fork instances and restore env vars.
 
-        When keep_anvil is True (and force is False), managed Anvil processes
-        are left running and their env vars are preserved. External Anvil env
-        vars are always restored since the user manages those processes.
+        When keep_anvil is True (and force is False), ordinary managed Anvil
+        processes remain running. An owned QA custody run instead waits for
+        its release proof, stops those handles, and then restores its env vars.
+        External Anvil env vars are always restored since the user manages those processes.
 
         Args:
             force: If True, always stop managed forks regardless of keep_anvil.
                    Used during error cleanup to avoid orphaned processes.
         """
+        custody = getattr(self, "_qa_fork_custody", None)
+        reason = "FORCED_SHUTDOWN"
+        if not force and self._keep_anvil and custody is not None and getattr(self, "_qa_custody_release_wait", True):
+            try:
+                reason = await custody.wait_for_release()
+            finally:
+                # The original handles remain owned even when proof collection fails.
+                for manager in self._anvil_managers.values():
+                    await manager.stop()
+                custody.record_stopped(reason, self._anvil_managers)
+            for env_var, original in self._original_env.items():
+                restore_env_value(env_var, original)
+            return
         if not force and self._keep_anvil and self._anvil_managers:
             for chain, manager in self._anvil_managers.items():
                 logger.info(
@@ -720,6 +753,11 @@ class ManagedGateway:
                 if chain in self._resetting_chains:
                     continue  # Skip chains being intentionally reset via reset_anvil_forks()
                 if not manager.is_running:
+                    if getattr(self.settings, "qa_pool_price_manifest", None) is not None:
+                        # A replacement fork cannot inherit a frozen run's evidence identity.
+                        logger.error("QA managed fork lost for %s; stopping gateway without restart", chain)
+                        self._stop_requested.set()
+                        return
                     logger.warning(
                         "Anvil fork for %s is no longer running (process exited). Restarting...",
                         chain,
@@ -772,6 +810,9 @@ class ManagedGateway:
                     except asyncio.CancelledError:
                         pass
                 await server.stop()
+                custody = getattr(self, "_qa_fork_custody", None)
+                if custody is not None:
+                    custody.record_gateway_stopped()
                 if self._anvil_managers:
                     await self._stop_anvil_forks()
 
@@ -834,6 +875,7 @@ class ManagedGateway:
 
     def _cleanup_on_failure(self) -> None:
         """Stop the background thread after a failed start. Suppresses stop errors."""
+        self._qa_custody_release_wait = False
         try:
             self.stop(timeout=3.0)
         except Exception:
@@ -876,6 +918,8 @@ class ManagedGateway:
             timeout: Max seconds to wait for the thread to join.
         """
         self._stop_requested.set()
+        if self._keep_anvil and getattr(self, "_qa_fork_custody", None) is not None and self._qa_custody_release_wait:
+            timeout = max(timeout, 620.0)
         if self._thread is not None:
             self._thread.join(timeout=timeout)
         logger.info("Managed gateway stopped")

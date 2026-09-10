@@ -137,6 +137,7 @@ class PriceData:
     confidence: ValueConfidence | str | None = None
     stale: bool | None = None
     raw_confidence: float | None = None
+    observation_id: str | None = None
 
     def __post_init__(self) -> None:
         from almanak.framework.portfolio.models import ValueConfidence
@@ -214,12 +215,15 @@ class PriceData:
         timestamp = timestamp_value if isinstance(timestamp_value, datetime) else None
         stale_value = getattr(result, "stale", None)
         stale = stale_value if isinstance(stale_value, bool) else None
+        details = getattr(result, "source_details", None)
+        observation_id = details.get("observation_id") if isinstance(details, dict) else None
         return cls(
             price=price,
             timestamp=timestamp,
             source=str(getattr(result, "source", "") or ""),
             stale=stale,
             raw_confidence=raw_confidence,
+            observation_id=observation_id if isinstance(observation_id, str) and observation_id else None,
         )
 
     def to_oracle_entry(self) -> dict[str, object]:
@@ -228,7 +232,7 @@ class PriceData:
 
         observed_at = self.observed_at.isoformat() if self.observed_at is not None else ""
         confidence = self.confidence.value if isinstance(self.confidence, ValueConfidence) else "UNAVAILABLE"
-        return {
+        entry: dict[str, object] = {
             "price_usd": str(self.price),
             "oracle_source": self.source or "unknown",
             # Keep the legacy key while making its observation semantics explicit.
@@ -238,6 +242,9 @@ class PriceData:
             "raw_confidence": self.raw_confidence,
             "stale": self.stale,
         }
+        if self.observation_id is not None:
+            entry["observation_id"] = self.observation_id
+        return entry
 
 
 class ReferenceMarketStatus(StrEnum):

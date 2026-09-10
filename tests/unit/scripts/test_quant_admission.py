@@ -161,3 +161,17 @@ def test_claim_scope_classifies_every_axis_once() -> None:
                 }
             }
         )
+
+
+def test_predeclared_unmeasured_axes_remain_distinct_from_not_applicable():
+    scope = {"required": ["strategy"], "not_applicable": [], "unmeasured": ["books", "dashboard", "harness"]}
+    assert validate_claim_scope({"claim_scope": scope}) == scope
+
+
+@pytest.mark.parametrize(
+    "unknown",
+    [["strategy", "books", "dashboard", "harness"], ["books", "books", "dashboard", "harness"], ["books"], "books"],
+)
+def test_unmeasured_scope_cannot_drop_duplicate_or_reclassify_required_axes(unknown):
+    with pytest.raises(ValueError):
+        validate_claim_scope({"claim_scope": {"required": ["strategy"], "not_applicable": [], "unmeasured": unknown}})

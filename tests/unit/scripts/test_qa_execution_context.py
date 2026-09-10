@@ -15,6 +15,7 @@ from qa_lab.qa_execution_context import MODE, ForkExecutionContext, active_conte
 
 @pytest.fixture
 def context(tmp_path, monkeypatch):
+    monkeypatch.delenv("ALMANAK_QA_RUNS_ROOT", raising=False)
     root = tmp_path / "acceptance"
     root.mkdir(mode=0o700)
     ctx = ForkExecutionContext(
@@ -333,3 +334,48 @@ def test_unknown_fork_recipe_raises_module_error(context):
 
     with pytest.raises(ValueError, match="No Mainnet Intent recipe backs acceptance cell"):
         resolve_recipe("intent.unknown_protocol.arbitrum.SWAP.anvil.eoa")
+
+
+def test_explicit_runs_parent_survives_coordinator_child(context, monkeypatch):
+    monkeypatch.setenv("ALMANAK_QA_RUNS_ROOT", str(context.root.parent))
+    assert active_context() == context
+    test_coordinator_child_retains_acceptance_temp_base(context)
+
+
+@pytest.mark.parametrize("placement", ["parent", "nested", "outside"])
+def test_configured_runs_parent_never_falls_back_to_temporary(context, monkeypatch, tmp_path, placement):
+    parent = context.root.parent
+    if placement == "parent":
+        parent = context.root
+    elif placement == "nested":
+        parent = context.root.parent.parent
+    elif placement == "outside":
+        parent = tmp_path / "another"
+        parent.mkdir(mode=0o700)
+    monkeypatch.setenv("ALMANAK_QA_RUNS_ROOT", str(parent))
+    with pytest.raises(ValueError, match="dedicated child"):
+        active_context()
+
+
+@pytest.mark.parametrize("value", ["", "relative", "alias", "public"])
+def test_configured_runs_parent_rejects_unsafe_directory(context, monkeypatch, tmp_path, value):
+    if value == "alias":
+        alias = tmp_path / "alias"
+        alias.symlink_to(context.root.parent, target_is_directory=True)
+        value = str(alias)
+    elif value == "public":
+        public = tmp_path / "public"
+        public.mkdir(mode=0o755)
+        value = str(public)
+    monkeypatch.setenv("ALMANAK_QA_RUNS_ROOT", value)
+    with pytest.raises(ValueError, match="QA runs root"):
+        active_context()
+
+
+def test_runs_parent_cannot_be_owned_by_another_user(context, monkeypatch):
+    import os
+
+    monkeypatch.setenv("ALMANAK_QA_RUNS_ROOT", str(context.root.parent))
+    monkeypatch.setattr(os, "geteuid", lambda: context.root.stat().st_uid + 1)
+    with pytest.raises(ValueError, match="owned by the current user"):
+        active_context()

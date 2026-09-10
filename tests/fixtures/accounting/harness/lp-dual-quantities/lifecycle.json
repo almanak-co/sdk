@@ -1,0 +1,43 @@
+{
+  "rows": [
+    {
+      "id": "90cc7cf1-a257-4cce-aa60-92b5a56e59c1",
+      "cycle_id": "008a491b-7fe5-4b74-9967-a0ca8db29914",
+      "timestamp": "2026-09-07T04:45:53+00:00"
+    },
+    {
+      "id": "0b6f3142-d73f-4b29-ac9f-efed0cd30519",
+      "cycle_id": "7728badc-a69a-49d6-a1d0-8484ba7f24f7",
+      "timestamp": "2026-09-07T04:47:16+00:00"
+    },
+    {
+      "id": "71405c07-527c-4621-a394-24a58e5d2015",
+      "cycle_id": "a43cedc7-416b-4e93-8005-58a2deccdb8e",
+      "timestamp": "2026-09-07T04:48:43+00:00"
+    },
+    {
+      "id": "1290e6ca-13fc-4606-b62f-d107298abdcb",
+      "cycle_id": "teardown-td_ead25e24b892",
+      "timestamp": "2026-09-07T04:51:33+00:00"
+    },
+    {
+      "id": "a9b20576-8303-4bf9-9518-790a14c4ed8a",
+      "cycle_id": "teardown-td_ead25e24b892",
+      "timestamp": "2026-09-07T04:52:00+00:00"
+    },
+    {
+      "id": "1a413661-efa9-49d7-8cc6-b9fed2266c7a",
+      "cycle_id": "teardown-td_ead25e24b892",
+      "timestamp": "2026-09-07T04:52:19+00:00"
+    }
+  ],
+  "request": {
+    "deployment_id": "deployment:4a9f5de1c786",
+    "status": "completed",
+    "positions_failed": 0,
+    "requested_at": "2026-09-07T04:50:44.789328+00:00",
+    "acknowledged_at": "2026-09-07T04:50:59.478787+00:00",
+    "started_at": "2026-09-07T04:50:59.501772+00:00",
+    "completed_at": "2026-09-07T04:52:19.595700+00:00"
+  }
+}

@@ -61,6 +61,7 @@ def _market_settings_stub(chains: list[str]) -> MagicMock:
     settings.network = "mainnet"
     settings.coingecko_api_key = ""
     settings.enable_manual_price_overrides = False
+    settings.qa_pool_price_manifest = None
     settings.stablecoin_verify = False
     settings.stablecoin_chainlink_check_interval = 50
     settings.stablecoin_verifier_failure_warning_threshold = 3

@@ -256,6 +256,12 @@ class TestRpcMethodValidation:
             with pytest.raises(ValidationError):
                 validate_rpc_method(method)
 
+    def test_fork_identity_read_is_anvil_only(self):
+        assert validate_rpc_method("anvil_metadata", network="anvil") == "anvil_metadata"
+        for network in ("mainnet", "testnet", None):
+            with pytest.raises(ValidationError):
+                validate_rpc_method("anvil_metadata", network=network)
+
     def test_debug_trace_transaction_is_anvil_only(self):
         """VIB-6437: call tracing is allowed ONLY on an Anvil gateway.
 

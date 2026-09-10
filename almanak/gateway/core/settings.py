@@ -109,6 +109,14 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     # Last-resort env prices are opt-in because incorrect values corrupt slippage and teardown decisions.
     enable_manual_price_overrides: bool = False
 
+    # An owned Local/Anvil experiment can bind GetPrice to an independently witnessed pool.
+    qa_pool_price_manifest: Path | None = None
+
+    @field_validator("qa_pool_price_manifest", mode="before")
+    @classmethod
+    def _empty_qa_pool_manifest_is_unset(cls, value: Any) -> Any:
+        return None if isinstance(value, str) and not value.strip() else value
+
     # Stable/USD uses a $1 fast path unless live multi-source de-peg verification is enabled.
     stablecoin_verify: bool = False
 

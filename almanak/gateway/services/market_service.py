@@ -572,6 +572,11 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             settings: Gateway settings with API keys and configuration.
         """
         self.settings = settings
+        self._qa_pool_input: Any = None
+        if getattr(settings, "qa_pool_price_manifest", None) is not None:
+            from almanak.gateway.data.price.qa_pool import PoolInputRoute
+
+            self._qa_pool_input = PoolInputRoute(settings)
         # Per-chain price aggregators (VIB-5651). Keyed by canonical chain name;
         # a no-chain gateway keeps a single entry under ``_NO_CHAIN_KEY``. This is
         # the source of truth for pricing; ``_price_aggregator`` (below) is a
@@ -1202,15 +1207,34 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         request: gateway_pb2.PriceRequest,
         context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.PriceResponse:
-        """Get token price from aggregated sources.
+        if getattr(self, "_qa_pool_input", None) is not None:
+            return await self._get_pool_input_price(request, context)
+        return await self._get_live_price(request, context)
 
-        Args:
-            request: Price request with token, quote currency, and optional chain hint
-            context: gRPC context
+    async def _get_pool_input_price(self, request, context) -> gateway_pb2.PriceResponse:
+        try:
+            result = await asyncio.to_thread(
+                self._qa_pool_input.get_price, request.token, request.quote or "USD", request.chain
+            )
+            return gateway_pb2.PriceResponse(
+                price=str(result.price),
+                timestamp=int(result.timestamp.timestamp()),
+                source=result.source,
+                confidence=result.confidence,
+                stale=result.stale,
+                observation_id=result.source_details["observation_id"],
+            )
+        except Exception as exc:
+            logger.error("Bound pool input unavailable: %s", exc)
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details("Bound pool input unavailable; live oracle fallback is forbidden")
+            return gateway_pb2.PriceResponse()
 
-        Returns:
-            PriceResponse with price, timestamp, source, confidence
-        """
+    async def _get_live_price(
+        self,
+        request: gateway_pb2.PriceRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.PriceResponse:
         await self._ensure_initialized()
 
         token = request.token

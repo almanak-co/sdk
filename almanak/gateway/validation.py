@@ -68,6 +68,7 @@ ALLOWED_RPC_METHODS = frozenset(
 # Enables time-locked DeFi testing: cooldown periods, vesting, lock expiry, etc.
 ANVIL_ONLY_RPC_METHODS = frozenset(
     {
+        "anvil_metadata",
         "evm_increaseTime",
         "evm_mine",
         "evm_snapshot",

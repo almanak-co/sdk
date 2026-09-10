@@ -370,6 +370,7 @@ Last-resort fallback for tokens that no real oracle source can price (e.g., long
 | Variable | Description |
 |----------|-------------|
 | `ALMANAK_GATEWAY_ENABLE_MANUAL_PRICE_OVERRIDES` | Enable the `ManualPriceOverrideSource` fallback. Default `false`. Off by default because a mis-set env var can feed a wrong price into slippage / teardown decisions. |
+| `ALMANAK_GATEWAY_QA_POOL_PRICE_MANIFEST` | Optional absolute path to an immutable E2E pool-input manifest. Only a dedicated Local SDK / Arbitrum / Anvil gateway may enable it. `GetPrice` uses block-pinned WETH/USDC pool observations with a declared USDC/USD anchor; unsupported requests or missing evidence fail without live-oracle fallback. Unset by default. |
 | `ALMANAK_PRICE_OVERRIDE_<TOKEN>` | Per-token override price in USD. Consulted only when every real oracle source failed to price the token. Example: `ALMANAK_PRICE_OVERRIDE_W0G=0.012`. |
 
 Set both: the enable flag turns the source on; the per-token vars supply the prices.

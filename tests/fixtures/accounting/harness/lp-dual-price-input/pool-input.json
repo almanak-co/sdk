@@ -1,0 +1,11 @@
+{
+  "config_sha256": "5b989c652336aed6d57341a9d5c7e807c67a6e8e3798339790cb5844cd90dc0b",
+  "database_path": "/private/tmp/qa-e2e-lp-dual/docs/internal/quant-user-runs/20260907-lp-dual-calibration-004/subject/almanak_state.db",
+  "fork_block": 502543425,
+  "fork_hash": "0x6c8b95ad9a2e849353011ec5c56c3b2f8e50851bb43a30f4a5d2813ae5de1920",
+  "preparation_sha256": "a26c21745a6f44b102654f893e95b3022ff3b31d66187cf113bbf28e5c1da483",
+  "run_id": "lp-dual-calibration-004",
+  "schema_version": 1,
+  "stimulus_usdc_raw": 10000000000000,
+  "stimulus_wallet": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+}

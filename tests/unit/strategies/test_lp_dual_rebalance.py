@@ -14,10 +14,13 @@ Construction mirrors ``test_lp_triple_phase_machine.py``: skip
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from strategies.accounting.lp_dual.strategy import (
     PHASE_BOTH_OPEN,
@@ -94,6 +97,61 @@ class _Market:
 
 def _lp_open_result(position_id: str) -> SimpleNamespace:
     return SimpleNamespace(position_id=position_id, lp_open_data=None, extracted_data={})
+
+
+def test_rebalance_records_the_consumed_price_observations(caplog):
+    strategy = _bare_strategy()
+    market = _Market(weth_price="2800")
+    market.price_data = lambda token: SimpleNamespace(observation_id=("a" if token == "WETH" else "b") * 64)
+    with caplog.at_level("INFO"):
+        intent = strategy._maybe_start_rebalance(market)
+    assert intent.position_id == "111"
+    records = [entry.message for entry in caplog.records if entry.message.startswith("LP_PRICE_INPUT ")]
+    assert len(records) == 1
+    witness = json.loads(records[0].removeprefix("LP_PRICE_INPUT "))
+    assert witness["token0_price"] == "2800"
+    assert witness["token1_price"] == "1"
+    assert witness["token0_observation_id"] == "a" * 64
+    assert witness["token1_observation_id"] == "b" * 64
+    assert witness["position_ids"] == ["111", "222"]
+
+
+@pytest.mark.parametrize("fault", ["first_read", "second_read", "unserializable_id"])
+def test_provenance_failure_preserves_the_price_driven_rebalance(caplog, fault):
+    expected_strategy = _bare_strategy()
+    expected = expected_strategy._maybe_start_rebalance(_Market(weth_price="2800"))
+    strategy = _bare_strategy()
+    market = _Market(weth_price="2800")
+
+    def price_data(token):
+        if fault == "first_read" or (fault == "second_read" and token == "USDC"):
+            raise RuntimeError("diagnostic failure detail")
+        value = object() if fault == "unserializable_id" and token == "USDC" else "a" * 64
+        return SimpleNamespace(observation_id=value)
+
+    market.price_data = price_data
+    with caplog.at_level("INFO"):
+        intent = strategy._maybe_start_rebalance(market)
+    assert type(intent) is type(expected)
+    assert intent.position_id == expected.position_id
+    assert strategy._phase == expected_strategy._phase
+    assert strategy._rebalancing_slot == expected_strategy._rebalancing_slot
+    assert strategy._oor_streaks == expected_strategy._oor_streaks
+    assert not any(entry.message.startswith("LP_PRICE_INPUT ") for entry in caplog.records)
+    assert any("Price-input evidence unavailable" in entry.message for entry in caplog.records)
+    assert "diagnostic failure detail" not in caplog.text
+
+
+def test_provenance_capture_does_not_swallow_controller_interruption():
+    strategy = _bare_strategy()
+    market = _Market(weth_price="2800")
+
+    def interrupted(token):
+        raise KeyboardInterrupt()
+
+    market.price_data = interrupted
+    with pytest.raises(KeyboardInterrupt):
+        strategy._maybe_start_rebalance(market)
 
 
 # ---------------------------------------------------------------------------

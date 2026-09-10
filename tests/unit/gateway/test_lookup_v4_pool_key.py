@@ -634,6 +634,7 @@ def _make_servicer() -> MarketServiceServicer:
     settings.network = "mainnet"
     settings.chains = ["base"]
     settings.coingecko_api_key = ""
+    settings.qa_pool_price_manifest = None
     return MarketServiceServicer(settings)
 
 
