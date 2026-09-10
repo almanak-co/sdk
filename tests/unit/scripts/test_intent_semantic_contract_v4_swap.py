@@ -65,11 +65,24 @@ def router_call(
     *,
     amount_in: int = AMOUNT_IN,
     commands: tuple[int, ...] = (0x10, 0x0B),
+    min_hop_price_x36: int | None = 0,
 ) -> dict[str, Any]:
     # USDG is currency1 in both pools, so a USDG-in swap is one-for-zero -- the
     # connector derives this the same way, from the input's position in the key.
     zero_for_one = USDG == key[0]
-    swap = encode([f"({POOL_KEY_TYPE},bool,uint128,uint128,bytes)"], [(key, zero_for_one, amount_in, minimum_out, b"")])
+    # Robinhood's router is a fork whose ExactInputSingleParams carries an extra
+    # uint256 minHopPriceX36; min_hop_price_x36=None builds the upstream shape,
+    # which this router cannot decode.
+    if min_hop_price_x36 is None:
+        swap = encode(
+            [f"({POOL_KEY_TYPE},bool,uint128,uint128,bytes)"],
+            [(key, zero_for_one, amount_in, minimum_out, b"")],
+        )
+    else:
+        swap = encode(
+            [f"({POOL_KEY_TYPE},bool,uint128,uint128,uint256,bytes)"],
+            [(key, zero_for_one, amount_in, minimum_out, min_hop_price_x36, b"")],
+        )
     inner = encode(["bytes", "bytes[]"], [bytes([0x06, 0x0B, 0x0E]), [swap]])
     outer = encode(["bytes", "bytes[]", "uint256"], [bytes(commands), [inner], 2_000_000_000])
     return {"to": ROUTER, "value": 0, "data": "0x" + EXECUTE_SELECTOR + outer.hex()}
@@ -515,3 +528,41 @@ def test_a_v4_swap_command_permitted_to_revert_is_refused() -> None:
             ),
             expected_profile="v4_swap.v1",
         )
+
+
+def test_a_swap_struct_the_committed_router_cannot_decode_is_refused() -> None:
+    """The upstream shape is not merely a different encoding here -- it is a payload
+    this router would trap on, so it must not be read with the other schema."""
+    logs = [
+        ROUTE_SWAP,
+        transfer(USDG, ACCOUNT, POOL_MANAGER, AMOUNT_IN),
+        mint(ROUTER, POOL_PAYOUT),
+        transfer(WETH, ROUTER, ACCOUNT, POOL_PAYOUT),
+    ]
+    contract = {
+        **ROUTE_CONTRACT,
+        "parser_output_amount_raw": str(POOL_PAYOUT),
+        "output_wallet_after_raw": str(POOL_PAYOUT),
+        "compiled_calls": [router_call(NATIVE_KEY, MIN_OUT, min_hop_price_x36=None)],
+    }
+    with pytest.raises(ValueError, match="not a decodable V4 swap"):
+        validate_semantic_contract(payload("v4_swap_route.v1", logs, **contract), expected_profile="v4_swap_route.v1")
+
+
+def test_a_second_price_bound_beyond_amount_out_minimum_is_refused() -> None:
+    """amountOutMinimum is what this proof reports the router was told to enforce;
+    a non-zero per-hop price is a second bound in different units that it does not describe."""
+    logs = [
+        ROUTE_SWAP,
+        transfer(USDG, ACCOUNT, POOL_MANAGER, AMOUNT_IN),
+        mint(ROUTER, POOL_PAYOUT),
+        transfer(WETH, ROUTER, ACCOUNT, POOL_PAYOUT),
+    ]
+    contract = {
+        **ROUTE_CONTRACT,
+        "parser_output_amount_raw": str(POOL_PAYOUT),
+        "output_wallet_after_raw": str(POOL_PAYOUT),
+        "compiled_calls": [router_call(NATIVE_KEY, MIN_OUT, min_hop_price_x36=1)],
+    }
+    with pytest.raises(ValueError, match="non-zero per-hop price bound"):
+        validate_semantic_contract(payload("v4_swap_route.v1", logs, **contract), expected_profile="v4_swap_route.v1")
