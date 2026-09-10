@@ -1815,6 +1815,25 @@ async def capture_teardown_snapshot_with_accounting(
     )
 
 
+async def _alert_pending_execution(
+    runner: StrategyRunner, strategy: StrategyProtocol, deployment_id: str, result: IterationResult
+) -> None:
+    now = datetime.now(UTC)
+    since = result.execution_pending_since
+    if not result.execution_pending_reason and since is not None and (now - since).total_seconds() < 300:
+        return
+    last_alert = getattr(runner, "_execution_pending_alert_at", None)
+    if isinstance(last_alert, datetime) and (now - last_alert).total_seconds() < 300:
+        return
+    reason = (
+        result.execution_pending_reason or "Receipt recovery exceeded five minutes; operator reconciliation required"
+    )
+    logger.error("Execution stalled for %s: %s; %s", deployment_id, reason, result.error)
+    runner._lifecycle_write_state(deployment_id, LifecycleState.ERROR, error_message=reason)
+    await runner._alert_execution_pending(strategy, result)
+    runner._execution_pending_alert_at = now
+
+
 async def handle_iteration_failure(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
@@ -1823,7 +1842,9 @@ async def handle_iteration_failure(
 ) -> None:
     """Post-iteration bookkeeping for the failure branch.
 
-    Increments ``_consecutive_errors``, records the first-error timestamp,
+    Unresolved execution is neutral: it neither adds to nor clears an error
+    streak, and it cannot trigger emergency teardown. Other outcomes increment
+    ``_consecutive_errors``, record the first-error timestamp,
     records the failure on the circuit breaker (skipping statuses that
     were already recorded inline to avoid double-counting), maybe
     triggers emergency stop if the breaker just tripped OPEN, and emits
@@ -1840,6 +1861,10 @@ async def handle_iteration_failure(
     never touches this helper.
     """
     from .runner_models import IterationStatus
+
+    if result.status is IterationStatus.EXECUTION_PENDING:
+        await _alert_pending_execution(runner, strategy, deployment_id, result)
+        return
 
     runner._consecutive_errors += 1
     if runner._first_error_at is None:
@@ -1895,6 +1920,9 @@ def handle_iteration_success(
     first-error timestamp, and resets the emergency trigger guard when
     the circuit breaker is not OPEN.
     """
+    pending_alerted = isinstance(getattr(runner, "_execution_pending_alert_at", None), datetime)
+    was_in_error_streak = was_in_error_streak or pending_alerted
+    runner._execution_pending_alert_at = None
     # Never let recovery overwrite a terminal state written during the same iteration.
     if was_in_error_streak and not runner._shutdown_requested and runner._terminal_lifecycle_state is None:
         runner._lifecycle_write_state(deployment_id, LifecycleState.RUNNING)

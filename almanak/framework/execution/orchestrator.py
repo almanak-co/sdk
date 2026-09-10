@@ -2405,7 +2405,7 @@ class ExecutionOrchestrator:
     ) -> None:
         """Build ordered results only from hash-bound receipt evidence."""
         result = state.result
-        available_receipts = list(state.receipts or [])
+        available_receipts = list(state.receipts or getattr(exc, "partial_receipts", []))
         exception_receipt = getattr(exc, "receipt", None)
         if exception_receipt is not None:
             available_receipts.append(exception_receipt)

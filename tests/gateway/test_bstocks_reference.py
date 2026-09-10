@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -225,8 +227,17 @@ def _web3(overrides=None):
         get_block=AsyncMock(return_value=block),
     )
 
+    captured = json.loads((Path(__file__).parent / "fixtures/bstocks_activation_contract.json").read_text())
+
     def rpc(method, params):
-        word = _address(GOOGLB.beacon) if method == "eth_getStorageAt" else words[params[0]["data"]]
+        if method == "eth_getCode":
+            return {"result": captured["implementation_code"]}
+        if method == "eth_getStorageAt":
+            if params[1] in ("0x0", "0x1", "0x2"):
+                return {"result": captured["storage"][str(int(params[1], 16))]}
+            word = _address(GOOGLB.beacon)
+        else:
+            word = words[params[0]["data"]]
         return {"jsonrpc": "2.0", "id": 1, "result": "0x" + word.hex()}
 
     return SimpleNamespace(
@@ -242,12 +253,45 @@ async def test_real_abi_words_decode_at_one_block_with_reorg_check():
     result = await read_multiplier(w3, GOOGLB)
     assert result.multiplier == Decimal("1.000478058978107511")
     assert result.scheduled_multiplier is None
+    assert result.last_activation_at == result.effective_at == 1788480000
     assert result.block_number == 120603059
     expected_block = {"blockHash": result.block_hash, "requireCanonical": True}
-    assert len(w3.provider.make_request.call_args_list) == 6
+    assert len(w3.provider.make_request.call_args_list) == 10
     for call in w3.provider.make_request.call_args_list:
         assert call.args[1][-1] == expected_block
     assert w3.eth.get_block.call_args_list[-1].args == (120603059,)
+
+
+@pytest.mark.asyncio
+async def test_retained_activation_accepts_a_fresh_quote_older_than_gateway_start():
+    observed = await read_multiplier(_web3(), GOOGLB)
+    source = underlying(timestamp=int(time.time()) - 60)
+    for _ in range(2):
+        result = compose_reference(source, GOOGLB, observed, AdjustmentCoherence())
+        assert result.price
+        assert result.observed_at == source.observed_at
+        assert result.composition.multiplier_effective_at == 1788480000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tamper", ["code", "slot_width", "slot_value"])
+async def test_activation_storage_requires_exact_runtime_and_consistent_words(tamper):
+    w3 = _web3()
+    original = w3.provider.make_request.side_effect
+
+    def rpc(method, params):
+        if tamper == "code" and method == "eth_getCode":
+            return {"result": "0x6000"}
+        if method == "eth_getStorageAt" and params[1] == "0x1":
+            if tamper == "slot_width":
+                return {"result": "0x01"}
+            if tamper == "slot_value":
+                return {"result": "0x" + _word(2 * 10**18).hex()}
+        return original(method, params)
+
+    w3.provider.make_request.side_effect = rpc
+    with pytest.raises(ValueError, match="multiplier_storage_"):
+        await read_multiplier(w3, GOOGLB)
 
 
 @pytest.mark.asyncio
@@ -282,7 +326,7 @@ async def test_real_owned_lookup_supports_hash_objects_without_ens_formatter_err
         result = await service._read_reference_multiplier(GOOGLB)
         assert result.multiplier == Decimal("1.000478058978107511")
         assert result.block_hash == "0x" + block["hash"].hex()
-        assert len(fixture.provider.make_request.call_args_list) == 6
+        assert len(fixture.provider.make_request.call_args_list) == 10
 
 
 @pytest.mark.asyncio
@@ -365,13 +409,13 @@ async def test_legacy_framework_request_cannot_receive_composition_it_cannot_val
     service._get_token_reference.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_uint256_multiplier_precision_is_not_rounded_to_decimal_default_context():
+def test_uint256_multiplier_precision_is_not_rounded_to_decimal_default_context():
+    from almanak.gateway.data.price.scaled_token_reference import _scaled
+
     raw = 2**256 - 1
     digits = str(raw)
     expected = Decimal(digits[:-18] + "." + digits[-18:])
-    result = await read_multiplier(_web3({"0xa60bf13d": _word(raw), "0xdc767007": _word(raw)}), GOOGLB)
-    assert result.multiplier == expected
+    assert _scaled(raw) == expected
 
 
 @pytest.mark.asyncio

@@ -4415,17 +4415,31 @@ class SubmissionTransactionEvidence(_message.Message):
     TX_ID_FIELD_NUMBER: _builtins.int
     ROLE_FIELD_NUMBER: _builtins.int
     REPLAY_POLICY_FIELD_NUMBER: _builtins.int
+    PLAN_INDICES_FIELD_NUMBER: _builtins.int
+    PLAN_TRANSACTION_COUNT_FIELD_NUMBER: _builtins.int
+    SAFE_ADDRESS_FIELD_NUMBER: _builtins.int
     tx_id: _builtins.str
     role: Global___ExecutionTransactionRole.ValueType
     replay_policy: Global___ReplayPolicy.ValueType
+    plan_transaction_count: _builtins.int
+    """Zero means coverage is unmeasured."""
+    safe_address: _builtins.str
+    """Nonempty requires proof of the Safe inner outcome."""
+    @_builtins.property
+    def plan_indices(self) -> _containers.RepeatedScalarFieldContainer[_builtins.int]:
+        """Logical compiled transactions covered by this physical submission."""
+
     def __init__(
         self,
         *,
         tx_id: _builtins.str = ...,
         role: Global___ExecutionTransactionRole.ValueType = ...,
         replay_policy: Global___ReplayPolicy.ValueType = ...,
+        plan_indices: _abc.Iterable[_builtins.int] | None = ...,
+        plan_transaction_count: _builtins.int = ...,
+        safe_address: _builtins.str = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["replay_policy", b"replay_policy", "role", b"role", "tx_id", b"tx_id"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["plan_indices", b"plan_indices", "plan_transaction_count", b"plan_transaction_count", "replay_policy", b"replay_policy", "role", b"role", "safe_address", b"safe_address", "tx_id", b"tx_id"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SubmissionTransactionEvidence: _TypeAlias = SubmissionTransactionEvidence  # noqa: Y015
@@ -4508,12 +4522,17 @@ class TxStatus(_message.Message):
     BLOCK_NUMBER_FIELD_NUMBER: _builtins.int
     GAS_USED_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
+    CANONICAL_RECEIPT_FIELD_NUMBER: _builtins.int
     status: _builtins.str
     """"pending", "confirmed", "failed", "reverted" """
     confirmations: _builtins.int
     block_number: _builtins.int
     gas_used: _builtins.int
     error: _builtins.str
+    canonical_receipt: _builtins.bytes
+    """Complete EVM receipt JSON after canonical inclusion checks. Empty means
+    unmeasured or unsupported; outer transaction success is not intent success.
+    """
     def __init__(
         self,
         *,
@@ -4522,8 +4541,9 @@ class TxStatus(_message.Message):
         block_number: _builtins.int = ...,
         gas_used: _builtins.int = ...,
         error: _builtins.str = ...,
+        canonical_receipt: _builtins.bytes = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["block_number", b"block_number", "confirmations", b"confirmations", "error", b"error", "gas_used", b"gas_used", "status", b"status"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["block_number", b"block_number", "canonical_receipt", b"canonical_receipt", "confirmations", b"confirmations", "error", b"error", "gas_used", b"gas_used", "status", b"status"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___TxStatus: _TypeAlias = TxStatus  # noqa: Y015

@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiohttp import ClientConnectionError
+from web3.exceptions import BlockNotFound, ProviderConnectionError, TransactionNotFound
 
 from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
 from almanak.framework.execution.interfaces import SubmissionError, TransactionRevertedError
@@ -140,3 +142,57 @@ def test_reorg_candidate_retries_under_same_deadline():
     receipt = asyncio.run(wait_for_canonical_receipt(web3, TX, 1))
     assert receipt.block_hash == BLOCK
     assert web3.eth.wait_for_transaction_receipt.await_count == 2
+
+
+@pytest.mark.parametrize("stage", ["receipt_observation", "block_membership", "receipt_refetch", "block_recheck"])
+@pytest.mark.parametrize(
+    "error_type", [ClientConnectionError, TimeoutError, ProviderConnectionError, TransactionNotFound, BlockNotFound]
+)
+def test_transient_read_failure_repeats_full_inclusion_proof(stage, error_type, caplog):
+    web3 = client()
+    block = {"hash": BLOCK, "transactions": [TX]}
+    error = error_type("provider URL contains secret-do-not-log")
+    if stage == "receipt_observation":
+        web3.eth.wait_for_transaction_receipt.side_effect = [error, raw()]
+    elif stage == "receipt_refetch":
+        web3.eth.get_transaction_receipt.side_effect = [error, raw()]
+    elif stage == "block_membership":
+        web3.eth.get_block.side_effect = [error, block, block]
+    else:
+        web3.eth.get_block.side_effect = [block, error, block, block]
+
+    submitter = PublicMempoolSubmitter(rpc_url="https://unused.invalid")
+    submitter._web3 = web3
+    receipt = asyncio.run(submitter.get_receipt(TX, 2))
+
+    assert receipt.tx_hash == TX
+    assert receipt.gas_cost_wei == 126007
+    assert web3.eth.wait_for_transaction_receipt.await_count == 2
+    assert f"stage={stage}" in caplog.text
+    assert "secret-do-not-log" not in caplog.text
+
+
+def test_persistent_transport_failure_expires_without_losing_hash():
+    submitter = PublicMempoolSubmitter(rpc_url="https://unused.invalid")
+    submitter._web3 = client()
+    submitter._web3.eth.get_block.side_effect = ClientConnectionError("unavailable")
+    with pytest.raises(SubmissionError, match="Timeout waiting") as raised:
+        asyncio.run(submitter.get_receipt(TX, 0.03))
+    assert raised.value.tx_hash == TX
+    assert submitter._web3.eth.wait_for_transaction_receipt.await_count == 1
+
+
+def test_cancellation_is_not_retried():
+    web3 = client()
+    web3.eth.get_transaction_receipt.side_effect = asyncio.CancelledError
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(wait_for_canonical_receipt(web3, TX, 1))
+    assert web3.eth.wait_for_transaction_receipt.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_receipt_batch_cancellation_takes_precedence_over_sibling_error():
+    submitter = object.__new__(PublicMempoolSubmitter)
+    submitter.get_receipt = AsyncMock(side_effect=[SubmissionError(reason="unobserved"), asyncio.CancelledError()])
+    with pytest.raises(asyncio.CancelledError):
+        await submitter.get_receipts([TX, "0x" + "56" * 32])

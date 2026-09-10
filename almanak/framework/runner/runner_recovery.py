@@ -425,6 +425,114 @@ async def save_execution_progress(runner: Any, deployment_id: str, progress: Exe
         raise
 
 
+async def save_pre_broadcast_checkpoint(runner: Any, strategy: Any, progress: ExecutionProgress) -> None:
+    """Atomically retain pre-callback strategy state and its replay barrier."""
+    from ..state.strategy_state import replace_strategy_persistent_state
+    from ..strategies.intent_strategy import IntentStrategy
+
+    if (
+        not isinstance(strategy, IntentStrategy)
+        or getattr(strategy, "_state_manager", None) is not runner.state_manager
+        or progress.recovery_context is None
+    ):
+        await runner._save_execution_progress(progress.deployment_id, progress)
+        return
+    from .runner_models import ExecutionBarrierPhase
+
+    execution = progress.recovery_context.execution
+    if (
+        strategy.deployment_id != progress.deployment_id
+        or execution.deployment_id != progress.deployment_id
+        or execution.intent_id != progress.execution_id
+        or progress.effective_barrier_phase is not ExecutionBarrierPhase.PRE_BROADCAST
+    ):
+        raise ValueError("Pre-broadcast checkpoint identity or phase mismatch")
+    context = progress.recovery_context.with_strategy_checkpoint(
+        strategy.get_persistent_state(), IntentStrategy._framework_persistent_state(strategy)
+    )
+    checkpoint = context.strategy_checkpoint
+    assert checkpoint is not None
+    progress.recovery_context = context
+    progress.last_updated = datetime.now(UTC)
+    saved = await replace_strategy_persistent_state(
+        runner.state_manager,
+        progress.deployment_id,
+        checkpoint["user_state"],
+        framework_state=checkpoint["framework_state"],
+        runner_state={"execution_progress": progress.to_dict()},
+    )
+    strategy._state_version = saved.version
+
+
+async def claim_observed_single_chain_recovery(
+    runner: Any,
+    expected: ExecutionProgress,
+    receipts: Any,
+) -> tuple[ExecutionProgress, int]:
+    """Claim fresh canonical observations once, before accounting or callbacks.
+
+    A concurrent marker/state change or an unacknowledged write leaves the
+    caller without ownership. It must not proceed with callback restoration.
+    """
+    from ..execution.plan_completion import prove_completed_evm_plan
+    from ..state.state_manager import StateData
+    from ..state.strategy_state import (
+        STATE_OWNERSHIP_VERSION,
+        STATE_OWNERSHIP_VERSION_KEY,
+        StateValuePreconditionError,
+        split_strategy_persistent_state,
+    )
+    from .runner_models import ExecutionBarrierPhase, ExecutionLane
+
+    context = expected.recovery_context
+    if (
+        expected.execution_lane is not ExecutionLane.SINGLE_CHAIN
+        or expected.effective_barrier_phase is not ExecutionBarrierPhase.RECONCILIATION_REQUIRED
+        or expected.total_steps != 1
+        or len(expected.submission_evidence) != 1
+        or context is None
+        or context.strategy_checkpoint is None
+        or context.execution.deployment_id != expected.deployment_id
+    ):
+        raise StateValuePreconditionError("Recovery has no complete original single-chain checkpoint")
+    evidence = expected.submission_evidence[0]
+    if evidence.step_index != 0 or evidence.chain != context.execution.chain:
+        raise StateValuePreconditionError("Recovery step identity changed")
+    ordered = prove_completed_evm_plan(
+        expected_plan_hash=context.plan_hash,
+        observed_plan_hash=evidence.execution_plan_hash,
+        provenance=evidence.submission_provenance,
+        submitted_tx_ids=evidence.submitted_transaction_ids,
+        evidence=evidence.submission_transactions,
+        receipts=receipts,
+    )
+    current = await runner.state_manager.load_state(expected.deployment_id)
+    if current is None:
+        raise StateValuePreconditionError("Recovery state row disappeared")
+    user, framework = split_strategy_persistent_state(current.state)
+    ownership_version = framework.pop(STATE_OWNERSHIP_VERSION_KEY, None)
+    if type(ownership_version) is not int or ownership_version != STATE_OWNERSHIP_VERSION:
+        raise StateValuePreconditionError("Recovery state ownership version is unproven")
+    actual = {
+        "progress": current.state.get("execution_progress"),
+        "checkpoint": {"user_state": user, "framework_state": framework},
+    }
+    required = {"progress": expected.to_dict(), "checkpoint": context.strategy_checkpoint}
+    if json.dumps(actual, sort_keys=True, allow_nan=False) != json.dumps(required, sort_keys=True, allow_nan=False):
+        raise StateValuePreconditionError("Recovery marker or pre-callback strategy state changed")
+    claimed = ExecutionProgress.from_dict(expected.to_dict())
+    claimed.recovery_receipts = [receipt.to_dict() for receipt in ordered]
+    claimed.mark_landed_repair_pending(0, "canonical plan observed; accounting and callback completion required")
+    candidate = StateData(
+        deployment_id=current.deployment_id,
+        version=current.version,
+        state={**current.state, "execution_progress": claimed.to_dict()},
+        schema_version=current.schema_version,
+    )
+    saved = await runner.state_manager.save_state(candidate, expected_version=current.version)
+    return claimed, saved.version
+
+
 async def clear_execution_progress(runner: Any, deployment_id: str) -> None:
     """Clear execution progress from state (after completion or abort).
 

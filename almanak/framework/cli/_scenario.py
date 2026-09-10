@@ -121,6 +121,7 @@ class ScenarioOverrides:
     balances: dict[str, Decimal] = field(default_factory=dict)
     rsi: dict[str, Decimal] = field(default_factory=dict)
     reference_events: tuple[ReferenceScenarioEvent, ...] = ()
+    withhold_execution_receipts_once: bool = False
 
     def is_empty(self) -> bool:
         return not (self.prices or self.balances or self.rsi or self.reference_events)
@@ -161,6 +162,13 @@ def _reference_events(doc: dict, *, prices: dict, balances: dict, rsi: dict) -> 
     return events
 
 
+def _receipt_withholding(doc: dict, reference_events: tuple) -> bool:
+    withhold = doc.get("withhold_execution_receipts_once", False)
+    if type(withhold) is not bool or withhold and not reference_events:
+        raise ScenarioParseError("withhold_execution_receipts_once requires a boolean and reference_events")
+    return withhold
+
+
 def parse_scenario(raw: str) -> ScenarioOverrides:
     """Parse an ``--inject`` argument into validated :class:`ScenarioOverrides`.
 
@@ -197,7 +205,7 @@ def parse_scenario(raw: str) -> ScenarioOverrides:
     if not isinstance(doc, dict):
         raise ScenarioParseError(f"--inject: top-level value must be a JSON object, got {type(doc).__name__}")
 
-    allowed = {"prices", "balances", "indicators", "reference_events"}
+    allowed = {"prices", "balances", "indicators", "reference_events", "withhold_execution_receipts_once"}
     unknown = set(doc) - allowed
     if unknown:
         raise ScenarioParseError(f"--inject: unknown key(s) {sorted(unknown)}; supported keys are {sorted(allowed)}")
@@ -220,7 +228,14 @@ def parse_scenario(raw: str) -> ScenarioOverrides:
                     raise ScenarioParseError(f"indicators.rsi.{token}: RSI must be within 0..100, got {value}")
 
     reference_events = _reference_events(doc, prices=prices, balances=balances, rsi=rsi)
-    overrides = ScenarioOverrides(prices=prices, balances=balances, rsi=rsi, reference_events=reference_events)
+    withhold = _receipt_withholding(doc, reference_events)
+    overrides = ScenarioOverrides(
+        prices=prices,
+        balances=balances,
+        rsi=rsi,
+        reference_events=reference_events,
+        withhold_execution_receipts_once=withhold,
+    )
     if overrides.is_empty():
         raise ScenarioParseError("--inject: document contained no overrides (prices/balances/indicators all empty)")
     return overrides

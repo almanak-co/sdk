@@ -177,9 +177,14 @@ class MockExecutionOrchestrator:
         result.success = self._success
         result.error = self._error
         result.phase = ExecutionPhase.COMPLETE if self._success else ExecutionPhase.VALIDATION
+        from almanak.framework.execution.submission import SubmissionProvenance
+
+        result.submission_provenance = (
+            SubmissionProvenance.ATTEMPTED if self._success else SubmissionProvenance.NOT_ATTEMPTED
+        )
         result.transaction_results = []
-        result.total_gas_used = 100000
-        result.total_gas_cost_wei = 1000000000000
+        result.total_gas_used = 100000 if self._success else 0
+        result.total_gas_cost_wei = 1000000000000 if self._success else 0
         # Avoid the auto-MagicMock attribute that trips the slippage circuit
         # breaker when the runner compares it against an int.
         result.swap_amounts = None

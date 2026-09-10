@@ -113,16 +113,22 @@ class SubmissionTransactionEvidence:
     tx_id: str
     role: TransactionRole = TransactionRole.UNKNOWN
     replay_policy: ReplayPolicy = ReplayPolicy.NEVER
+    plan_indices: tuple[int, ...] = ()
+    plan_transaction_count: int = 0
+    safe_address: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", TransactionRole.parse(self.role))
         object.__setattr__(self, "replay_policy", ReplayPolicy.parse(self.replay_policy))
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "tx_id": self.tx_id,
             "role": self.role.value,
             "replay_policy": self.replay_policy.value,
+            "plan_indices": list(self.plan_indices),
+            "plan_transaction_count": self.plan_transaction_count,
+            "safe_address": self.safe_address,
         }
 
     @classmethod
@@ -131,11 +137,25 @@ class SubmissionTransactionEvidence:
             return value
         if isinstance(value, Mapping):
             tx_id = value.get("tx_id")
+            indices = value.get("plan_indices", [])
+            count = value.get("plan_transaction_count", 0)
+            safe_address = value.get("safe_address", "")
+            if (
+                not isinstance(indices, list | tuple)
+                or any(type(index) is not int or index < 0 for index in indices)
+                or type(count) is not int
+                or count < 0
+                or not isinstance(safe_address, str)
+            ):
+                return None
             if isinstance(tx_id, str) and tx_id.strip():
                 return cls(
                     tx_id=tx_id.strip(),
                     role=TransactionRole.parse(value.get("role")),
                     replay_policy=ReplayPolicy.parse(value.get("replay_policy")),
+                    plan_indices=tuple(indices),
+                    plan_transaction_count=count,
+                    safe_address=safe_address,
                 )
         return None
 
@@ -158,6 +178,7 @@ def certify_submission_transactions(
     *,
     transaction_indices: list[int | None] | tuple[int | None, ...] | None = None,
     atomic_batch: bool = False,
+    safe_address: str = "",
 ) -> list[SubmissionTransactionEvidence]:
     """Certify conservative per-transaction roles from the compiled plan.
 
@@ -217,7 +238,17 @@ def certify_submission_transactions(
             role, policy = TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY
         else:
             role, policy = TransactionRole.ACTION, ReplayPolicy.NEVER
-        return [SubmissionTransactionEvidence(tx_id=tx_id, role=role, replay_policy=policy) for tx_id in tx_ids]
+        return [
+            SubmissionTransactionEvidence(
+                tx_id=tx_id,
+                role=role,
+                replay_policy=policy,
+                plan_indices=tuple(range(len(transactions))) if valid_physical_identity else (),
+                plan_transaction_count=len(transactions),
+                safe_address=safe_address,
+            )
+            for tx_id in tx_ids
+        ]
 
     if transaction_indices is None or len(transaction_indices) != len(tx_ids):
         transaction_indices = [None] * len(tx_ids)
@@ -229,6 +260,7 @@ def certify_submission_transactions(
     evidence: list[SubmissionTransactionEvidence] = []
     for tx_id, transaction_index in zip(tx_ids, transaction_indices, strict=True):
         transaction_identity = _canonical_tx_id(tx_id)
+        plan_indices: tuple[int, ...] = ()
         if (
             isinstance(transaction_index, int)
             and not isinstance(transaction_index, bool)
@@ -237,12 +269,22 @@ def certify_submission_transactions(
             and transaction_identity is not None
             and tx_id_counts.get(transaction_identity) == 1
         ):
+            plan_indices = (transaction_index,)
             role, policy = _role_and_policy(transactions[transaction_index])
             if role is TransactionRole.SETUP_APPROVAL and not complete_plan_binding:
                 role, policy = TransactionRole.UNKNOWN, ReplayPolicy.NEVER
         else:
             role, policy = TransactionRole.UNKNOWN, ReplayPolicy.NEVER
-        evidence.append(SubmissionTransactionEvidence(tx_id=tx_id, role=role, replay_policy=policy))
+        evidence.append(
+            SubmissionTransactionEvidence(
+                tx_id=tx_id,
+                role=role,
+                replay_policy=policy,
+                plan_indices=plan_indices,
+                plan_transaction_count=len(transactions),
+                safe_address=safe_address,
+            )
+        )
     return evidence
 
 

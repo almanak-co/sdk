@@ -155,6 +155,9 @@ def _submission_transactions_to_proto(
                 if item.replay_policy is ReplayPolicy.RECOMPILE_ONLY
                 else gateway_pb2.REPLAY_POLICY_NEVER
             ),
+            plan_indices=item.plan_indices,
+            plan_transaction_count=item.plan_transaction_count,
+            safe_address=item.safe_address,
         )
         for item in values
     ]
@@ -1379,6 +1382,28 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 submission_provenance=gateway_pb2.SUBMISSION_PROVENANCE_UNSPECIFIED,
             )
 
+    def _execution_safe_address(self, chain: str, wallet_address: str, signer: Any) -> str:
+        from almanak.framework.execution.signer.safe.base import SafeSigner
+
+        expected_safe = wallet_address if self._is_safe_address(wallet_address) else ""
+        if self.wallet_registry is not None:
+            try:
+                resolved = self.wallet_registry.resolve(chain)
+            except KeyError:
+                resolved = None
+            if resolved is not None and resolved.kind == "zodiac":
+                expected_safe = resolved.account_address
+                if wallet_address.lower() != expected_safe.lower():
+                    raise ValueError("Safe signer identity does not match the execution wallet")
+        if expected_safe and not isinstance(signer, SafeSigner):
+            raise ValueError("Configured Safe wallet requires a SafeSigner before execution")
+        if isinstance(signer, SafeSigner):
+            address = signer.address
+            if not address or address.lower() != (expected_safe or wallet_address).lower():
+                raise ValueError("Safe signer identity does not match the execution wallet")
+            return address
+        return ""
+
     async def _execute_evm(
         self,
         request: gateway_pb2.ExecuteRequest,
@@ -1395,6 +1420,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
 
             # Get orchestrator for chain
             orchestrator = await self._get_orchestrator(chain, wallet_address)
+            safe_address = self._execution_safe_address(chain, wallet_address, orchestrator.signer)
             cache_key = f"{chain}:{wallet_address}"
             orchestrator_lock = self._orchestrator_locks.setdefault(cache_key, asyncio.Lock())
             default_gas_cap = self._orchestrator_default_gas_caps.setdefault(
@@ -1440,9 +1466,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 finally:
                     orchestrator.tx_risk_config.max_gas_price_gwei = default_gas_cap
 
-            from almanak.framework.execution.signer.safe.base import SafeSigner
-
-            atomic_safe_batch = isinstance(orchestrator.signer, SafeSigner) and len(action_bundle.transactions) > 1
+            atomic_safe_batch = bool(safe_address) and len(action_bundle.transactions) > 1
 
             # Preserve the positional 1:1 tx-hash/receipt contract. The old
             # loop skipped an individual receipt after a conversion failure
@@ -1484,6 +1508,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                                 and transaction_result.tx_hash.strip()
                             ],
                             atomic_batch=atomic_safe_batch,
+                            safe_address=safe_address,
                         )
                     ),
                 )
@@ -1510,6 +1535,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                             for transaction_result in transaction_results
                         ],
                         atomic_batch=atomic_safe_batch,
+                        safe_address=safe_address,
                     )
                 ),
             )
@@ -1638,49 +1664,25 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         chain: str,
         context: grpc.aio.ServicerContext,
     ) -> gateway_pb2.TxStatus:
-        """Get EVM transaction status via eth_getTransactionReceipt."""
+        """Return canonical EVM receipt evidence through the gateway boundary."""
         try:
             from web3 import AsyncHTTPProvider, AsyncWeb3
 
+            from almanak.gateway.data.transaction_status import observe_evm_transaction
             from almanak.gateway.utils import get_rpc_url
             from almanak.gateway.utils.ssl_context import build_ssl_context
 
             rpc_url = get_rpc_url(chain, network=self.settings.network)
-            w3 = AsyncWeb3(AsyncHTTPProvider(rpc_url, request_kwargs={"ssl": build_ssl_context()}))
-
-            # Get transaction receipt
-            receipt = await w3.eth.get_transaction_receipt(tx_hash)  # type: ignore[arg-type]
-
-            if receipt is None:
-                return gateway_pb2.TxStatus(status="pending")
-
-            # Check status
-            if receipt["status"] == 1:
-                current_block = await w3.eth.block_number
-                confirmations = current_block - receipt["blockNumber"]
-
-                return gateway_pb2.TxStatus(
-                    status="confirmed",
-                    confirmations=confirmations,
-                    block_number=receipt["blockNumber"],
-                    gas_used=receipt["gasUsed"],
+            provider = AsyncHTTPProvider(rpc_url, request_kwargs={"ssl": build_ssl_context()})
+            try:
+                return await observe_evm_transaction(
+                    AsyncWeb3(provider), tx_hash, chain_id=ChainRegistry.resolve(chain).chain_id
                 )
-            else:
-                return gateway_pb2.TxStatus(
-                    status="reverted",
-                    block_number=receipt["blockNumber"],
-                    gas_used=receipt["gasUsed"],
-                    error="Transaction reverted",
-                )
-
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"GetTransactionStatus failed for {tx_hash}: {error_msg}")
-
-            # If tx not found, it's likely still pending
-            if "not found" in error_msg.lower():
-                return gateway_pb2.TxStatus(status="pending")
-
+            finally:
+                await provider.disconnect()
+        except Exception as exc:
+            logger.error("EVM GetTransactionStatus unavailable tx_hash=%s error_type=%s", tx_hash, type(exc).__name__)
+            error = "canonical_receipt_service_unavailable"
             context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(error_msg)
-            return gateway_pb2.TxStatus(status="unknown", error=error_msg)
+            context.set_details(error)
+            return gateway_pb2.TxStatus(status="unknown", error=error)

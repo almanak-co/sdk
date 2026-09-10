@@ -1514,6 +1514,16 @@ def run(
                 managed=managed_gateway is not None and not no_gateway and not anvil_ports,
                 client=gateway_client,
             )
+            if reference_overrides.withhold_execution_receipts_once:
+                from ._receipt_observation_scenario import install_receipt_observation_scenario
+
+                install_receipt_observation_scenario(
+                    runner,
+                    network=runtime_bootstrap.resolved_network,
+                    managed=managed_gateway is not None and not no_gateway and not anvil_ports,
+                    working_dir=working_dir,
+                    digest=runner._snapshot_override_hook.digest,
+                )
             cleanup_resources = runner._snapshot_override_hook.wrap_cleanup(cleanup_resources)
             click.echo(f"SYNTHETIC reference scenario: {runner._snapshot_override_hook.digest}")
         except Exception:

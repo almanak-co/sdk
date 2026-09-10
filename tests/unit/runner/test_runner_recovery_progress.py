@@ -341,3 +341,77 @@ async def test_prior_async_save_failure_prevents_pre_broadcast_marker() -> None:
     with pytest.raises(OSError, match="older state write failed"):
         await StrategyRunner._flush_strategy_pending_save_strict(strategy)
     assert strategy._pending_save is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disk_failure", [False, True])
+async def test_pre_broadcast_state_and_marker_commit_together_in_sqlite(tmp_path, monkeypatch, disk_failure) -> None:
+    from almanak.framework.execution.orchestrator import ExecutionContext
+    from almanak.framework.runner.recovery_context import ExecutionRecoveryContext
+    from almanak.framework.runner.runner_models import ExecutionBarrierPhase
+    from almanak.framework.runner.runner_recovery import save_pre_broadcast_checkpoint
+
+    config = SQLiteConfig(db_path=str(tmp_path / "checkpoint.sqlite"))
+    store = SQLiteStore(config)
+    manager = StateManager(StateManagerConfig(load_state_on_startup=False), warm_backend=store)
+    await manager.initialize()
+    deployment_id = "deployment:checkpoint"
+    await manager.save_state(
+        StateData(
+            deployment_id=deployment_id,
+            version=1,
+            state={
+                STRATEGY_USER_STATE_KEY: {"position_open": False},
+                "recovered_sessions": ["session-other"],
+            },
+        )
+    )
+    strategy = object.__new__(_AccessorHidingIntentStrategy)
+    strategy._state_manager = manager
+    strategy._pending_save = None
+    strategy._lp_position_tracker = LPPositionTracker()
+    strategy._state_version = 1
+    strategy._deployment_id = deployment_id
+    progress = _progress(deployment_id)
+    progress.barrier_phase = ExecutionBarrierPhase.PRE_BROADCAST
+    progress.recovery_context = ExecutionRecoveryContext.capture(
+        plan_hash="a" * 64,
+        execution=ExecutionContext(
+            deployment_id=deployment_id,
+            intent_id=progress.execution_id,
+            chain="bsc",
+            wallet_address="0x" + "11" * 20,
+        ),
+        pre_snapshot=None,
+        prices=None,
+        bundle_metadata={},
+    )
+    runner = SimpleNamespace(state_manager=manager)
+    if disk_failure:
+        monkeypatch.setattr(store, "save", AsyncMock(side_effect=sqlite3.OperationalError("disk full")))
+    try:
+        if disk_failure:
+            with pytest.raises(sqlite3.OperationalError):
+                await save_pre_broadcast_checkpoint(runner, strategy, progress)
+        else:
+            await save_pre_broadcast_checkpoint(runner, strategy, progress)
+            assert strategy._state_version == 2
+    finally:
+        await manager.close()
+
+    restarted = StateManager(StateManagerConfig(load_state_on_startup=False), warm_backend=SQLiteStore(config))
+    await restarted.initialize()
+    try:
+        row = await restarted.load_state(deployment_id)
+        assert row.state["recovered_sessions"] == ["session-other"]
+        if disk_failure:
+            assert row.state[STRATEGY_USER_STATE_KEY] == {"position_open": False}
+            assert "execution_progress" not in row.state
+        else:
+            restored = ExecutionProgress.from_dict(row.state["execution_progress"])
+            assert row.state[STRATEGY_USER_STATE_KEY] == {"position_open": True}
+            assert restored.recovery_context.strategy_checkpoint["user_state"] == row.state[STRATEGY_USER_STATE_KEY]
+            assert restored.recovery_context.strategy_checkpoint["framework_state"][PERSISTENT_STATE_KEY] == {}
+            assert restored.effective_barrier_phase is ExecutionBarrierPhase.PRE_BROADCAST
+    finally:
+        await restarted.close()

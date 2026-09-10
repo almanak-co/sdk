@@ -1547,6 +1547,10 @@ message SubmissionTransactionEvidence {
   string tx_id = 1;
   ExecutionTransactionRole role = 2;
   ReplayPolicy replay_policy = 3;
+  // Logical compiled transactions covered by this physical submission.
+  repeated uint32 plan_indices = 4;
+  uint32 plan_transaction_count = 5; // Zero means coverage is unmeasured.
+  string safe_address = 6; // Nonempty requires proof of the Safe inner outcome.
 }
 
 message ExecutionResult {
@@ -1574,6 +1578,9 @@ message TxStatus {
   int64 block_number = 3;
   int64 gas_used = 4;
   string error = 5;
+  // Complete EVM receipt JSON after canonical inclusion checks. Empty means
+  // unmeasured or unsupported; outer transaction success is not intent success.
+  bytes canonical_receipt = 6;
 }
 
 // =============================================================================

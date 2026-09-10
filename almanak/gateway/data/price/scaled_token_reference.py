@@ -13,6 +13,8 @@ from web3.types import RPCEndpoint
 
 from almanak.integrations.bstocks.catalog import MAX_CLOCK_SKEW_SECONDS, MAX_CONTRACT_AGE_SECONDS, TokenReferenceProfile
 
+from .scaled_token_storage import read_activation_storage, verify_activation_storage
+
 BEACON_SLOT = int.from_bytes(AsyncWeb3.keccak(text="eip1967.proxy.beacon"), "big") - 1
 SCALE = Decimal(10**18)
 
@@ -34,6 +36,7 @@ class MultiplierObservation:
     effective_at: int
     beacon: str
     implementation: str
+    last_activation_at: int | None = None
 
 
 def _word(raw: bytes) -> int:
@@ -106,6 +109,14 @@ async def read_multiplier(w3: AsyncWeb3, profile: TokenReferenceProfile) -> Mult
             raise ValueError("multiplier_schedule_incoherent")
         if effective <= timestamp and next_multiplier != multiplier:
             raise ValueError("multiplier_activation_incoherent")
+        stored = await read_activation_storage(w3, profile, block_ref)
+        last_activation = verify_activation_storage(
+            stored,
+            active=multiplier,
+            following=next_multiplier,
+            effective=effective,
+            block_timestamp=timestamp,
+        )
         final_block = await w3.eth.get_block(number)
         if bytes(final_block["hash"]) != bytes(block["hash"]):
             raise ValueError("multiplier_block_reorganized")
@@ -116,9 +127,10 @@ async def read_multiplier(w3: AsyncWeb3, profile: TokenReferenceProfile) -> Mult
             block_timestamp=timestamp,
             read_at=int(datetime.now(UTC).timestamp()),
             scheduled_multiplier=_scaled(next_multiplier) if effective > timestamp else None,
-            effective_at=effective,
+            effective_at=last_activation if last_activation is not None else effective,
             beacon=profile.beacon,
             implementation=profile.implementation,
+            last_activation_at=last_activation,
         )
         if reason := contract_age_reason(observed, observed.read_at):
             raise ValueError(reason)
@@ -126,7 +138,7 @@ async def read_multiplier(w3: AsyncWeb3, profile: TokenReferenceProfile) -> Mult
 
 
 class AdjustmentCoherence:
-    """Do not combine a pre-observation stock quote with an unobserved adjustment."""
+    """Require post-activation quotes, retaining an observation floor for legacy evidence."""
 
     def __init__(self) -> None:
         self._seen: dict[tuple[str, str], tuple[MultiplierObservation, int]] = {}
@@ -145,10 +157,15 @@ class AdjustmentCoherence:
                 or state.block_timestamp != prior.block_timestamp
                 or state.scheduled_multiplier != prior.scheduled_multiplier
                 or state.effective_at != prior.effective_at
+                or state.last_activation_at != prior.last_activation_at
             ):
                 return "multiplier_observation_conflict"
             if prior.multiplier != state.multiplier:
                 verified_since = state.block_timestamp
+        if state.last_activation_at is not None:
+            if type(state.last_activation_at) is not int or not 0 <= state.last_activation_at <= state.block_timestamp:
+                return "multiplier_activation_evidence_invalid"
+            verified_since = state.last_activation_at
         self._seen[key] = (state, verified_since)
         if state.scheduled_multiplier is not None:
             return "multiplier_adjustment_pending"

@@ -226,6 +226,40 @@ class RunnerAlerter:
         except Exception as alert_err:  # noqa: BLE001
             logger.error("Failed to send enrichment failure alert: %s", alert_err)
 
+    async def alert_execution_pending(self, strategy: StrategyProtocol, result: IterationResult) -> None:
+        """Escalate an unresolved broadcast without authorizing another transaction."""
+        if not self._runner.config.enable_alerting or not self._runner.alert_manager:
+            return
+        try:
+            card = OperatorCard(
+                deployment_id=strategy.deployment_id,
+                timestamp=datetime.now(UTC),
+                event_type=EventType.STUCK,
+                reason=StuckReason.UNKNOWN,
+                severity=Severity.HIGH,
+                position_summary=PositionSummary(total_value_usd=None, available_balance_usd=None),
+                risk_description="Submitted transactions remain sealed against replay until reconciled.",
+                suggested_actions=[
+                    SuggestedAction(
+                        action=AvailableAction.PAUSE,
+                        description="Inspect execution-recovery status before any manual intervention; do not replay the sealed intent",
+                    )
+                ],
+                available_actions=[AvailableAction.PAUSE],
+                context={
+                    "status": result.status.value,
+                    "pending_since": result.execution_pending_since.isoformat()
+                    if result.execution_pending_since
+                    else None,
+                    "reason": result.execution_pending_reason or "Receipt recovery exceeded five minutes",
+                    "error": result.error,
+                    "action": "Inspect execution-recovery status; replay remains blocked",
+                },
+            )
+            await self._runner.alert_manager.send_alert(card)
+        except Exception:
+            logger.exception("Failed to dispatch unresolved execution alert")
+
     async def alert_consecutive_errors(
         self,
         strategy: StrategyProtocol,

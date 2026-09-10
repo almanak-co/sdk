@@ -377,9 +377,11 @@ async def test_execute_serializes_proven_revert_without_losing_submission_eviden
 
 
 @pytest.mark.asyncio
-async def test_execute_certifies_multitransaction_safe_as_one_atomic_action():
+@pytest.mark.parametrize("receipt_missing", [False, True])
+@pytest.mark.parametrize("transaction_count", [1, 2])
+async def test_execute_certifies_safe_plan_coverage(transaction_count: int, receipt_missing: bool):
     class SafeSignerMarker:
-        pass
+        address = "0x" + "34" * 20
 
     service = ExecutionServiceServicer(GatewaySettings())
     service._ensure_initialized = AsyncMock()
@@ -389,7 +391,13 @@ async def test_execute_certifies_multitransaction_safe_as_one_atomic_action():
     orchestrator.execute = AsyncMock(
         return_value=SimpleNamespace(
             success=True,
-            transaction_results=[SimpleNamespace(tx_hash="0xsafe", receipt=_SerializableReceipt("0xsafe"))],
+            transaction_results=[
+                SimpleNamespace(
+                    tx_hash="0xsafe",
+                    receipt=None if receipt_missing else _SerializableReceipt("0xsafe"),
+                    transaction_index=0,
+                )
+            ],
             total_gas_used=21_000,
             correlation_id="cid",
             error="",
@@ -408,15 +416,71 @@ async def test_execute_certifies_multitransaction_safe_as_one_atomic_action():
         }
     ).encode("utf-8")
 
+    if transaction_count == 1:
+        bundle = json.loads(request.action_bundle)
+        bundle["transactions"] = bundle["transactions"][1:]
+        request.action_bundle = json.dumps(bundle).encode("utf-8")
+
+    request.wallet_address = SafeSignerMarker.address
     with patch("almanak.framework.execution.signer.safe.base.SafeSigner", SafeSignerMarker):
         response = await service.Execute(request, MagicMock())
 
-    assert response.success
+    assert response.success is (not receipt_missing)
+    if receipt_missing:
+        assert response.error_code == "RECEIPT_SET_INCOMPLETE"
     submitted_bundle = orchestrator.execute.await_args.args[0]
-    assert [transaction["tx_type"] for transaction in submitted_bundle.transactions] == ["approve", "swap"]
+    assert len(submitted_bundle.transactions) == transaction_count
     assert list(response.tx_hashes) == ["0xsafe"]
     assert len(response.submission_transactions) == 1
     evidence = response.submission_transactions[0]
     assert evidence.tx_id == "0xsafe"
     assert evidence.role == gateway_pb2.EXECUTION_TRANSACTION_ROLE_ACTION
     assert evidence.replay_policy == gateway_pb2.REPLAY_POLICY_NEVER
+    assert list(evidence.plan_indices) == list(range(transaction_count))
+    assert evidence.plan_transaction_count == transaction_count
+    assert evidence.safe_address == SafeSignerMarker.address
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("registry", [False, True])
+async def test_configured_safe_rejects_non_safe_plugin_before_broadcast(registry):
+    address = "0x" + "34" * 20
+    settings = GatewaySettings(safe_address=address, safe_mode="direct")
+    service = ExecutionServiceServicer(settings)
+    service._ensure_initialized = AsyncMock()
+    if registry:
+        service.wallet_registry = SimpleNamespace(
+            resolve=lambda chain: SimpleNamespace(kind="zodiac", account_address=address)
+        )
+        service.settings.safe_address = None
+    orchestrator = MagicMock()
+    orchestrator.signer = SimpleNamespace(address=address)
+    orchestrator.execute = AsyncMock()
+    service._get_orchestrator = AsyncMock(return_value=orchestrator)
+    request = _request(5)
+    request.wallet_address = address
+    response = await service.Execute(request, MagicMock())
+    assert not response.success
+    assert "SafeSigner" in response.error
+    orchestrator.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_registry_safe_wallet_mismatch_is_rejected_before_execution():
+    from almanak.framework.execution.signer.safe.base import SafeSigner
+
+    address = "0x" + "34" * 20
+    service = ExecutionServiceServicer(GatewaySettings())
+    service._ensure_initialized = AsyncMock()
+    service.wallet_registry = SimpleNamespace(
+        resolve=lambda chain: SimpleNamespace(kind="zodiac", account_address=address)
+    )
+    orchestrator = MagicMock()
+    orchestrator.signer = MagicMock(spec=SafeSigner)
+    orchestrator.signer.address = address
+    orchestrator.execute = AsyncMock()
+    service._get_orchestrator = AsyncMock(return_value=orchestrator)
+    response = await service.Execute(_request(5), MagicMock())
+    assert not response.success
+    assert "does not match" in response.error
+    orchestrator.execute.assert_not_awaited()

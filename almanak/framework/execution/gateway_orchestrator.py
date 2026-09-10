@@ -17,6 +17,7 @@ ExecutionResult, allowing strategy authors to access extracted data directly:
         print(f"Swapped: {out if out is not None else 'unmeasured'}")
 """
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ from almanak.gateway.proto import gateway_pb2
 
 if TYPE_CHECKING:
     from .extracted_data import AsyncOrderData, BridgeData, LPCloseData, SwapAmounts
+    from .interfaces import TransactionReceipt
     from .outcome import ExecutionOutcome
 
 logger = logging.getLogger(__name__)
@@ -148,6 +150,9 @@ def _submission_transactions_from_proto(
                 if item.replay_policy == gateway_pb2.REPLAY_POLICY_RECOMPILE_ONLY
                 else ReplayPolicy.NEVER
             ),
+            plan_indices=tuple(getattr(item, "plan_indices", ())),
+            plan_transaction_count=getattr(item, "plan_transaction_count", 0),
+            safe_address=getattr(item, "safe_address", ""),
         )
         for item in items
     ]
@@ -747,3 +752,56 @@ class GatewayExecutionOrchestrator:
         except Exception as e:
             logger.error(f"Gateway get tx status failed for {tx_hash}: {e}")
             return {"status": "unknown", "error": str(e)}
+
+    async def get_receipt(self, tx_hash: str, timeout: float = 30.0) -> "TransactionReceipt":
+        """Read a canonical EVM receipt without executing or compiling an intent."""
+        from almanak.framework.execution.interfaces import TransactionRevertedError
+        from almanak.framework.execution.receipt_observation import decode_canonical_receipt
+
+        response = await asyncio.to_thread(
+            self._client.execution.GetTransactionStatus,
+            gateway_pb2.TxStatusRequest(tx_hash=tx_hash, chain=self._chain),
+            timeout=timeout,
+        )
+        receipt = decode_canonical_receipt(response, tx_hash)
+        if not receipt.success:
+            raise TransactionRevertedError(
+                tx_hash=tx_hash,
+                gas_used=receipt.gas_used,
+                block_number=receipt.block_number,
+                receipt=receipt,
+            )
+        return receipt
+
+    async def get_completed_plan_receipts(
+        self,
+        *,
+        expected_plan_hash: str,
+        observed_plan_hash: str,
+        provenance: SubmissionProvenance,
+        submitted_tx_ids: list[str],
+        evidence: list[SubmissionTransactionEvidence],
+        timeout: float = 30.0,
+    ) -> tuple["TransactionReceipt", ...]:
+        """Observe complete plan execution without submitting or advancing state."""
+        from almanak.framework.execution.plan_completion import prove_completed_evm_plan
+
+        async with asyncio.timeout(timeout):
+            observations = await asyncio.gather(
+                *(self.get_receipt(tx_hash, timeout=timeout) for tx_hash in submitted_tx_ids),
+                return_exceptions=True,
+            )
+        for observation in observations:
+            if isinstance(observation, asyncio.CancelledError):
+                raise observation
+        for observation in observations:
+            if isinstance(observation, BaseException):
+                raise observation
+        return prove_completed_evm_plan(
+            expected_plan_hash=expected_plan_hash,
+            observed_plan_hash=observed_plan_hash,
+            provenance=provenance,
+            submitted_tx_ids=submitted_tx_ids,
+            evidence=evidence,
+            receipts=[observation for observation in observations if not isinstance(observation, BaseException)],
+        )

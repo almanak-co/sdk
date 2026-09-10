@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
@@ -16,6 +18,7 @@ from almanak.framework.runner.runner_models import (
     SubmissionProvenance,
 )
 from almanak.framework.state import StateValuePreconditionError
+from almanak.gateway.proto import gateway_pb2
 
 
 def _progress(*, evidence: list[StepSubmissionEvidence] | None = None) -> ExecutionProgress:
@@ -41,6 +44,37 @@ def _evidence(
         submission_provenance=provenance,
         submitted_transaction_ids=tx_ids or [],
     )
+
+
+@pytest.mark.parametrize("include_receipt", [False, True])
+def test_evm_retry_release_requires_canonical_receipt_not_only_reverted_status(include_receipt):
+    tx_id = "0x" + "12" * 32
+    progress = _progress(evidence=[_evidence(SubmissionProvenance.ATTEMPTED, tx_ids=[tx_id], chain="bsc")])
+    reply = gateway_pb2.TxStatus(status="reverted", block_number=7, gas_used=21_000)
+    if include_receipt:
+        reply.canonical_receipt = json.dumps(
+            {
+                "tx_hash": tx_id,
+                "block_number": 7,
+                "block_hash": "0x" + "34" * 32,
+                "gas_used": 21_000,
+                "effective_gas_price": "6",
+                "status": 0,
+                "logs": [],
+            }
+        ).encode()
+    client = MagicMock()
+    client.execution.GetTransactionStatus.return_value = reply
+    statuses = recovery_module._query_statuses(client, progress)
+    assert statuses == {tx_id: "reverted" if include_receipt else "canonical_receipt_unavailable"}
+    assert assess_replay_barrier(progress, statuses).releasable is include_receipt
+
+
+def test_solana_status_lookup_does_not_require_evm_receipt_capability():
+    progress = _progress(evidence=[_evidence(SubmissionProvenance.ATTEMPTED, tx_ids=["signature"], chain="solana")])
+    client = MagicMock()
+    client.execution.GetTransactionStatus.return_value = gateway_pb2.TxStatus(status="reverted")
+    assert recovery_module._query_statuses(client, progress) == {"signature": "reverted"}
 
 
 def test_legacy_marker_without_typed_evidence_fails_closed() -> None:
@@ -315,3 +349,12 @@ def test_seal_repair_command_uses_exact_compare_replace(monkeypatch) -> None:
     assert len(replaced) == 1
     assert replaced[0][:4] == (manager, "deployment:test", "execution_progress", marker)
     assert replaced[0][4]["barrier_phase"] == "completed"
+
+
+def test_unknown_persisted_chain_is_visible_and_never_queried_or_released():
+    progress = _progress(evidence=[_evidence(SubmissionProvenance.ATTEMPTED, tx_ids=["tx"], chain="removed-chain")])
+    client = MagicMock()
+    statuses = recovery_module._query_statuses(client, progress)
+    assert statuses == {"tx": "unknown_chain"}
+    assert not assess_replay_barrier(progress, statuses).releasable
+    client.execution.GetTransactionStatus.assert_not_called()

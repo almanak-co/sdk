@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from almanak.framework.runner.runner_models import ExecutionBarrierPhase, ExecutionProgress, IterationStatus
+from almanak.framework.runner.runner_models import (
+    ExecutionBarrierPhase,
+    ExecutionLane,
+    ExecutionProgress,
+    IterationStatus,
+)
 from almanak.framework.runner.strategy_runner import RunnerConfig, StrategyRunner
 
 
@@ -17,6 +22,7 @@ def _progress(phase: ExecutionBarrierPhase) -> ExecutionProgress:
         intents_hash="sealed-plan",
         total_steps=1,
         barrier_phase=phase,
+        execution_lane=ExecutionLane.SINGLE_CHAIN,
     )
     if phase is ExecutionBarrierPhase.RECONCILIATION_REQUIRED:
         progress.reconciliation_required_step_index = 0
@@ -58,7 +64,7 @@ async def test_absent_or_completed_progress_allows_decide(saved_progress: Execut
 
 
 @pytest.mark.asyncio
-async def test_reconciliation_marker_fails_closed_with_stable_default_error() -> None:
+async def test_reconciliation_marker_remains_pending_with_stable_default_error() -> None:
     runner = _runner(_progress(ExecutionBarrierPhase.RECONCILIATION_REQUIRED))
 
     result = await runner._check_and_resume_stuck_execution(
@@ -67,11 +73,12 @@ async def test_reconciliation_marker_fails_closed_with_stable_default_error() ->
     )
 
     assert result is not None
-    assert result.status is IterationStatus.EXECUTION_FAILED
+    assert result.status is IterationStatus.EXECUTION_PENDING
     assert result.error == (
         "BROADCAST_RECONCILIATION_REQUIRED: submitted transaction hashes must be reconciled before execution can resume"
     )
-    runner._record_failure.assert_called_once_with()
+    runner._record_failure.assert_not_called()
+    assert runner._total_iterations == 1
 
 
 @pytest.mark.asyncio

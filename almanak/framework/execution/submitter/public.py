@@ -1261,9 +1261,24 @@ class PublicMempoolSubmitter(Submitter):
         if not tx_hashes:
             return []
 
-        # Fetch receipts concurrently
         tasks = [self.get_receipt(tx_hash, timeout) for tx_hash in tx_hashes]
-        return await asyncio.gather(*tasks)
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        receipts = [outcome for outcome in outcomes if isinstance(outcome, TransactionReceipt)]
+        receipts.extend(
+            outcome.receipt
+            for outcome in outcomes
+            if isinstance(outcome, TransactionRevertedError) and outcome.receipt is not None
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, asyncio.CancelledError):
+                raise outcome
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                # Keep completed sibling evidence without presenting a partial
+                # list as a complete, positionally paired receipt set.
+                outcome.partial_receipts = receipts  # type: ignore[attr-defined]
+                raise outcome
+        return receipts
 
     @property
     def metrics(self) -> SubmitterHealthMetrics:

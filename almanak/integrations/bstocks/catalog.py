@@ -16,6 +16,7 @@ class TokenReferenceProfile:
     decimals: int
     beacon: str
     implementation: str
+    implementation_code_sha256: str = ""
 
 
 # Chainlink's BSC GOOGL/USD product identifies GOOGL_EQ / USD_FX (share price),
@@ -31,6 +32,7 @@ GOOGLB = TokenReferenceProfile(
     decimals=18,
     beacon="0x156D6dce9a4f6139a3406F1f021F1A4880De93a3".lower(),
     implementation="0xCFEd6c4679297ea4889F8183bC057B4A86C64e46".lower(),
+    implementation_code_sha256="814fc45a704716dbda5b91791b69b7780924f66ae604606d670bded136bc339c",
 )
 PROFILES = (GOOGLB,)
 

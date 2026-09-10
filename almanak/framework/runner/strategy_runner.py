@@ -63,7 +63,6 @@ from ..execution.circuit_breaker import CircuitBreaker
 from ..execution.enso_state_provider import EnsoStateProvider
 from ..execution.extract_result import CriticalAccountingError
 from ..execution.fork_signal import is_managed_fork_network
-from ..execution.interfaces import TransactionReceipt as FullTransactionReceipt
 from ..execution.multichain import (
     MultiChainOrchestrator,
 )
@@ -655,6 +654,7 @@ class SingleChainExecutionState:
     last_execution_context: Any | None = None
     last_bundle_metadata: dict[str, Any] | None = None
     replay_barrier: ExecutionProgress | None = None
+    reconciliation_sealed: bool = False
     failed_attempt_ledger_id: str | None = None
     failed_attempt_receipts: dict[str, tuple[dict[str, Any], ...]] = field(default_factory=dict)
 
@@ -1019,6 +1019,7 @@ class StrategyRunner:
         self._current_loop_task: asyncio.Task[None] | None = None
 
         # Metrics tracking
+        self._execution_pending_alert_at: datetime | None = None
         self._consecutive_errors = 0
         self._first_error_at: datetime | None = None  # Timestamp of first error in current streak
         self._total_iterations = 0
@@ -9123,7 +9124,7 @@ class StrategyRunner:
         """Drive the IntentStateMachine until it reaches a terminal state.
 
         Handles retry delays, dry-run short-circuit, and per-step execution
-        (including the pre-retry "previously-submitted tx" check, CLOB vs
+        (including the durable pre-broadcast replay barrier, CLOB vs
         on-chain routing, receipt conversion, phase-event emission, and
         cache invalidation on failure). Returns an IterationResult only when
         the loop terminates early via dry-run; otherwise returns None and
@@ -9210,6 +9211,7 @@ class StrategyRunner:
 
         execution_context = ExecutionContext(
             deployment_id=deployment_id,
+            intent_id=intent.intent_id,
             chain=strategy.chain,
             simulation_enabled=self.config.simulation_enabled,
             wallet_address=strategy.wallet_address,
@@ -9224,12 +9226,6 @@ class StrategyRunner:
             # Note: _is_multi_chain flag guarantees this is ExecutionOrchestrator
             # but we use cast for type checker since orchestrator is Union type
             single_chain_orch = cast(ExecutionOrchestrator, self.execution_orchestrator)
-
-            # Pre-retry check: if previous attempt timed out and we have
-            # submitted tx_hashes, check if they've since confirmed to avoid
-            # duplicate swaps from retrying already-confirmed transactions.
-            if await self._single_chain_pre_retry_confirmed(state, single_chain_orch):
-                return None  # Treated as success; continue state-machine loop
 
             from almanak.framework.execution.reconciliation import (
                 failed_submission_allows_recompile,
@@ -9283,6 +9279,7 @@ class StrategyRunner:
                 recompile_error=(receipt_error or "fresh recompilation required") if recompile_allowed else None,
             )
 
+            state.reconciliation_sealed = reconciliation_required
             receipt = TransactionReceipt(
                 success=execution_result.success,
                 tx_hash=tx_hash,
@@ -9293,36 +9290,13 @@ class StrategyRunner:
             # Set receipt for state machine validation
             state_machine.set_receipt(receipt)
 
-            from almanak.framework.observability.emitter import emit_phase_event
-            from almanak.framework.observability.events import StrategyPhase
-
-            # VIB-4043 / PR4: gas_used is money-shaped — moved to
-            # transaction_ledger.gas_used / gas_usd. The phase breadcrumb
-            # carries lifecycle markers only.
-            # PR4 / PRD-TimelineEvents §6.1 (CodeRabbit review): the raw
-            # `execution_result.error` carries money-shaped data on slippage
-            # / reconciliation paths (bps, token deltas). Bucket it through
-            # `_classify_failure_reason` so the EXECUTE breadcrumb stays a
-            # lifecycle marker — full text lives in `transaction_ledger.error`.
-            details: dict[str, Any] = {
-                "success": execution_result.success,
-                "tx_count": len(submitted_hashes),
-                # Preserve the complete submitted set in the timeline. The
-                # top-level tx_hash remains the action/first hash for existing
-                # consumers; this list is the immutable replay-safety evidence
-                # when a multi-tx receipt set is rejected atomically.
-                "submitted_tx_hashes": list(submitted_hashes),
-            }
-            if not execution_result.success:
-                details["failure_reason"] = self._classify_failure_reason(execution_result.error or "")
-            emit_phase_event(
+            self._single_chain_emit_execution_phase(
                 deployment_id=deployment_id,
-                phase=StrategyPhase.EXECUTE,
-                event_type="TRANSACTION_CONFIRMED" if execution_result.success else "TRANSACTION_FAILED",
-                description=f"Execution {'succeeded' if execution_result.success else 'failed'}",
-                chain=strategy.chain,
+                strategy=strategy,
+                execution_result=execution_result,
+                submitted_hashes=submitted_hashes,
                 tx_hash=tx_hash,
-                details=details,
+                reconciliation_required=reconciliation_required,
             )
 
             if execution_result.success:
@@ -9338,9 +9312,12 @@ class StrategyRunner:
                     f"tx_count={len(execution_result.transaction_results)}"
                 )
             else:
-                logger.warning(
-                    f"Execution failed for {deployment_id}: {execution_result.error} "
-                    f"(retry {state_machine.retry_count}/{self.config.max_retries})"
+                logger.log(
+                    logging.INFO if reconciliation_required else logging.WARNING,
+                    "Execution %s for %s: %s",
+                    "awaiting reconciliation" if reconciliation_required else "failed",
+                    deployment_id,
+                    execution_result.error,
                 )
                 self._single_chain_reset_caches_after_failure(
                     compiler, execution_result, reconciliation_required=reconciliation_required
@@ -9367,6 +9344,51 @@ class StrategyRunner:
             )
 
         return None
+
+    def _single_chain_emit_execution_phase(
+        self,
+        *,
+        deployment_id: str,
+        strategy: Any,
+        execution_result: ExecutionResult,
+        submitted_hashes: tuple[str, ...],
+        tx_hash: str,
+        reconciliation_required: bool,
+    ) -> None:
+        from almanak.framework.observability.emitter import emit_phase_event
+        from almanak.framework.observability.events import StrategyPhase
+
+        # Monetary diagnostics stay in the ledger; lifecycle events use bucketed reasons.
+        details: dict[str, Any] = {
+            "success": execution_result.success,
+            "tx_count": len(submitted_hashes),
+            # Preserve the complete submitted set in the timeline. The
+            # top-level tx_hash remains the action/first hash for existing
+            # consumers; this list is the immutable replay-safety evidence
+            # when a multi-tx receipt set is rejected atomically.
+            "submitted_tx_hashes": list(submitted_hashes),
+        }
+        if reconciliation_required:
+            details["reconciliation_required"] = True
+        if not execution_result.success:
+            details["failure_reason"] = self._classify_failure_reason(execution_result.error or "")
+        emit_phase_event(
+            deployment_id=deployment_id,
+            phase=StrategyPhase.EXECUTE,
+            event_type=(
+                "TRANSACTION_SUBMITTED"
+                if reconciliation_required
+                else "TRANSACTION_CONFIRMED"
+                if execution_result.success
+                else "TRANSACTION_FAILED"
+            ),
+            description="Execution awaiting reconciliation"
+            if reconciliation_required
+            else f"Execution {'succeeded' if execution_result.success else 'failed'}",
+            chain=strategy.chain,
+            tx_hash=tx_hash,
+            details=details,
+        )
 
     def _single_chain_reset_caches_after_failure(
         self, compiler: Any, execution_result: ExecutionResult, *, reconciliation_required: bool
@@ -9414,6 +9436,21 @@ class StrategyRunner:
         )
         from almanak.framework.execution.submission import SubmissionProvenance, execution_plan_hash
 
+        from .recovery_context import ExecutionRecoveryContext
+
+        try:
+            marker.recovery_context = ExecutionRecoveryContext.capture(
+                plan_hash=execution_plan_hash(step_result.action_bundle),
+                execution=execution_context,
+                pre_snapshot=state.pre_snapshot,
+                prices=state.price_oracle,
+                bundle_metadata=state.last_bundle_metadata,
+                failed_attempt_receipts=state.failed_attempt_receipts,
+            )
+        except (TypeError, ValueError):
+            logger.warning(
+                "Automatic receipt recovery unavailable: checkpoint inputs are not serializable", exc_info=True
+            )
         marker.record_submission_evidence(
             step_index=0,
             chain=str(getattr(state.strategy, "chain", "")),
@@ -9421,9 +9458,11 @@ class StrategyRunner:
             submitted_transaction_ids=[],
             execution_plan_hash=execution_plan_hash(step_result.action_bundle),
         )
+        from .runner_recovery import save_pre_broadcast_checkpoint
+
         await self._flush_strategy_pending_save_strict(state.strategy)
         try:
-            await self._save_execution_progress(state.deployment_id, marker)
+            await save_pre_broadcast_checkpoint(self, state.strategy, marker)
         except Exception as exc:
             raise RuntimeError(f"{pending_error}; marker write failed: {exc}") from exc
         try:
@@ -9574,96 +9613,6 @@ class StrategyRunner:
                 await self._flush_strategy_pending_save_strict(strategy)
         except Exception as exc:
             raise RuntimeError(f"Landed {lane} strategy state could not be persisted; replay barrier retained") from exc
-
-    async def _single_chain_pre_retry_confirmed(
-        self, state: SingleChainExecutionState, single_chain_orch: ExecutionOrchestrator
-    ) -> bool:
-        """Check whether the previous timed-out attempt has since confirmed.
-
-        On a retry after a timeout, poll receipts for the previously-submitted
-        tx hashes. If every one confirms, synthesise a success
-        ``ExecutionResult`` into ``state.last_execution_result`` and push a
-        success receipt into the state machine so the loop treats this as a
-        success without re-submitting. Returns ``True`` when the retry was
-        short-circuited, ``False`` otherwise.
-        """
-        state_machine = state.state_machine
-        last = state.last_execution_result
-        if not (
-            state_machine.retry_count > 0
-            and last
-            and last.transaction_results
-            and last.error
-            and "timeout" in last.error.lower()
-        ):
-            return False
-
-        prev_hashes = [tr.tx_hash for tr in last.transaction_results if tr.tx_hash]
-        if not prev_hashes:
-            return False
-
-        logger.info(f"Pre-retry check: verifying {len(prev_hashes)} previously-submitted tx(es) before retrying")
-        all_confirmed = True
-        prev_receipts: list[FullTransactionReceipt] = []
-        for prev_hash in prev_hashes:
-            try:
-                prev_receipt = await single_chain_orch.submitter.get_receipt(prev_hash, timeout=30.0)
-                prev_receipts.append(prev_receipt)
-                if prev_receipt.success:
-                    logger.info(f"Previously-submitted tx {prev_hash[:10]}... confirmed")
-                else:
-                    logger.warning(f"Previously-submitted tx {prev_hash[:10]}... reverted")
-                    all_confirmed = False
-            except Exception:
-                logger.warning(f"Could not get receipt for {prev_hash[:10]}..., proceeding with retry")
-                all_confirmed = False
-
-        if not (all_confirmed and prev_receipts):
-            return False
-
-        logger.info("All previously-submitted transactions confirmed -- skipping retry, treating as success")
-        # Update last_execution_result so downstream consumers
-        # (timeline, callbacks, IterationResult) see a successful
-        # result instead of the stale timeout failure.
-        # Preserve receipt data so ResultEnricher can extract
-        # swap amounts, position IDs, and other enriched data.
-        state.last_execution_result = ExecutionResult(
-            success=True,
-            phase=ExecutionPhase.COMPLETE,
-            transaction_results=[
-                TransactionResult(
-                    tx_hash=r.tx_hash,
-                    success=r.success,
-                    receipt=r,
-                    gas_used=r.gas_used,
-                    gas_cost_wei=r.gas_cost_wei,
-                    logs=r.logs,
-                )
-                for r in prev_receipts
-            ],
-            total_gas_used=sum(r.gas_used for r in prev_receipts),
-            total_gas_cost_wei=sum(r.gas_cost_wei for r in prev_receipts),
-            completed_at=datetime.now(UTC),
-        )
-        # Convert to simplified receipt for state machine
-        state_machine.set_receipt(
-            TransactionReceipt(
-                success=True,
-                tx_hash=prev_receipts[0].tx_hash,
-                gas_used=sum(r.gas_used for r in prev_receipts),
-            )
-        )
-        # The prior attempt's reconciliation marker still owns this broadcast.
-        # Upgrade it durably before downstream accounting/callback/state work;
-        # otherwise a successful late confirmation would try to seal a
-        # reconciliation marker directly, or a crash could replay the landed tx.
-        if state.replay_barrier is not None:
-            state.replay_barrier.mark_landed_repair_pending(
-                0,
-                "late-confirmed transaction requires downstream accounting/state completion",
-            )
-            await self._save_execution_progress(state.deployment_id, state.replay_barrier)
-        return True
 
     async def _single_chain_execute_clob(self, state: SingleChainExecutionState, step_result: Any) -> ExecutionResult:
         """Execute a Polymarket CLOB bundle via the connector-built CLOB handler."""
@@ -10617,6 +10566,27 @@ class StrategyRunner:
         dispatches the operator alert, fires on_intent_executed with
         success=False, and returns IterationStatus.EXECUTION_FAILED.
         """
+        if (
+            state.reconciliation_sealed
+            and state.replay_barrier is not None
+            and state.replay_barrier.is_reconciliation_required
+        ):
+            self._total_iterations += 1
+            return IterationResult(
+                status=IterationStatus.EXECUTION_PENDING,
+                intent=state.intent,
+                execution_result=state.last_execution_result,
+                error=state.replay_barrier.failure_error,
+                execution_pending_since=state.replay_barrier.started_at,
+                execution_pending_reason=(
+                    "Original recovery context is unavailable; operator reconciliation required"
+                    if state.replay_barrier.recovery_context is None
+                    else None
+                ),
+                deployment_id=state.deployment_id,
+                duration_ms=self._calculate_duration_ms(state.start_time),
+            )
+
         strategy = state.strategy
         intent = state.intent
         deployment_id = state.deployment_id
@@ -10801,21 +10771,36 @@ class StrategyRunner:
             return None
 
         if saved_progress.is_reconciliation_required:
+            from .single_chain_recovery import recover_pending_swap
+
+            recovered = await recover_pending_swap(self, strategy, saved_progress, start_time)
+            if recovered is not None:
+                return recovered
             error = saved_progress.failure_error or (
                 "BROADCAST_RECONCILIATION_REQUIRED: submitted transaction hashes "
                 "must be reconciled before execution can resume"
             )
-            logger.error(
-                "Refusing to resume execution %s for %s: %s",
+            logger.info(
+                "Execution %s for %s awaits reconciliation: %s",
                 saved_progress.execution_id,
                 deployment_id,
                 error,
             )
-            self._record_failure()
+            self._total_iterations += 1
             return IterationResult(
-                status=IterationStatus.EXECUTION_FAILED,
+                status=(
+                    IterationStatus.EXECUTION_PENDING
+                    if saved_progress.execution_lane is ExecutionLane.SINGLE_CHAIN
+                    else IterationStatus.EXECUTION_FAILED
+                ),
                 intent=None,
                 error=error,
+                execution_pending_since=saved_progress.started_at,
+                execution_pending_reason=(
+                    "Original recovery context is unavailable; operator reconciliation required"
+                    if saved_progress.recovery_context is None
+                    else None
+                ),
                 deployment_id=deployment_id,
                 duration_ms=self._calculate_duration_ms(start_time),
             )
@@ -13458,6 +13443,9 @@ class StrategyRunner:
 
     async def _alert_enrichment_failure(self, strategy: StrategyProtocol, error: "CriticalAccountingError") -> None:
         await RunnerAlerter(self).alert_enrichment_failure(strategy, error)
+
+    async def _alert_execution_pending(self, strategy: StrategyProtocol, result: IterationResult) -> None:
+        await RunnerAlerter(self).alert_execution_pending(strategy, result)
 
     async def _alert_consecutive_errors(self, strategy: StrategyProtocol, last_result: IterationResult) -> None:
         await RunnerAlerter(self).alert_consecutive_errors(strategy, last_result)

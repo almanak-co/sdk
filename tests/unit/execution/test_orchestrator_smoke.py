@@ -9,6 +9,7 @@ event emissions) rather than implementation details.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -498,6 +499,45 @@ class TestExecuteHappyPath:
 
 
 class TestReceiptRevertedMidPipeline:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failed_index", [0, 1])
+    @pytest.mark.parametrize("sibling_reverted", [False, True])
+    async def test_parallel_receipt_failure_preserves_later_sibling_evidence(
+        self, orchestrator, failed_index, sibling_reverted
+    ):
+        bundle = ActionBundle(
+            intent_type="SWAP",
+            transactions=[{"to": "0x0", "data": "0x", "value": 0}] * 2,
+        )
+        _wire_for_happy_path(orchestrator, tx_count=2)
+        sibling_index = 1 - failed_index
+        sibling = _make_receipt(success=not sibling_reverted, tx_hash=f"0xtx{sibling_index}")
+        submitter = PublicMempoolSubmitter(rpc_url="https://unused.invalid")
+
+        async def observe(tx_hash, timeout):
+            if tx_hash == f"0xtx{failed_index}":
+                raise SubmissionError("receipt observation unavailable", tx_hash=tx_hash)
+            # The sibling completes after the failure; gather must drain it.
+            await asyncio.sleep(0.01)
+            if sibling_reverted:
+                raise TransactionRevertedError(tx_hash=tx_hash, receipt=sibling)
+            return sibling
+
+        submitter.get_receipt = AsyncMock(side_effect=observe)
+        orchestrator.submitter.get_receipts = submitter.get_receipts
+        result = await orchestrator.execute(bundle)
+
+        assert result.success is False
+        assert result.submission_provenance is SubmissionProvenance.ATTEMPTED
+        assert [item.tx_hash for item in result.transaction_results] == ["0xtx0", "0xtx1"]
+        assert result.transaction_results[failed_index].receipt is None
+        assert result.transaction_results[sibling_index].receipt is sibling
+        assert result.transaction_results[sibling_index].success is (not sibling_reverted)
+        assert result.total_gas_used == sibling.gas_used
+        assert result.total_gas_cost_wei == sibling.gas_cost_wei
+        assert failed_submission_requires_reconciliation(result)
+        orchestrator.submitter.submit.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_transaction_reverted_error_raised_by_helper_mapped_to_confirmation(self, orchestrator):
         bundle = ActionBundle(intent_type="SWAP", transactions=[{"to": "0x0", "data": "0x", "value": 0}])

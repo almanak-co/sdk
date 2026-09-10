@@ -1,6 +1,8 @@
 """Plan-bound submission-role evidence contracts."""
 
-from almanak.framework.execution.gateway_orchestrator import GatewayExecutionResult
+import pytest
+
+from almanak.framework.execution.gateway_orchestrator import _execution_result_from_proto
 from almanak.framework.execution.submission import (
     ReplayPolicy,
     SubmissionTransactionEvidence,
@@ -26,8 +28,8 @@ def test_certification_requires_canonical_approval_calldata_and_zero_value() -> 
     evidence = certify_submission_transactions(_bundle(), ["0xaaa", "0xbbb"], transaction_indices=[0, 1])
 
     assert evidence == [
-        SubmissionTransactionEvidence("0xaaa", TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY),
-        SubmissionTransactionEvidence("0xbbb", TransactionRole.ACTION, ReplayPolicy.NEVER),
+        SubmissionTransactionEvidence("0xaaa", TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY, (0,), 2),
+        SubmissionTransactionEvidence("0xbbb", TransactionRole.ACTION, ReplayPolicy.NEVER, (1,), 2),
     ]
 
     wrong_selector = certify_submission_transactions(
@@ -46,14 +48,16 @@ def test_partial_evidence_requires_explicit_non_positional_alignment() -> None:
     unbound = certify_submission_transactions(_bundle(), ["0xaction"])
     bound = certify_submission_transactions(_bundle(), ["0xaction"], transaction_indices=[1])
 
-    assert unbound == [SubmissionTransactionEvidence("0xaction", TransactionRole.UNKNOWN, ReplayPolicy.NEVER)]
-    assert bound == [SubmissionTransactionEvidence("0xaction", TransactionRole.ACTION, ReplayPolicy.NEVER)]
+    assert unbound == [SubmissionTransactionEvidence("0xaction", TransactionRole.UNKNOWN, ReplayPolicy.NEVER, (), 2)]
+    assert bound == [SubmissionTransactionEvidence("0xaction", TransactionRole.ACTION, ReplayPolicy.NEVER, (1,), 2)]
 
 
 def test_partial_approval_evidence_cannot_authorize_recompile_of_an_unaccounted_action() -> None:
     evidence = certify_submission_transactions(_bundle(), ["0xapprove"], transaction_indices=[0])
 
-    assert evidence == [SubmissionTransactionEvidence("0xapprove", TransactionRole.UNKNOWN, ReplayPolicy.NEVER)]
+    assert evidence == [
+        SubmissionTransactionEvidence("0xapprove", TransactionRole.UNKNOWN, ReplayPolicy.NEVER, (0,), 2)
+    ]
 
 
 def test_duplicate_or_out_of_range_indices_fail_closed() -> None:
@@ -65,7 +69,9 @@ def test_duplicate_or_out_of_range_indices_fail_closed() -> None:
     out_of_range = certify_submission_transactions(_bundle(), ["0xunknown"], transaction_indices=[2])
 
     assert all(item.role is TransactionRole.UNKNOWN for item in duplicate)
-    assert out_of_range == [SubmissionTransactionEvidence("0xunknown", TransactionRole.UNKNOWN, ReplayPolicy.NEVER)]
+    assert out_of_range == [
+        SubmissionTransactionEvidence("0xunknown", TransactionRole.UNKNOWN, ReplayPolicy.NEVER, (), 2)
+    ]
 
 
 def test_duplicate_transaction_id_with_distinct_indices_fails_closed() -> None:
@@ -93,7 +99,7 @@ def test_duplicate_transaction_id_uses_canonical_evm_identity() -> None:
 def test_atomic_safe_batch_is_action_if_any_logical_member_is_action() -> None:
     evidence = certify_submission_transactions(_bundle(), ["0xsafe"], atomic_batch=True)
 
-    assert evidence == [SubmissionTransactionEvidence("0xsafe", TransactionRole.ACTION, ReplayPolicy.NEVER)]
+    assert evidence == [SubmissionTransactionEvidence("0xsafe", TransactionRole.ACTION, ReplayPolicy.NEVER, (0, 1), 2)]
 
 
 def test_atomic_safe_batch_is_setup_only_when_every_member_is_idempotent_setup() -> None:
@@ -106,7 +112,7 @@ def test_atomic_safe_batch_is_setup_only_when_every_member_is_idempotent_setup()
     evidence = certify_submission_transactions(bundle, ["0xsafe"], atomic_batch=True)
 
     assert evidence == [
-        SubmissionTransactionEvidence("0xsafe", TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY)
+        SubmissionTransactionEvidence("0xsafe", TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY, (0, 1), 2)
     ]
 
 
@@ -116,7 +122,7 @@ def test_atomic_safe_batch_rejects_prefix_only_transaction_id() -> None:
 
     evidence = certify_submission_transactions(bundle, ["0x"], atomic_batch=True)
 
-    assert evidence == [SubmissionTransactionEvidence("0x", TransactionRole.UNKNOWN, ReplayPolicy.NEVER)]
+    assert evidence == [SubmissionTransactionEvidence("0x", TransactionRole.UNKNOWN, ReplayPolicy.NEVER, (), 1)]
 
 
 def test_plan_hash_binds_order_and_exact_transaction_bytes() -> None:
@@ -131,8 +137,8 @@ def test_plan_hash_binds_order_and_exact_transaction_bytes() -> None:
 
 def test_proto_and_gateway_result_preserve_role_policy_and_plan_binding() -> None:
     internal = [
-        SubmissionTransactionEvidence("0xaaa", TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY),
-        SubmissionTransactionEvidence("0xbbb", TransactionRole.ACTION, ReplayPolicy.NEVER),
+        SubmissionTransactionEvidence("0xaaa", TransactionRole.SETUP_APPROVAL, ReplayPolicy.RECOMPILE_ONLY, (0,), 2),
+        SubmissionTransactionEvidence("0xbbb", TransactionRole.ACTION, ReplayPolicy.NEVER, (1,), 2),
     ]
     wire = gateway_pb2.ExecutionResult(
         execution_plan_hash="a" * 64,
@@ -141,27 +147,57 @@ def test_proto_and_gateway_result_preserve_role_policy_and_plan_binding() -> Non
 
     assert wire.submission_transactions[0].role == gateway_pb2.EXECUTION_TRANSACTION_ROLE_SETUP_APPROVAL
     assert wire.submission_transactions[0].replay_policy == gateway_pb2.REPLAY_POLICY_RECOMPILE_ONLY
-    result = GatewayExecutionResult(
-        success=False,
-        tx_hashes=["0xaaa", "0xbbb"],
-        total_gas_used=0,
-        receipts=[],
-        execution_id="",
-        execution_plan_hash=wire.execution_plan_hash,
-        submission_transactions=[
-            SubmissionTransactionEvidence(
-                item.tx_id,
-                TransactionRole.SETUP_APPROVAL
-                if item.role == gateway_pb2.EXECUTION_TRANSACTION_ROLE_SETUP_APPROVAL
-                else TransactionRole.ACTION,
-                ReplayPolicy.RECOMPILE_ONLY
-                if item.replay_policy == gateway_pb2.REPLAY_POLICY_RECOMPILE_ONLY
-                else ReplayPolicy.NEVER,
-            )
-            for item in wire.submission_transactions
-        ],
-    )
+    result = _execution_result_from_proto(wire, chain="bsc", expected_plan_hash="a" * 64)
 
     assert result.to_dict()["execution_plan_hash"] == "a" * 64
     assert result.to_dict()["submission_transactions"] == [item.to_dict() for item in internal]
     assert result.to_outcome().submission_transactions == internal
+
+
+def test_safe_plan_binding_survives_gateway_and_durable_marker_round_trip() -> None:
+    from almanak.framework.runner.runner_models import StepSubmissionEvidence
+
+    safe = "0x" + "12" * 20
+    certified = certify_submission_transactions(_bundle(), ["0xsafe"], atomic_batch=True, safe_address=safe)
+    wire = gateway_pb2.ExecutionResult(
+        execution_plan_hash="a" * 64,
+        submission_transactions=_submission_transactions_to_proto(certified),
+    )
+    result = _execution_result_from_proto(wire, chain="bsc", expected_plan_hash="a" * 64)
+    marker = StepSubmissionEvidence(
+        step_index=0,
+        chain="bsc",
+        execution_plan_hash=result.execution_plan_hash,
+        submission_transactions=result.submission_transactions,
+    )
+
+    restored = StepSubmissionEvidence.from_dict(marker.to_dict())
+    assert restored.submission_transactions == certified
+    assert restored.submission_transactions[0].plan_indices == (0, 1)
+    assert restored.submission_transactions[0].plan_transaction_count == 2
+    assert restored.submission_transactions[0].safe_address == safe
+    mismatched = _execution_result_from_proto(wire, chain="bsc", expected_plan_hash="b" * 64)
+    assert mismatched.submission_transactions == []
+
+
+def test_legacy_evidence_has_unmeasured_plan_coverage() -> None:
+    legacy = {"tx_id": "0xaaa", "role": "ACTION", "replay_policy": "NEVER"}
+    restored = SubmissionTransactionEvidence.from_value(legacy)
+    assert restored is not None
+    assert restored.plan_indices == ()
+    assert restored.plan_transaction_count == 0
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"plan_indices": [True]},
+        {"plan_indices": [-1]},
+        {"plan_indices": "0"},
+        {"plan_transaction_count": True},
+        {"plan_transaction_count": -1},
+        {"safe_address": None},
+    ],
+)
+def test_malformed_persisted_coverage_is_rejected(fields: dict) -> None:
+    assert SubmissionTransactionEvidence.from_value({"tx_id": "0xaaa", **fields}) is None

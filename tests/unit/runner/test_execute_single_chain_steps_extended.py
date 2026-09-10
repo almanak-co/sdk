@@ -3,7 +3,6 @@
 Complements ``test_execute_single_chain_steps.py`` with extra branch
 coverage for: ``_init_single_chain_state``, ``_single_chain_state_machine_loop``,
 ``_single_chain_execute_step`` (non-dry-run paths),
-``_single_chain_pre_retry_confirmed`` (retry edge cases),
 ``_single_chain_slippage_guard``, ``_single_chain_handle_recon_incident``,
 ``_single_chain_handle_success``, ``_single_chain_handle_failure``,
 ``_single_chain_execute_clob``, ``_single_chain_execute_onchain``, plus the
@@ -24,7 +23,6 @@ from almanak.framework.execution.orchestrator import (
     ExecutionContext,
     ExecutionPhase,
     ExecutionResult,
-    TransactionResult,
 )
 from almanak.framework.intents.vocabulary import SwapIntent
 from almanak.framework.runner.runner_models import ExecutionProgress
@@ -125,100 +123,6 @@ class TestBuildPriceOracleExtended:
         market = SimpleNamespace(get_price_oracle_dict=lambda: {"USDC": Decimal("1"), "ETH": Decimal("2000")})
         result = StrategyRunner._build_single_chain_price_oracle(market, intent)
         assert result == {"USDC": Decimal("1"), "ETH": Decimal("2000")}
-
-
-# =============================================================================
-# _single_chain_pre_retry_confirmed - extended
-# =============================================================================
-
-
-class TestSingleChainPreRetryConfirmedExtended:
-    @pytest.mark.asyncio
-    async def test_timeout_with_empty_tx_hashes_returns_false(self) -> None:
-        """Timeout occurred but no partial tx_hashes -> short-circuit is not possible."""
-        runner = _make_runner()
-        strategy = _make_strategy()
-        state = _make_state(strategy)
-        state.state_machine = MagicMock()
-        state.state_machine.retry_count = 1
-        state.last_execution_result = ExecutionResult(
-            success=False,
-            phase=ExecutionPhase.SUBMISSION,
-            transaction_results=[TransactionResult(tx_hash="", success=False, gas_used=0, gas_cost_wei=0)],
-            error="timeout waiting for receipt",
-        )
-
-        single_chain_orch = MagicMock()
-        assert await runner._single_chain_pre_retry_confirmed(state, single_chain_orch) is False
-
-    @pytest.mark.asyncio
-    async def test_get_receipt_raises_treated_as_unconfirmed(self) -> None:
-        """RPC error fetching receipt -> set all_confirmed=False, do not short-circuit."""
-        runner = _make_runner()
-        strategy = _make_strategy()
-        state = _make_state(strategy)
-        state.state_machine = MagicMock()
-        state.state_machine.retry_count = 1
-        state.state_machine.set_receipt = MagicMock()
-        state.last_execution_result = ExecutionResult(
-            success=False,
-            phase=ExecutionPhase.SUBMISSION,
-            transaction_results=[TransactionResult(tx_hash="0xdead", success=False, gas_used=0, gas_cost_wei=0)],
-            error="timeout waiting for receipt",
-        )
-
-        single_chain_orch = MagicMock()
-        single_chain_orch.submitter = MagicMock()
-        single_chain_orch.submitter.get_receipt = AsyncMock(side_effect=RuntimeError("rpc down"))
-
-        assert await runner._single_chain_pre_retry_confirmed(state, single_chain_orch) is False
-        state.state_machine.set_receipt.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_no_last_execution_result_returns_false(self) -> None:
-        runner = _make_runner()
-        strategy = _make_strategy()
-        state = _make_state(strategy)
-        state.state_machine = MagicMock()
-        state.state_machine.retry_count = 1
-        state.last_execution_result = None  # never executed
-
-        single_chain_orch = MagicMock()
-        assert await runner._single_chain_pre_retry_confirmed(state, single_chain_orch) is False
-
-    @pytest.mark.asyncio
-    async def test_multi_tx_all_confirmed_sums_gas_correctly(self) -> None:
-        runner = _make_runner()
-        strategy = _make_strategy()
-        state = _make_state(strategy)
-        state.state_machine = MagicMock()
-        state.state_machine.retry_count = 1
-        state.state_machine.set_receipt = MagicMock()
-        state.last_execution_result = ExecutionResult(
-            success=False,
-            phase=ExecutionPhase.SUBMISSION,
-            transaction_results=[
-                TransactionResult(tx_hash="0xa", success=False, gas_used=0, gas_cost_wei=0),
-                TransactionResult(tx_hash="0xb", success=False, gas_used=0, gas_cost_wei=0),
-            ],
-            error="timeout while submitting",
-        )
-
-        receipts = [
-            SimpleNamespace(tx_hash="0xa", success=True, gas_used=21000, gas_cost_wei=1000, logs=[]),
-            SimpleNamespace(tx_hash="0xb", success=True, gas_used=50000, gas_cost_wei=5000, logs=[]),
-        ]
-        single_chain_orch = MagicMock()
-        single_chain_orch.submitter = MagicMock()
-        single_chain_orch.submitter.get_receipt = AsyncMock(side_effect=receipts)
-
-        result = await runner._single_chain_pre_retry_confirmed(state, single_chain_orch)
-        assert result is True
-        # Synthesised ExecutionResult aggregates gas across both
-        assert state.last_execution_result.total_gas_used == 71000
-        assert state.last_execution_result.total_gas_cost_wei == 6000
-        assert state.last_execution_result.success is True
-        state.state_machine.set_receipt.assert_called_once()
 
 
 # =============================================================================

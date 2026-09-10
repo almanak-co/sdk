@@ -61,6 +61,27 @@ def document(raw=None):
     return {"reference_events": [{"scenario_at": AT.isoformat(), "references": [raw or observation()]}]}
 
 
+def test_receipt_withholding_requires_explicit_reference_scenario():
+    doc = document()
+    doc["withhold_execution_receipts_once"] = True
+    assert parse_scenario(json.dumps(doc)).withhold_execution_receipts_once is True
+    assert parse_scenario(json.dumps(document())).withhold_execution_receipts_once is False
+
+
+@pytest.mark.parametrize("value", [True, 1, "true", None])
+def test_receipt_withholding_rejects_missing_reference_events(value):
+    with pytest.raises(ScenarioParseError):
+        parse_scenario(json.dumps({"withhold_execution_receipts_once": value}))
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_receipt_withholding_rejects_non_boolean_value(value):
+    doc = document()
+    doc["withhold_execution_receipts_once"] = value
+    with pytest.raises(ScenarioParseError):
+        parse_scenario(json.dumps(doc))
+
+
 def client_and_market():
     client = SimpleNamespace(is_connected=True, config=SimpleNamespace(timeout=2), market=MagicMock(), rpc=MagicMock())
     client.rpc.Call.return_value = pb.RpcResponse(success=True, result='"anvil/v1"')

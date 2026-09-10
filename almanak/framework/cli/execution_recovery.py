@@ -17,6 +17,10 @@ from typing import Any
 import click
 
 from almanak.config.cli_options import gateway_client_options
+from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
+from almanak.framework.execution.interfaces import SubmissionError
+from almanak.framework.execution.receipt_observation import decode_canonical_receipt
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 from almanak.framework.runner.runner_models import (
     ExecutionBarrierPhase,
@@ -220,12 +224,22 @@ def _query_statuses(client: GatewayClient, progress: ExecutionProgress) -> dict[
     if evidence.submission_provenance is not SubmissionProvenance.ATTEMPTED:
         return {}
     statuses: dict[str, str] = {}
+    descriptor = ChainRegistry.try_resolve(evidence.chain)
     for tx_id in evidence.submitted_transaction_ids:
+        if descriptor is None:
+            statuses[tx_id] = "unknown_chain"
+            continue
         response = client.execution.GetTransactionStatus(
             gateway_pb2.TxStatusRequest(tx_hash=tx_id, chain=evidence.chain),
             timeout=30,
         )
-        statuses[tx_id] = response.status or "unknown"
+        status = response.status or "unknown"
+        if descriptor.family is ChainFamily.EVM and status in {"confirmed", "reverted"}:
+            try:
+                decode_canonical_receipt(response, tx_id)
+            except SubmissionError:
+                status = "canonical_receipt_unavailable"
+        statuses[tx_id] = status
     return statuses
 
 

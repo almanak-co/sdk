@@ -171,6 +171,11 @@ multiplier, contract block and implementation provenance. Compare this raw-token
 reference with a raw-token pool quote; do not multiply it again by the multiplier.
 It does not change `market.price()` or wallet transfer units.
 
+For the pinned implementation, `composition.multiplier_effective_at` preserves
+the activation timestamp verified from contract storage even after the public
+`effectiveAt()` getter resets to zero. Alignment therefore survives gateway
+restarts; the underlying quote must still be strictly newer than that activation.
+
 Missing or incompatible gateway fields, changed implementation, expired contract
 observations and unaligned adjustments fail closed. The equity source timestamp
 is never replaced by composition time. Catalog availability alone does not prove

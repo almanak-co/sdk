@@ -15,6 +15,7 @@ from ..execution.submission import SubmissionProvenance, SubmissionTransactionEv
 from ..intents.vocabulary import AnyIntent, DecideResult
 from ..portfolio import PortfolioSnapshot
 from .failure_kind import FailureKind
+from .recovery_context import ExecutionRecoveryContext
 
 # =============================================================================
 # Exceptions
@@ -264,6 +265,7 @@ class IterationStatus(StrEnum):
     TEARDOWN = "TEARDOWN"  # Strategy is executing teardown
     COMPILATION_FAILED = "COMPILATION_FAILED"
     EXECUTION_FAILED = "EXECUTION_FAILED"
+    EXECUTION_PENDING = "EXECUTION_PENDING"
     # Tx landed on-chain but pre/post balance deltas fell outside the
     # intent's expected range (fee-on-transfer token, malicious router,
     # approval skim, oracle corruption). On-chain state already moved —
@@ -311,6 +313,8 @@ class IterationResult:
     deployment_id: str = ""
     duration_ms: float = 0.0
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+    execution_pending_since: datetime | None = None
+    execution_pending_reason: str | None = None
     balance_reconciliation: dict[str, Any] | None = None  # Post-execution balance check
     # VIB-5746: typed failure classification for the circuit-breaker recording
     # path. When set, ``handle_iteration_failure`` uses it instead of inferring
@@ -344,6 +348,10 @@ class IterationResult:
             "timestamp": self.timestamp.isoformat(),
             "balance_reconciliation": self.balance_reconciliation,
             "async_settlement": self.async_settlement,
+            "execution_pending_since": self.execution_pending_since.isoformat()
+            if self.execution_pending_since
+            else None,
+            "execution_pending_reason": self.execution_pending_reason,
         }
 
 
@@ -484,6 +492,8 @@ class ExecutionProgress:
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     last_updated: datetime = field(default_factory=lambda: datetime.now(UTC))
     serialized_intents: list[dict[str, Any]] | None = None
+    recovery_context: ExecutionRecoveryContext | None = None
+    recovery_receipts: list[dict[str, Any]] | None = None
     failed_at_step_index: int | None = None
     failure_error: str | None = None
     accounting_pending_step_index: int | None = None
@@ -663,6 +673,8 @@ class ExecutionProgress:
             "started_at": self.started_at.isoformat(),
             "last_updated": self.last_updated.isoformat(),
             "serialized_intents": self.serialized_intents,
+            "recovery_receipts": self.recovery_receipts,
+            "recovery_context": self.recovery_context.to_dict() if self.recovery_context is not None else None,
             "failed_at_step_index": self.failed_at_step_index,
             "failure_error": self.failure_error,
             "accounting_pending_step_index": self.accounting_pending_step_index,
@@ -687,6 +699,12 @@ class ExecutionProgress:
             started_at=datetime.fromisoformat(data["started_at"]),
             last_updated=datetime.fromisoformat(data["last_updated"]),
             serialized_intents=data.get("serialized_intents"),
+            recovery_receipts=data.get("recovery_receipts"),
+            recovery_context=(
+                ExecutionRecoveryContext.from_dict(data["recovery_context"])
+                if data.get("recovery_context") is not None
+                else None
+            ),
             failed_at_step_index=data.get("failed_at_step_index"),
             failure_error=data.get("failure_error"),
             accounting_pending_step_index=data.get("accounting_pending_step_index"),

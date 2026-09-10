@@ -6,7 +6,6 @@ driver plus per-phase step helpers:
 * ``_init_single_chain_state`` (runtime-handle setup)
 * ``_single_chain_state_machine_loop`` (state-machine drive)
 * ``_single_chain_execute_step`` (per-bundle execution with dry-run short-circuit)
-* ``_single_chain_pre_retry_confirmed`` (post-timeout retry short-circuit)
 * ``_single_chain_slippage_guard`` (realized-slippage circuit-breaker)
 * ``_single_chain_handle_recon_incident`` (reconciliation-failure finalizer)
 * ``_single_chain_handle_success`` / ``_single_chain_handle_failure``
@@ -30,7 +29,6 @@ from almanak.framework.execution.gateway_orchestrator import GatewayExecutionRes
 from almanak.framework.execution.orchestrator import (
     ExecutionPhase,
     ExecutionResult,
-    TransactionResult,
 )
 from almanak.framework.execution.submission import (
     ReplayPolicy,
@@ -309,94 +307,6 @@ class TestBuildSingleChainPriceOracle:
         assert "MATIC" not in called
 
 
-# =============================================================================
-# _single_chain_pre_retry_confirmed
-# =============================================================================
-
-
-class TestSingleChainPreRetryConfirmed:
-    @pytest.mark.asyncio
-    async def test_no_prior_timeout_returns_false(self) -> None:
-        runner = _make_runner()
-        strategy = _make_strategy()
-        state = _make_state(strategy)
-        state.state_machine = MagicMock()
-        state.state_machine.retry_count = 0  # first attempt -- not a retry
-
-        single_chain_orch = MagicMock()
-        assert await runner._single_chain_pre_retry_confirmed(state, single_chain_orch) is False
-
-    @pytest.mark.asyncio
-    async def test_non_timeout_error_returns_false(self) -> None:
-        runner = _make_runner()
-        strategy = _make_strategy()
-        state = _make_state(strategy)
-        state.state_machine = MagicMock()
-        state.state_machine.retry_count = 1
-        state.last_execution_result = ExecutionResult(
-            success=False,
-            phase=ExecutionPhase.SIGNING,
-            transaction_results=[TransactionResult(tx_hash="0xabc", success=False, gas_used=0, gas_cost_wei=0)],
-            error="reverted",
-        )
-
-        single_chain_orch = MagicMock()
-        assert await runner._single_chain_pre_retry_confirmed(state, single_chain_orch) is False
-
-    @pytest.mark.asyncio
-    async def test_all_prior_confirmed_short_circuits_to_success(self) -> None:
-        runner = _make_runner()
-        strategy = _make_strategy()
-        state = _make_state(strategy)
-        state.state_machine = MagicMock()
-        state.state_machine.retry_count = 1
-        state.state_machine.set_receipt = MagicMock()
-        state.last_execution_result = ExecutionResult(
-            success=False,
-            phase=ExecutionPhase.SUBMISSION,
-            transaction_results=[TransactionResult(tx_hash="0xdead", success=False, gas_used=0, gas_cost_wei=0)],
-            error="timeout waiting for receipt",
-        )
-
-        submitted_receipt = SimpleNamespace(tx_hash="0xdead", success=True, gas_used=21000, gas_cost_wei=100, logs=[])
-        single_chain_orch = MagicMock()
-        single_chain_orch.submitter = MagicMock()
-        single_chain_orch.submitter.get_receipt = AsyncMock(return_value=submitted_receipt)
-
-        assert await runner._single_chain_pre_retry_confirmed(state, single_chain_orch) is True
-        # Success ExecutionResult synthesised
-        assert state.last_execution_result.success is True
-        assert state.last_execution_result.total_gas_used == 21000
-        state.state_machine.set_receipt.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_prior_reverted_tx_does_not_short_circuit(self) -> None:
-        runner = _make_runner()
-        strategy = _make_strategy()
-        state = _make_state(strategy)
-        state.state_machine = MagicMock()
-        state.state_machine.retry_count = 1
-        state.state_machine.set_receipt = MagicMock()
-        original_result = ExecutionResult(
-            success=False,
-            phase=ExecutionPhase.SUBMISSION,
-            transaction_results=[TransactionResult(tx_hash="0xdead", success=False, gas_used=0, gas_cost_wei=0)],
-            error="timeout waiting for receipt",
-        )
-        state.last_execution_result = original_result
-
-        reverted_receipt = SimpleNamespace(tx_hash="0xdead", success=False, gas_used=21000, gas_cost_wei=100, logs=[])
-        single_chain_orch = MagicMock()
-        single_chain_orch.submitter = MagicMock()
-        single_chain_orch.submitter.get_receipt = AsyncMock(return_value=reverted_receipt)
-
-        # Reverted TX -> not all confirmed -> do not short-circuit
-        assert await runner._single_chain_pre_retry_confirmed(state, single_chain_orch) is False
-        # Does not overwrite last_execution_result
-        assert state.last_execution_result is original_result
-        state.state_machine.set_receipt.assert_not_called()
-
-
 @pytest.mark.asyncio
 async def test_incomplete_gateway_receipt_set_with_known_hash_is_never_redispatched() -> None:
     """Live state-machine control: a mined-but-unmeasured bundle executes once.
@@ -457,6 +367,9 @@ async def test_incomplete_gateway_receipt_set_with_known_hash_is_never_redispatc
     progress = runner._save_execution_progress.await_args.args[1]
     assert progress.reconciliation_required_step_index == 0
     assert progress.serialized_intents == [state.intent.serialize()]
+    assert progress.recovery_context is not None
+    assert progress.recovery_context.execution.intent_id == state.intent.intent_id
+    assert progress.recovery_context.plan_hash == execution_plan_hash(bundle)
     [evidence] = progress.submission_evidence
     assert evidence.step_index == 0
     assert evidence.chain == "arbitrum"
@@ -472,12 +385,27 @@ async def test_incomplete_gateway_receipt_set_with_known_hash_is_never_redispatc
     tx_hash, _gas_used, _gas_usd = _extract_tx_and_gas(state.last_execution_result)
     assert tx_hash == "0x" + "a" * 64
 
+    runner._write_ledger_entry = AsyncMock()
+    runner._emit_execution_timeline_event = MagicMock()
+    with patch("almanak.framework.runner.strategy_runner.diagnose_revert", new_callable=AsyncMock) as diagnose:
+        pending = await runner._single_chain_handle_failure(state)
+    assert pending.status is IterationStatus.EXECUTION_PENDING
+    assert not pending.success
+    assert pending.execution_result is state.last_execution_result
+    assert state.replay_barrier is progress
+    runner._write_ledger_entry.assert_not_awaited()
+    runner._emit_execution_timeline_event.assert_not_called()
+    diagnose.assert_not_awaited()
+    strategy.on_intent_executed.assert_not_called()
+    assert timeline["event_type"] == "TRANSACTION_SUBMITTED"
+    assert timeline["details"]["reconciliation_required"] is True
+
     # Next-cycle negative control: the pre-decide gate reads the durable marker
     # and returns before strategy.decide() or another orchestrator broadcast.
     runner._load_execution_progress = AsyncMock(return_value=progress)  # type: ignore[method-assign]
     resumed = await runner._check_and_resume_stuck_execution(strategy, datetime.now(UTC))
     assert resumed is not None
-    assert resumed.status == IterationStatus.EXECUTION_FAILED
+    assert resumed.status == IterationStatus.EXECUTION_PENDING
     orchestrator.execute.assert_awaited_once()
 
 
@@ -971,3 +899,29 @@ class TestSingleChainSlippageGuard:
         assert captured["error"] is not None
         assert "Slippage circuit breaker" in captured["error"]
         assert "200" in captured["error"] and "100" in captured["error"]
+
+
+@pytest.mark.asyncio
+async def test_unserializable_recovery_metadata_keeps_prebroadcast_barrier():
+    from almanak.framework.execution.orchestrator import ExecutionContext
+    from almanak.framework.models.reproduction_bundle import ActionBundle
+
+    runner = _make_runner()
+    runner._save_execution_progress = AsyncMock()
+    runner._flush_strategy_pending_save_strict = AsyncMock()
+    runner._single_chain_execute_onchain = AsyncMock(return_value=SimpleNamespace(success=True))
+    state = _make_state(_make_strategy())
+    state.last_bundle_metadata = {"connector_object": object()}
+    step = SimpleNamespace(action_bundle=ActionBundle(intent_type="SWAP", transactions=[]))
+    context = ExecutionContext(
+        deployment_id=state.deployment_id,
+        intent_id=state.intent.intent_id,
+        chain="bsc",
+        wallet_address="0x" + "11" * 20,
+    )
+    result, marker = await runner._single_chain_execute_onchain_guarded(state, step, context, MagicMock())
+    assert result.success
+    assert marker.recovery_context is None
+    assert marker.barrier_phase is ExecutionBarrierPhase.PRE_BROADCAST
+    runner._save_execution_progress.assert_awaited_once()
+    runner._single_chain_execute_onchain.assert_awaited_once()
