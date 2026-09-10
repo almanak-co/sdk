@@ -104,6 +104,27 @@ def engine_error_verdict(error: BaseException) -> RunValidityVerdict:
     return build_verdict([reason], executed_fills=0)
 
 
+def _recovered_initial_warmup(failure: Mapping[str, Any], tick_count: int) -> bool:
+    """Exclude only initial warm-up with a later, matching successful input read."""
+    if failure.get("warmup_only") is not True:
+        return False
+    recovery = failure.get("warmup_recovery")
+    if not isinstance(recovery, Mapping):
+        return False
+    last_failure = failure.get("last_tick")
+    first_success = recovery.get("first_success_tick")
+    last_success = recovery.get("last_success_tick")
+    successful_reads = recovery.get("successful_reads")
+    if (
+        type(last_failure) is not int
+        or type(first_success) is not int
+        or type(last_success) is not int
+        or type(successful_reads) is not int
+    ):
+        return False
+    return 0 < last_failure < first_success <= last_success <= tick_count and successful_reads > 0
+
+
 def classify_run_validity(
     *,
     tick_count: int,
@@ -160,7 +181,9 @@ def classify_run_validity(
     if rejected is not None:
         reasons.append(rejected)
 
-    persistent = [failure for failure in decision_input_failures if failure.get("pattern") == "persistent"]
+    unresolved = [failure for failure in decision_input_failures if not _recovered_initial_warmup(failure, tick_count)]
+    persistent = [failure for failure in unresolved if failure.get("pattern") == "persistent"]
+    non_warm_up = [failure for failure in unresolved if failure.get("pattern") in {"persistent", "intermittent"}]
     required_exact_pool_ohlcv = [
         failure
         for failure in persistent
@@ -175,8 +198,10 @@ def classify_run_validity(
                 executed_fills=executed_fills,
             )
         )
-    elif persistent and executed_fills == 0 and intent_ticks == 0 and tick_count > 0:
-        reasons.append(input_starved_reason(persistent, tick_count=tick_count))
+    elif non_warm_up and executed_fills == 0 and intent_ticks == 0 and tick_count > 0:
+        # Session gates can make an input fail on every eligible decision tick
+        # while its failures remain intermittent over the full market grid.
+        reasons.append(input_starved_reason(non_warm_up, tick_count=tick_count))
     elif persistent and executed_fills > 0:
         warnings.append(
             RunValidityReason(
@@ -233,16 +258,16 @@ def family_all_rejected_reason(decision_summary: Mapping[str, Any]) -> RunValidi
 
 
 def input_starved_reason(
-    persistent: Sequence[Mapping[str, Any]],
+    failures: Sequence[Mapping[str, Any]],
     *,
     tick_count: int,
     intent_ticks: int = 0,
     executed_fills: int = 0,
 ) -> RunValidityReason:
-    """Reason for a held run whose required inputs failed persistently."""
+    """Reason for an unevaluated signal path with unavailable required inputs."""
     blocking = "; ".join(
         f"{failure['source']}:{failure['key']} ({failure['ticks']}/{tick_count} ticks: {failure['detail']})"
-        for failure in persistent[:3]
+        for failure in failures[:3]
     )
     if executed_fills or intent_ticks:
         outcome = (
@@ -254,10 +279,10 @@ def input_starved_reason(
     return RunValidityReason(
         code=INPUT_STARVED,
         message=(
-            f"{len(persistent)} required decision input(s) were unavailable on nearly every one of "
-            f"{tick_count} tick(s). {outcome} Blocking input(s): {blocking}. {_METRICS_DISCLAIMER}"
+            f"{len(failures)} required decision input(s) were unavailable beyond completed warm-up "
+            f"during the {tick_count}-tick run. {outcome} Blocking input(s): {blocking}. {_METRICS_DISCLAIMER}"
         ),
-        details={"inputs": [_failure_ref(failure, tick_count) for failure in persistent[:5]]},
+        details={"inputs": [_failure_ref(failure, tick_count) for failure in failures[:5]]},
     )
 
 

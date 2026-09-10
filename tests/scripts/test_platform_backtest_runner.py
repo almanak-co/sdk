@@ -1851,6 +1851,7 @@ def test_cloud_run_retry_derives_run_validity_from_the_artifact_result(
 
     payload = _redelivered_failed_payload(monkeypatch, env, error_message="BACKTEST_UNSUPPORTED_DATA: starved")
 
+    assert payload["result_summary"]["code"] == "BACKTEST_UNSUPPORTED_DATA"
     assert payload["result_summary"]["run_validity"]["validity"] == "NOT_EVALUABLE"
     assert payload["result_summary"]["run_validity"]["reason_codes"] == ["INPUT_STARVED"]
 
@@ -2249,15 +2250,83 @@ def test_cloud_run_retry_normalizes_a_persisted_unknown_verdict(monkeypatch: pyt
     assert payload["result_summary"]["run_validity"]["reason_codes"] == ["NEW_CODE"]
 
 
+def test_input_starved_run_certifies_failed_and_publishes_no_performance_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_successful_run(monkeypatch, tmp_path)
+    env = _env(STRATEGY_WORKDIR=str(tmp_path / "strategy"))
+    result = SimpleNamespace(success=False, error="BACKTEST_UNSUPPORTED_DATA: cash-hours reference unavailable")
+    verdict = {
+        "schema_version": 1,
+        "validity": "NOT_EVALUABLE",
+        "reasons": [{"code": "INPUT_STARVED"}],
+        "warnings": [],
+        "executed_fills": 0,
+    }
+
+    class Backtester:
+        async def backtest(self, strategy: object, config: object) -> object:
+            return result
+
+        async def close(self) -> None:
+            return None
+
+    uploads: list[dict[str, Any]] = []
+    callbacks: list[dict[str, Any]] = []
+    monkeypatch.setattr(runner, "create_backtester", lambda **kwargs: Backtester())
+    monkeypatch.setattr(
+        runner,
+        "serialize_result",
+        lambda current_result: {
+            "success": False,
+            "error": result.error,
+            "run_validity": verdict,
+            "metrics": {"total_return_pct": "5"},
+            "trades": [],
+        },
+    )
+    monkeypatch.setattr(runner, "upload_result_to_gcs", lambda *args: uploads.append(args[2]) or "42")
+    monkeypatch.setattr(runner, "post_callback", lambda current_env, payload: callbacks.append(payload))
+
+    payload = asyncio.run(runner.run_platform_backtest(env))
+
+    assert uploads[-1]["backtest_outcome"] == "FAILED"
+    assert payload == callbacks[0]
+    assert payload["status"] == "FAILED"
+    assert payload["result_summary"]["code"] == "BACKTEST_UNSUPPORTED_DATA"
+    assert payload["result_summary"]["run_validity"]["validity"] == "NOT_EVALUABLE"
+    assert "total_return_pct" not in payload["result_summary"]
+    assert payload["result_summary"]["run_validity"]["passive_only"] is False
+
+
 def test_build_run_failure_summary_carries_run_validity() -> None:
     verdict = {"schema_version": 1, "validity": "NOT_EVALUABLE", "reason_codes": ["INPUT_STARVED"]}
 
     summary = runner.build_run_failure_summary("BACKTEST_UNSUPPORTED_DATA: starved", run_validity=verdict)
 
-    assert summary["code"] == "STRATEGY_ERROR"
+    assert summary["code"] == "BACKTEST_UNSUPPORTED_DATA"
+    assert summary["failure_stage"] == "run"
     assert summary["run_validity"] == verdict
     assert "run_validity" not in runner.build_run_failure_summary("plain failure")
     assert "decision_summary" not in summary
+
+
+@pytest.mark.parametrize(
+    ("error", "verdict", "expected"),
+    [
+        ("BACKTEST_UNSUPPORTED_DATA: unavailable reference", None, "BACKTEST_UNSUPPORTED_DATA"),
+        ("required input unavailable", {"validity": "NOT_EVALUABLE"}, "BACKTEST_UNSUPPORTED_DATA"),
+        ("strategy raised", None, "STRATEGY_ERROR"),
+        ("BACKTEST_EXECUTION_REJECTED: no fill", {"validity": "INVALID"}, "STRATEGY_ERROR"),
+        ("BACKTEST_UNSUPPORTED_DATA: unavailable reference", {"validity": "INVALID"}, "STRATEGY_ERROR"),
+    ],
+)
+def test_run_failure_taxonomy(error: str, verdict: dict | None, expected: str) -> None:
+    summary = runner.build_run_failure_summary(error, run_validity=verdict)
+
+    assert summary["code"] == expected
+    assert summary["blockers"][0]["code"] == expected
+    assert summary["failure_stage"] == "run"
 
 
 def test_result_summary_carries_both_cadence_axes() -> None:

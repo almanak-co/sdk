@@ -21,9 +21,13 @@ Usage:
 
 import logging
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import wraps
+from inspect import signature
+from itertools import islice
+from typing import Any
 
 from almanak.framework.data.indicators.adx import ADXCalculator
 from almanak.framework.data.indicators.atr import ATRCalculator
@@ -71,6 +75,8 @@ SUPPORTED_INDICATORS = frozenset(
 # interval_seconds -> canonical timeframe label for pre-populated indicators.
 _TIMEFRAME_LABELS = {60: "1m", 300: "5m", 900: "15m", 1800: "30m", 3600: "1h", 14400: "4h", 86400: "1d"}
 
+IndicatorReadKey = tuple[str, str, int, tuple[tuple[str, Any], ...]]
+
 
 class IndicatorTimeframeMismatchError(ValueError):
     """An indicator asks for observations finer than the measured price plane.
@@ -99,6 +105,34 @@ class IndicatorTimeframeMismatchError(ValueError):
             f"underlying price data has {self.native_timeframe} resolution; a "
             f"{self.requested_timeframe} indicator would be computed from flat upsampled "
             f"ticks and saturate (ALM-2957) — {recovery}"
+        )
+
+
+class IndicatorWarmupError(InsufficientDataError):
+    """An observed close series has not yet filled the requested lookback."""
+
+    def __init__(
+        self,
+        *,
+        indicator: str,
+        required: int,
+        available: int,
+        timeframe_seconds: int,
+        required_ticks: int,
+        available_ticks: int,
+        tick_interval_seconds: int,
+    ) -> None:
+        self.timeframe_seconds = timeframe_seconds
+        self.request_key: IndicatorReadKey | None = None
+        self.required_ticks = required_ticks
+        self.available_ticks = available_ticks
+        self.missing_history_seconds = max(0, required_ticks - available_ticks) * tick_interval_seconds
+        super().__init__(required=required, available=available, indicator=indicator)
+        self.args = (
+            f"{self.args[0]}; timeframe={timeframe_label(timeframe_seconds)}, "
+            f"retained_ticks={available_ticks}, required_ticks={required_ticks}, "
+            f"missing_history_seconds={self.missing_history_seconds}; "
+            "source=historical_close_series; this accessor does not fetch earlier history",
         )
 
 
@@ -179,7 +213,7 @@ def native_series_aliases(chain: str) -> dict[str, tuple[str, ...]]:
     return dict.fromkeys(alias_keys, resolved)
 
 
-# Maximum price history to keep per token (covers all standard indicator periods)
+# Default tick retention before a consumer requests a longer lookback.
 DEFAULT_MAX_HISTORY = 200
 
 
@@ -193,7 +227,7 @@ class BacktestIndicatorEngine:
 
     Attributes:
         required_indicators: Set of indicator names to compute each tick.
-        max_history: Maximum number of prices to retain per token.
+        max_history: Shared retention floor; demanded series can retain more.
     """
 
     def __init__(
@@ -213,6 +247,8 @@ class BacktestIndicatorEngine:
         self._base_max_history = max_history
         # token -> rolling deque of close prices (oldest first)
         self._price_buffers: dict[str, deque[Decimal]] = {}
+        self._token_history_limits: dict[str, int] = {}
+        self._successful_indicator_reads: set[IndicatorReadKey] = set()
         # Declared same-asset series aliases (native placeholder → wrapped
         # ERC-20 spellings), registered per run from native_series_aliases().
         self._series_aliases: dict[str, tuple[str, ...]] = {}
@@ -235,7 +271,7 @@ class BacktestIndicatorEngine:
     def append_price(self, token: str, price: Decimal) -> None:
         """Append a close price to the rolling buffer for a token."""
         if token not in self._price_buffers:
-            self._price_buffers[token] = deque(maxlen=self._max_history)
+            self._price_buffers[token] = deque(maxlen=self._history_limit(token))
         self._price_buffers[token].append(price)
 
     def replace_price_history(self, token: str, prices: Sequence[Decimal]) -> None:
@@ -246,7 +282,19 @@ class BacktestIndicatorEngine:
         observations strictly before the active tick; the normal loop appends
         that tick exactly once after overlays have been applied.
         """
-        self._price_buffers[token] = deque(prices, maxlen=self._max_history)
+        self._price_buffers[token] = deque(prices, maxlen=self._history_limit(token))
+
+    def _history_limit(self, token: str) -> int:
+        return max(self._max_history, self._token_history_limits.get(token, 0))
+
+    def _ensure_token_capacity(self, token: str, min_history: int) -> None:
+        """Retain this series' requested lookback without growing unrelated assets."""
+        previous_limit = self._history_limit(token)
+        self._token_history_limits[token] = max(min_history, self._token_history_limits.get(token, 0))
+        if min_history <= previous_limit:
+            return
+        if token in self._price_buffers:
+            self._price_buffers[token] = deque(self._price_buffers[token], maxlen=min_history)
 
     def ensure_capacity(self, min_history: int) -> None:
         """Raise the per-token retention to at least ``min_history`` ticks.
@@ -266,12 +314,12 @@ class BacktestIndicatorEngine:
             return
         self._max_history = int(min_history)
         self._price_buffers = {
-            token: deque(buffer, maxlen=self._max_history) for token, buffer in self._price_buffers.items()
+            token: deque(buffer, maxlen=self._history_limit(token)) for token, buffer in self._price_buffers.items()
         }
 
     @property
     def max_history(self) -> int:
-        """Maximum retained tick closes per token."""
+        """Shared retention floor before per-token lookback requirements."""
         return self._max_history
 
     def get_buffer_size(self, token: str) -> int:
@@ -289,10 +337,7 @@ class BacktestIndicatorEngine:
         SLAs. On-demand reads (``_series_for``) still see the full retained
         history.
         """
-        price_list = list(prices)
-        if len(price_list) > self._base_max_history:
-            return price_list[-self._base_max_history :]
-        return price_list
+        return list(reversed(list(islice(reversed(prices), self._base_max_history))))
 
     def populate_snapshot(
         self,
@@ -821,7 +866,9 @@ class BacktestIndicatorEngine:
         to compute. Strategy calls to market.rsi() etc. will raise ValueError,
         which is expected and should not be logged as an error.
         """
-        return self.get_buffer_size(token) < self.min_warmup_ticks(config)
+        token = self.resolve_series_token(token)
+        required = max(self.min_warmup_ticks(config), self._token_history_limits.get(token, 0))
+        return self.get_buffer_size(token) < required
 
     def register_series_aliases(self, aliases: Mapping[str, Sequence[str]]) -> None:
         """Register declared same-asset series aliases (native → wrapped).
@@ -854,6 +901,8 @@ class BacktestIndicatorEngine:
     def reset(self) -> None:
         """Clear all price buffers and series aliases. Useful between backtest runs."""
         self._price_buffers.clear()
+        self._token_history_limits.clear()
+        self._successful_indicator_reads.clear()
         self._series_aliases.clear()
 
     # ------------------------------------------------------------------
@@ -905,11 +954,7 @@ class BacktestIndicatorEngine:
             # Scale from the CONSTRUCTED capacity (idempotent — a second call
             # must not compound the scale).
             scaled = self._base_max_history * ratio
-            if scaled > self._max_history:
-                self._max_history = scaled
-                self._price_buffers = {
-                    token: deque(buffer, maxlen=scaled) for token, buffer in self._price_buffers.items()
-                }
+            self.ensure_capacity(scaled)
 
     def _degenerate_at_tick(self) -> bool:
         """True when the tick buffer is an upsampled coarser-data plane."""
@@ -924,6 +969,9 @@ class BacktestIndicatorEngine:
         token: str,
         timeframe: OHLCVTimeframe | None,
         tick_interval_seconds: int,
+        *,
+        required_points: int = 1,
+        indicator: str = "price history",
     ) -> list[Decimal]:
         """Close series for ``timeframe``, resampled from the tick series.
 
@@ -940,9 +988,8 @@ class BacktestIndicatorEngine:
         of its own is served from its wrapped ERC-20 series.
         """
         token = self.resolve_series_token(token)
-        prices = list(self._price_buffers.get(token, []))
-        if not prices:
-            raise InsufficientDataError(required=1, available=0, indicator="price history")
+        if tick_interval_seconds <= 0 or required_points < 1:
+            raise ValueError("tick interval and required history must be positive")
         requested = _timeframe_seconds(timeframe) if timeframe else tick_interval_seconds
         native = self._data_granularity_seconds
         # Both comparisons tolerate vendor timestamp jitter (ALM-2962): a
@@ -957,16 +1004,28 @@ class BacktestIndicatorEngine:
                 native_seconds=native,
                 requested_seconds=requested,
             )
-        if requested == tick_interval_seconds:
-            return prices
         if requested % tick_interval_seconds != 0:
             raise ValueError(
                 f"timeframe {timeframe!r} is not derivable from the backtest tick interval "
                 f"({timeframe_label(tick_interval_seconds)}); use the tick timeframe or a whole multiple"
             )
         step = requested // tick_interval_seconds
+        required_ticks = (required_points - 1) * step + 1
+        self._ensure_token_capacity(token, required_ticks)
+        buffer = self._price_buffers.get(token, ())
         # Bucket closes, aligned so the newest bucket ends at the current tick.
-        return prices[::-1][::step][::-1]
+        prices = list(reversed(list(islice(reversed(buffer), 0, None, step))))
+        if len(prices) < required_points:
+            raise IndicatorWarmupError(
+                indicator=indicator,
+                required=required_points,
+                available=len(prices),
+                timeframe_seconds=requested,
+                required_ticks=required_ticks,
+                available_ticks=len(buffer),
+                tick_interval_seconds=tick_interval_seconds,
+            )
+        return prices
 
     def snapshot_providers(
         self,
@@ -986,12 +1045,20 @@ class BacktestIndicatorEngine:
             period: int = 14,
             timeframe: OHLCVTimeframe | None = None,
         ) -> RSIData:
-            prices = self._series_for(token, timeframe, tick_interval_seconds)
+            prices = self._series_for(
+                token, timeframe, tick_interval_seconds, required_points=int(period) + 1, indicator="RSI"
+            )
             value = RSICalculator.calculate_rsi_from_prices(prices, int(period))
             return RSIData(value=Decimal(str(round(value, 4))), period=int(period))
 
         def _macd(token, fast_period=12, slow_period=26, signal_period=9, timeframe=None) -> MACDData:
-            prices = self._series_for(token, timeframe, tick_interval_seconds)
+            prices = self._series_for(
+                token,
+                timeframe,
+                tick_interval_seconds,
+                required_points=int(slow_period) + int(signal_period),
+                indicator="MACD",
+            )
             result = MACDCalculator.calculate_macd_from_prices(
                 prices, int(fast_period), int(slow_period), int(signal_period)
             )
@@ -1005,7 +1072,9 @@ class BacktestIndicatorEngine:
             )
 
         def _bollinger(token, period=20, std_dev=2.0, timeframe=None) -> BollingerBandsData:
-            prices = self._series_for(token, timeframe, tick_interval_seconds)
+            prices = self._series_for(
+                token, timeframe, tick_interval_seconds, required_points=int(period), indicator="Bollinger Bands"
+            )
             result = BollingerBandsCalculator.calculate_bollinger_from_prices(prices, int(period), float(std_dev))
             return BollingerBandsData(
                 upper_band=Decimal(str(round(result.upper_band, 6))),
@@ -1018,7 +1087,13 @@ class BacktestIndicatorEngine:
             )
 
         def _stochastic(token, k_period=14, d_period=3, timeframe=None) -> StochasticData:
-            prices = self._series_for(token, timeframe, tick_interval_seconds)
+            prices = self._series_for(
+                token,
+                timeframe,
+                tick_interval_seconds,
+                required_points=int(k_period) + int(d_period) - 1,
+                indicator="Stochastic",
+            )
             result = StochasticCalculator.calculate_stochastic_from_candles(
                 self._close_candles(prices), int(k_period), int(d_period)
             )
@@ -1030,7 +1105,9 @@ class BacktestIndicatorEngine:
             )
 
         def _atr(token, period=14, timeframe=None) -> ATRData:
-            prices = self._series_for(token, timeframe, tick_interval_seconds)
+            prices = self._series_for(
+                token, timeframe, tick_interval_seconds, required_points=int(period) + 1, indicator="ATR"
+            )
             value = ATRCalculator.calculate_atr_from_prices(prices, int(period))
             current = float(prices[-1])
             pct = (value / current * 100) if current > 0 else 0.0
@@ -1041,7 +1118,9 @@ class BacktestIndicatorEngine:
             )
 
         def _sma(token, period=20, timeframe=None) -> MAData:
-            prices = self._series_for(token, timeframe, tick_interval_seconds)
+            prices = self._series_for(
+                token, timeframe, tick_interval_seconds, required_points=int(period), indicator="SMA"
+            )
             value = MovingAverageCalculator.calculate_sma_from_prices(prices, int(period))
             return MAData(
                 value=Decimal(str(round(value, 6))),
@@ -1051,7 +1130,9 @@ class BacktestIndicatorEngine:
             )
 
         def _ema(token, period=12, timeframe=None) -> MAData:
-            prices = self._series_for(token, timeframe, tick_interval_seconds)
+            prices = self._series_for(
+                token, timeframe, tick_interval_seconds, required_points=int(period), indicator="EMA"
+            )
             value = MovingAverageCalculator.calculate_ema_from_prices(prices, int(period))
             return MAData(
                 value=Decimal(str(round(value, 6))),
@@ -1061,7 +1142,9 @@ class BacktestIndicatorEngine:
             )
 
         def _adx(token, period=14, timeframe=None) -> ADXData:
-            prices = self._series_for(token, timeframe, tick_interval_seconds)
+            prices = self._series_for(
+                token, timeframe, tick_interval_seconds, required_points=int(period) * 2, indicator="ADX"
+            )
             result = ADXCalculator.calculate_adx_from_candles(self._close_candles(prices), int(period))
             return ADXData(
                 adx=Decimal(str(round(result.adx, 4))),
@@ -1074,12 +1157,20 @@ class BacktestIndicatorEngine:
             raise ValueError("OBV requires volume history; the backtest price series is close-only (ALM-2951)")
 
         def _cci(token, period=20, timeframe=None) -> CCIData:
-            prices = self._series_for(token, timeframe, tick_interval_seconds)
+            prices = self._series_for(
+                token, timeframe, tick_interval_seconds, required_points=int(period), indicator="CCI"
+            )
             value = CCICalculator.calculate_cci_from_candles(self._close_candles(prices), int(period))
             return CCIData(value=Decimal(str(round(value, 4))), period=int(period))
 
         def _ichimoku(token, tenkan_period=9, kijun_period=26, senkou_b_period=52, timeframe=None) -> IchimokuData:
-            prices = self._series_for(token, timeframe, tick_interval_seconds)
+            prices = self._series_for(
+                token,
+                timeframe,
+                tick_interval_seconds,
+                required_points=max(int(tenkan_period), int(kijun_period), int(senkou_b_period)),
+                indicator="Ichimoku",
+            )
             result = IchimokuCalculator.calculate_ichimoku_from_candles(
                 self._close_candles(prices), int(tenkan_period), int(kijun_period), int(senkou_b_period)
             )
@@ -1094,16 +1185,51 @@ class BacktestIndicatorEngine:
                 senkou_b_period=int(senkou_b_period),
             )
 
+        def track(name: str, callback: Callable[..., Any]) -> Callable[..., Any]:
+            return self._track_indicator_read(name, callback, tick_interval_seconds)
+
         provider = IndicatorProvider(
-            macd=_macd,
-            bollinger=_bollinger,
-            stochastic=_stochastic,
-            atr=_atr,
-            sma=_sma,
-            ema=_ema,
-            adx=_adx,
+            macd=track("macd", _macd),
+            bollinger=track("bollinger", _bollinger),
+            stochastic=track("stochastic", _stochastic),
+            atr=track("atr", _atr),
+            sma=track("sma", _sma),
+            ema=track("ema", _ema),
+            adx=track("adx", _adx),
             obv=_obv,
-            cci=_cci,
-            ichimoku=_ichimoku,
+            cci=track("cci", _cci),
+            ichimoku=track("ichimoku", _ichimoku),
         )
-        return _rsi, provider
+        return track("rsi", _rsi), provider
+
+    def begin_decision_tick(self) -> None:
+        """Scope successful reads to the next actual strategy decision."""
+        self._successful_indicator_reads.clear()
+
+    def successful_indicator_reads(self) -> frozenset[IndicatorReadKey]:
+        """Exact requests whose calculator returned successfully this decision."""
+        return frozenset(self._successful_indicator_reads)
+
+    def _track_indicator_read(
+        self, name: str, callback: Callable[..., Any], tick_interval_seconds: int
+    ) -> Callable[..., Any]:
+        parameters = signature(callback)
+
+        @wraps(callback)
+        def read(*args: Any, **kwargs: Any) -> Any:
+            bound = parameters.bind(*args, **kwargs)
+            bound.apply_defaults()
+            token = self.resolve_series_token(bound.arguments["token"])
+            timeframe = bound.arguments["timeframe"]
+            seconds = _timeframe_seconds(timeframe) if timeframe else tick_interval_seconds
+            params = tuple((key, value) for key, value in bound.arguments.items() if key not in {"token", "timeframe"})
+            request_key = (name, token, seconds, params)
+            try:
+                result = callback(*args, **kwargs)
+            except IndicatorWarmupError as exc:
+                exc.request_key = request_key
+                raise
+            self._successful_indicator_reads.add(request_key)
+            return result
+
+        return read

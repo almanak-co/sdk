@@ -302,6 +302,38 @@ def _backtester(num_ticks: int) -> PnLBacktester:
     )
 
 
+@pytest.mark.asyncio
+async def test_daily_sma_short_window_reports_latest_actual_warmup_counts():
+    class DailySmaReader:
+        deployment_id = "daily_sma_reader"
+        required_indicators = set()
+
+        def decide(self, market):
+            try:
+                market.sma("WETH", period=40, timeframe="1d")
+            except ValueError:
+                pass
+            return None
+
+    result = await _backtester(400).backtest(DailySmaReader(), _config(400))
+    failure = next(item for item in result.decision_input_failures if item["source"] == "sma")
+
+    assert failure["ticks"] == 400
+    assert failure["pattern"] == "persistent"
+    assert "have 1;" in failure["detail"]
+    assert "have 17;" in failure["latest_detail"]
+    assert failure["warmup"] == {
+        "required_points": 40,
+        "available_points": 17,
+        "timeframe_seconds": 86400,
+        "required_ticks": 937,
+        "available_ticks": 400,
+        "additional_contiguous_history_seconds": 537 * 3600,
+        "earliest_possible_at": (datetime(2024, 1, 1, tzinfo=UTC) + timedelta(hours=936)).isoformat(),
+        "source": "historical_close_series",
+    }
+
+
 class TestSimulatedGasViewErrors:
     def test_unbound_view_raises_gas_unavailable_not_valueerror_subclass_confusion(self):
         from almanak.framework.backtesting.pnl.engine import SimulatedGasView
@@ -397,13 +429,14 @@ class TestRunLevelReport:
         assert result.success is True
 
     @pytest.mark.asyncio
-    async def test_intermittent_input_failure_does_not_fail_the_run(self):
+    async def test_intermittent_input_failure_without_actions_is_not_evaluable(self):
         backtester = _backtester(num_ticks=100)
 
         result = await backtester.backtest(_IntermittentTwapReadingStrategy(), _config(100))
 
-        assert result.success is True
-        assert result.error is None
+        assert result.success is False
+        assert result.error.startswith("BACKTEST_UNSUPPORTED_DATA:")
+        assert result.run_validity.validity.value == "NOT_EVALUABLE"
         assert result.decision_input_failures
         assert result.decision_input_failures[0]["pattern"] == "intermittent"
 
@@ -582,3 +615,41 @@ class TestLendingRateServe:
         # Served every tick, never a hollow unconfigured failure.
         assert all(r is not None for r in seen)
         assert not any(entry["source"] == "lending_rate" for entry in (result.decision_input_failures or []))
+
+
+@pytest.mark.asyncio
+async def test_daily_sma_recovery_requires_an_actual_matching_successful_read():
+    class DailySmaReader:
+        deployment_id = "daily_sma_recovery_reader"
+        required_indicators = set()
+
+        def decide(self, market):
+            for token, period, timeframe in [("WETH", 40, "1d"), ("USDC", 40, "1d"), ("WETH", 200, "1d")]:
+                try:
+                    market.sma(token, period=period, timeframe=timeframe)
+                except ValueError:
+                    pass
+            try:
+                market.reference_price("NOK")
+            except ValueError:
+                pass
+            return None
+
+    result = await _backtester(1000).backtest(DailySmaReader(), _config(1000))
+    failures = result.decision_input_failures
+    recovered = [f for f in failures if f["source"] == "sma" and "200)" not in f["key"]]
+    assert len(recovered) == 2
+    for failure in recovered:
+        assert failure["warmup_only"] is True
+        assert failure["last_tick"] == 936
+        assert failure["warmup_recovery"] == {
+            "first_success_tick": 937,
+            "last_success_tick": 1000,
+            "successful_reads": 64,
+        }
+    unresolved = next(f for f in failures if f["source"] == "sma" and "200)" in f["key"])
+    assert unresolved["warmup_only"] is True
+    assert "warmup_recovery" not in unresolved
+    reference = next(f for f in failures if f["source"] == "reference_price")
+    assert reference["warmup_only"] is False
+    assert "warmup_recovery" not in reference

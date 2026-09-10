@@ -42,7 +42,7 @@ import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import closing, nullcontext
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -1368,6 +1368,50 @@ def _failure_pattern(entry: dict[str, Any], total_ticks: int) -> str:
     return "intermittent"
 
 
+def _record_latest_indicator_warmup(entry: dict[str, Any], cause: Any, detail: str, timestamp: datetime) -> None:
+    """Keep actual warmup progress without replacing the first observed failure."""
+    from almanak.framework.backtesting.pnl.indicator_engine import IndicatorWarmupError
+
+    if not isinstance(cause, IndicatorWarmupError):
+        entry["warmup_only"] = False
+        entry.pop("latest_detail", None)
+        entry.pop("warmup", None)
+        return
+    entry.setdefault("warmup_only", True)
+    entry["_warmup_request_key"] = cause.request_key
+    entry["latest_detail"] = detail
+    entry["warmup"] = {
+        "required_points": cause.required,
+        "available_points": cause.available,
+        "timeframe_seconds": cause.timeframe_seconds,
+        "required_ticks": cause.required_ticks,
+        "available_ticks": cause.available_ticks,
+        "additional_contiguous_history_seconds": cause.missing_history_seconds,
+        "earliest_possible_at": (timestamp + timedelta(seconds=cause.missing_history_seconds)).isoformat(),
+        "source": "historical_close_series",
+    }
+
+
+def _record_indicator_warmup_recovery(state: BacktestState) -> None:
+    """Certify only a matching successful provider return after typed warmup."""
+    served = state.indicator_engine.successful_indicator_reads()
+    if not served:
+        return
+    for entry in state.decision_input_failures.values():
+        if (
+            entry.get("warmup_only") is not True
+            or entry.get("_warmup_request_key") not in served
+            or entry["last_tick"] >= state.tick_count
+        ):
+            continue
+        recovery = entry.setdefault(
+            "warmup_recovery",
+            {"first_success_tick": state.tick_count, "last_success_tick": state.tick_count, "successful_reads": 0},
+        )
+        recovery["last_success_tick"] = state.tick_count
+        recovery["successful_reads"] += 1
+
+
 def _decision_input_failure_report(state: BacktestState) -> list[dict[str, Any]]:
     """Sorted decide()-time data-failure report entries (ALM-2951)."""
     return [
@@ -1376,6 +1420,9 @@ def _decision_input_failure_report(state: BacktestState) -> list[dict[str, Any]]
             "key": key,
             "ticks": entry["ticks"],
             "detail": entry["detail"],
+            **({"latest_detail": entry["latest_detail"], "warmup": entry["warmup"]} if "warmup" in entry else {}),
+            "warmup_only": entry.get("warmup_only", False),
+            **({"warmup_recovery": entry["warmup_recovery"]} if "warmup_recovery" in entry else {}),
             "first_tick": entry.get("first_tick"),
             "last_tick": entry.get("last_tick"),
             "pattern": _failure_pattern(entry, state.tick_count),
@@ -2223,7 +2270,10 @@ async def execute_iteration_loop(
         build_backtest_lending_rates,
         sync_il_calculator_positions,
     )
-    from almanak.framework.backtesting.pnl.indicator_engine import native_series_aliases, timeframe_label
+    from almanak.framework.backtesting.pnl.indicator_engine import (
+        native_series_aliases,
+        timeframe_label,
+    )
     from almanak.framework.data.lp import ILCalculator
     from almanak.framework.data.risk.metrics import PortfolioRiskCalculator
 
@@ -2507,6 +2557,7 @@ async def execute_iteration_loop(
                         )
 
             # Get strategy decision (warm-up + error-handler branch)
+            state.indicator_engine.begin_decision_tick()
             decide_result = _invoke_strategy_decide(
                 backtester=backtester,
                 strategy=strategy,
@@ -2558,6 +2609,9 @@ async def execute_iteration_loop(
                 )
                 entry["ticks"] += 1
                 entry["last_tick"] = state.tick_count
+                cause = getattr(snapshot, "_critical_data_failure_causes", {}).get(failure_key)
+                _record_latest_indicator_warmup(entry, cause, str(detail), timestamp)
+            _record_indicator_warmup_recovery(state)
 
             # Update positions via adapter if available
             backtester._update_positions_via_adapter(state.portfolio, market_state, timestamp)

@@ -26,6 +26,7 @@ from almanak.framework.backtesting.pnl.indicator_engine import (
     DEFAULT_MAX_HISTORY,
     BacktestIndicatorEngine,
     IndicatorTimeframeMismatchError,
+    IndicatorWarmupError,
     native_series_aliases,
     ohlcv_timeframe_for_interval,
 )
@@ -60,6 +61,99 @@ def _create_engine_with_prices(
     for price in prices:
         engine.append_price(token, price)
     return engine
+
+
+@pytest.mark.parametrize(
+    ("accessor", "args", "required_points"),
+    [
+        ("sma", (40,), 40),
+        ("ema", (55,), 55),
+        ("rsi", (40,), 41),
+        ("macd", (12, 26, 9), 35),
+        ("bollinger", (40,), 40),
+        ("stochastic", (40, 3), 42),
+        ("atr", (40,), 41),
+        ("adx", (20,), 40),
+        ("cci", (40,), 40),
+        ("ichimoku", (9, 26, 52), 52),
+    ],
+)
+def test_daily_indicator_acquires_its_required_hourly_history(accessor, args, required_points):
+    engine = BacktestIndicatorEngine(required_indicators=set())
+    rsi, provider = engine.snapshot_providers({}, 3600)
+    read = rsi if accessor == "rsi" else getattr(provider, accessor)
+    required_ticks = (required_points - 1) * 24 + 1
+    prices = _generate_prices(100, required_ticks)
+
+    for i, price in enumerate(prices[:-1], start=1):
+        engine.append_price("asset", price)
+        with pytest.raises(IndicatorWarmupError) as missing:
+            read("asset", *args, timeframe="1d")
+        assert missing.value.required == required_points
+        assert missing.value.available == (i - 1) // 24 + 1
+        assert missing.value.required_ticks == required_ticks
+        assert missing.value.missing_history_seconds == (required_ticks - i) * 3600
+        assert engine.is_warming_up("asset")
+
+    engine.append_price("asset", prices[-1])
+    result = read("asset", *args, timeframe="1d")
+
+    assert result is not None
+    assert not engine.is_warming_up("asset")
+    if accessor == "sma":
+        expected = sum(prices[::24]) / Decimal(required_points)
+        assert result.value == expected.quantize(Decimal("0.000001"))
+
+
+def test_indicator_retention_is_per_series_bounded_and_survives_other_capacity_changes():
+    engine = BacktestIndicatorEngine(required_indicators=set())
+    engine.register_series_aliases({"native": ("wrapped",)})
+    _, provider = engine.snapshot_providers({}, 3600)
+    for i in range(2000):
+        engine.append_price("wrapped", Decimal(i + 1))
+        engine.append_price("unread", Decimal(i + 1))
+        try:
+            provider.sma("native", 40, timeframe="1d")
+            provider.sma("wrapped", 10, timeframe="1h")
+        except IndicatorWarmupError:
+            pass
+
+    assert engine.get_buffer_size("wrapped") == 937
+    assert engine.get_buffer_size("unread") == DEFAULT_MAX_HISTORY
+    assert engine._eager_price_window(engine._price_buffers["wrapped"]) == [Decimal(i) for i in range(1801, 2001)]
+    engine.ensure_capacity(300)
+    assert engine._price_buffers["wrapped"].maxlen == 937
+    engine.replace_price_history("wrapped", [Decimal(i) for i in range(1200)])
+    assert engine.get_buffer_size("wrapped") == 937
+    engine.reset()
+    engine.append_price("wrapped", Decimal(1))
+    assert engine._price_buffers["wrapped"].maxlen == 300
+
+
+def test_late_indicator_request_does_not_reconstruct_discarded_history():
+    engine = BacktestIndicatorEngine(required_indicators=set())
+    for i in range(2000):
+        engine.append_price("asset", Decimal(i + 1))
+    _, provider = engine.snapshot_providers({}, 3600)
+
+    with pytest.raises(IndicatorWarmupError) as missing:
+        provider.sma("asset", 40, timeframe="1d")
+
+    assert missing.value.available == 9
+    assert missing.value.available_ticks == 200
+    assert engine.get_buffer_size("asset") == 200
+    assert "does not fetch earlier history" in str(missing.value)
+
+
+def test_incompatible_timeframe_does_not_expand_retention():
+    engine = BacktestIndicatorEngine(required_indicators=set())
+    engine.append_price("asset", Decimal(1))
+    _, provider = engine.snapshot_providers({}, 3600)
+
+    with pytest.raises(ValueError, match="not derivable"):
+        provider.sma("asset", 500, timeframe="15m")
+
+    assert engine._price_buffers["asset"].maxlen == DEFAULT_MAX_HISTORY
 
 
 # =============================================================================

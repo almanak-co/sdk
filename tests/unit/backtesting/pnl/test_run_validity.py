@@ -165,10 +165,72 @@ class TestClassifier:
         assert error.startswith("BACKTEST_UNSUPPORTED_DATA: ")
         assert "twap:unconfigured (9/10 ticks" in error
 
-    @pytest.mark.parametrize("pattern", ["intermittent", "warm_up"])
-    def test_non_persistent_failures_keep_a_held_run_valid(self, pattern: str):
-        verdict = _classify(decision_input_failures=[_failure(pattern, ticks=2)])
+    def test_warm_up_failures_keep_a_held_run_valid(self):
+        verdict = _classify(decision_input_failures=[_failure("warm_up", ticks=2)])
         assert verdict.validity is RunValidity.VALID
+        assert verdict.warnings == ()
+
+    def test_cash_hours_input_starvation_is_not_evaluable(self):
+        failure = {
+            "source": "reference_price",
+            "key": "TSLA@bsc",
+            "ticks": 156,
+            "detail": "no historical reference-price plane",
+            "pattern": "intermittent",
+        }
+        verdict = _classify(tick_count=905, decision_input_failures=[failure])
+
+        assert verdict.validity is RunValidity.NOT_EVALUABLE
+        assert verdict.reason_codes == (INPUT_STARVED,)
+        assert verdict.passive_only is False
+        assert "156/905 ticks" in terminal_errors(verdict)[0]
+        assert "nearly every" not in terminal_errors(verdict)[0]
+
+    @pytest.mark.parametrize("pattern", ["intermittent", "persistent"])
+    def test_long_initial_warmup_with_matching_success_is_valid(self, pattern: str):
+        failure = {
+            **_failure(pattern, ticks=936),
+            "last_tick": 936,
+            "warmup_only": True,
+            "warmup_recovery": {"first_success_tick": 937, "last_success_tick": 1000, "successful_reads": 64},
+        }
+        verdict = _classify(tick_count=1000, decision_input_failures=[failure])
+
+        assert verdict.validity is RunValidity.VALID
+        assert verdict.passive_only is True
+        assert verdict.warnings == ()
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"warmup_only": False},
+            {"warmup_only": 1},
+            {"warmup_recovery": None},
+            {"warmup_recovery": {"first_success_tick": 936, "last_success_tick": 1000, "successful_reads": 64}},
+            {"warmup_recovery": {"first_success_tick": 937, "last_success_tick": 1001, "successful_reads": 64}},
+            {"warmup_recovery": {"first_success_tick": 937, "last_success_tick": 1000, "successful_reads": 0}},
+            {"warmup_recovery": {"first_success_tick": "937", "last_success_tick": 1000, "successful_reads": 64}},
+        ],
+    )
+    def test_warmup_without_later_matching_success_remains_not_evaluable(self, override: dict[str, Any]):
+        failure = {
+            **_failure("persistent", ticks=936),
+            "last_tick": 936,
+            "warmup_only": True,
+            "warmup_recovery": {"first_success_tick": 937, "last_success_tick": 1000, "successful_reads": 64},
+            **override,
+        }
+        verdict = _classify(tick_count=1000, decision_input_failures=[failure])
+        assert verdict.validity is RunValidity.NOT_EVALUABLE
+
+    def test_intermittent_failure_does_not_invalidate_a_traded_run(self):
+        verdict = _classify(
+            decision_summary=_summary(intent_ticks=2, fills=2),
+            decision_input_failures=[_failure("intermittent", ticks=2)],
+            executed_fills=2,
+        )
+        assert verdict.validity is RunValidity.VALID
+        assert verdict.reasons == ()
         assert verdict.warnings == ()
 
     def test_starved_lane_on_a_traded_run_is_a_warning_only(self):
@@ -375,6 +437,74 @@ class TestEngineVerdict:
         payload = serialize_result(result)
         assert payload["run_validity"]["validity"] == "VALID"
         assert payload["run_validity"]["passive_only"] is True
+
+    @pytest.mark.asyncio
+    async def test_cash_hours_reference_refusal_blocks_performance_publication(self):
+        class _CashHoursReferenceHolder:
+            deployment_id = "cash_hours_reference_holder"
+
+            def decide(self, market: Any) -> Any:
+                if market.timestamp.weekday() < 5 and 14 <= market.timestamp.hour < 21:
+                    reference = market.reference_price("TSLA", quote="USD")
+                    assert reference.price is None
+                    assert "no historical reference-price plane" in reference.reason
+                return None
+
+        result = await _backtester(168).backtest(_CashHoursReferenceHolder(), _config(168, "10000"))
+
+        assert result.decision_summary["intent_ticks"] == 0
+        assert result.decision_summary["executions"]["fills"] == 0
+        assert result.decision_input_failures[0]["pattern"] == "intermittent"
+        assert result.success is False
+        assert result.institutional_compliance is False
+        assert result.run_validity.validity is RunValidity.NOT_EVALUABLE
+        assert result.error.startswith("BACKTEST_UNSUPPORTED_DATA:")
+        payload = serialize_result(result)
+        assert payload["run_validity"]["validity"] == "NOT_EVALUABLE"
+        assert payload["run_validity"]["passive_only"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("unresolved_input", [None, "reference", "longer_window"])
+    async def test_completed_daily_warmup_needs_matching_success_for_each_lane(self, unresolved_input: str | None):
+        successes: list[Any] = []
+
+        class _DailyReader:
+            deployment_id = "completed_daily_warmup"
+            required_indicators = set()
+
+            def decide(self, market: Any) -> Any:
+                try:
+                    successes.append(market.sma("WETH", period=40, timeframe="1d"))
+                except ValueError:
+                    pass
+                if unresolved_input == "reference":
+                    market.reference_price("NOK")
+                elif unresolved_input == "longer_window":
+                    try:
+                        market.sma("WETH", period=200, timeframe="1d")
+                    except ValueError:
+                        pass
+                return None
+
+        result = await _backtester(1000).backtest(_DailyReader(), _config(1000, "10000"))
+
+        assert successes
+        assert result.decision_summary["intent_ticks"] == 0
+        assert result.run_validity.executed_fills == 0
+        failures = result.decision_input_failures
+        recovered = next(failure for failure in failures if failure.get("warmup_recovery"))
+        assert recovered["warmup_only"] is True
+        assert recovered["warmup_recovery"]["first_success_tick"] > recovered["last_tick"]
+        if unresolved_input is None:
+            assert result.success is True
+            assert result.run_validity.validity is RunValidity.VALID
+            assert result.run_validity.passive_only is True
+        else:
+            assert result.success is False
+            assert result.run_validity.validity is RunValidity.NOT_EVALUABLE
+            blocking = result.run_validity.reasons[0].details["inputs"]
+            assert len(blocking) == 1
+            assert blocking[0]["source"] == ("reference_price" if unresolved_input == "reference" else "sma")
 
     @pytest.mark.asyncio
     async def test_zero_capital_run_no_longer_certifies(self):
