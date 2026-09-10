@@ -46,6 +46,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class GatewayCompilationError(RuntimeError):
+    """A rejected compilation with diagnostics, without an execution result."""
+
+    def __init__(self, response: Any, intent_id: str) -> None:
+        super().__init__(f"Compilation failed: {response.error} ({response.error_code})")
+        self.is_safety_refusal = bool(getattr(response, "is_safety_refusal", False))
+        raw = getattr(response, "compilation_evidence", b"")
+        self.compilation_evidence = json.loads(raw) if raw else None
+        if self.compilation_evidence is not None and (
+            not isinstance(self.compilation_evidence, dict) or self.compilation_evidence.get("intent_id") != intent_id
+        ):
+            raise ValueError("Gateway compilation evidence does not match the requested intent")
+
+
 def _submission_provenance_from_proto(response: Any) -> SubmissionProvenance:
     """Map the wire enum, treating absent/unknown values as UNSPECIFIED.
 
@@ -159,6 +173,23 @@ def _execution_result_from_proto(
     response_plan_hash = getattr(response, "execution_plan_hash", "")
     plan_hash_matches = isinstance(response_plan_hash, str) and response_plan_hash == expected_plan_hash
 
+    extracted_data = {}
+    evidence_payload = getattr(response, "execution_evidence_json", b"")
+    if evidence_payload:
+        try:
+            evidence = json.loads(evidence_payload)
+            if not plan_hash_matches:
+                raise ValueError("execution plan hash differs")
+            if (
+                not isinstance(evidence, dict)
+                or type(evidence.get("schema_version")) is not int
+                or evidence["schema_version"] != 1
+            ):
+                raise ValueError("unsupported execution evidence schema")
+            extracted_data["execution_evidence"] = evidence
+        except (ValueError, TypeError, UnicodeDecodeError) as exc:
+            extraction_warnings.append(f"Execution observations unavailable: {exc}")
+
     return GatewayExecutionResult(
         success=response.success,
         tx_hashes=tx_hashes,
@@ -169,6 +200,7 @@ def _execution_result_from_proto(
         error=response.error if response.error else None,
         error_code=response.error_code if response.error_code else None,
         extraction_warnings=extraction_warnings,
+        extracted_data=extracted_data,
         submission_provenance=_submission_provenance_from_proto(response),
         execution_plan_hash=response_plan_hash if plan_hash_matches else "",
         submission_transactions=_submission_transactions_from_proto(response, plan_hash_matches=plan_hash_matches),
@@ -606,7 +638,7 @@ class GatewayExecutionOrchestrator:
             response = self._client.execution.CompileIntent(request, timeout=self._timeout)
 
             if not response.success:
-                raise RuntimeError(f"Compilation failed: {response.error} ({response.error_code})")
+                raise GatewayCompilationError(response, intent.intent_id)
 
             # Deserialize action bundle
             return json.loads(response.action_bundle.decode("utf-8"))

@@ -27,6 +27,7 @@ Example:
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -400,7 +401,11 @@ class UniswapV4Adapter:
 
         # Price-impact guard is only meaningful against an executable quote
         # plus a real oracle estimate.
-        guard_failure = self._check_swap_price_impact(
+        from almanak.framework.execution.fork_signal import resolve_managed_fork
+
+        from .price_impact import evaluate_swap_price_impact
+
+        impact = evaluate_swap_price_impact(
             quote_source=quote_source,
             quoter_amount=quote.amount_out,
             amount_in=amount_in,
@@ -409,23 +414,44 @@ class UniswapV4Adapter:
             max_price_impact=max_price_impact,
             config_max_price_impact=config_max_price_impact,
             using_placeholders=using_placeholders,
-            token_in=token_in,
-            token_out=token_out,
+            managed_fork=resolve_managed_fork(self.managed_fork),
         )
-        if guard_failure is not None:
-            return guard_failure
+        impact_evidence = {
+            **impact.to_wire(),
+            "chain": self.chain,
+            "pool_id": selection.key.pool_id,
+            "token_in": token_in_addr,
+            "token_out": token_out_addr,
+            "amount_in_raw": str(amount_in_raw),
+            "quote_block": verified.evidence.block_number if verified is not None else None,
+        }
+        if impact.status == "refused":
+            reason = (
+                f"Price impact too high: {Decimal(impact.price_impact):.2%} "
+                f"exceeds {Decimal(impact.max_price_impact):.2%}"
+                if impact.price_impact is not None and impact.max_price_impact is not None
+                else f"Price impact check unavailable: {impact.reason}"
+            )
+            return SwapResult(
+                success=False,
+                transactions=[],
+                error=f"{reason}; refusing {token_in} -> {token_out}",
+                quote_source=quote_source,
+                price_impact_check=impact_evidence,
+            )
 
         transactions: list[SwapTransaction] = []
 
         # ERC-20 path needs approve then Permit2 grant; native ETH skips both as msg.value.
         is_native = token_in_addr.lower() == NATIVE_CURRENCY
         if not is_native:
-            approve_tx = self._sdk.build_approve_tx(
-                token_address=token_in_addr,
-                spender=PERMIT2_ADDRESS,
-                amount=amount_in_raw,
+            transactions.extend(
+                self._erc20_permit2_approvals(
+                    token_in_addr,
+                    amount_in_raw,
+                    block_number=verified.evidence.block_number if verified is not None else None,
+                )
             )
-            transactions.append(approve_tx)
 
             permit2_tx = self._sdk.build_permit2_approve_tx(
                 token_address=token_in_addr,
@@ -464,6 +490,7 @@ class UniswapV4Adapter:
             token_in=token_in_addr,
             token_out=token_out_addr,
             hook_data=selection.hook_data or b"",
+            price_impact_check=impact_evidence,
         )
 
     def _observation_gateway(self) -> Any:
@@ -601,73 +628,6 @@ class UniswapV4Adapter:
             )
             return None, "unavailable"
 
-    def _check_swap_price_impact(
-        self,
-        *,
-        quote_source: str,
-        quoter_amount: int,
-        amount_in: Decimal,
-        token_out_dec: int,
-        price_ratio: Decimal | None,
-        max_price_impact: Decimal | None,
-        config_max_price_impact: Decimal | None,
-        using_placeholders: bool,
-        token_in: str,
-        token_out: str,
-    ) -> SwapResult | None:
-        """Liquidity / price-impact guard (VIB-2058 C2), parity with V3.
-
-        Reuses the framework's protocol-agnostic ``check_price_impact`` helper.
-        Returns a failed ``SwapResult`` when impact exceeds tolerance (pool likely
-        illiquid → would silently no-op), else ``None`` (proceed).
-
-        Only runs against an executable on-chain quote: a ``local_estimate`` is
-        itself oracle-derived, so comparing it to the oracle estimate is circular.
-        Skipped on a confirmed managed Anvil fork (C4 — fork pool state and the
-        live oracle are not time-aligned); ALM-3184 requires that confirmation to
-        be a positive signal, never the shape of ``rpc_url``.
-        """
-        if quote_source != "onchain_quoter":
-            return None
-        if price_ratio is None:
-            # Without an oracle estimate there is nothing to compare; depth stays unguarded.
-            return None
-
-        from almanak.framework.execution.fork_signal import resolve_managed_fork
-
-        if resolve_managed_fork(self.managed_fork):
-            logger.info(
-                "Skipping V4 price-impact guard: managed Anvil fork confirmed (%s). Fork pool state "
-                "and live oracle prices are not time-aligned.",
-                self.rpc_url,
-            )
-            return None
-
-        from almanak.framework.intents._compiler_helpers import PriceImpactDecision, check_price_impact
-
-        oracle_estimate = int(amount_in * price_ratio * Decimal(10**token_out_dec))
-        result = check_price_impact(
-            oracle_estimate=oracle_estimate,
-            quoter_amount=quoter_amount,
-            intent_max_impact=max_price_impact,
-            config_max_impact=config_max_price_impact if config_max_price_impact is not None else Decimal("0.05"),
-            offline_mode=using_placeholders,
-            using_placeholders=using_placeholders,
-        )
-        if result.decision is PriceImpactDecision.IMPACT_TOO_HIGH and result.price_impact is not None:
-            return SwapResult(
-                success=False,
-                transactions=[],
-                error=(
-                    f"Price impact too high for {token_in} -> {token_out}: on-chain quote "
-                    f"implies {result.price_impact:.1%} impact vs oracle (max allowed "
-                    f"{result.effective_max_impact:.2%}). Likely cause: insufficient pool "
-                    f"liquidity at the selected fee tier. Refusing to compile a swap that "
-                    f"would likely no-op or be sandwiched."
-                ),
-            )
-        return None
-
     def compile_swap_intent(
         self,
         intent: SwapIntent,
@@ -733,7 +693,14 @@ class UniswapV4Adapter:
         computed_price_ratio = None
         from_price = lenient_oracle_price(price_oracle, intent.from_token, getattr(intent, "chain", None) or self.chain)
         to_price = lenient_oracle_price(price_oracle, intent.to_token, getattr(intent, "chain", None) or self.chain)
-        if from_price and to_price and to_price > 0:
+        if (
+            from_price
+            and to_price
+            and from_price.is_finite()
+            and to_price.is_finite()
+            and from_price > 0
+            and to_price > 0
+        ):
             computed_price_ratio = Decimal(str(from_price)) / Decimal(str(to_price))
 
         result = self.swap_exact_input(
@@ -749,6 +716,11 @@ class UniswapV4Adapter:
             swap_params=intent.swap_params,
         )
 
+        logger.info(
+            "v4_price_impact_check intent_id=%s evidence=%s",
+            intent.intent_id,
+            json.dumps(result.price_impact_check, sort_keys=True),
+        )
         if not result.success:
             return ActionBundle(
                 intent_type=IntentType.SWAP.value,
@@ -756,6 +728,7 @@ class UniswapV4Adapter:
                 metadata={
                     "error": result.error,
                     "intent_id": intent.intent_id,
+                    "price_impact_check": result.price_impact_check,
                 },
             )
 
@@ -808,6 +781,7 @@ class UniswapV4Adapter:
             "protocol_version": "v4",
             # Whether minOut came from an executable quote or an offline estimate.
             "quote_source": result.quote_source,
+            "price_impact_check": result.price_impact_check,
         }
         if result.pool_key is not None:
             metadata["pool_key"] = result.pool_key.to_wire()
@@ -923,7 +897,6 @@ class UniswapV4Adapter:
             )
         if hooks != NATIVE_CURRENCY and not self._can_observe():
             raise UniswapV4UnsupportedPoolError("Hooked LP entry requires gateway-verified operation evidence")
-        self._reject_unsupported_v0_pool(pool_key)
         return _LPOpenPool(
             token0_symbol=token0_symbol,
             token1_symbol=token1_symbol,
@@ -1079,10 +1052,28 @@ class UniswapV4Adapter:
             slippage_bps=slippage_bps,
         )
 
+    def _erc20_permit2_approvals(self, token: str, amount: int, *, block_number: int | None) -> list[SwapTransaction]:
+        from .approvals import approval_amounts, observe_permit2_allowance
+
+        current = None
+        if block_number is not None:
+            current = observe_permit2_allowance(
+                self._observation_gateway(),
+                chain=self.chain,
+                token=token,
+                wallet=self.wallet_address,
+                block_number=block_number,
+            )
+        return [
+            self._sdk.build_approve_tx(token, PERMIT2_ADDRESS, value) for value in approval_amounts(current, amount)
+        ]
+
     def _build_lp_open_transactions(
         self,
         pool: _LPOpenPool,
         liquidity: _LPOpenLiquidity,
+        *,
+        block_number: int | None = None,
     ) -> list[SwapTransaction]:
         """Build Permit2 approvals followed by the PositionManager mint."""
         mint_params = LPMintParams(
@@ -1103,7 +1094,7 @@ class UniswapV4Adapter:
         ]:
             if token_addr.lower() == NATIVE_CURRENCY:
                 continue
-            transactions.append(self._sdk.build_approve_tx(token_addr, PERMIT2_ADDRESS, amount_max))
+            transactions.extend(self._erc20_permit2_approvals(token_addr, amount_max, block_number=block_number))
             transactions.append(self._sdk.build_permit2_approve_tx(token_addr, position_manager, amount_max))
 
         transactions.append(
@@ -1233,7 +1224,9 @@ class UniswapV4Adapter:
                     transactions=[],
                     metadata={"error": "Computed liquidity is zero — check amounts and price range"},
                 )
-            transactions = self._build_lp_open_transactions(pool, liquidity)
+            transactions = self._build_lp_open_transactions(
+                pool, liquidity, block_number=verified.evidence.block_number if verified is not None else None
+            )
             bundle = self._build_lp_open_bundle(intent, pool, price, liquidity, transactions)
             if verified is not None:
                 from .operation import bind_lp_operation
@@ -1344,7 +1337,7 @@ class UniswapV4Adapter:
             amount0_min, amount1_min = withdrawal_minima(
                 position,
                 liquidity,
-                9900 if tolerance is None else slippage_to_bps(tolerance),
+                self.default_slippage_bps if tolerance is None else slippage_to_bps(tolerance),
             )
         else:
             raise ValueError("V4 withdrawal needs measured position state or explicit minima for offline compilation")
@@ -1502,15 +1495,6 @@ class UniswapV4Adapter:
         return bundle
 
     @staticmethod
-    def _reject_unsupported_v0_pool(pool_key: Any) -> None:
-        """Reject LP callbacks until an operation profile covers their behavior."""
-        if int(pool_key.hooks, 16) & 0x0C02:
-            raise UniswapV4UnsupportedPoolError(
-                f"Uniswap V4 pool has hooks={pool_key.hooks} with LP entry callbacks; "
-                "no reviewed LP operation profile admits these callbacks."
-            )
-
-    @staticmethod
     def _parse_pool(pool: str) -> tuple[str, str, int]:
         """Parse pool string into (token0_symbol, token1_symbol, fee).
 
@@ -1579,6 +1563,7 @@ class SwapResult:
     token_in: str = ""
     token_out: str = ""
     hook_data: bytes = b""
+    price_impact_check: dict[str, Any] | None = None
 
 
 def tx_to_dict(tx: SwapTransaction) -> dict[str, Any]:

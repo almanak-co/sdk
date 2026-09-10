@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from typing import Any, ClassVar
 
 from almanak.connectors._strategy_base.base.compiler import (
@@ -83,6 +84,7 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
             )
 
             if not action_bundle.transactions:
+                decision = action_bundle.metadata.get("price_impact_check")
                 return CompilationResult(
                     status=CompilationStatus.FAILED,
                     error=action_bundle.metadata.get(
@@ -90,6 +92,8 @@ class UniswapV4Compiler(BaseProtocolCompiler[SwapCompilerContext]):
                         "Uniswap V4 swap compilation returned no transactions",
                     ),
                     intent_id=intent.intent_id,
+                    is_safety_refusal=isinstance(decision, dict) and decision.get("status") == "refused",
+                    compiler_evidence={"price_impact_check": deepcopy(decision)} if decision is not None else {},
                 )
 
             action_bundle.metadata["protocol"] = "uniswap_v4"

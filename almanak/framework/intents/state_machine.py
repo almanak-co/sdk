@@ -994,6 +994,11 @@ class IntentStateMachine:
         return None
 
     @property
+    def compilation_evidence(self) -> dict[str, Any] | None:
+        """Return a detached snapshot of the current failed compilation."""
+        return self._compilation_result.compilation_evidence if self._compilation_result is not None else None
+
+    @property
     def refused_by_safety_guard(self) -> bool:
         """True when the last compile was refused by a pre-execution safety guard.
 
@@ -1115,6 +1120,7 @@ class IntentStateMachine:
             self._started_at = datetime.now(UTC)
 
         # Compile the intent
+        self._compilation_result = None
         try:
             self._compilation_result = self.compiler.compile(self.intent)
         except Exception as e:

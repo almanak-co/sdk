@@ -106,6 +106,30 @@ class ReceiptSetSerializationError(RuntimeError):
     """The gateway could not preserve one receipt per transaction result."""
 
 
+def _compilation_evidence_bytes(evidence: Any) -> bytes:
+    if evidence is None:
+        return b""
+    try:
+        return json.dumps(evidence, allow_nan=False, sort_keys=True).encode("utf-8")
+    except (TypeError, ValueError):
+        # Diagnostic loss cannot replace the compiler's original safety refusal.
+        logger.exception("Compilation observations could not be serialized")
+        return b""
+
+
+def _execution_evidence_bytes(result: Any) -> bytes:
+    extracted = getattr(result, "extracted_data", None)
+    evidence = extracted.get("execution_evidence") if isinstance(extracted, dict) else None
+    if evidence is None:
+        return b""
+    try:
+        return json.dumps(evidence, allow_nan=False, sort_keys=True).encode("utf-8")
+    except (TypeError, ValueError):
+        # A telemetry serialization fault must not discard already-mined receipts.
+        logger.exception("Execution observations could not be serialized")
+        return b""
+
+
 def _submission_provenance_to_proto(value: Any) -> gateway_pb2.SubmissionProvenance.ValueType:
     """Serialize provenance without upgrading missing/unknown evidence."""
     parsed = SubmissionProvenance.parse(value)
@@ -700,10 +724,17 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         simulation_config = SimulationConfig.from_env()
         # Requests carry the resolved preference; the cached backend must remain capable.
         simulation_config.enabled = True
-        simulator = create_simulator(config=simulation_config, rpc_url=rpc_url)
-
         from almanak.core.rpc_network import Network
         from almanak.gateway.services.venue_verification_gateway import GatewayRpcVenueVerificationGateway
+
+        if simulation_config.backend == "rpc":
+            from almanak.gateway.services.rpc_simulator import create_gateway_simulator
+
+            simulator = create_gateway_simulator(
+                config=simulation_config, rpc_url=rpc_url, chain=chain, network=Network.parse(network)
+            )
+        else:
+            simulator = create_simulator(config=simulation_config, rpc_url=rpc_url)
 
         orchestrator = ExecutionOrchestrator(
             signer=signer,
@@ -1051,6 +1082,8 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 success=False,
                 error=error_msg,
                 error_code="COMPILATION_FAILED",
+                compilation_evidence=_compilation_evidence_bytes(compilation_result.compilation_evidence),
+                is_safety_refusal=compilation_result.is_safety_refusal,
             )
 
         if compilation_result.action_bundle is None:
@@ -1435,6 +1468,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                     execution_id=result.correlation_id or "",
                     error=str(exc),
                     error_code="RECEIPT_SET_INCOMPLETE",
+                    execution_evidence_json=_execution_evidence_bytes(result),
                     submission_provenance=_submission_provenance_to_proto(
                         getattr(result, "submission_provenance", SubmissionProvenance.UNSPECIFIED)
                     ),
@@ -1462,6 +1496,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 receipts=receipts_bytes,
                 execution_id=result.correlation_id or "",
                 error=result.error or "",
+                execution_evidence_json=_execution_evidence_bytes(result),
                 submission_provenance=_submission_provenance_to_proto(
                     getattr(result, "submission_provenance", SubmissionProvenance.UNSPECIFIED)
                 ),

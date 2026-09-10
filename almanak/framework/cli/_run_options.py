@@ -82,6 +82,12 @@ def strategy_run_options(func: Callable[..., Any]) -> Callable[..., Any]:
         help="Loop interval in seconds. Defaults to [tool.almanak.run].interval or 60.",
     )(func)
     func = click.option(
+        "--confirm-start",
+        is_flag=True,
+        default=False,
+        help="Wait for confirmation after wallet setup, before strategy execution. Defaults to no on EOF.",
+    )(func)
+    func = click.option(
         "--dry-run",
         is_flag=True,
         default=False,

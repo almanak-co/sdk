@@ -224,6 +224,7 @@ class TestRpcMethodValidation:
         """Test that allowed RPC methods pass validation."""
         allowed = [
             "eth_call",
+            "eth_simulateV1",
             "eth_getBalance",
             "eth_blockNumber",
             "eth_sendRawTransaction",

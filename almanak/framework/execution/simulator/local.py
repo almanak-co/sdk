@@ -42,6 +42,7 @@ from web3.exceptions import ContractCustomError, ContractLogicError
 from web3.types import RPCEndpoint, TxParams, Wei
 
 from almanak.framework.execution.interfaces import (
+    SimulationError,
     SimulationResult,
     Simulator,
     UnsignedTransaction,
@@ -108,9 +109,7 @@ _STATE_SETUP_TX_TIMEOUT = 30
 # _STATE_SETUP_TX_TIMEOUT envelope so a single tx can never hang the caller
 # past the combined timeout budget.
 _ESTIMATE_GAS_TIMEOUT = 30
-# Sentinel prefix emitted by _estimate_gas on TimeoutError. Used by the timeout
-# fallback check to distinguish eth_estimateGas timeouts from transport-layer
-# "timed out" strings (e.g. urllib ReadTimeout) that should NOT trigger the fallback.
+# Distinguishes an unmeasured estimation timeout from a measured EVM revert.
 _ESTIMATE_GAS_TIMEOUT_MARKER = "eth_estimateGas timed out after"
 
 # Hard timeout for evm_snapshot / evm_revert RPC calls. Anvil normally returns
@@ -226,7 +225,10 @@ class LocalSimulator(Simulator):
         Returns:
             Tuple of (gas_estimate, error_message)
             If successful, error_message is None
-            If failed, gas_estimate is 0 and error_message contains the reason
+            On revert or timeout, gas_estimate is 0 and error_message contains the reason
+
+        Raises:
+            SimulationError: Provider or response failure without a measured EVM outcome.
         """
         web3 = await self._get_web3()
 
@@ -243,12 +245,14 @@ class LocalSimulator(Simulator):
             # Hard timeout: eth_estimateGas on deep-call contracts against a
             # slow public RPC can hang indefinitely (e.g. MetaMorpho deposit
             # routing into Morpho Blue markets exercises hundreds of storage
-            # slots). VIB-3295. Surface the hang as a clean timeout so the
-            # caller can fall back to compiler-provided gas_limit.
+            # slots). A timeout leaves this call unmeasured.
             gas_estimate = await asyncio.wait_for(
                 web3.eth.estimate_gas(tx_params),
                 timeout=_ESTIMATE_GAS_TIMEOUT,
             )
+
+            if type(gas_estimate) is not int or gas_estimate <= 0:
+                raise ValueError("RPC returned an invalid gas estimate")
 
             logger.debug(
                 f"Gas estimated (raw): {gas_estimate}",
@@ -291,14 +295,7 @@ class LocalSimulator(Simulator):
             )
             return 0, decoded
         except Exception as e:
-            error_str = str(e)
-            # Try to extract revert reason from common error formats
-            revert_reason = self._parse_revert_reason(error_str)
-            logger.warning(
-                f"Gas estimation failed: {revert_reason}",
-                extra={"to": tx.to, "error": error_str},
-            )
-            return 0, revert_reason
+            raise SimulationError(f"Gas estimation unavailable: {e}") from e
 
     def _parse_revert_reason(self, error_str: str) -> str:
         """Parse revert reason from error string.
@@ -337,9 +334,6 @@ class LocalSimulator(Simulator):
         # Return truncated original error
         return error_str[:200] if len(error_str) > 200 else error_str
 
-    # Approval call selectors that can safely fall back to compiler gas limit when
-    # eth_estimateGas fails (e.g., due to "missing trie node" on Anvil fork).
-    # For these, the compiler-provided gas limit is a reliable upper bound.
     _APPROVAL_SELECTORS: frozenset[str] = frozenset(
         {
             "0x095ea7b3",  # ERC20 approve(address,uint256)
@@ -352,9 +346,7 @@ class LocalSimulator(Simulator):
         """Check if transaction is an approval call.
 
         Handles ERC20 approve, ERC1155 setApprovalForAll, and TraderJoe V2
-        LBPair approveForAll. All are safe to fall back to the compiler-provided
-        gas limit when eth_estimateGas fails (e.g., due to missing trie nodes on
-        Anvil forks). TraderJoe V2 uses approveForAll (0xe584b654) rather than
+        LBPair approveForAll. TraderJoe V2 uses approveForAll (0xe584b654) rather than
         the standard ERC1155 setApprovalForAll (0xa22cb465).
         """
         if not tx.data or len(tx.data) < 10:
@@ -456,7 +448,7 @@ class LocalSimulator(Simulator):
 
         Returns (snapshot_id, warnings). snapshot_id is None when no snapshot
         was created (single-tx bundle, remote RPC, or evm_snapshot failure);
-        warnings then carries the user-facing note for the success result.
+        warnings then explains why dependent simulation is unavailable.
         """
         if tx_count <= 1:
             return None, []
@@ -468,7 +460,7 @@ class LocalSimulator(Simulator):
             snapshot_unavailable = True
             logger.debug(
                 "Skipping evm_snapshot: not a local RPC (evm_snapshot is Anvil-only). "
-                "Proceeding with gas estimation only."
+                "Dependent bundle simulation is unavailable."
             )
         else:
             try:
@@ -483,28 +475,26 @@ class LocalSimulator(Simulator):
                     snapshot_unavailable = True
                     logger.warning(
                         "evm_snapshot returned None - snapshot not supported. "
-                        "Proceeding with gas estimation only (no state-mutating execution)."
+                        "Dependent bundle simulation is unavailable."
                     )
             except TimeoutError:
                 snapshot_unavailable = True
                 logger.warning(
                     f"evm_snapshot timed out after {_EVM_SNAPSHOT_TIMEOUT}s. "
-                    "Proceeding with gas estimation only (no state-mutating execution)."
+                    "Dependent bundle simulation is unavailable."
                 )
             except Exception as e:
                 snapshot_unavailable = True
                 logger.warning(
-                    f"evm_snapshot failed (unexpected on Anvil): {e}. "
-                    "Proceeding with gas estimation only (no state-mutating execution)."
+                    f"evm_snapshot failed (unexpected on Anvil): {e}. Dependent bundle simulation is unavailable."
                 )
 
         # Add warning to result when snapshot is unavailable for multi-tx bundles
         warnings: list[str] = []
         if snapshot_unavailable:
             warnings.append(
-                "Snapshot unavailable: multi-tx simulation ran without state setup. "
-                "Gas estimates for later transactions may be inaccurate if they depend on "
-                "earlier transactions (e.g., approvals). Consider using an Anvil fork."
+                "Snapshot unavailable: dependent transactions were not simulated. "
+                "Use a sequential simulation backend or a managed Anvil fork."
             )
         return snapshot_id, warnings
 
@@ -579,31 +569,6 @@ class LocalSimulator(Simulator):
             revert_reason=f"{prefix} {index + 1} execution failed: {exec_error}",
         )
 
-    def _assign_compiler_gas_without_state_setup(
-        self,
-        tx: UnsignedTransaction,
-        index: int,
-        tx_count: int,
-        gas_estimates: list[int],
-    ) -> None:
-        """Use the compiler gas_limit for a non-first bundle tx when no snapshot exists.
-
-        Without a snapshot the earlier txs were never executed, so the state this
-        tx depends on (an allowance, a freshly minted position) is absent and
-        eth_estimateGas would revert on the missing dependency instead of
-        measuring the tx. The compiler limit is the only honest number here.
-        When a snapshot exists the earlier txs HAVE been executed and the
-        dependent tx is estimated like any other; a static limit there is a
-        real gas ceiling that large swaps exceed (ALM-8811).
-        """
-        fallback_gas = tx.gas_limit if tx.gas_limit and tx.gas_limit > 0 else 300_000
-        gas_estimates.append(fallback_gas)
-        logger.info(
-            f"Transaction {index + 1}/{tx_count}: skipping estimation (multi-TX dependent, "
-            f"no snapshot), using compiler gas_limit={fallback_gas}",
-            extra={"tx_index": index, "to": tx.to},
-        )
-
     async def _handle_approve_skip(
         self,
         tx: UnsignedTransaction,
@@ -618,12 +583,15 @@ class LocalSimulator(Simulator):
         This avoids hangs caused by Anvil failing to fetch contract storage
         (e.g., TraderJoe V2 LBPair on Avalanche — approveForAll hangs
         indefinitely while Anvil tries to retrieve hundreds of bin storage
-        slots). Approve gas is well-known (~30-55K) so compiler limits are safe.
+        slots). The approval must execute inside the reversible snapshot;
+        single or terminal approvals still require estimation.
 
         Returns (handled, failure): (False, None) when the tx has no usable
         gas_limit and must fall through to estimation; (True, None) when the
         skip succeeded; (True, result) when state-setup execution failed.
         """
+        if snapshot_id is None or is_last:
+            return False, None
         if not tx.gas_limit or tx.gas_limit <= 0:
             logger.warning(
                 f"Transaction {index + 1}/{tx_count}: approve TX but no compiler gas_limit, "
@@ -634,7 +602,7 @@ class LocalSimulator(Simulator):
 
         gas_estimates.append(tx.gas_limit)
         logger.info(
-            f"Transaction {index + 1}/{tx_count}: approve TX, skipping simulation, "
+            f"Transaction {index + 1}/{tx_count}: executing approval in snapshot, "
             f"using compiler gas_limit={tx.gas_limit}",
             extra={"tx_index": index, "to": tx.to, "gas_limit": tx.gas_limit},
         )
@@ -646,56 +614,27 @@ class LocalSimulator(Simulator):
                 return True, failure
         return True, None
 
-    async def _estimate_with_fallbacks(
+    async def _estimate_measured_gas(
         self,
         tx: UnsignedTransaction,
         index: int,
         tx_count: int,
         gas_estimates: list[int],
     ) -> tuple[int, SimulationResult | None]:
-        """Estimate gas for one tx, applying the approve and timeout fallbacks.
+        """Estimate gas without substituting a compiler limit for failed evaluation.
 
         Returns (gas_estimate, failure). failure is None on success; on
         failure the gas estimate is meaningless and must be discarded.
         """
-        gas_estimate, error = await self._estimate_gas(tx)
-
-        if error and self._is_approve_tx(tx):
-            # Approve fallback: if eth_estimateGas fails for approve calls
-            # (e.g., proxy contracts like Avalanche USDC), fall back to the
-            # connector-provided gas_limit from the original transaction.
-            if not tx.gas_limit or tx.gas_limit <= 0:
-                logger.warning(
-                    f"Transaction {index + 1}/{tx_count}: approve eth_estimateGas failed "
-                    "and tx.gas_limit is missing/zero",
-                    extra={"tx_index": index, "to": tx.to},
-                )
-                return 0, SimulationResult(
-                    success=False,
-                    simulated=True,
-                    gas_estimates=gas_estimates,
-                    revert_reason=error,
-                )
-            gas_estimate = tx.gas_limit
-            error = None
-            logger.info(
-                f"Transaction {index + 1}/{tx_count}: approve eth_estimateGas failed, "
-                f"using connector-provided gas_limit={gas_estimate}",
-                extra={"tx_index": index, "to": tx.to},
+        try:
+            gas_estimate, error = await self._estimate_gas(tx)
+        except SimulationError as exc:
+            return 0, SimulationResult(
+                success=False,
+                simulated=False,
+                gas_estimates=gas_estimates,
+                revert_reason=str(exc),
             )
-
-        # Timeout fallback: when eth_estimateGas times out (not a real revert), use the
-        # compiler-provided gas_limit instead of failing the simulation. Mirrors the
-        # approve fallback above. Uses the sentinel prefix from _ESTIMATE_GAS_TIMEOUT_MARKER
-        # to distinguish this from transport-layer timeouts (e.g. urllib ReadTimeout).
-        if error and error.startswith(_ESTIMATE_GAS_TIMEOUT_MARKER) and tx.gas_limit and tx.gas_limit > 0:
-            logger.warning(
-                f"Transaction {index + 1}/{tx_count}: eth_estimateGas timed out, "
-                f"falling back to compiler gas_limit={tx.gas_limit}",
-                extra={"tx_index": index, "to": tx.to},
-            )
-            gas_estimate = tx.gas_limit
-            error = None
 
         if error:
             logger.warning(
@@ -704,7 +643,7 @@ class LocalSimulator(Simulator):
             )
             return 0, SimulationResult(
                 success=False,
-                simulated=True,
+                simulated=not error.startswith(_ESTIMATE_GAS_TIMEOUT_MARKER),
                 gas_estimates=gas_estimates,
                 revert_reason=error,
             )
@@ -757,13 +696,23 @@ class LocalSimulator(Simulator):
         snapshot_id, warnings = await self._create_snapshot_if_needed(web3, tx_count)
         is_multi_tx_bundle = tx_count > 1
 
+        if is_multi_tx_bundle and snapshot_id is None:
+            return SimulationResult(
+                success=False,
+                simulated=False,
+                revert_reason="Dependent transactions require sequential simulation; RPC snapshot support is unavailable",
+                warnings=warnings,
+                simulator_name=self._name,
+                evidence={
+                    "method": "eth_estimateGas",
+                    "evaluated_indices": [],
+                    "skipped_indices": list(range(tx_count)),
+                },
+            )
+
         try:
             for i, tx in enumerate(txs):
                 is_last = i == tx_count - 1
-
-                if is_multi_tx_bundle and i > 0 and snapshot_id is None:
-                    self._assign_compiler_gas_without_state_setup(tx, i, tx_count, gas_estimates)
-                    continue
 
                 if self._is_approve_tx(tx):
                     handled, failure = await self._handle_approve_skip(
@@ -774,7 +723,7 @@ class LocalSimulator(Simulator):
                     if handled:
                         continue
 
-                gas_estimate, failure = await self._estimate_with_fallbacks(tx, i, tx_count, gas_estimates)
+                gas_estimate, failure = await self._estimate_measured_gas(tx, i, tx_count, gas_estimates)
                 if failure is not None:
                     return failure
 

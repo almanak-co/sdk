@@ -509,14 +509,14 @@ class ManagedGateway:
     def _parse_anvil_funding_for_chain(
         self,
         chain: str,
-    ) -> tuple[str | None, Decimal, dict[str, Decimal]]:
+    ) -> tuple[str | None, Decimal | None, dict[str, Decimal]]:
         """Validate and normalize one chain's native/address funding section."""
         from almanak.core.chains import ChainRegistry
         from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 
         descriptor = ChainRegistry.try_resolve(chain)
         chain_native = descriptor.native.symbol if descriptor is not None else None
-        native_amount = Decimal("0")
+        native_amount: Decimal | None = None
         erc20_tokens: dict[str, Decimal] = {}
         for token_ref, amount in self._anvil_funding_for_chain(chain).items():
             if not isinstance(token_ref, str):
@@ -525,8 +525,10 @@ class ManagedGateway:
                 parsed = Decimal(str(amount))
             except Exception as e:
                 raise ValueError(f"Invalid anvil_funding value for {token_ref}: {amount!r}") from e
+            if not parsed.is_finite() or parsed < 0:
+                raise ValueError(f"anvil_funding amount for {token_ref} must be finite and nonnegative")
             if token_ref.lower() == NATIVE_SENTINEL.lower():
-                native_amount += parsed
+                native_amount = (native_amount or Decimal("0")) + parsed
             elif _EVM_TOKEN_ADDRESS_RE.fullmatch(token_ref):
                 if int(token_ref, 16) == 0:
                     # ALM-3269/3270/3288: the zero address unambiguously means
@@ -544,7 +546,7 @@ class ManagedGateway:
                         token_ref,
                         NATIVE_SENTINEL,
                     )
-                    native_amount += parsed
+                    native_amount = (native_amount or Decimal("0")) + parsed
                     continue
                 normalized_address = token_ref.lower()
                 erc20_tokens[normalized_address] = erc20_tokens.get(normalized_address, Decimal("0")) + parsed
@@ -625,28 +627,19 @@ class ManagedGateway:
             try:
                 chain_native, native_amount, erc20_tokens = parsed_funding[chain]
 
-                # VIB-3752: ensure baseline native gas funding even when the
-                # strategy's config.json omits anvil_funding for this chain.
-                # Without this, the wallet boots with 0 native balance and the
-                # first SWAP/APPROVE bounces with "Insufficient funds for gas".
-                #
-                # Apply unconditionally on chain_native lookup: ``manager.fund_wallet``
-                # uses ``anvil_setBalance`` which is symbol-agnostic — funding
-                # works correctly even on chains not yet in CHAIN_NATIVE_SYMBOL.
-                # Only top-up — never reduce a user-specified amount.
-                applied_default = False
-                if native_amount < self.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT:
+                # A default supplies omitted gas funding; explicit amounts,
+                # including zero, are exact test inputs and must not be raised.
+                applied_default = native_amount is None
+                if native_amount is None:
                     native_amount = self.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT
-                    applied_default = True
 
-                if native_amount > 0:
-                    native_funded = await manager.fund_wallet(wallet, native_amount)
-                    suffix = " (default)" if applied_default else ""
-                    native_label = chain_native or f"<unknown native for {chain}>"
-                    if native_funded:
-                        logger.info(f"Funded native {native_label}: {native_amount}{suffix}")
-                    else:
-                        funding_failures.append(f"{chain}: could not fund native gas asset {native_label}")
+                native_funded = await manager.fund_wallet(wallet, native_amount)
+                suffix = " (default)" if applied_default else ""
+                native_label = chain_native or f"<unknown native for {chain}>"
+                if native_funded:
+                    logger.info(f"Funded native {native_label}: {native_amount}{suffix}")
+                else:
+                    funding_failures.append(f"{chain}: could not fund native gas asset {native_label}")
                 if erc20_tokens:
                     # VIB-2570: Log each ERC20 token being funded so failures are traceable
                     logger.info(f"Funding ERC20 tokens on {chain}: {list(erc20_tokens.keys())}")

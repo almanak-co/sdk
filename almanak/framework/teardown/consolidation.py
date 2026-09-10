@@ -627,12 +627,34 @@ def _skip(
     )
 
 
+def _token_matches(token: str, candidates: Iterable[str], chain: str | None) -> bool:
+    from almanak.framework.data.tokens.exceptions import TokenResolutionError
+    from almanak.framework.data.tokens.identity import canonicalize_token_identity
+
+    candidates = tuple(candidates)
+    if token in candidates:
+        return True
+    if not chain:
+        return token.upper() in {candidate.upper() for candidate in candidates}
+    try:
+        identity = canonicalize_token_identity(token, chain)
+    except TokenResolutionError:
+        return False
+    for candidate in candidates:
+        try:
+            if canonicalize_token_identity(candidate, chain) == identity:
+                return True
+        except TokenResolutionError:
+            continue
+    return False
+
+
 def _decide_token(
     token: str,
     *,
     market: Any,
     chain: str | None,
-    targets_upper: set[str],
+    target_tokens: set[str],
     native_symbol: str,
     keep_tokens: set[str],
     min_swap_value: Decimal,
@@ -643,9 +665,8 @@ def _decide_token(
     *token* keeps its ORIGINAL casing — it feeds ``market.balance()`` /
     ``market.price()`` here and ``Intent.swap(from_token=...)`` in the
     caller; canonical registry symbols can be mixed-case (``USDC.e``).
-    Membership comparisons fold to upper.
+    Membership comparisons use chain-scoped token identities.
     """
-    token_upper = token.upper()
     if not _is_consolidatable_symbol(token):
         # VIB-5393 (Case B) defense-in-depth: a pool-pair label (e.g.
         # "WAVAX/USDC") is not a swappable token. The universe derivation
@@ -653,13 +674,13 @@ def _decide_token(
         # market.balance() even if a caller passes a raw universe — that read
         # can only fail and emit a misleading balance_unavailable skip.
         return _skip(token, "not_a_token")
-    if token_upper in targets_upper:
+    if _token_matches(token, target_tokens, chain):
         return _skip(token, "target")
-    if token_upper == native_symbol:
+    if _token_matches(token, (native_symbol,), chain):
         # Wrapped native (WETH/WBNB/...) is a distinct symbol and IS
         # swappable — only the raw gas token is protected.
         return _skip(token, "native_gas")
-    if token_upper in keep_tokens:
+    if _token_matches(token, keep_tokens, chain):
         return _skip(token, "keep_token")
     if market is None:
         warnings.append(f"no market snapshot — cannot read {token} balance; skipping")
@@ -799,7 +820,7 @@ def plan_consolidation(
     )
     if targets_by_upper is None:
         return ConsolidationPlan(intents=[], decisions=[], warnings=warnings)
-    targets_upper = set(targets_by_upper)
+    target_tokens = set(targets_by_upper.values())
 
     # Deterministic primary target: honour the configured target_token when it
     # is one of the resolved targets (always true for target_token policy);
@@ -811,9 +832,7 @@ def plan_consolidation(
     from almanak.framework.accounting.gas_pricing import native_token_for_chain
 
     native_symbol = native_token_for_chain(chain or "").upper()
-    keep_tokens = {
-        k.upper() for k in (getattr(token_consolidation_cfg, "keep_tokens", None) or []) if isinstance(k, str) and k
-    }
+    keep_tokens = {k for k in (getattr(token_consolidation_cfg, "keep_tokens", None) or []) if isinstance(k, str) and k}
     min_swap_value = _coerce_decimal(getattr(token_consolidation_cfg, "min_swap_value_usd", None))
     if min_swap_value is None:
         min_swap_value = Decimal("5")
@@ -843,7 +862,7 @@ def plan_consolidation(
             token,
             market=market,
             chain=chain,
-            targets_upper=targets_upper,
+            target_tokens=target_tokens,
             native_symbol=native_symbol,
             keep_tokens=keep_tokens,
             min_swap_value=min_swap_value,

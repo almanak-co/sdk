@@ -111,6 +111,9 @@ class SwapAmounts:
     # set this to RECEIPT_DECODED or BALANCE_DELTA when they have a
     # measured value.
     slippage_source: SlippageSource = SlippageSource.NONE
+    # Receipt-bound addresses preserve price identity independently of display symbols.
+    token_in_address: str | None = None
+    token_out_address: str | None = None
 
     # Aliases: amount_in_human / amount_out_human (VIB-295)
     # Strategy authors naturally reach for _human instead of _decimal.
@@ -139,6 +142,8 @@ class SwapAmounts:
             "expected_out_decimal": str(self.expected_out_decimal) if self.expected_out_decimal is not None else None,
             "token_in": self.token_in,
             "token_out": self.token_out,
+            "token_in_address": self.token_in_address,
+            "token_out_address": self.token_out_address,
             "amount_in_decimal_resolved": self.amount_in_decimal_resolved,
             "amount_out_decimal_resolved": self.amount_out_decimal_resolved,
         }

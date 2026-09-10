@@ -6,6 +6,7 @@ from typing import Any
 
 from almanak.core.rpc_network import Network
 from almanak.framework.venues import VenueReferenceNamespace, VenueTargetRef
+from almanak.framework.venues.provider import GatewayBlockIdentity
 from almanak.gateway.utils.rpc_provider import get_cached_web3
 
 
@@ -82,6 +83,21 @@ class GatewayRpcVenueVerificationGateway:
         if block_hash is None:
             raise ValueError(f"gateway did not return block {block_number} hash on {chain}")
         return "0x" + bytes(block_hash).hex().lower()
+
+    def block_identity(self, *, chain: str, block_number: int) -> GatewayBlockIdentity:
+        self._require_chain(chain)
+        block: Any = self._web3.eth.get_block(block_number)
+        observed_number = block.get("number")
+        if type(observed_number) is not int or observed_number != block_number:
+            raise ValueError(f"gateway returned block {observed_number} for requested block {block_number}")
+        block_hash = block.get("hash")
+        if not isinstance(block_hash, bytes):
+            raise ValueError(f"gateway block {block_number} has malformed hash")
+        return GatewayBlockIdentity(
+            number=observed_number,
+            block_hash="0x" + bytes(block_hash).hex(),
+            timestamp=block.get("timestamp"),
+        )
 
 
 __all__ = ["GatewayRpcVenueVerificationGateway"]

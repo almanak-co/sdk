@@ -28,6 +28,7 @@ async def test_connector_refusal_emits_validation_failure(error, expected):
     orchestrator.chain = "base"
     orchestrator.signer = Mock()
     orchestrator.operation_observer_factory = None
+    orchestrator.managed_fork = False
     orchestrator._emit_event = Mock()
     orchestrator._complete_session = Mock()
     context = ExecutionContext(deployment_id="deployment:test", chain="base")
@@ -47,5 +48,10 @@ async def test_connector_refusal_emits_validation_failure(error, expected):
     assert result.error == expected
     orchestrator._complete_session.assert_called_once_with(state.session, success=False, error=expected)
     orchestrator._emit_event.assert_called_once_with(
-        ExecutionEventType.RISK_BLOCKED, context, {"violations": [expected]}
+        ExecutionEventType.RISK_BLOCKED,
+        context,
+        {
+            "violations": [expected],
+            "connector_validation": {"status": "refused", "phase": ExecutionPhase.VALIDATION.value, "error": str(error)},
+        },
     )

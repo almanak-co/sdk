@@ -1,0 +1,15 @@
+{
+  "source_repository": "https://github.com/whetstoneresearch/doppler",
+  "source_commit": "bda077cf05c834f3bb5eb311f5b86376910d7912",
+  "source_path": "src/initializers/DopplerHookInitializer.sol",
+  "compiler": "0.8.26+commit.8a97fa7a",
+  "via_ir": true,
+  "evm_version": "cancun",
+  "optimizer_runs": 0,
+  "append_cbor": false,
+  "runtime_keccak": "0xc41a91106002f15bf70ae266824317f3f3ac638ac72ca5253bae395fa47ee631",
+  "runtime_bytes": 25533,
+  "chain_id": 4663,
+  "deployment": "0x4e3468951d49f2eea976ed0d6e75ffcb44a9a544",
+  "scope": "Reproduced deployed runtime for the registered Robinhood event-only liquidity profile; active swap callbacks require separate admission."
+}

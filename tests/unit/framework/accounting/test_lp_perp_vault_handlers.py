@@ -1435,7 +1435,12 @@ class TestHandleLpCostBasisUsd:
             token_out="WETH",
             amount_in="100.0",
             amount_out="0.05",
-            price_inputs_json=json.dumps({"USDC": "1.00", "WETH": "3000.00"}),
+            price_inputs_json=json.dumps(
+                {
+                    "USDC": {"price_usd": "1.00", "confidence": "HIGH"},
+                    "WETH": {"price_usd": "3000.00", "confidence": "HIGH"},
+                }
+            ),
         )
 
         result = handle_lp(outbox_row, ledger_row)
@@ -1499,7 +1504,7 @@ class TestHandleLpCostBasisUsd:
             token_out="USDC",
             amount_in="0",
             amount_out="50.0",
-            price_inputs_json=json.dumps({"USDC": "1.00"}),
+            price_inputs_json=json.dumps({"USDC": {"price_usd": "1.00", "confidence": "HIGH"}}),
         )
 
         result = handle_lp(outbox_row, ledger_row)

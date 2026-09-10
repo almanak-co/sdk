@@ -11,6 +11,7 @@ from almanak.core.asset_identity import AssetIdentity
 from almanak.core.chains import ChainRegistry
 from almanak.framework.primitives.types import Primitive
 
+from .provider import GatewayBlockIdentity
 from .types import VenueBindingComponent, VenueTargetRef, VenueTargetRole, VenueVerificationResult
 
 _IDENTITY_ROLES = frozenset(
@@ -45,6 +46,9 @@ class VenueVerificationGateway(Protocol):
 
     def block_hash(self, *, chain: str, block_number: int) -> str:
         """Return the canonical hash for a gateway-observed block."""
+
+    def block_identity(self, *, chain: str, block_number: int) -> GatewayBlockIdentity:
+        """Return number, hash and timestamp from the same pinned block header."""
 
 
 @dataclass(frozen=True, slots=True)

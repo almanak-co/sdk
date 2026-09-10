@@ -15,6 +15,7 @@ from almanak.framework.accounting.category_handlers._price_helpers import (
     load_raw_price_inputs,
     parse_price_inputs,
 )
+from almanak.framework.accounting.category_handlers.lp_confidence import retain_lp_price_confidence
 from almanak.framework.accounting.ids import make_accounting_event_id
 from almanak.framework.accounting.lp_accounting import (
     LPAccountingEvent,
@@ -2090,7 +2091,7 @@ def handle_lp(
         ledger_entry_id=ledger_entry_id,
     )
 
-    return LPAccountingEvent(
+    event = LPAccountingEvent(
         identity=identity,
         event_type=event_type,
         position_key=position_key,
@@ -2123,6 +2124,8 @@ def handle_lp(
         # ALM-3190 — exact N-coin identities for replay-safe peg gating.
         coin_addresses=getattr(lp_data, "coin_addresses", None),
     )
+
+    return retain_lp_price_confidence(event, ledger_row.get("price_inputs_json"), lp_data, prior_open_payload)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

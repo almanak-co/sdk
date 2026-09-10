@@ -3835,6 +3835,7 @@ class StrategyRunner:
         chain: str | None = None,
         wallet_address: str | None = None,
         ledger_entry_id: str | None = None,
+        compilation_evidence: dict[str, Any] | None = None,
     ) -> str | None:
         """Returns the persisted LedgerEntry.id on success, None on non-live failure."""
         """Write a structured trade record to the transaction ledger.
@@ -3924,6 +3925,7 @@ class StrategyRunner:
                 lp_open_native_amounts=lp_open_native_amounts,
                 v4_lp_close_native_principal=v4_lp_close_native_principal,
                 lp_close_native_amounts=lp_close_native_amounts,
+                compilation_evidence=compilation_evidence,
             )
 
             if ledger_entry_id is not None:
@@ -10632,23 +10634,30 @@ class StrategyRunner:
         # state.price_oracle is the right source so gas_usd lands populated.
         # Accounting-AttemptNo17 §A4: pass pre_state. No post-state since
         # this path means execution itself failed (or was never attempted).
-        # CodeRabbit review: backfill ``last_execution_result.error`` BEFORE
-        # building ``timeline_result`` and writing the ledger so both surfaces
-        # see the terminal state-machine reason (was previously backfilled
-        # only after the timeline emit, leaving the activity feed bucketed as
-        # "unknown error" while the ledger had the correct text on the same
-        # iteration).
-        if last_execution_result is not None and not getattr(last_execution_result, "error", ""):
+        # A refused recompile must not relabel the prior execution's error.
+        compilation_evidence = getattr(state_machine, "compilation_evidence", None)
+        if not isinstance(compilation_evidence, dict):
+            compilation_evidence = None
+        if (
+            compilation_evidence is None
+            and last_execution_result is not None
+            and not getattr(last_execution_result, "error", "")
+        ):
             last_execution_result.error = error_msg
-        timeline_result = last_execution_result or SimpleNamespace(error=error_msg)
         if last_execution_result is not None and state.failed_attempt_ledger_id is None:
             await self._single_chain_persist_failed_attempt(state, last_execution_result)
-        failed_ledger_id = state.failed_attempt_ledger_id or await self._write_ledger_entry(
+        # A later refused recompile is a separate unexecuted attempt; never
+        # replace the immutable receipts and costs of an earlier failed execution.
+        terminal_result = None if compilation_evidence is not None else last_execution_result
+        timeline_result = terminal_result or SimpleNamespace(error=error_msg)
+        previous_ledger_id = None if compilation_evidence is not None else state.failed_attempt_ledger_id
+        failed_ledger_id = previous_ledger_id or await self._write_ledger_entry(
             strategy,
             intent,
-            result=last_execution_result,
+            result=terminal_result,
             success=False,
             error=error_msg,
+            compilation_evidence=compilation_evidence,
             # VIB-3804 hardening: even on the post-retry FAILED path, gas
             # may have been burned by the attempt(s). Refresh+merge so the
             # ledger row carries the full oracle and ``gas_usd`` is non-
@@ -10703,10 +10712,7 @@ class StrategyRunner:
         if last_execution_result:
             await self._handle_execution_error(strategy, last_execution_result)
 
-        # Notify strategy of failed execution.
-        # ``last_execution_result.error`` is already backfilled above (before
-        # the ledger/timeline writes), so this `or SimpleNamespace(...)` only
-        # catches the pre-execution path where last_execution_result is None.
+        # Preserve prior execution receipts for strategy recovery callbacks.
         callback_result = last_execution_result or SimpleNamespace(error=error_msg)
         self._notify_intent_executed(strategy, intent, False, callback_result)
         self._invoke_optional_hook(

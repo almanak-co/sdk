@@ -2285,12 +2285,23 @@ class MarketSnapshot:
         """
         if self._balance_provider is None:
             return
-        resolved = self._resolve_protocol_variant(token, protocol)
-        stale_keys = [key for key in self._balance_cache if key == resolved or key.startswith(f"{resolved}@")]
+        # Match balance()/set_balance() identity normalization, including
+        # address casing, native aliases and explicitly registered aliases.
+        # This API has no chain selector, so evict the token on every
+        # configured chain, preserving its existing cross-chain semantics.
+        resolved_keys = {
+            self._resolve_protocol_variant(self._token_cache_key(token, chain), protocol) for chain in self.chains
+        }
+        stale_keys = [
+            key
+            for key in self._balance_cache
+            if any(key == resolved or key.startswith(f"{resolved}@") for resolved in resolved_keys)
+        ]
         for key in stale_keys:
             self._balance_cache.pop(key, None)
             self._balance_usd_unmeasured.discard(key)
-        self._balances.pop(resolved, None)
+        for resolved in resolved_keys:
+            self._balances.pop(resolved, None)
 
     def invalidate_balances(self) -> None:
         """Evict ALL memoized wallet balances so the next :meth:`balance` call

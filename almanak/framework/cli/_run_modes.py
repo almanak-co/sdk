@@ -449,8 +449,20 @@ def _execute_run_mode(
     managed_gateway: Any,
     test_inject: Any | None = None,
     test_asset_policy: str | None = None,
+    confirm_start: bool = False,
 ) -> int:
     """Dispatch to the lifecycle, once, or continuous execution lane."""
+    if confirm_start:
+        try:
+            click.confirm(
+                f"Wallet setup complete for {strategy_instance.deployment_id}. Start strategy execution?",
+                default=False,
+                abort=True,
+            )
+        except click.Abort:
+            asyncio.run(cleanup_fn())
+            return 2
+
     if test_actions is not None:
         return _run_test_lifecycle(
             runner=runner,

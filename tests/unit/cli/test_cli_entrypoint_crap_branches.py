@@ -104,6 +104,7 @@ def test_strategy_run_forwards_exact_defaults(tmp_path: Path, strategy_run_harne
         "anvil_ports": (),
         "keep_anvil": False,
         "reference_scenario": None,
+        "confirm_start": False,
     }
 
 
@@ -162,6 +163,7 @@ def test_strategy_run_forwards_every_explicit_option(
         "--keep-anvil",
         "--reference-scenario",
         str(reference_file),
+        "--confirm-start",
     )
 
     assert result.exit_code == 0
@@ -196,6 +198,7 @@ def test_strategy_run_forwards_every_explicit_option(
         "anvil_ports": ("arbitrum=8545",),
         "keep_anvil": True,
         "reference_scenario": str(reference_file),
+        "confirm_start": True,
     }
 
 

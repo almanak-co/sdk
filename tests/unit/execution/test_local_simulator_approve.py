@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from hexbytes import HexBytes
+from web3.exceptions import ContractLogicError
 
 from almanak.framework.execution.interfaces import (
     TransactionType,
@@ -71,8 +72,7 @@ class TestApproveSkipsSimulation:
     """
 
     @pytest.mark.asyncio
-    async def test_approve_skips_estimate_gas_uses_compiler_limit(self):
-        """Approve with gas_limit should skip eth_estimateGas entirely."""
+    async def test_single_approval_requires_measured_estimate(self):
         sim = LocalSimulator(rpc_url="http://localhost:8545", gas_buffer=1.0)
 
         mock_web3 = MagicMock()
@@ -84,14 +84,11 @@ class TestApproveSkipsSimulation:
         result = await sim.simulate([tx], chain="ethereum")
 
         assert result.success
-        # Should use compiler gas_limit (65000), NOT the estimate (46000)
-        assert result.gas_estimates == [65000]
-        # eth_estimateGas should NOT be called
-        mock_web3.eth.estimate_gas.assert_not_called()
+        assert result.gas_estimates == [46000]
+        mock_web3.eth.estimate_gas.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_approve_skip_uses_exact_compiler_value(self):
-        """Approve skip should use the exact compiler gas_limit value."""
+    async def test_single_approval_does_not_report_compiler_gas_as_measured(self):
         sim = LocalSimulator(rpc_url="http://localhost:8545", gas_buffer=1.0)
 
         mock_web3 = MagicMock()
@@ -99,13 +96,12 @@ class TestApproveSkipsSimulation:
         mock_web3.to_checksum_address = lambda x: x
         sim._web3 = mock_web3
 
-        # Use a distinctive value to prove it comes from the compiler
         tx = _make_approve_tx(gas_limit=123456)
         result = await sim.simulate([tx], chain="ethereum")
 
         assert result.success
-        assert result.gas_estimates == [123456]
-        mock_web3.eth.estimate_gas.assert_not_called()
+        assert result.gas_estimates == [52000]
+        mock_web3.eth.estimate_gas.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_non_approve_tx_not_skipped(self):
@@ -135,12 +131,10 @@ class TestApproveFallback:
     """When approve has no gas_limit and eth_estimateGas also fails, fallback handling."""
 
     @pytest.mark.asyncio
-    async def test_approve_with_gas_limit_never_needs_estimation_fallback(self):
-        """Approve with gas_limit skips estimation entirely — no fallback needed."""
+    async def test_single_approval_error_cannot_use_compiler_limit(self):
         sim = LocalSimulator(rpc_url="http://localhost:8545", gas_buffer=1.0)
 
         mock_web3 = MagicMock()
-        # Even if estimation would fail, it should never be called
         mock_web3.eth.estimate_gas = AsyncMock(side_effect=Exception("would hang"))
         mock_web3.to_checksum_address = lambda x: x
         sim._web3 = mock_web3
@@ -149,9 +143,9 @@ class TestApproveFallback:
         tx = _make_approve_tx(gas_limit=connector_gas_limit)
         result = await sim.simulate([tx], chain="avalanche")
 
-        assert result.success
-        assert result.gas_estimates == [connector_gas_limit]
-        mock_web3.eth.estimate_gas.assert_not_called()
+        assert not result.success
+        assert result.gas_estimates == []
+        mock_web3.eth.estimate_gas.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_non_approve_failure_still_fails(self):
@@ -235,8 +229,7 @@ class TestERC1155SetApprovalForAll:
         assert sim._is_approve_tx(tx)
 
     @pytest.mark.asyncio
-    async def test_set_approval_for_all_skips_estimation(self):
-        """setApprovalForAll with gas_limit should skip eth_estimateGas."""
+    async def test_single_set_approval_for_all_requires_estimation(self):
         sim = LocalSimulator(rpc_url="http://localhost:8545")
 
         mock_web3 = MagicMock()
@@ -248,8 +241,8 @@ class TestERC1155SetApprovalForAll:
         result = await sim.simulate([tx], chain="avalanche")
 
         assert result.success
-        assert result.gas_estimates == [65000]
-        mock_web3.eth.estimate_gas.assert_not_called()
+        assert result.gas_estimates == [48000]
+        mock_web3.eth.estimate_gas.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_set_approval_for_all_then_remove_liquidity(self):
@@ -289,12 +282,10 @@ class TestTraderJoeV2ApproveForAll:
         assert sim._is_approve_tx(tx)
 
     @pytest.mark.asyncio
-    async def test_traderjoe_approve_for_all_skips_estimation(self):
-        """approveForAll with gas_limit skips eth_estimateGas (the VIB-422 fix)."""
+    async def test_single_traderjoe_approval_error_refuses(self):
         sim = LocalSimulator(rpc_url="http://localhost:8545")
 
         mock_web3 = MagicMock()
-        # This would hang indefinitely on Avalanche — but it should never be called
         mock_web3.eth.estimate_gas = AsyncMock(side_effect=Exception("would hang"))
         mock_web3.to_checksum_address = lambda x: x
         sim._web3 = mock_web3
@@ -302,9 +293,9 @@ class TestTraderJoeV2ApproveForAll:
         tx = _make_traderjoe_approve_for_all_tx(gas_limit=50_000)
         result = await sim.simulate([tx], chain="avalanche")
 
-        assert result.success
-        assert result.gas_estimates == [50_000]
-        mock_web3.eth.estimate_gas.assert_not_called()
+        assert not result.success
+        assert result.gas_estimates == []
+        mock_web3.eth.estimate_gas.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_traderjoe_approve_for_all_then_remove_liquidity(self):
@@ -383,8 +374,7 @@ class TestMultiTxSimulationSkip:
         assert mock_web3.eth.estimate_gas.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_multi_tx_without_snapshot_uses_compiler_gas_limits(self):
-        """Without a snapshot nothing is executed, so the dependent TX keeps its compiler gas_limit."""
+    async def test_multi_tx_without_snapshot_cannot_claim_simulation(self):
         sim = LocalSimulator(rpc_url="http://localhost:8545")
 
         mock_web3 = MagicMock()
@@ -400,8 +390,9 @@ class TestMultiTxSimulationSkip:
 
         result = await sim.simulate([tx1, tx2], chain="arbitrum")
 
-        assert result.success
-        assert result.gas_estimates == [65000, 884_000]
+        assert not result.success
+        assert not result.simulated
+        assert result.gas_estimates == []
         mock_web3.eth.estimate_gas.assert_not_called()
         mock_web3.eth.send_transaction.assert_not_called()
 
@@ -541,7 +532,7 @@ class TestDependentTxEstimatedAfterStateSetup:
         assert estimated["data"] == HexBytes(swap_tx.data)
 
     @pytest.mark.asyncio
-    async def test_dependent_estimate_never_below_zero_falls_to_compiler_only_without_snapshot(self):
+    async def test_dependent_bundle_without_snapshot_is_unmeasured(self):
         sim = LocalSimulator(rpc_url="http://localhost:8545")
         mock_web3, calls = self._bundle_web3(estimate_return=1_936_985, snapshot=None)
         sim._web3 = mock_web3
@@ -551,8 +542,10 @@ class TestDependentTxEstimatedAfterStateSetup:
 
         result = await sim.simulate([approve_tx, swap_tx], chain="arbitrum")
 
-        assert result.success
-        assert result.gas_estimates == [120_000, 300_000]
+        assert not result.success
+        assert not result.simulated
+        assert result.gas_estimates == []
+        assert result.evidence["skipped_indices"] == [0, 1]
         assert calls == []
         assert any("Snapshot unavailable" in w for w in result.warnings)
 
@@ -560,7 +553,7 @@ class TestDependentTxEstimatedAfterStateSetup:
     async def test_dependent_estimate_revert_fails_closed(self):
         """A dependent TX that reverts against the advanced state is not sent blind."""
         sim = LocalSimulator(rpc_url="http://localhost:8545")
-        mock_web3, calls = self._bundle_web3(estimate_return=Exception("execution reverted: STF"))
+        mock_web3, calls = self._bundle_web3(estimate_return=ContractLogicError("execution reverted: STF"))
         sim._web3 = mock_web3
 
         approve_tx = _make_approve_tx(gas_limit=120_000)
@@ -575,8 +568,7 @@ class TestDependentTxEstimatedAfterStateSetup:
         assert calls == ["send", "estimate"]
 
     @pytest.mark.asyncio
-    async def test_dependent_estimate_timeout_keeps_compiler_limit(self):
-        """An eth_estimateGas timeout is not a revert: the compiler limit stands."""
+    async def test_dependent_estimate_timeout_is_unmeasured(self):
         sim = LocalSimulator(rpc_url="http://localhost:8545")
         mock_web3, calls = self._bundle_web3(estimate_return=TimeoutError())
         sim._web3 = mock_web3
@@ -586,8 +578,9 @@ class TestDependentTxEstimatedAfterStateSetup:
 
         result = await sim.simulate([approve_tx, swap_tx], chain="arbitrum")
 
-        assert result.success
-        assert result.gas_estimates == [120_000, 300_000]
+        assert not result.success
+        assert not result.simulated
+        assert result.gas_estimates == [120_000]
 
     @pytest.mark.asyncio
     async def test_middle_dependent_tx_state_setup_uses_its_estimate(self):

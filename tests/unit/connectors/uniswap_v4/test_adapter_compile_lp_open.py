@@ -1,9 +1,4 @@
-"""VIB-4475 regression: ensure the V0 scope guards do not produce false positives.
-
-The V0 hookless ERC20-ERC20 happy path must continue to compile cleanly after
-the hooks≠0 / native-ETH guards land. A regression here would mean the guard
-widened past its intended scope.
-"""
+"""Hook admission preserves hookless LP compilation and explicit pool identity."""
 
 from __future__ import annotations
 
@@ -15,8 +10,8 @@ import pytest
 from almanak.connectors.uniswap_v4.adapter import (
     UniswapV4Adapter,
     UniswapV4Config,
-    UniswapV4UnsupportedPoolError,
 )
+from almanak.connectors.uniswap_v4.behavior import admit_hook
 
 
 def _make_resolver():
@@ -47,7 +42,7 @@ def adapter():
 
 
 def test_hookless_erc20_erc20_pool_compiles(adapter):
-    """The V0 supported shape (no hooks, both ERC20) must compile to a non-empty bundle."""
+    """Hookless ERC20 pools compile to a non-empty bundle."""
     from almanak.framework.intents.vocabulary import LPOpenIntent
 
     intent = LPOpenIntent(
@@ -62,19 +57,17 @@ def test_hookless_erc20_erc20_pool_compiles(adapter):
     )
     price_oracle = {"WETH": Decimal("2000"), "USDC": Decimal("1")}
 
-    # Must NOT raise the V0 guard.
     bundle = adapter.compile_lp_open_intent(intent, price_oracle)
 
     assert bundle.intent_type == "LP_OPEN"
     assert len(bundle.transactions) > 0, "Happy path must produce transactions"
     assert "error" not in bundle.metadata, "Happy path must not soft-error"
     assert bundle.metadata.get("protocol_version") == "v4"
-    # The hooks field on PoolKey should be the zero address for V0.
     assert bundle.metadata.get("hooks") == "0x0000000000000000000000000000000000000000"
 
 
 def test_hookless_with_explicit_zero_hooks_compiles(adapter):
-    """Explicit hooks=0x0 in protocol_params must also pass the guard."""
+    """Explicit zero hooks preserve hookless admission."""
     from almanak.framework.intents.vocabulary import LPOpenIntent
 
     intent = LPOpenIntent(
@@ -97,8 +90,8 @@ def test_hookless_with_explicit_zero_hooks_compiles(adapter):
     assert len(bundle.transactions) > 0
 
 
-def test_guard_does_not_fire_on_erc20_currencies():
-    """The standalone guard helper accepts ERC20-ERC20 hookless input."""
+def test_hookless_erc20_admission_needs_no_gateway():
+    """Hookless admission requires no runtime observations."""
     from types import SimpleNamespace
 
     pool_key = SimpleNamespace(
@@ -107,12 +100,11 @@ def test_guard_does_not_fire_on_erc20_currencies():
         hooks="0x0000000000000000000000000000000000000000",
     )
 
-    # No raise.
-    UniswapV4Adapter._reject_unsupported_v0_pool(pool_key)
+    admit_hook(chain="arbitrum", key=pool_key, operation="lp_open", route="position_manager_eoa", hook_data=b"", gateway=None, block_number=1)
 
 
-def test_guard_fires_on_hooks_via_helper():
-    """Direct unit test of the guard helper for hooks rejection."""
+def test_unreviewed_hook_is_refused():
+    """An active callback requires a reviewed behavior profile."""
     from types import SimpleNamespace
 
     pool_key = SimpleNamespace(
@@ -120,16 +112,12 @@ def test_guard_fires_on_hooks_via_helper():
         currency1="0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
         hooks="0x0000000000000000000000000000000000000800",
     )
-    with pytest.raises(UniswapV4UnsupportedPoolError, match="hook"):
-        UniswapV4Adapter._reject_unsupported_v0_pool(pool_key)
+    with pytest.raises(ValueError, match="No reviewed hook"):
+        admit_hook(chain="arbitrum", key=pool_key, operation="lp_open", route="position_manager_eoa", hook_data=b"", gateway=None, block_number=1)
 
 
-def test_guard_does_not_fire_on_native_currency0():
-    """VIB-4483: native-ETH currency0 is supported — the guard must NOT raise.
-
-    The guard now only rejects hook-bearing pools; native-ETH currency0
-    (currency0 == 0x0) is a supported V4 pool shape.
-    """
+def test_hookless_native_currency_is_admitted():
+    """Native currency identity does not require hook behavior evidence."""
     from types import SimpleNamespace
 
     pool_key = SimpleNamespace(
@@ -137,8 +125,7 @@ def test_guard_does_not_fire_on_native_currency0():
         currency1="0xaf88d065e77c8cc2239327c5edb3a432268e5831",
         hooks="0x0000000000000000000000000000000000000000",
     )
-    # No raise — native-ETH currency0 is in scope (VIB-4483 lifted the guard).
-    UniswapV4Adapter._reject_unsupported_v0_pool(pool_key)
+    admit_hook(chain="arbitrum", key=pool_key, operation="lp_open", route="position_manager_eoa", hook_data=b"", gateway=None, block_number=1)
 
 
 @pytest.mark.parametrize("pool_id", [None, 7, "0x" + "00" * 32])

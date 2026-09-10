@@ -41,6 +41,8 @@ PoolKeyLookup = Callable[[str, str], "PoolKey | None"]
 
 logger = logging.getLogger(__name__)
 
+_ACTIVE_SWAP_CALLBACK_MASK = 0x00CC
+
 
 EVENT_TOPICS: dict[str, str] = {
     # Swap(bytes32,address,int128,int128,uint160,uint128,int24,uint24)
@@ -209,6 +211,7 @@ class UniswapV4ReceiptParser:
         *,
         swap_token_meta: dict[str, dict[str, Any]] | None = None,
         swap_pool_key: dict[str, Any] | None = None,
+        swap_operation: dict[str, Any] | None = None,
     ) -> ParseResult:
         """Decode supported events and build a swap summary when present.
 
@@ -250,6 +253,7 @@ class UniswapV4ReceiptParser:
                 quoted_amount_out,
                 swap_token_meta=swap_token_meta,
                 swap_pool_key=swap_pool_key,
+                swap_operation=swap_operation,
             )
 
         return result
@@ -261,6 +265,7 @@ class UniswapV4ReceiptParser:
         expected_out: Decimal | None = None,
         swap_token_meta: dict[str, dict[str, Any]] | None = None,
         swap_pool_key: dict[str, Any] | None = None,
+        swap_operation: dict[str, Any] | None = None,
     ) -> SwapAmounts | None:
         """Extract swap amounts for ResultEnricher integration.
 
@@ -270,7 +275,9 @@ class UniswapV4ReceiptParser:
         """
         from almanak.framework.execution.extracted_data import SwapAmounts
 
-        parsed = self.parse_receipt(receipt, swap_token_meta=swap_token_meta, swap_pool_key=swap_pool_key)
+        parsed = self.parse_receipt(
+            receipt, swap_token_meta=swap_token_meta, swap_pool_key=swap_pool_key, swap_operation=swap_operation
+        )
         if not parsed.swap_result:
             return None
 
@@ -292,6 +299,8 @@ class UniswapV4ReceiptParser:
             # Ledger and FIFO identity use canonical symbols, not addresses.
             token_in=self._swap_token_symbol(sr.token_in),
             token_out=self._swap_token_symbol(sr.token_out),
+            token_in_address=self._swap_token_address(sr.token_in),
+            token_out_address=self._swap_token_address(sr.token_out),
             amount_in_decimal_resolved=sr.amount_in_decimal_resolved,
             amount_out_decimal_resolved=sr.amount_out_decimal_resolved,
         )
@@ -1303,15 +1312,19 @@ class UniswapV4ReceiptParser:
             if key.pool_id != bundle_metadata.get("pool_id"):
                 raise ValueError("V4 receipt metadata pool ID does not match its full key")
             kwargs["swap_pool_key"] = key.to_wire()
+            if int(key.hooks, 16) & _ACTIVE_SWAP_CALLBACK_MASK:
+                kwargs["swap_operation"] = bundle_metadata.get("v4_operation")
         return kwargs
 
-    def _swap_token_symbol(self, address: str | None) -> str | None:
+    @staticmethod
+    def _swap_token_address(address: str | None) -> str | None:
         from almanak.connectors._strategy_base.v4_pool_abi import V4_ZERO_ADDRESS
         from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 
-        if address == V4_ZERO_ADDRESS:
-            address = NATIVE_SENTINEL
-        return resolve_swap_token_symbol(address, self.chain)
+        return NATIVE_SENTINEL if address == V4_ZERO_ADDRESS else address
+
+    def _swap_token_symbol(self, address: str | None) -> str | None:
+        return resolve_swap_token_symbol(self._swap_token_address(address), self.chain)
 
     @staticmethod
     def _build_hint_map(
@@ -1394,31 +1407,40 @@ class UniswapV4ReceiptParser:
         quoted_amount_out: int | None,
         swap_token_meta: dict[str, dict[str, Any]] | None = None,
         swap_pool_key: dict[str, Any] | None = None,
+        swap_operation: dict[str, Any] | None = None,
     ) -> ParsedSwapResult:
         """Build a high-level swap result from decoded events.
 
-        Receipt order is significant: the first Swap supplies amounts and
-        post-swap state. Decimal conversion uses ``None`` internally for
+        Active-hook operations use wallet settlement and the router-owned Swap,
+        excluding nested rebalancing amounts. Legacy single-swap receipts use
+        pool deltas. Decimal conversion uses ``None`` internally for
         unresolved sides, then preserves the public ``Decimal(0)`` sentinel and
         records the distinction in ``*_decimal_resolved``.
         """
-        swap = swap_events[0]
         token_in_addr: str | None
         token_out_addr: str | None
-        amount_in, amount_out = self._compute_swap_amounts(swap)
-        slippage_bps = self._calculate_slippage_bps(amount_out, quoted_amount_out)
-        if swap_pool_key is not None:
-            key = PoolKey.from_wire(swap_pool_key)
-            if len(swap_events) != 1 or swap.pool_id.lower() != key.pool_id:
-                raise ValueError("V4 receipt swaps do not match the selected single-pool operation")
-            if swap.amount0 < 0 < swap.amount1:
-                token_in_addr, token_out_addr = key.currency0, key.currency1
-            elif swap.amount1 < 0 < swap.amount0:
-                token_in_addr, token_out_addr = key.currency1, key.currency0
-            else:
-                raise ValueError("V4 receipt has no positive bilateral swap for the selected pool")
+        key = PoolKey.from_wire(swap_pool_key) if swap_pool_key is not None else None
+        if key is not None and int(key.hooks, 16) & _ACTIVE_SWAP_CALLBACK_MASK:
+            from .swap_settlement import active_hook_swap_settlement
+
+            swap, amount_in, amount_out, token_in_addr, token_out_addr = active_hook_swap_settlement(
+                chain=self.chain, key=key, operation=swap_operation, swaps=swap_events, transfers=transfer_events
+            )
         else:
-            token_in_addr, token_out_addr = self._identify_swap_tokens(transfer_events, amount_in, amount_out)
+            swap = swap_events[0]
+            amount_in, amount_out = self._compute_swap_amounts(swap)
+            if key is not None:
+                if len(swap_events) != 1 or swap.pool_id.lower() != key.pool_id:
+                    raise ValueError("V4 receipt swaps do not match the selected single-pool operation")
+                if swap.amount0 < 0 < swap.amount1:
+                    token_in_addr, token_out_addr = key.currency0, key.currency1
+                elif swap.amount1 < 0 < swap.amount0:
+                    token_in_addr, token_out_addr = key.currency1, key.currency0
+                else:
+                    raise ValueError("V4 receipt has no positive bilateral swap for the selected pool")
+            else:
+                token_in_addr, token_out_addr = self._identify_swap_tokens(transfer_events, amount_in, amount_out)
+        slippage_bps = self._calculate_slippage_bps(amount_out, quoted_amount_out)
         token_in_addr, token_out_addr = self._apply_token_meta_addresses(
             token_in_addr, token_out_addr, swap_token_meta, single_swap=len(swap_events) == 1
         )

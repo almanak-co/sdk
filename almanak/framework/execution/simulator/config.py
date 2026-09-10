@@ -235,6 +235,7 @@ class SimulationConfig:
     alchemy_api_key: str | None = field(default=None, repr=False)
     timeout_seconds: float = 10.0
     prefer_alchemy: bool = False
+    backend: str = "auto"
 
     def has_tenderly(self) -> bool:
         """Check if Tenderly is configured.
@@ -269,7 +270,7 @@ class SimulationConfig:
         if not self.enabled:
             return False
 
-        return self.has_tenderly() or self.has_alchemy()
+        return self.backend == "rpc" or self.has_tenderly() or self.has_alchemy()
 
     def can_simulate_chain(self, chain: str) -> bool:
         """Check if a chain can be simulated.
@@ -287,6 +288,10 @@ class SimulationConfig:
             chain_lower = resolve_chain_name(chain)
         except (ValueError, ImportError):
             chain_lower = chain.lower()
+
+        if self.backend == "rpc":
+            descriptor = ChainRegistry.try_resolve(chain_lower)
+            return descriptor is not None and descriptor.family is ChainFamily.EVM
 
         # Check Tenderly support
         if self.has_tenderly() and chain_lower in TENDERLY_SUPPORTED_CHAINS:
@@ -345,6 +350,7 @@ class SimulationConfig:
             alchemy_api_key=cfg.alchemy_api_key,
             timeout_seconds=cfg.timeout_seconds,
             prefer_alchemy=cfg.prefer_alchemy,
+            backend=cfg.backend,
         )
 
     @classmethod
@@ -371,6 +377,7 @@ class SimulationConfig:
             "alchemy_configured": self.has_alchemy(),
             "timeout_seconds": self.timeout_seconds,
             "prefer_alchemy": self.prefer_alchemy,
+            "backend": self.backend,
         }
 
     def __repr__(self) -> str:

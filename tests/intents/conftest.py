@@ -17,6 +17,7 @@ import time
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,11 +37,14 @@ from almanak.connectors.uniswap_v3.slot0_fallback import (
 from almanak.framework.accounting.basis import FIFOBasisStore
 from almanak.framework.accounting.lp_accounting import _get_pool_address
 from almanak.framework.accounting.processor import AccountingProcessor, write_outbox_entry
+from almanak.framework.market.models import PriceData
 from almanak.framework.observability.ledger import build_ledger_entry
 from almanak.framework.state.backends.sqlite import SQLiteConfig, SQLiteStore
+from tests.intents._price_evidence import ObservedPrices
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import V4PositionState
+    from almanak.framework.venues import GatewayBlockIdentity
 
 # =============================================================================
 # Test Timeouts (Fail Fast)
@@ -259,6 +263,12 @@ class AnvilEthCallAdapter:
     def block_hash(self, *, chain: str, block_number: int) -> str:
         del chain
         return "0x" + bytes(self.web3.eth.get_block(block_number)["hash"]).hex()
+
+    def block_identity(self, *, chain: str, block_number: int) -> "GatewayBlockIdentity":
+        """Read and validate the pinned fork header using the production decoder."""
+        from almanak.framework.venues.gateway import GatewayClientExactVenueDataGateway
+
+        return GatewayClientExactVenueDataGateway(self).block_identity(chain=chain, block_number=block_number)
 
     def _positions_words(self, position_manager: str, token_id: int, block: int | str | None) -> list[bytes] | None:
         """``positions(tokenId)`` as 32-byte words, or ``None`` on a read fault.
@@ -730,7 +740,7 @@ async def _persist_and_drain_for_intent_test(
         chain=chain,
         success=success,
         error=error,
-        price_oracle=price_oracle,
+        price_oracle=price_oracle.ledger_inputs() if isinstance(price_oracle, ObservedPrices) else price_oracle,
         pre_state=pre_state,
         post_state=post_state,
         lp_open_native_amounts=v4_lp_open_native_amounts,
@@ -2586,7 +2596,7 @@ def funded_wallet(
 # so that only the tested chain's Anvil fork needs to start.
 # =============================================================================
 
-from almanak.gateway.data.price.coingecko import GLOBAL_TOKEN_IDS
+from almanak.gateway.data.price.coingecko import GLOBAL_TOKEN_IDS, CoinGeckoPriceSource
 
 
 def _fetch_prices_sync(chain_name: str) -> dict[str, Decimal]:
@@ -2628,7 +2638,7 @@ def _fetch_prices_sync(chain_name: str) -> dict[str, Decimal]:
         base_url = "https://api.coingecko.com/api/v3/simple/price"
         headers = {}
 
-    params = {"ids": ",".join(unique_cg_ids), "vs_currencies": "usd"}
+    params = {"ids": ",".join(unique_cg_ids), "vs_currencies": "usd", "include_last_updated_at": "true"}
 
     # Fetch with retry on 429
     print(f"\n  Fetching prices for {chain_name} via direct CoinGecko HTTP:")
@@ -2650,8 +2660,9 @@ def _fetch_prices_sync(chain_name: str) -> dict[str, Decimal]:
 
     data = resp.json()
 
-    # Build symbol -> price map
-    prices: dict[str, Decimal] = {}
+    # Provider age is bounded by the same lifetime as the production fresh cache.
+    policy = CoinGeckoPriceSource(api_key="")
+    prices = ObservedPrices()
     missing = []
     for symbol, cg_id in symbol_to_cg_id.items():
         entry = data.get(cg_id, {})
@@ -2659,7 +2670,25 @@ def _fetch_prices_sync(chain_name: str) -> dict[str, Decimal]:
         if usd_price is None:
             missing.append(f"{symbol} (cg_id={cg_id})")
             continue
-        prices[symbol] = Decimal(str(usd_price))
+        observed_at = entry.get("last_updated_at")
+        timestamp = None
+        stale = None
+        raw_confidence = None
+        now = int(time.time())
+        if type(observed_at) is int and 0 < observed_at <= now:
+            timestamp = datetime.fromtimestamp(observed_at, tz=UTC)
+            stale = now - observed_at > policy._cache_ttl
+            raw_confidence = policy._stale_confidence_multiplier if stale else 1.0
+        prices.record(
+            symbol,
+            PriceData(
+                price=Decimal(str(usd_price)),
+                source="coingecko",
+                timestamp=timestamp,
+                raw_confidence=raw_confidence,
+                stale=stale,
+            ),
+        )
         print(f"    {symbol}: ${usd_price}")
 
     if missing:
@@ -2786,7 +2815,11 @@ def _fetch_prices_from_fork(chain_name: str) -> dict[str, Decimal]:
         print(f"  Chainlink: no RPC at {get_anvil_rpc_url(chain_name)} for {chain_name}; cannot price at the fork")
         return {}
 
-    prices: dict[str, Decimal] = {}
+    # Every feed and derived component uses the same observed fork head.
+    if block == "latest":
+        block = int(w3.eth.get_block("latest")["number"])
+
+    prices = ObservedPrices()
     for symbol in symbols:
         # Symbol -> pair aliasing is the CATALOGUE's job (WETH->ETH/USD,
         # WBNB->BNB/USD, WAVAX->AVAX/USD, WSTETH->WSTETH/USD, ...). A hand-rolled
@@ -2802,9 +2835,9 @@ def _fetch_prices_from_fork(chain_name: str) -> dict[str, Decimal]:
             spec = CATALOG.feed_for_token(chain_name, "USDT")
 
         if spec is not None:
-            usd = _read_chainlink(w3, spec.address, block, symbol)
+            usd = _read_chainlink(w3, spec, block, symbol)
             if usd is not None:
-                prices[symbol] = usd
+                prices.record(symbol, usd)
                 continue
 
         # No USD feed (or it failed): try the ETH-denominated feed and convert.
@@ -2817,10 +2850,20 @@ def _fetch_prices_from_fork(chain_name: str) -> dict[str, Decimal]:
         eth_spec = CATALOG.derived_feed_for_token(chain_name, symbol)
         eth_usd_spec = CATALOG.feed_for_token(chain_name, "WETH")
         if eth_spec is not None and eth_usd_spec is not None:
-            in_eth = _read_chainlink(w3, eth_spec.address, block, f"{symbol} (in ETH)")
-            eth_usd = _read_chainlink(w3, eth_usd_spec.address, block, "ETH/USD")
+            in_eth = _read_chainlink(w3, eth_spec, block, f"{symbol} (in ETH)")
+            eth_usd = _read_chainlink(w3, eth_usd_spec, block, "ETH/USD")
             if in_eth is not None and eth_usd is not None:
-                prices[symbol] = in_eth * eth_usd
+                prices.record(
+                    symbol,
+                    PriceData(
+                        price=in_eth.price * eth_usd.price,
+                        source="onchain",
+                        timestamp=min(in_eth.timestamp, eth_usd.timestamp),
+                        raw_confidence=min(in_eth.raw_confidence, eth_usd.raw_confidence) * 0.95,
+                        stale=in_eth.stale or eth_usd.stale,
+                        observation_id=f"{in_eth.observation_id}*{eth_usd.observation_id}",
+                    ),
+                )
                 print(f"    {symbol}: derived from {symbol}/ETH x ETH/USD at the pinned block")
                 continue
 
@@ -2844,21 +2887,43 @@ def _fork_block_label(chain_name: str) -> str:
     return pin if pin and pin.isdigit() else "latest (NOT pinned)"
 
 
-def _read_chainlink(w3, address: str, block: int | str, label: str) -> Decimal | None:
-    """One Chainlink read, or None with a NAMED reason. Never raises."""
-    from web3 import Web3
+def _read_chainlink(w3, spec, block: int | str, label: str) -> PriceData | None:
+    """Preserve the production Chainlink policy at the actual fork header time."""
+    from almanak.integrations.chainlink.gateway.live import (
+        _DIRECT_PRICE_STALENESS_THRESHOLD_SECONDS,
+        _MAX_FUTURE_TIMESTAMP_SKEW_SECONDS,
+    )
+    from almanak.integrations.chainlink.models import CHAINLINK_SOURCE_NAME, FeedKind
 
     try:
-        contract = w3.eth.contract(address=Web3.to_checksum_address(address), abi=_CHAINLINK_ROUND_ABI)
-        decimals = contract.functions.decimals().call(block_identifier=block)
-        answer = contract.functions.latestRoundData().call(block_identifier=block)[1]
+        header = w3.eth.get_block(block)
+        pinned = int(header["number"])
+        block_hash = Web3.to_hex(header["hash"])
+        if isinstance(block, int) and pinned != block:
+            raise ValueError("Chainlink observation returned a different block")
+        contract = w3.eth.contract(address=Web3.to_checksum_address(spec.address), abi=_CHAINLINK_ROUND_ABI)
+        decimals = contract.functions.decimals().call(block_identifier=pinned)
+        round_id, answer, _, updated_at, answered_in_round = contract.functions.latestRoundData().call(
+            block_identifier=pinned
+        )
+        now = int(header["timestamp"])
+        if decimals != spec.decimals or answer <= 0 or answered_in_round < round_id:
+            raise ValueError("Chainlink observation has invalid decimals, answer or round")
+        if updated_at <= 0 or updated_at > now + _MAX_FUTURE_TIMESTAMP_SKEW_SECONDS:
+            raise ValueError("Chainlink observation has invalid updatedAt")
+        threshold = spec.heartbeat_seconds if spec.kind is FeedKind.ETH else _DIRECT_PRICE_STALENESS_THRESHOLD_SECONDS
+        stale = now - updated_at > threshold
+        return PriceData(
+            price=Decimal(answer) / Decimal(10**decimals),
+            source=CHAINLINK_SOURCE_NAME,
+            timestamp=datetime.fromtimestamp(updated_at, tz=UTC),
+            raw_confidence=0.85 if stale else 0.95,
+            stale=stale,
+            observation_id=f"{spec.chain}:{spec.address}:{pinned}:{block_hash}:{round_id}",
+        )
     except Exception as exc:  # noqa: BLE001 - one bad feed must not fail the run
-        print(f"    {label}: Chainlink read FAILED at {address} ({exc})")
+        print(f"    {label}: Chainlink read FAILED at {spec.address} ({exc})")
         return None
-    if answer <= 0:
-        print(f"    {label}: Chainlink returned a non-positive answer ({answer}) at {address}")
-        return None
-    return Decimal(answer) / Decimal(10**decimals)
 
 
 def _create_price_oracle_fixture(chain_name: str):
@@ -2959,7 +3024,7 @@ def _create_price_oracle_fixture(chain_name: str):
                 f"bounded; kept rather than dropping the chain to all-live (VIB-6733)."
             )
         # On-chain values win; live only fills the gaps.
-        return {**live, **on_chain}
+        return ObservedPrices(live) | on_chain
 
     return price_oracle_fixture
 

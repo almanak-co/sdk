@@ -15,8 +15,20 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 from almanak.framework.venues import VenueBindingFailure, VenueVerificationGateway
 
 from .addresses import UNISWAP_V4
+from .freshness import QuoteFreshnessObservation, validate_quote_freshness
 from .pool_key import PoolKey
+from .router_deployments import RouterABI, router_deployment
 from .sdk import SwapQuote, UniswapV4SDK
+
+MAX_QUOTE_AGE_SECONDS = 300
+MAX_HEAD_CLOCK_SKEW_SECONDS = 30
+
+
+def _quote_timestamp(verified: Any) -> int:
+    timestamps = [fact.value for fact in verified.evidence.observed_facts if fact.name == "block_timestamp"]
+    if len(timestamps) != 1 or int(timestamps[0]) <= 0:
+        raise ValueError("V4 operation requires a measured quote block timestamp")
+    return int(timestamps[0])
 
 
 def transaction_digest(transactions: list[dict[str, Any]]) -> str:
@@ -34,8 +46,9 @@ def bind_swap_operation(*, result: Any, chain: str, wallet: str, slippage_bps: i
     transactions = [tx_to_dict(tx) for tx in result.transactions]
     _, _, deadline = decode(["bytes", "bytes[]", "uint256"], bytes.fromhex(transactions[-1]["data"][10:]))
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "swap_exact_in",
+        "router_abi": router_deployment(chain, transactions[-1]["to"]).abi.value,
         "chain": chain,
         "wallet": wallet.lower(),
         "pool_key": result.pool_key.to_wire(),
@@ -43,6 +56,7 @@ def bind_swap_operation(*, result: Any, chain: str, wallet: str, slippage_bps: i
         "venue_binding_hash": verified.binding.binding_hash,
         "quote_block": verified.evidence.block_number,
         "quote_block_hash": verified.evidence.block_hash,
+        "quote_block_timestamp": _quote_timestamp(verified),
         "quoted_at": int(time.time()),
         "expires_at": deadline,
         "amount_in": str(result.amount_in),
@@ -85,7 +99,7 @@ def bind_lp_operation(
         }
     )
     bundle.metadata["v4_operation"] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": operation,
         "chain": verified.binding.chain,
         "wallet": wallet.lower(),
@@ -94,6 +108,7 @@ def bind_lp_operation(
         "venue_binding_hash": verified.binding.binding_hash,
         "quote_block": verified.evidence.block_number,
         "quote_block_hash": verified.evidence.block_hash,
+        "quote_block_timestamp": _quote_timestamp(verified),
         "quoted_at": int(time.time()),
         "expires_at": deadline,
         "hook_data": "0x" + hook_data.hex(),
@@ -119,7 +134,8 @@ def validate_execution(
     is_safe: bool,
     now: int | None = None,
     gateway: VenueVerificationGateway | None = None,
-) -> None:
+    managed_fork: bool | None = None,
+) -> dict[str, Any] | None:
     """Refuse stale or changed operations before signing and before submitting.
 
     The hash protects continuity, not authorization: the gateway's policy, signer
@@ -133,7 +149,7 @@ def validate_execution(
         or any(tx.get("to", "").lower() in targets for tx in bundle.transactions)
     )
     if not applies:
-        return
+        return None
     if bundle.metadata.get("protocol") != "uniswap_v4" or bundle.intent_type not in (
         "SWAP",
         "LP_OPEN",
@@ -142,8 +158,12 @@ def validate_execution(
     ):
         raise ValueError("V4 transaction targets require the bound protocol and supported operation type")
     artifact = bundle.metadata.get("v4_operation")
-    if not isinstance(artifact, dict) or artifact.get("schema_version") != 1:
-        raise ValueError("V4 swaps require a verified version-1 operation artifact; offline estimates cannot execute")
+    if (
+        not isinstance(artifact, dict)
+        or type(artifact.get("schema_version")) is not int
+        or artifact["schema_version"] not in (1, 2)
+    ):
+        raise ValueError("V4 operations require a verified version-1 or version-2 artifact; recompile before execution")
     if artifact["chain"] != chain or artifact["wallet"] != wallet.lower():
         raise ValueError("V4 operation belongs to a different chain or wallet")
     if artifact["expires_at"] <= (int(time.time()) if now is None else now):
@@ -159,14 +179,19 @@ def validate_execution(
         raise ValueError("V4 operation transactions changed after quoting")
     if artifact["hook_evidence"] is not None and is_safe:
         raise ValueError("Hooked Safe routes require separate outer-route qualification")
-    _validate_approvals(bundle, artifact, key)
+    _validate_approvals(bundle, artifact, key, gateway=gateway)
     if bundle.intent_type != "SWAP":
         _validate_lp_encoding(bundle, artifact, key, wallet)
-        _validate_fresh_evidence(artifact, key, gateway)
+    else:
+        _validate_swap_encoding(bundle, artifact, key, wallet, chain)
+    observation = _validate_fresh_evidence(artifact, key, gateway, now=now, managed_fork=managed_fork)
+    if bundle.intent_type != "SWAP":
         _validate_position_continuity(bundle, key, gateway, chain, wallet)
-        return
-    _validate_swap_encoding(bundle, artifact, key, wallet, chain)
-    _validate_fresh_evidence(artifact, key, gateway)
+    return {
+        "protocol": "uniswap_v4",
+        "operation_schema_version": artifact["schema_version"],
+        "freshness": asdict(observation),
+    }
 
 
 def _validate_swap_encoding(
@@ -174,6 +199,9 @@ def _validate_swap_encoding(
 ) -> None:
     if artifact["operation"] != "swap_exact_in" or not 0 <= artifact["slippage_bps"] < 10000:
         raise ValueError("V4 swap operation or slippage is invalid")
+    deployment = router_deployment(chain, UNISWAP_V4[chain]["universal_router"])
+    if artifact.get("router_abi", RouterABI.V4.value) != deployment.abi.value:
+        raise ValueError("V4 router ABI changed or is absent; recompile before execution")
     quote = SwapQuote(
         amount_in=int(artifact["amount_in"]),
         amount_out=int(artifact["amount_out"]),
@@ -205,9 +233,35 @@ def _validate_swap_encoding(
         raise ValueError("V4 swap minimum output is absent, zero or inconsistent")
 
 
-def _validate_approvals(bundle: ActionBundle, artifact: dict[str, Any], key: PoolKey) -> None:
+def _consume_erc20_approvals(
+    approvals: list[dict[str, Any]], cursor: int, token: str, amount: int, sdk: UniswapV4SDK
+) -> int:
     from .sdk import PERMIT2_ADDRESS
 
+    erc20_amounts = []
+    while cursor < len(approvals) and approvals[cursor]["to"].lower() == token.lower():
+        erc20 = approvals[cursor]
+        raw = bytes.fromhex(erc20["data"][2:])
+        if len(raw) != 68:
+            raise ValueError("V4 ERC20 approval has unexpected encoding")
+        value = decode(["address", "uint256"], raw[4:])[1]
+        expected = sdk.build_approve_tx(token, PERMIT2_ADDRESS, value)
+        if int(erc20.get("value", 0)) != 0 or erc20["data"].lower() != expected.data.lower():
+            raise ValueError("V4 ERC20 approval differs from the operation spender")
+        erc20_amounts.append(value)
+        cursor += 1
+    if erc20_amounts not in ([], [amount], [0, amount]):
+        raise ValueError("V4 ERC20 approval exceeds or differs from the operation budget")
+    return cursor
+
+
+def _validate_approvals(
+    bundle: ActionBundle,
+    artifact: dict[str, Any],
+    key: PoolKey,
+    *,
+    gateway: VenueVerificationGateway | None = None,
+) -> None:
     sdk = UniswapV4SDK(artifact["chain"])
     if bundle.intent_type == "SWAP":
         budgets = [(artifact["token_in"], int(artifact["amount_in"]))]
@@ -223,17 +277,31 @@ def _validate_approvals(bundle: ActionBundle, artifact: dict[str, Any], key: Poo
         spender = sdk.addresses["position_manager"]
     budgets = [(token, amount) for token, amount in budgets if int(token, 16) != 0]
     approvals = bundle.transactions[:-1]
-    if len(approvals) != 2 * len(budgets):
-        raise ValueError("V4 operation contains unexpected approval or auxiliary transactions")
-    for index, (token, amount) in enumerate(budgets):
-        erc20, permit = approvals[index * 2 : index * 2 + 2]
-        expected = sdk.build_approve_tx(token, PERMIT2_ADDRESS, amount)
-        if (erc20["to"].lower(), int(erc20.get("value", 0)), erc20["data"].lower()) != (
-            expected.to.lower(),
-            expected.value,
-            expected.data.lower(),
-        ):
-            raise ValueError("V4 ERC20 approval exceeds or differs from the operation budget")
+    cursor = 0
+    observation_block = None
+    for token, amount in budgets:
+        first_approval = cursor
+        cursor = _consume_erc20_approvals(approvals, cursor, token, amount, sdk)
+        if cursor == first_approval:
+            from .approvals import observe_permit2_allowance
+
+            if gateway is None:
+                raise ValueError("V4 omitted ERC20 approval requires gateway allowance observation")
+            if observation_block is None:
+                observation_block = gateway.block_number(chain=artifact["chain"])
+            current = observe_permit2_allowance(
+                gateway,
+                chain=artifact["chain"],
+                token=token,
+                wallet=artifact["wallet"],
+                block_number=observation_block,
+            )
+            if current < amount:
+                raise ValueError("V4 ERC20 allowance decreased; recompile before execution")
+        if cursor >= len(approvals):
+            raise ValueError("V4 operation is missing its bounded Permit2 approval")
+        permit = approvals[cursor]
+        cursor += 1
         raw = bytes.fromhex(permit["data"][2:])
         if len(raw) != 132:
             raise ValueError("V4 Permit2 approval has unexpected encoding")
@@ -247,6 +315,8 @@ def _validate_approvals(bundle: ActionBundle, artifact: dict[str, Any], key: Poo
             expected.data.lower(),
         ):
             raise ValueError("V4 Permit2 approval differs from the operation token, spender or budget")
+    if cursor != len(approvals):
+        raise ValueError("V4 operation contains unexpected approval or auxiliary transactions")
 
 
 def _validate_position_continuity(
@@ -271,7 +341,14 @@ def _validate_position_continuity(
         raise ValueError("V4 full-close liquidity changed; recompile against the current owned NFT")
 
 
-def _validate_fresh_evidence(artifact: dict[str, Any], key: PoolKey, gateway: VenueVerificationGateway | None) -> None:
+def _validate_fresh_evidence(
+    artifact: dict[str, Any],
+    key: PoolKey,
+    gateway: VenueVerificationGateway | None,
+    *,
+    now: int | None = None,
+    managed_fork: bool | None = None,
+) -> QuoteFreshnessObservation:
     from almanak.framework.primitives.types import Primitive
 
     from .behavior import admit_hook
@@ -281,18 +358,34 @@ def _validate_fresh_evidence(artifact: dict[str, Any], key: PoolKey, gateway: Ve
         raise ValueError("V4 execution requires gateway-mediated fresh venue observations")
     chain = artifact["chain"]
     head = gateway.block_number(chain=chain)
-    # Conservative age windows complement the on-chain deadline. Arbitrum's
-    # sequencer emits subsecond blocks; elapsed seconds alone miss reorgs.
-    max_lag = {"arbitrum": 1200, "base": 150, "optimism": 150}.get(chain, 24)
-    if not 0 <= head - artifact["quote_block"] <= max_lag:
-        raise ValueError("V4 quote exceeds its block age bound")
-    if gateway.block_hash(chain=chain, block_number=artifact["quote_block"]) != artifact["quote_block_hash"]:
-        raise ValueError("V4 quote block was reorganized")
+    quote_header = gateway.block_identity(chain=chain, block_number=artifact["quote_block"])
+    head_header = gateway.block_identity(chain=chain, block_number=head)
+    if quote_header.number != artifact["quote_block"] or head_header.number != head:
+        raise ValueError("V4 freshness gateway returned a different block number")
+    observation = QuoteFreshnessObservation(
+        quote=quote_header,
+        head=head_header,
+        expected_quote_hash=artifact["quote_block_hash"],
+        observed_at=int(time.time()) if now is None else now,
+        max_age_seconds=MAX_QUOTE_AGE_SECONDS,
+        max_clock_skew_seconds=MAX_HEAD_CLOCK_SKEW_SECONDS,
+        managed_fork=managed_fork is True,
+    )
+    validate_quote_freshness(observation)
+    # V1's canonical block hash already commits to the measured timestamp.
+    # Recovering that header permits gateway-first rollout without fabricating time.
+    if artifact["schema_version"] == 2 or "quote_block_timestamp" in artifact:
+        if type(artifact.get("quote_block_timestamp")) is not int or (
+            quote_header.timestamp != artifact["quote_block_timestamp"]
+        ):
+            raise ValueError("V4 quote timestamp differs from the bound canonical header")
     operation = artifact["operation"]
     primitive = Primitive.SWAP if operation == "swap_exact_in" else Primitive.LP
     fresh = V4VenueVerifier().verify_venue(verification_request(chain, key, primitive), gateway, block_number=head)
     if isinstance(fresh, VenueBindingFailure):
         raise ValueError(f"V4 execution identity unavailable: {fresh.detail}")
+    if fresh.evidence.block_hash != head_header.block_hash or _quote_timestamp(fresh) != head_header.timestamp:
+        raise ValueError("V4 head changed between freshness and venue observations")
     if fresh.binding.binding_hash != artifact["venue_binding_hash"]:
         raise ValueError("V4 execution venue binding changed")
     code = [
@@ -321,6 +414,7 @@ def _validate_fresh_evidence(artifact: dict[str, Any], key: PoolKey, gateway: Ve
             != (old["profile"], old["version"], old["dependency_digest"])
         ):
             raise ValueError("V4 hook admission evidence changed since quote")
+    return observation
 
 
 def _validate_lp_encoding(bundle: ActionBundle, artifact: dict[str, Any], key: PoolKey, wallet: str) -> None:

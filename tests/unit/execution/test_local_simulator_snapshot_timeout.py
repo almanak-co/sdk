@@ -43,13 +43,12 @@ class TestEvmSnapshotTimeout:
     """evm_snapshot must be wrapped in asyncio.wait_for so it cannot hang."""
 
     @pytest.mark.asyncio
-    async def test_snapshot_timeout_falls_through_to_no_snapshot(self, monkeypatch):
+    async def test_snapshot_timeout_refuses_unmeasured_dependent_simulation(self, monkeypatch):
         """A hanging evm_snapshot does not block the simulation.
 
         Without the wait_for guard, a stalled provider would block here for the
         full transport-layer timeout (~150s on AsyncHTTPProvider). With the
-        guard, the simulator marks the snapshot unavailable and continues —
-        gas estimation proceeds and the call returns within the test budget.
+        guard, the simulator reports unavailable state setup within the test budget.
         """
         sim = LocalSimulator(rpc_url="http://localhost:8545", gas_buffer=1.0)
 
@@ -81,8 +80,9 @@ class TestEvmSnapshotTimeout:
         result = await asyncio.wait_for(sim.simulate(txs, chain="arbitrum"), timeout=5.0)
 
         assert hung.is_set()
-        # Snapshot timed out → warnings populated → simulation still succeeds.
-        assert result.success
+        assert not result.success
+        assert not result.simulated
+        mock_web3.eth.estimate_gas.assert_not_called()
         assert any("Snapshot unavailable" in w for w in result.warnings)
 
     @pytest.mark.asyncio

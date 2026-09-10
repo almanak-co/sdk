@@ -1,5 +1,7 @@
 """Execution defaults for real managed-fork EOA intent proofs."""
 
+from typing import Any
+
 from web3 import Web3
 
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator, ExecutionResult
@@ -8,6 +10,9 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 
 class SimulatedIntentOrchestrator(ExecutionOrchestrator):
     """Require real simulation for the ordinary context-free intent test path."""
+
+    def __init__(self, *args: Any, managed_fork: bool | None = True, **kwargs: Any) -> None:
+        super().__init__(*args, managed_fork=managed_fork, **kwargs)
 
     async def execute(self, action_bundle: ActionBundle, context: ExecutionContext | None = None) -> ExecutionResult:
         if context is None:

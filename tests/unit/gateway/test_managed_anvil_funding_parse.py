@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from almanak.framework.data.tokens.defaults import NATIVE_SENTINEL
 from almanak.gateway.managed import ManagedGateway
 
@@ -68,7 +70,7 @@ def test_regular_erc20_addresses_unaffected() -> None:
 
     _chain_native, native_amount, erc20_tokens = mg._parse_anvil_funding_for_chain("arbitrum")
 
-    assert native_amount == Decimal("0")
+    assert native_amount is None
     assert erc20_tokens == {USDC_ARBITRUM: Decimal("250")}
 
 
@@ -81,3 +83,11 @@ def test_zero_address_inside_per_chain_section_canonicalizes() -> None:
 
     assert native_amount == Decimal("1")
     assert erc20_tokens == {USDC_ARBITRUM: Decimal("100")}
+
+
+@pytest.mark.parametrize("amount", ["-1", "NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("token", [NATIVE_SENTINEL, USDC_ARBITRUM])
+def test_invalid_amount_refuses_during_parse(token: str, amount: str) -> None:
+    mg = _gateway_with_funding({token: amount})
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        mg._parse_anvil_funding_for_chain("arbitrum")

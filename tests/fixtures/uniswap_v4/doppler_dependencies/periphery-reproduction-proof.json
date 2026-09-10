@@ -1,0 +1,95 @@
+[
+  {
+    "contract": "V4Quoter",
+    "runtime_bytes": 6118,
+    "runtime_hash": "0xd707b1da8cb165e5ea35a3b4450d971eb562ec171e23492aa117036b78a868f6",
+    "source_recompiled_exact": true,
+    "settings": {
+      "viaIR": true,
+      "metadata": {
+        "bytecodeHash": "none"
+      },
+      "libraries": {},
+      "optimizer": {
+        "runs": 44444444,
+        "enabled": true
+      },
+      "evmVersion": "cancun",
+      "remappings": [
+        "@ensdomains/=lib/v4-core/node_modules/@ensdomains/",
+        "@openzeppelin/=lib/v4-core/lib/openzeppelin-contracts/",
+        "@uniswap/v4-core/=lib/v4-core/",
+        "ds-test/=lib/v4-core/lib/forge-std/lib/ds-test/src/",
+        "erc4626-tests/=lib/v4-core/lib/openzeppelin-contracts/lib/erc4626-tests/",
+        "forge-gas-snapshot/=lib/permit2/lib/forge-gas-snapshot/src/",
+        "forge-std/=lib/v4-core/lib/forge-std/src/",
+        "hardhat/=lib/v4-core/node_modules/hardhat/",
+        "openzeppelin-contracts/=lib/v4-core/lib/openzeppelin-contracts/",
+        "permit2/=lib/permit2/",
+        "solmate/=lib/v4-core/lib/solmate/",
+        "v4-core/=lib/v4-core/src/"
+      ]
+    },
+    "immutables": {
+      "3490": "0x0000000000000000000000008366a39cc670b4001a1121b8f6a443a643e40951"
+    }
+  },
+  {
+    "contract": "UniversalRouter",
+    "runtime_bytes": 24546,
+    "runtime_hash": "0x2ce6aaaf9f4151f5e1cbf774668772f17f532ae11b15e9284fd0a072a8b0fbde",
+    "source_recompiled_exact": true,
+    "settings": {
+      "viaIR": true,
+      "metadata": {
+        "appendCBOR": true,
+        "bytecodeHash": "none",
+        "useLiteralContent": false
+      },
+      "optimizer": {
+        "runs": 4444,
+        "enabled": true
+      },
+      "evmVersion": "cancun",
+      "remappings": [
+        "solmate/=lib/solmate/",
+        "permit2/=lib/permit2/",
+        "forge-std/=lib/forge-std/src/",
+        "@uniswap/v3-core/=node_modules/@uniswap/v3-core/",
+        "@uniswap/v2-core/=node_modules/@uniswap/v2-core/",
+        "@uniswap/v3-periphery/=lib/v3-periphery/",
+        "@uniswap/v4-periphery/=lib/v4-periphery/",
+        "@ensdomains/=lib/v4-periphery/lib/v4-core/node_modules/@ensdomains/",
+        "@openzeppelin/=lib/v4-periphery/lib/v4-core/lib/openzeppelin-contracts/",
+        "@uniswap/v4-core/=lib/v4-periphery/lib/v4-core/",
+        "ds-test/=lib/solmate/lib/ds-test/src/",
+        "erc4626-tests/=lib/v4-periphery/lib/v4-core/lib/openzeppelin-contracts/lib/erc4626-tests/",
+        "forge-gas-snapshot/=lib/permit2/lib/forge-gas-snapshot/src/",
+        "hardhat/=lib/v4-periphery/lib/v4-core/node_modules/hardhat/",
+        "openzeppelin-contracts/=lib/permit2/lib/openzeppelin-contracts/",
+        "v3-periphery/=lib/v3-periphery/contracts/",
+        "v4-core/=lib/v4-periphery/lib/v4-core/src/",
+        "v4-periphery/=lib/v4-periphery/"
+      ]
+    },
+    "immutables": {
+      "1783": "0x0000000000000000000000007332d11bd10d18a04b119cd4671a96f3148002c4",
+      "1922": "0x00000000000000000000000073991a25c818bf1f1128deaab1492d45638de0d3",
+      "1926": "0x00000000000000000000000058daec3116aae6d93017baaea7749052e8a04fa7",
+      "2379": "0x0000000000000000000000000bd7d308f8e1639fab988df18a8011f41eacad73",
+      "2383": "0x000000000000000000000000000000000022d473030f116ddee9f6b43ac78ba3",
+      "2776": "0x0000000000000000000000008bceaa40b9acdfaedf85adf4ff01f5ad6517937f",
+      "2779": "0x96e8ac4277198ff8b6f785478aa9a39f403cb768dd02cbee326c3e7da348845f",
+      "2782": "0x0000000000000000000000001f7d7550b1b028f7571e69a784071f0205fd2efa",
+      "2785": "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54",
+      "7823": "0xa7af6fcd684cdc3a3dc593f7aef3964925bd849513dc6f154233ada3b5303099",
+      "7825": "0x0000000000000000000000000000000000000000000000000000000000001237",
+      "7827": "0x0000000000000000000000008876789976decbfcbbbe364623c63652db8c0904",
+      "7829": "0xa11b775f1048ec545859d88137f90763cf7eee88ee2eace12b317c4eb4f76c80",
+      "7831": "0xad7c5bef027816a800da1736444fb58a807ef4c9603b7848673f7e3a68eb14a5",
+      "7834": "0x556e6976657273616c526f75746572000000000000000000000000000000000f",
+      "7837": "0x3200000000000000000000000000000000000000000000000000000000000001",
+      "13207": "0x0000000000000000000000008366a39cc670b4001a1121b8f6a443a643e40951"
+    }
+  }
+]

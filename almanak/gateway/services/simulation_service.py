@@ -24,15 +24,18 @@ The servicer keeps three gateway-local responsibilities:
 All API keys are held in the gateway, keeping credentials secure.
 """
 
+import json
 import logging
 import time
 
 import grpc
 
 from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
 from almanak.framework.execution.gas.constants import DEFAULT_SIMULATION_BUFFER
 from almanak.framework.execution.interfaces import (
     SimulationResult,
+    Simulator,
     TransactionType,
     UnsignedTransaction,
 )
@@ -41,10 +44,12 @@ from almanak.framework.execution.simulator.config import (
     ALCHEMY_MAX_BUNDLE_SIZE,
     ALCHEMY_SUPPORTED_CHAINS,
     TENDERLY_SUPPORTED_CHAINS,
+    SimulationConfig,
 )
 from almanak.framework.execution.simulator.tenderly import TenderlySimulator
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+from almanak.gateway.services.rpc_simulator import GatewayRpcSimulator
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
@@ -95,6 +100,8 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
             settings: Gateway settings (may contain Tenderly/Alchemy credentials)
         """
         self.settings = settings
+        self._simulation_config = SimulationConfig.from_env()
+        self._rpc_simulators: dict[str, GatewayRpcSimulator] = {}
 
         # Boot-time settings are resolved through the config service; the
         # servicer consumes that typed slice rather than reparsing env.
@@ -154,6 +161,16 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
             )
         return self._alchemy_sim
 
+    def _select_rpc(self, chain: str, tx_count: int, preferred: str) -> bool:
+        if preferred != "rpc" and (preferred or self._simulation_config.backend != "rpc"):
+            return False
+        descriptor = ChainRegistry.resolve(chain)
+        if descriptor.family is not ChainFamily.EVM:
+            raise ValueError("Sequential RPC simulation requires an EVM chain")
+        if not 1 <= tx_count <= 64:
+            raise ValueError("Sequential RPC simulation requires 1–64 transactions")
+        return True
+
     def _select_simulator(
         self,
         chain: str,
@@ -175,6 +192,11 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
         Raises:
             ValueError: If no suitable simulator is available
         """
+        if self._select_rpc(chain, tx_count, preferred):
+            return "rpc"
+        return self._select_vendor_simulator(chain, tx_count, has_state_overrides, preferred)
+
+    def _select_vendor_simulator(self, chain: str, tx_count: int, has_state_overrides: bool, preferred: str) -> str:
         # If user specified, try to use it
         if preferred == "tenderly":
             if not self._tenderly_available:
@@ -264,9 +286,10 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
         """
         if not result.simulated:
             return gateway_pb2.SimulateBundleResponse(
-                success=True,
+                success=result.success,
                 simulated=False,
                 simulator_used="none",
+                revert_reason=result.revert_reason or "",
             )
 
         if not result.success:
@@ -307,6 +330,15 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
         state_overrides = list(request.state_overrides)
         preferred_simulator = request.simulator.lower() if request.simulator else ""
 
+        if preferred_simulator not in {"", "rpc", "tenderly", "alchemy"}:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(f"Unsupported simulator: {preferred_simulator}")
+            return gateway_pb2.SimulateBundleResponse(
+                success=False,
+                simulated=False,
+                error=f"Unsupported simulator: {preferred_simulator}",
+            )
+
         if not transactions:
             return gateway_pb2.SimulateBundleResponse(
                 success=True,
@@ -331,11 +363,25 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
                 chosen,
             )
 
-            simulator = self._framework_simulator_for(chosen)
+            simulator: Simulator
+            if chosen == "rpc":
+                if chain not in self._rpc_simulators:
+                    self._rpc_simulators[chain] = GatewayRpcSimulator(
+                        chain=chain,
+                        network=self.settings.network,
+                        timeout_seconds=self._simulation_config.timeout_seconds,
+                    )
+                simulator = self._rpc_simulators[chain]
+            else:
+                simulator = self._framework_simulator_for(chosen)
             txs = [self._proto_to_unsigned(tx, chain) for tx in transactions]
             overrides = {o.address: {"balance": o.balance} for o in state_overrides}
             result = await simulator.simulate(txs, chain, state_overrides=overrides or None)
             response = self._result_to_response(result, chain, chosen)
+            if result.evidence:
+                response.simulation_evidence_json = json.dumps(
+                    result.evidence, sort_keys=True, allow_nan=False
+                ).encode()
 
             latency = time.time() - start_time
             logger.info(

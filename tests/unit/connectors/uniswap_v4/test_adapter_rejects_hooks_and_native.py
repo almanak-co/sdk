@@ -22,6 +22,7 @@ from almanak.connectors.uniswap_v4.adapter import (
     UniswapV4Config,
     UniswapV4UnsupportedPoolError,
 )
+from almanak.connectors.uniswap_v4.behavior import admit_hook
 
 # =============================================================================
 # Fixtures
@@ -200,25 +201,12 @@ class TestLPCloseAcceptsNativeETH:
 
 
 class TestSaltNotRejected:
-    """Locked-in regression: the V0 guard must never look at salt.
+    """PositionManager salts identify NFTs, independently of hook admission."""
 
-    Per VIB-4426 §Q7, salt = bytes32(tokenId) is the canonical
-    PositionManager._mint path. The guard helper's docstring is the
-    architectural contract here; this test catches any drift that would
-    accidentally reject non-zero salt.
-    """
-
-    def test_guard_helper_does_not_inspect_salt(self):
-        """If a 'salt' field ever appears on PoolKey, the guard must not read it."""
-        from almanak.connectors.uniswap_v4.adapter import UniswapV4Adapter
-
-        # A duck-typed PoolKey stand-in WITHOUT a salt attribute. If the guard
-        # tries to read salt, it would AttributeError. Hookless ERC20-ERC20
-        # input must pass cleanly.
-        class _FakePoolKey:
+    def test_admission_does_not_inspect_position_salt(self):
+        class PoolWithoutPositionSalt:
             hooks = "0x0000000000000000000000000000000000000000"
             currency0 = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
             currency1 = "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
 
-        # Should not raise — and crucially should not touch salt.
-        UniswapV4Adapter._reject_unsupported_v0_pool(_FakePoolKey())
+        assert admit_hook(chain="arbitrum", key=PoolWithoutPositionSalt(), operation="lp_open", route="position_manager_eoa", hook_data=b"", gateway=None, block_number=1) is None

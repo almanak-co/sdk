@@ -1251,6 +1251,7 @@ def run(
     max_iterations: int | None = None,
     teardown_after: bool = False,
     reference_scenario: str | None = None,
+    confirm_start: bool = False,
     # Internal-only (not exposed as click flags). Used by `almanak strat test`
     # to drive a force-action lifecycle through this command's setup pipeline
     # without duplicating it. Do not set from the CLI.
@@ -1522,6 +1523,7 @@ def run(
             raise
 
     exit_code = _execute_run_mode(
+        confirm_start=confirm_start,
         test_actions=test_actions,
         once=once,
         teardown_after=teardown_after,

@@ -1,0 +1,83 @@
+{
+  "provenance": {
+    "network": "robinhood-mainnet",
+    "source_db_sha256": "e026ba7f36bcb418ef3175c4334f15e94fdebffa0ac593b6d6ad8d24f6a2e34f",
+    "source_sdk_head": "9f5147ee72f9bd83b726a4f27af7fdf488a7fe1d"
+  },
+  "events": [
+    {
+      "ledger": {
+        "id": "2cda97ad-1dec-4bc0-824c-3d7efd612572",
+        "deployment_id": "deployment:918334f4751b",
+        "cycle_id": "85695c7f-53d6-4f2c-89a6-4bd9247b2d1f",
+        "intent_type": "LP_OPEN",
+        "protocol": "uniswap_v4",
+        "chain": "robinhood",
+        "execution_mode": "live",
+        "tx_hash": "0x233ab6f432c7c3ec23cf3de532ba4c015c0f69a3737a2c8c102d62fd5ad97520",
+        "token_in": "BELIKEBOB",
+        "token_out": "USDG",
+        "amount_in": "41219.178493728232461465",
+        "amount_out": "0.943092",
+        "timestamp": "2026-09-10T05:46:47+00:00",
+        "price_inputs_json": "{\"robinhood:0x29cdaa3a468682573f405f070884eb933cde1e18\": {\"price_usd\": \"0.00001997\", \"oracle_source\": \"aggregated\", \"fetched_at\": \"2026-09-10T05:45:53+00:00\", \"observed_at\": \"2026-09-10T05:45:53+00:00\", \"confidence\": \"STALE\", \"raw_confidence\": 0.75, \"stale\": false}, \"BELIKEBOB\": {\"price_usd\": \"0.00001997\", \"oracle_source\": \"aggregated\", \"fetched_at\": \"2026-09-10T05:45:53+00:00\", \"observed_at\": \"2026-09-10T05:45:53+00:00\", \"confidence\": \"STALE\", \"raw_confidence\": 0.75, \"stale\": false}, \"robinhood:0x5fc5360d0400a0fd4f2af552add042d716f1d168\": {\"price_usd\": \"0.9997345\", \"oracle_source\": \"aggregated\", \"fetched_at\": \"2026-09-10T05:45:53+00:00\", \"observed_at\": \"2026-09-10T05:45:53+00:00\", \"confidence\": \"ESTIMATED\", \"raw_confidence\": 0.9, \"stale\": false}, \"USDG\": {\"price_usd\": \"0.9997345\", \"oracle_source\": \"aggregated\", \"fetched_at\": \"2026-09-10T05:45:53+00:00\", \"observed_at\": \"2026-09-10T05:45:53+00:00\", \"confidence\": \"ESTIMATED\", \"raw_confidence\": 0.9, \"stale\": false}, \"ETH\": {\"price_usd\": \"2480.195\", \"oracle_source\": \"aggregated\", \"fetched_at\": \"2026-09-10T05:45:53+00:00\", \"observed_at\": \"2026-09-10T05:45:53+00:00\", \"confidence\": \"ESTIMATED\", \"raw_confidence\": 0.9, \"stale\": false}}",
+        "extracted_data_json": "{\"position_id\": 2307829, \"lp_open_data\": {\"position_id\": 2307829, \"tick_lower\": -385600, \"tick_upper\": -383592, \"liquidity\": \"4036741677252025\", \"amount0\": \"41219178493728232461465\", \"amount1\": \"943092\", \"current_tick\": -384527, \"pool_address\": \"0xc36720ccade464d80291c3a583efb707772c6b14cf5532ff240c19b8eea27905\", \"position_hash\": \"0xa42fa3127c835dcfcadd61f2d60bbf100e0fea23afe78859fc1710a720314f3e\", \"currency0\": \"0x29cdaa3a468682573f405f070884eb933cde1e18\", \"currency1\": \"0x5fc5360d0400a0fd4f2af552add042d716f1d168\", \"coin_symbols\": null, \"coin_addresses\": null, \"_type\": \"LPOpenData\"}}"
+      },
+      "outbox": {
+        "id": "77f5ec3c-6536-4107-9374-7876bc07d954",
+        "deployment_id": "deployment:918334f4751b",
+        "cycle_id": "85695c7f-53d6-4f2c-89a6-4bd9247b2d1f",
+        "intent_type": "LP_OPEN",
+        "wallet_address": "0x807c1016BFD0c9Dbd3fcC97801E911E5CeF0B8F8",
+        "position_key": "lp:uniswap_v4:robinhood:0x807c1016bfd0c9dbd3fcc97801e911e5cef0b8f8:0xc36720ccade464d80291c3a583efb707772c6b14cf5532ff240c19b8eea27905",
+        "market_id": "0xc36720ccade464d80291c3a583efb707772c6b14cf5532ff240c19b8eea27905"
+      },
+      "original_money": {
+        "amount0": "41219.178493728232461465",
+        "amount1": "0.943092",
+        "cost_basis_usd": "1.76598860359375280225545605",
+        "realized_pnl_usd": null,
+        "fees_total_usd": null,
+        "il_usd": null,
+        "hodl_value_usd": null
+      }
+    },
+    {
+      "ledger": {
+        "id": "c4a6ff22-613e-440b-9dd1-b81ea2782faa",
+        "deployment_id": "deployment:918334f4751b",
+        "cycle_id": "teardown-td_0b9873234924",
+        "intent_type": "LP_CLOSE",
+        "protocol": "uniswap_v4",
+        "chain": "robinhood",
+        "execution_mode": "live",
+        "tx_hash": "0xc9f4f9d18744d3b39672570d5c319b796f2abddc0a78b182801a1c1189212f80",
+        "token_in": "BELIKEBOB",
+        "token_out": "USDG",
+        "amount_in": "41219.178493728232461464",
+        "amount_out": "0.943091",
+        "timestamp": "2026-09-10T05:52:42+00:00",
+        "price_inputs_json": "{\"0x29cdaa3a468682573f405f070884eb933cde1e18\": {\"price_usd\": \"0.00002000\", \"oracle_source\": \"aggregated\", \"fetched_at\": \"2026-09-10T05:51:58+00:00\", \"observed_at\": \"2026-09-10T05:51:58+00:00\", \"confidence\": \"STALE\", \"raw_confidence\": 0.75, \"stale\": false}, \"0x5fc5360d0400a0fd4f2af552add042d716f1d168\": {\"price_usd\": \"1.000134\", \"oracle_source\": \"aggregated\", \"fetched_at\": \"2026-09-10T05:51:59+00:00\", \"observed_at\": \"2026-09-10T05:51:59+00:00\", \"confidence\": \"ESTIMATED\", \"raw_confidence\": 0.9, \"stale\": false}, \"ETH\": {\"price_usd\": \"2480.145\", \"oracle_source\": \"aggregated\", \"fetched_at\": \"2026-09-10T05:52:00+00:00\", \"observed_at\": \"2026-09-10T05:52:00+00:00\", \"confidence\": \"ESTIMATED\", \"raw_confidence\": 0.9, \"stale\": false}, \"BELIKEBOB\": {\"price_usd\": \"0.00002000\", \"oracle_source\": \"aggregated\", \"fetched_at\": \"2026-09-10T05:52:42+00:00\", \"observed_at\": \"2026-09-10T05:52:42+00:00\", \"confidence\": \"STALE\", \"raw_confidence\": 0.75, \"stale\": false}, \"USDG\": {\"price_usd\": \"1.0001305\", \"oracle_source\": \"aggregated\", \"fetched_at\": \"2026-09-10T05:52:42+00:00\", \"observed_at\": \"2026-09-10T05:52:42+00:00\", \"confidence\": \"ESTIMATED\", \"raw_confidence\": 0.9, \"stale\": false}}",
+        "extracted_data_json": "{\"lp_close_data\": {\"amount0_collected\": \"41219178493728232461464\", \"amount1_collected\": \"943091\", \"fees0\": \"0\", \"fees1\": \"0\", \"liquidity_removed\": \"4036741677252025\", \"current_tick\": null, \"pool_address\": \"0xc36720ccade464d80291c3a583efb707772c6b14cf5532ff240c19b8eea27905\", \"source\": \"modify_liquidity\", \"currency0\": \"0x29cdaa3a468682573f405f070884eb933cde1e18\", \"currency1\": \"0x5fc5360d0400a0fd4f2af552add042d716f1d168\", \"coin_symbols\": null, \"coin_addresses\": null, \"position_id\": \"2307829\", \"position_hash\": \"0xa42fa3127c835dcfcadd61f2d60bbf100e0fea23afe78859fc1710a720314f3e\", \"fee_separation_method\": \"SEPARATE\", \"fee_confidence\": \"EXACT\", \"_type\": \"LPCloseData\"}}"
+      },
+      "outbox": {
+        "id": "bd3ddfab-1dab-47f4-ac8d-1093c8dfb588",
+        "deployment_id": "deployment:918334f4751b",
+        "cycle_id": "teardown-td_0b9873234924",
+        "intent_type": "LP_CLOSE",
+        "wallet_address": "0x807c1016BFD0c9Dbd3fcC97801E911E5CeF0B8F8",
+        "position_key": "lp:uniswap_v4:robinhood:0x807c1016bfd0c9dbd3fcc97801e911e5cef0b8f8:0xc36720ccade464d80291c3a583efb707772c6b14cf5532ff240c19b8eea27905",
+        "market_id": "0xc36720ccade464d80291c3a583efb707772c6b14cf5532ff240c19b8eea27905"
+      },
+      "original_money": {
+        "amount0": "41219.178493728232461464",
+        "amount1": "0.943091",
+        "cost_basis_usd": "1.76759764325006464922928000",
+        "realized_pnl_usd": "0.00160903965631184697382395",
+        "fees_total_usd": "0E-8",
+        "il_usd": "-0.00000100013050000000002000",
+        "hodl_value_usd": "1.76759864338056464922930000"
+      }
+    }
+  ]
+}

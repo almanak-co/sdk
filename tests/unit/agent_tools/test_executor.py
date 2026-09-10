@@ -277,7 +277,81 @@ class TestPlanningToolDispatch:
             {"intent_type": "invalid", "params": {}},
         )
         assert result.status == "error"
-        assert result.error["error_code"] == "simulation_failed"
+        assert result.error["error_code"] == "compilation_failed"
+        assert result.error.recoverable is False
+
+    @pytest.mark.asyncio
+    async def test_compile_safety_refusal_preserves_bound_evidence_without_caching(self, executor, mock_gateway):
+        from almanak.gateway.proto import gateway_pb2
+
+        evidence = None
+
+        def refuse(request):
+            nonlocal evidence
+            intent = json.loads(request.intent_data)
+            evidence = {
+                "schema_version": 1,
+                "intent_id": intent["intent_id"],
+                "compiled_at": "2026-09-10T03:24:36+00:00",
+                "compiler_evidence": {
+                    "price_impact_check": {
+                        "status": "refused",
+                        "reason": "IMPACT_TOO_HIGH",
+                        "price_impact": "0.1506901248886602455983403543",
+                        "max_price_impact": "0.10",
+                        "quote_block": 59079845,
+                        "amount_in_raw": "1000377",
+                    }
+                },
+            }
+            return gateway_pb2.CompilationResult(
+                success=False,
+                error="Price impact exceeds limit",
+                is_safety_refusal=True,
+                compilation_evidence=json.dumps(evidence).encode(),
+            )
+
+        mock_gateway.execution.CompileIntent.side_effect = refuse
+        with patch.object(executor._bundle_cache, "put") as cache:
+            result = await executor.execute("compile_intent", {"intent_type": "swap", "params": {}})
+        assert result.error.error_code == "risk_blocked"
+        assert result.error.error_category == "policy_violation"
+        assert result.error.recoverable is False
+        assert "slippage" not in result.error.suggestion.lower()
+        assert result.data["compilation_evidence"] == evidence
+        assert result.data["intent_id"] == evidence["intent_id"]
+        assert "bundle_id" not in result.data
+        cache.assert_not_called()
+        mock_gateway.execution.Execute.assert_not_called()
+        assert result.model_dump(mode="json")["data"]["compilation_evidence"] == evidence
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw", [b"{", b"\xff", b"[]", b'{"schema_version":1,"intent_id":"other"}'])
+    async def test_invalid_refusal_evidence_never_becomes_executable(self, executor, mock_gateway, raw):
+        from almanak.gateway.proto import gateway_pb2
+
+        mock_gateway.execution.CompileIntent.return_value = gateway_pb2.CompilationResult(
+            success=False, error="Refused", is_safety_refusal=True, compilation_evidence=raw
+        )
+        with patch.object(executor._bundle_cache, "put") as cache:
+            result = await executor.execute("compile_intent", {"intent_type": "swap", "params": {}})
+        assert result.error.error_code == "risk_blocked"
+        assert result.data["compilation_evidence_status"] == "invalid"
+        assert "compilation_evidence" not in result.data
+        cache.assert_not_called()
+        mock_gateway.execution.Execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_legacy_compile_failure_is_not_inferred_to_be_a_safety_refusal(self, executor, mock_gateway):
+        from types import SimpleNamespace
+
+        mock_gateway.execution.CompileIntent.return_value = SimpleNamespace(
+            success=False, error="Price impact too high"
+        )
+        result = await executor.execute("compile_intent", {"intent_type": "swap", "params": {}})
+        assert result.error.error_code == "compilation_failed"
+        assert result.data["is_safety_refusal"] is False
+        assert result.data["compilation_evidence_status"] == "unmeasured"
 
     @pytest.mark.asyncio
     async def test_simulate_intent_with_intent_type(self, executor, mock_gateway):

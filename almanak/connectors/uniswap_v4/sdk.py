@@ -44,6 +44,7 @@ from almanak.framework.intents._compiler_helpers import deadline_from_now
 
 from .addresses import UNISWAP_V4
 from .pool_key import PoolKey
+from .router_deployments import RouterABI, router_deployment
 
 if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
@@ -969,7 +970,7 @@ class UniswapV4SDK:
     ) -> str:
         """Encode ExactInputSingleParams struct for V4 SWAP_EXACT_IN_SINGLE action.
 
-        Deployed struct layout (v4-periphery IV4Router.sol):
+        Legacy struct layout (v4-periphery IV4Router.sol):
             struct ExactInputSingleParams {
                 PoolKey poolKey;        // (currency0, currency1, fee, tickSpacing, hooks)
                 bool zeroForOne;
@@ -977,6 +978,9 @@ class UniswapV4SDK:
                 uint128 amountOutMinimum;
                 bytes hookData;         // dynamic
             }
+
+        Hop-price deployments insert uint256 minHopPriceX36 before hookData.
+        The qualified router deployment selects the layout.
 
         Note: sqrtPriceLimitX96 was removed in the deployed V4 contracts.
         The V4Router hardcodes it internally (MIN_SQRT_PRICE+1 or MAX_SQRT_PRICE-1).
@@ -993,9 +997,17 @@ class UniswapV4SDK:
             raise ValueError("V4 amount_in must be a positive uint128")
         if type(amount_out_minimum) is not int or not 0 <= amount_out_minimum <= uint128_max:
             raise ValueError("V4 amount_out_minimum must fit uint128")
+        deployment = router_deployment(self.chain, self.router)
+        fields = (tuple(pool_key.to_wire().values()), zero_for_one, quote.amount_in, amount_out_minimum)
+        if deployment.abi is RouterABI.V4_HOP_PRICE:
+            # The absolute minimum remains binding; zero disables only the optional per-hop price check.
+            return encode(
+                ["((address,address,uint24,int24,address),bool,uint128,uint128,uint256,bytes)"],
+                [(*fields, 0, quote.hook_data)],
+            ).hex()
         return encode(
             ["((address,address,uint24,int24,address),bool,uint128,uint128,bytes)"],
-            [(tuple(pool_key.to_wire().values()), zero_for_one, quote.amount_in, amount_out_minimum, quote.hook_data)],
+            [(*fields, quote.hook_data)],
         ).hex()
 
     def build_mint_position_tx(

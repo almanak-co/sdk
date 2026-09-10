@@ -116,6 +116,9 @@ def create_simulator(
         logger.info("Simulation disabled, using DirectSimulator (pass-through)")
         return DirectSimulator(name="direct_disabled")
 
+    if config.backend != "auto":
+        raise ValueError("Explicit RPC simulation requires the gateway's chain-bound simulator factory")
+
     # Check for local RPC - Tenderly/Alchemy simulate against mainnet, not fork state.
     # Use LocalSimulator which simulates against the actual fork state.
     if rpc_url and is_local_rpc(rpc_url):

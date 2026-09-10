@@ -10,6 +10,8 @@ from eth_utils import keccak
 from almanak.connectors._strategy_base.v4_pool_abi import V4_ZERO_ADDRESS
 from almanak.framework.venues import VenueVerificationGateway
 
+from .doppler import DopplerLiquidityProfile
+from .doppler_swap import DopplerRehypeSwapProfile
 from .pool_key import PoolKey
 
 
@@ -92,7 +94,11 @@ class CallbackFreeOperationProfile:
 
 
 # Strategy configuration cannot turn an arbitrary encoder into hook admission.
-REVIEWED_PROFILES: tuple[HookBehaviorProfile, ...] = (CallbackFreeOperationProfile(),)
+REVIEWED_PROFILES: tuple[HookBehaviorProfile, ...] = (
+    CallbackFreeOperationProfile(),
+    DopplerLiquidityProfile(),
+    DopplerRehypeSwapProfile(),
+)
 
 
 def admit_hook(

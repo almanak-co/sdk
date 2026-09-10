@@ -43,6 +43,29 @@ def test_v4_compiler_artifact_is_deeply_copied_and_serializes_exactly():
     assert deserialize_extracted_data(serialize_extracted_data(result.extracted_data)) == result.extracted_data
 
 
+@pytest.mark.parametrize("success", [True, False])
+@pytest.mark.parametrize("status", ["passed", "skipped", "refused"])
+def test_v4_price_impact_decision_survives_execution_enrichment_and_ledger_roundtrip(success, status):
+    decision = {
+        "schema_version": 1,
+        "status": status,
+        "amount_in_raw": str(2**128 + 1),
+        "quote_amount_raw": str(2**128 - 1),
+        "pool_id": "0x" + "ab" * 32,
+        "chain": "robinhood",
+        "quote_block": 58956617,
+    }
+    original = dict(decision)
+    result = ExecutionResult(success=success, phase=ExecutionPhase.CONFIRMATION)
+    enrich("uniswap_v4", {"price_impact_check": decision}, result)
+    decision["status"] = "changed"
+    restored = deserialize_extracted_data(serialize_extracted_data(result.extracted_data))
+    assert restored["compiler_evidence"]["price_impact_check"] == original
+    enrich("uniswap_v4", {"price_impact_check": original}, result)
+    with pytest.raises(ValueError, match="Compiler evidence changed"):
+        enrich("uniswap_v4", {"price_impact_check": decision}, result)
+
+
 @pytest.mark.parametrize(
     "protocol,metadata",
     [

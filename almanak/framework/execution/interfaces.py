@@ -99,6 +99,15 @@ class SigningError(ExecutionError):
         super().__init__(f"Signing failed: {reason}")
 
 
+class ConnectorValidationError(ValueError):
+    """Connector refusal with machine-readable, pre-submission observations."""
+
+    def __init__(self, message: str, *, code: str, evidence: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.code = code
+        self.evidence = evidence
+
+
 class SimulationError(ExecutionError):
     """Raised when transaction simulation fails.
 
@@ -609,6 +618,7 @@ class SimulationResult:
     logs: list[dict[str, Any]] = field(default_factory=list)
     simulation_url: str | None = None
     simulator_name: str | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -622,6 +632,7 @@ class SimulationResult:
             "logs": self.logs,
             "simulation_url": self.simulation_url,
             "simulator_name": self.simulator_name,
+            "evidence": self.evidence,
         }
 
     @classmethod
@@ -637,6 +648,7 @@ class SimulationResult:
             logs=data.get("logs", []),
             simulation_url=data.get("simulation_url"),
             simulator_name=data.get("simulator_name"),
+            evidence=data.get("evidence", {}),
         )
 
 

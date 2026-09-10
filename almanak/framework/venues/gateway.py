@@ -87,6 +87,9 @@ class GatewayClientVenueVerificationGateway:
             raise ValueError(f"gateway did not return block {block_number} hash on {chain}")
         return block_hash.lower()
 
+    def block_identity(self, *, chain: str, block_number: int) -> GatewayBlockIdentity:
+        return GatewayClientExactVenueDataGateway(self._client).block_identity(chain=chain, block_number=block_number)
+
 
 class GatewayClientExactVenueDataGateway:
     """Route exact-data reads through deployed gateway gRPC services."""

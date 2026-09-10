@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from almanak.framework.market import MarketSnapshot
 from almanak.framework.market.models import TokenBalance
 
@@ -68,6 +70,19 @@ def test_invalidate_balance_unknown_token_is_noop() -> None:
     snapshot = _snapshot(provider)
     snapshot.invalidate_balance("WETH")  # nothing cached — must not raise
     assert snapshot.balance("WETH").balance == Decimal("1")
+
+
+@pytest.mark.parametrize("seeded", [False, True])
+def test_invalidate_address_balance_after_sale(seeded: bool) -> None:
+    token = "0xe2324ff2a59f8ecba8c321c6466e59121c00e795"
+    provider = _Provider(Decimal("3000"))
+    snapshot = MarketSnapshot(chain="robinhood", wallet_address="0x" + "11" * 20, balance_provider=provider)
+    if seeded:
+        snapshot.set_balance(token, TokenBalance(symbol=token, balance=Decimal("3000"), balance_usd=Decimal("1.47")))
+    assert snapshot.balance(token).balance == Decimal("3000")
+    provider.value = Decimal("0")
+    snapshot.invalidate_balance(token.upper().replace("0X", "0x"))
+    assert snapshot.balance(token).balance == Decimal("0")
 
 
 def test_invalidate_balance_noop_without_provider() -> None:

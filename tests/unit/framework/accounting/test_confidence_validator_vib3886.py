@@ -164,8 +164,8 @@ def test_lp_handler_does_not_emit_contradiction_with_nested_oracle():
 
     nested = json.dumps(
         {
-            "WETH": {"price_usd": "2301.69", "oracle_source": "coingecko"},
-            "USDC": {"price_usd": "1.0001", "oracle_source": "chainlink"},
+            "WETH": {"price_usd": "2301.69", "oracle_source": "coingecko", "confidence": "HIGH"},
+            "USDC": {"price_usd": "1.0001", "oracle_source": "chainlink", "confidence": "HIGH"},
         }
     )
     led_id = str(uuid.uuid4())

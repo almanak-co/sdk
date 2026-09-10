@@ -26,6 +26,7 @@ ALLOWED_RPC_METHODS = frozenset(
     {
         # State queries
         "eth_call",
+        "eth_simulateV1",
         "eth_getBalance",
         "eth_getTransactionCount",
         "eth_getCode",

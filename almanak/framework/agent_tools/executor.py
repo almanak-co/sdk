@@ -43,7 +43,6 @@ from almanak.framework.agent_tools.errors import (
     AgentErrorCode,
     ExecutionFailedError,
     RiskBlockedError,
-    SimulationFailedError,
     ToolError,
     ToolErrorPayload,
     ToolValidationError,
@@ -341,6 +340,47 @@ def _error_payload(
 
 
 _MAX_UINT256 = (1 << 256) - 1
+
+
+def _compilation_failure_response(response: Any, intent_id: str) -> ToolResponse:
+    refused = getattr(response, "is_safety_refusal", False) is True
+    message = f"Compilation failed: {response.error}"
+    data: dict[str, Any] = {"intent_id": intent_id, "is_safety_refusal": refused}
+    raw = getattr(response, "compilation_evidence", b"")
+    if isinstance(raw, bytes | str) and raw:
+        try:
+            evidence = json.loads(raw)
+            if (
+                not isinstance(evidence, dict)
+                or type(evidence.get("schema_version")) is not int
+                or evidence["schema_version"] != 1
+                or evidence.get("intent_id") != intent_id
+                or not isinstance(evidence.get("compiled_at"), str)
+                or not evidence["compiled_at"]
+                or not isinstance(evidence.get("compiler_evidence"), dict)
+                or not evidence["compiler_evidence"]
+            ):
+                raise ValueError("Invalid compilation evidence envelope")
+        except (ValueError, UnicodeError):
+            data["compilation_evidence_status"] = "invalid"
+        else:
+            data["compilation_evidence"] = evidence
+    else:
+        data["compilation_evidence_status"] = "unmeasured"
+    return ToolResponse(
+        status=ToolResponseStatus.ERROR,
+        data=data,
+        error=_error_payload(
+            AgentErrorCode.RISK_BLOCKED if refused else AgentErrorCode.COMPILATION_FAILED,
+            message,
+            suggestion=(
+                "Inspect the safety refusal and current market conditions before planning another trade."
+                if refused
+                else "Inspect the compilation error and correct the intent before compiling again."
+            ),
+        ),
+        explanation=message,
+    )
 
 
 @dataclass(frozen=True)
@@ -1345,6 +1385,7 @@ class ToolExecutor:
             # Coerce float values to strings to prevent Pydantic SafeDecimal rejection
             # (e.g., max_slippage=0.03 becomes "0.03" which Decimal() accepts)
             params = _coerce_floats_to_str(params)
+            params.setdefault("intent_id", str(uuid.uuid4()))
 
             resp = self._client.execution.CompileIntent(
                 gateway_pb2.CompileIntentRequest(
@@ -1356,10 +1397,7 @@ class ToolExecutor:
             )
 
             if not resp.success:
-                raise SimulationFailedError(
-                    f"Compilation failed: {resp.error}",
-                    tool_name=tool_name,
-                )
+                return _compilation_failure_response(resp, params["intent_id"])
 
             # Cache the compiled bundle with chain metadata and original args for
             # later execution and spend tracking. The cache persists to disk so

@@ -26,7 +26,9 @@ from almanak.framework.cli.check import (
     Finding,
     Layer,
     Severity,
+    _apply_template_heuristics,
     _detect_template,
+    _scan_config_placeholders,
     check,
     run_checks,
 )
@@ -35,6 +37,41 @@ from almanak.framework.cli.new_strategy import (
     new_strategy,
 )
 from almanak.framework.strategies.metadata import StrategyMetadata
+
+
+def test_full_pool_key_recognizes_native_and_hookless_sentinels(tmp_path: Path) -> None:
+    zero = "0x" + "0" * 40
+    config = {
+        "pool_key": {
+            "currency0": zero,
+            "currency1": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+            "fee": 31100,
+            "tick_spacing": 311,
+            "hooks": zero,
+        },
+        "vault_address": zero,
+    }
+    report = CheckReport(strategy_dir=str(tmp_path))
+    _scan_config_placeholders(config, tmp_path / "config.json", report)
+    _apply_template_heuristics("lp", config, report, tmp_path / "strategy.py")
+    assert [(f.code, f.field) for f in report.findings] == [("placeholder_address", "vault_address")]
+
+
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_pool_key_sentinels_do_not_hide_placeholder_currency_or_incomplete_key(
+    tmp_path: Path, incomplete: bool
+) -> None:
+    zero = "0x" + "0" * 40
+    config = {"pool_key": {"currency0": zero, "currency1": zero, "fee": 31100, "tick_spacing": 311, "hooks": zero}}
+    if incomplete:
+        del config["pool_key"]["fee"]
+    report = CheckReport(strategy_dir=str(tmp_path))
+    _scan_config_placeholders(config, tmp_path / "config.json", report)
+    fields = {f.field for f in report.findings}
+    assert "pool_key.currency1" in fields
+    assert ("pool_key.currency0" in fields) is incomplete
+    assert ("pool_key.hooks" in fields) is incomplete
+
 
 # ---------------------------------------------------------------------------
 # Scaffolding helper

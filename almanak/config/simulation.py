@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -27,6 +28,7 @@ class SimulationConfig(BaseModel):
     alchemy_api_key: str | None = Field(default=None, repr=False)
     timeout_seconds: float = DEFAULT_SIMULATION_TIMEOUT_SECONDS
     prefer_alchemy: bool = DEFAULT_PREFER_ALCHEMY
+    backend: Literal["auto", "rpc"] = "auto"
 
     model_config = ConfigDict(extra="forbid")
 
@@ -67,6 +69,7 @@ def simulation_config_from_env(
             DEFAULT_SIMULATION_TIMEOUT_SECONDS,
         ),
         prefer_alchemy=_parse_bool(os.environ.get(f"{prefix}SIMULATION_PREFER_ALCHEMY"), DEFAULT_PREFER_ALCHEMY),
+        backend=cast(Literal["auto", "rpc"], os.environ.get(f"{prefix}SIMULATION_BACKEND", "auto")),
     )
 
 

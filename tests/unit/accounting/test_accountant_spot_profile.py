@@ -576,3 +576,37 @@ def test_same_second_cycle_binding_does_not_bypass_wrong_inventory_quantity():
     positions["metadata"]["swap_inventory"]["tokens"]["eth"]["quantity"] = "0.001"
     snapshot["positions_json"] = json.dumps(positions)
     assert _same_second_s3(data).status == "FAIL"
+
+
+def test_spot_wallet_mark_matches_verified_address_alias():
+    events, payloads, snapshots = _rows()
+    rows = json.loads(snapshots[0]["wallet_balances_json"])
+    rows[0]["symbol"] = "0x4200000000000000000000000000000000000006"
+    snapshots[0]["wallet_balances_json"] = json.dumps(rows)
+    assert _by_id(events, payloads, snapshots)["S3"].status == "PASS"
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_spot_wallet_mark_refuses_wrong_or_duplicate_asset_identity(duplicate):
+    events, payloads, snapshots = _rows()
+    rows = json.loads(snapshots[0]["wallet_balances_json"])
+    if duplicate:
+        rows.append({**rows[0], "symbol": "0x4200000000000000000000000000000000000006"})
+    else:
+        rows[0]["symbol"] = "0x" + "1" * 40
+    snapshots[0]["wallet_balances_json"] = json.dumps(rows)
+    assert _by_id(events, payloads, snapshots)["S3"].status == "FAIL"
+
+
+@pytest.mark.parametrize(
+    "token,expected", [("0x4200000000000000000000000000000000000006", "PASS"), ("0x" + "1" * 40, "FAIL")]
+)
+def test_spot_inventory_basis_requires_canonical_lot_identity(token, expected):
+    events, payloads, snapshots = _rows()
+    positions = json.loads(snapshots[0]["positions_json"])
+    inventory = positions["metadata"]["swap_inventory"]["tokens"]
+    inventory[token] = inventory.pop("weth")
+    snapshots[0]["positions_json"] = json.dumps(positions)
+    cells = _by_id(events, payloads, snapshots)
+    assert cells["S3"].status == expected
+    assert cells["S4"].status == expected

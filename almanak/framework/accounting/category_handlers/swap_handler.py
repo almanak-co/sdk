@@ -14,6 +14,7 @@ this generic handler is called.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -414,28 +415,8 @@ def handle_swap(
     price_oracle = parse_price_inputs(ledger_row.get("price_inputs_json"))
     price_snapshot = PriceSnapshot.from_json(ledger_row.get("price_inputs_json") or "")
 
-    # VIB-4304: ``price_inputs_json`` is symbol-keyed (e.g. ``"WETH"``)
-    # but several connectors' receipt parsers (Aerodrome confirmed; likely
-    # PancakeSwap, Sushi, Uniswap V3, Curve and others) stamp the contract
-    # **address** into ``swap_amounts.token_in`` / ``token_out``. That
-    # propagates to ``transaction_ledger.token_in`` / ``token_out`` and
-    # then to this handler as ``"0X833589FCD6..."`` — which always misses
-    # the symbol-keyed ``price_oracle``, flipping every confidence
-    # downgrade to ESTIMATED with a misleading "missing prices" reason.
-    #
-    # Resolve address-shaped values to symbol via the token resolver
-    # singleton (same pattern as ``lp_handler`` and ``lending_handler``).
-    # On a resolver miss the original (address) value is preserved so the
-    # confidence ``unavailable_reason`` still shows the on-chain address
-    # (Empty != zero / no fabricated symbol substitution).
-    #
-    # VIB-4487: ``token_in`` / ``token_out`` are now the canonical resolved
-    # identity (computed once above), so the price lookup reuses them
-    # directly instead of resolving a second time. Pre-VIB-4487 the symbol
-    # was resolved HERE only for the price key while the FIFO key + identity
-    # hash kept the raw ``.upper()`` address — the divergence VIB-4487 fixes.
-    token_in_key = token_in
-    token_out_key = token_out
+    token_in_key = _receipt_price_key(ledger_row, "token_in", token_in, chain, price_oracle)
+    token_out_key = _receipt_price_key(ledger_row, "token_out", token_out, chain, price_oracle)
     # Capture price-presence as separate booleans BEFORE the USD conversion,
     # so the confidence helper can distinguish "no price in
     # price_inputs_json" from "price was present but USD was forced to None
@@ -553,6 +534,31 @@ def _parse_decimal(value: Any) -> Decimal | None:
     except Exception:  # noqa: BLE001
         return None
     return parsed if parsed.is_finite() else None
+
+
+def _receipt_price_key(
+    ledger_row: dict[str, Any], side: str, label: str, chain: str, oracle: dict[str, Decimal]
+) -> str:
+    """Retain symbol lot identity while pricing receipt-bound addresses first."""
+    from almanak.framework.data.tokens.address_resolution import looks_like_address
+    from almanak.framework.market.price_store import lookup_price
+
+    try:
+        extracted = json.loads(ledger_row.get("extracted_data_json") or "{}")
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(extracted, dict):
+        return ""
+    amounts = extracted.get("swap_amounts", {})
+    if not isinstance(amounts, dict):
+        return ""
+    address = amounts.get(f"{side}_address")
+    if address is None:
+        return label
+    if not isinstance(address, str) or not looks_like_address(address, chain):
+        return ""
+    found = lookup_price(oracle, token=address, chain=chain, quote="USD")
+    return str(found.key).upper() if found is not None else ""
 
 
 def _token_usd(symbol: str, amount: Decimal | None, oracle: dict[str, Decimal]) -> Decimal | None:

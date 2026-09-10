@@ -573,6 +573,24 @@ def _derive_isolated_wallet_or_none(
     return isolated_wallet_address, derived_key
 
 
+def _resolve_default_anvil_key(
+    runtime_private_key: str | None, *, network: str, wallet: str, has_evm_forks: bool
+) -> str | None:
+    if network != "anvil" or wallet != "default" or not has_evm_forks:
+        return runtime_private_key
+    from almanak.config.env import gateway_config_from_env
+
+    effective = runtime_private_key or _runtime_private_key_override.get() or gateway_config_from_env().private_key
+    if effective:
+        return effective
+    from ._run_components import _accept_anvil_default_wallet_or_exit
+    from .run import ANVIL_DEFAULT_PRIVATE_KEY
+
+    # Funding and the runner must receive the same identity before either starts.
+    _accept_anvil_default_wallet_or_exit()
+    return ANVIL_DEFAULT_PRIVATE_KEY
+
+
 def _resolve_signing_key(*, isolated_wallet_private_key: str | None, runtime_private_key: str | None) -> str | None:
     """Resolve the effective signing key and publish it on `_runtime_private_key_override` (#2100).
 
@@ -875,6 +893,10 @@ def _setup_gateway(
             external_anvil_ports=external_anvil_ports,
             quick_config=load_quick_config(),
         )
+
+    runtime_private_key = _resolve_default_anvil_key(
+        runtime_private_key, network=gateway_network, wallet=wallet, has_evm_forks=bool(anvil_chains)
+    )
 
     # Wallet isolation: derive a unique wallet per strategy on Anvil
     isolated_wallet_address, isolated_wallet_private_key = _derive_isolated_wallet_or_none(

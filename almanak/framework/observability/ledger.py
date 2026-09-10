@@ -1713,6 +1713,25 @@ def _stamp_lp_close_native_amounts(
         return
 
 
+def _ledger_extracted_data(result: Any, success: bool, intent: Any, compilation_evidence: dict[str, Any] | None) -> str:
+    if compilation_evidence is None:
+        return _build_extracted_data_json(result)
+    if success or result is not None:
+        raise ValueError("Compilation refusal evidence requires an unexecuted failed intent")
+    intent_id = getattr(intent, "intent_id", None)
+    if not intent_id or compilation_evidence.get("intent_id") != intent_id:
+        raise ValueError("Compilation evidence belongs to a different intent")
+    artifacts = compilation_evidence.get("compiler_evidence")
+    if compilation_evidence.get("schema_version") != 1 or not isinstance(artifacts, dict) or not artifacts:
+        raise ValueError("Invalid compilation evidence schema or artifacts")
+    return serialize_extracted_data(
+        {
+            "compilation": {key: value for key, value in compilation_evidence.items() if key != "compiler_evidence"},
+            "compiler_evidence": artifacts,
+        }
+    )
+
+
 def build_ledger_entry(
     *,
     deployment_id: str,
@@ -1730,6 +1749,7 @@ def build_ledger_entry(
     lp_open_native_amounts: tuple[int | None, int | None] | None = None,
     v4_lp_close_native_principal: tuple[int | None, int | None] | None = None,
     lp_close_native_amounts: tuple[int | None, int | None] | None = None,
+    compilation_evidence: dict[str, Any] | None = None,
 ) -> LedgerEntry:
     """Build a LedgerEntry from an intent and its execution result.
 
@@ -1817,7 +1837,7 @@ def build_ledger_entry(
         effective_price,
         slippage_bps,
     ) = _extract_tokens_and_amounts(intent, result, chain=chain)
-    extracted_data_json = _build_extracted_data_json(result)
+    extracted_data_json = _ledger_extracted_data(result, success, intent, compilation_evidence)
 
     def _safe_json(d: dict[str, Any] | None) -> str:
         # ``None`` means uncaptured; ``{}`` means explicitly empty and

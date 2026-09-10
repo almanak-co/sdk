@@ -2215,6 +2215,7 @@ def _cell_g6_reconciliation(  # noqa: C901
     wallet_pnl = final - initial
 
     sum_swap = Decimal(0)
+    sum_swap_exchange = Decimal(0)
     sum_lp = Decimal(0)
     sum_perp = Decimal(0)
     sum_fees = Decimal(0)
@@ -2225,6 +2226,7 @@ def _cell_g6_reconciliation(  # noqa: C901
 
     # Null bucket counts prevent unmeasured component PnL from becoming measured zero.
     null_swap_rpnl = 0
+    null_swap_exchange = 0
     # A swap with measured amounts but no prior FIFO basis is not an unmeasured PnL input.
     no_prior_basis_swap = 0
     null_lp_close_rpnl = 0
@@ -2268,6 +2270,17 @@ def _cell_g6_reconciliation(  # noqa: C901
             matched = _dec(p.get("realized_pnl_usd_matched"))
             rpnl_swap = matched if matched is not None else rpnl
             amt_in_usd = _dec(p.get("amount_in_usd"))
+            amt_out_usd = _dec(p.get("amount_out_usd"))
+            # FIFO realizes the disposed token's mark; acquisition basis uses the received mark.
+            # Their difference is a separate exchange result, not an inferred protocol fee.
+            if (
+                amt_in_usd is not None
+                and amt_out_usd is not None
+                and all(value.is_finite() and value >= 0 for value in (amt_in_usd, amt_out_usd))
+            ):
+                sum_swap_exchange += amt_out_usd - amt_in_usd
+            else:
+                null_swap_exchange += 1
             if rpnl_swap is not None:
                 sum_swap += rpnl_swap
             elif amt_in_usd is not None:
@@ -2446,7 +2459,7 @@ def _cell_g6_reconciliation(  # noqa: C901
     # such a window can report a loud residual even when these cost terms are correct.
 
     component_pnl = sum_swap + sum_lp + sum_perp + sum_fees + sum_funding + sum_interest - sum_gas
-    component_pnl += sum_inventory_reval
+    component_pnl += sum_inventory_reval + sum_swap_exchange
 
     # Tolerance is the greater of a $0.10 noise floor and a primitive-specific
     # percentage of traded notional, debt high-water mark, or perp exposure.
@@ -2473,6 +2486,7 @@ def _cell_g6_reconciliation(  # noqa: C901
 
     null_breakdown = {
         "Σ_swaps_usd_null_count": null_swap_rpnl,
+        "Σ_swap_exchange_usd_null_count": null_swap_exchange,
         "Σ_lp_usd_null_count": null_lp_close_rpnl,
         "Σ_lp_fees_null_count": null_lp_fees,
         "Σ_perp_usd_null_count": null_perp_rpnl,
@@ -2505,6 +2519,7 @@ def _cell_g6_reconciliation(  # noqa: C901
         "wallet_pnl_usd": str(wallet_pnl),
         "component_pnl_usd": str(component_pnl),
         "Σ_swaps_usd": str(sum_swap),
+        "Σ_swap_exchange_usd": str(sum_swap_exchange),
         # Measured swaps without prior basis are diagnostic, not null inputs.
         "Σ_swaps_no_prior_basis_count": str(no_prior_basis_swap),
         # Measured PT disposals without prior basis follow the same rule.
@@ -5282,6 +5297,17 @@ def _spot_mark_errors(mark: dict[str, Any], wallet_row: dict[str, Any], replay_q
     return errors
 
 
+def _spot_inventory_identity(token: Any, chain: str) -> tuple[str, str]:
+    from almanak.framework.data.tokens.exceptions import TokenResolutionError
+    from almanak.framework.data.tokens.identity import canonicalize_token_identity
+
+    try:
+        return canonicalize_token_identity(str(token), chain)
+    except TokenResolutionError:
+        # Unresolved legacy names may match exactly but cannot establish an address alias.
+        return chain, _spot_token(token, chain)
+
+
 def _spot_mark_cell(
     swaps: list[tuple[dict[str, Any], dict[str, Any]]],
     snapshots: list[dict[str, Any]],
@@ -5299,10 +5325,19 @@ def _spot_mark_cell(
         marked_snapshots += 1
         lots, replay_errors = _spot_snapshot_lots(swaps, snapshot, ledger)
         errors.extend(f"snapshot {snapshot.get('id')}: {error}" for error in replay_errors)
+        scope = _spot_snapshot_scope(snapshot, swaps)
+        if scope is None:
+            errors.append(f"snapshot {snapshot.get('id')}: wallet/chain scope is unmeasured or ambiguous")
+            continue
         wallet_rows = _json_list(snapshot.get("wallet_balances_json"))
-        wallet = {str(row.get("symbol") or "").lower(): row for row in wallet_rows}
+        wallet = {}
+        for row in wallet_rows:
+            identity = _spot_inventory_identity(row.get("symbol") or "", scope[1])
+            if identity in wallet:
+                errors.append(f"snapshot {snapshot.get('id')}: duplicate wallet asset identity {identity}")
+            wallet[identity] = row
         for token, mark in inventory.items():
-            wallet_row = wallet.get(str(token).lower())
+            wallet_row = wallet.get(_spot_inventory_identity(token, scope[1]))
             if wallet_row is None:
                 errors.append(f"snapshot {snapshot.get('id')}: {token} absent from wallet balances")
                 continue
@@ -5310,7 +5345,8 @@ def _spot_mark_cell(
                 (
                     lot.remaining
                     for key, token_lots in lots.items()
-                    if key[-1] == _spot_token(token, key[1])
+                    if key[:3] == scope
+                    and _spot_inventory_identity(key[-1], key[1]) == _spot_inventory_identity(token, scope[1])
                     for lot in token_lots
                 ),
                 Decimal("0"),
@@ -5369,7 +5405,8 @@ def _spot_basis_cell(swaps: list[tuple[dict[str, Any], dict[str, Any]]], snapsho
                 (
                     lot.original_cost * (lot.remaining / lot.amount)
                     for key, token_lots in lots.items()
-                    if key[:3] == scope and key[-1] == _spot_token(token, scope[1])
+                    if key[:3] == scope
+                    and _spot_inventory_identity(key[-1], key[1]) == _spot_inventory_identity(token, scope[1])
                     for lot in token_lots
                     if lot.remaining > 0
                 ),

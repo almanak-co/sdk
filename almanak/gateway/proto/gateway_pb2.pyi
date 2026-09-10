@@ -4341,12 +4341,17 @@ class CompilationResult(_message.Message):
     ACTION_BUNDLE_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
     ERROR_CODE_FIELD_NUMBER: _builtins.int
+    COMPILATION_EVIDENCE_FIELD_NUMBER: _builtins.int
+    IS_SAFETY_REFUSAL_FIELD_NUMBER: _builtins.int
     success: _builtins.bool
     action_bundle: _builtins.bytes
     """JSON-serialized ActionBundle"""
     error: _builtins.str
     error_code: _builtins.str
     """Structured error code"""
+    compilation_evidence: _builtins.bytes
+    """JSON diagnostics bound to the failed intent; no executable transactions"""
+    is_safety_refusal: _builtins.bool
     def __init__(
         self,
         *,
@@ -4354,8 +4359,10 @@ class CompilationResult(_message.Message):
         action_bundle: _builtins.bytes = ...,
         error: _builtins.str = ...,
         error_code: _builtins.str = ...,
+        compilation_evidence: _builtins.bytes = ...,
+        is_safety_refusal: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["action_bundle", b"action_bundle", "error", b"error", "error_code", b"error_code", "success", b"success"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["action_bundle", b"action_bundle", "compilation_evidence", b"compilation_evidence", "error", b"error", "error_code", b"error_code", "is_safety_refusal", b"is_safety_refusal", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___CompilationResult: _TypeAlias = CompilationResult  # noqa: Y015
@@ -4437,6 +4444,7 @@ class ExecutionResult(_message.Message):
     SUBMISSION_PROVENANCE_FIELD_NUMBER: _builtins.int
     EXECUTION_PLAN_HASH_FIELD_NUMBER: _builtins.int
     SUBMISSION_TRANSACTIONS_FIELD_NUMBER: _builtins.int
+    EXECUTION_EVIDENCE_JSON_FIELD_NUMBER: _builtins.int
     success: _builtins.bool
     total_gas_used: _builtins.int
     receipts: _builtins.bytes
@@ -4446,6 +4454,8 @@ class ExecutionResult(_message.Message):
     execution_id: _builtins.str
     submission_provenance: Global___SubmissionProvenance.ValueType
     execution_plan_hash: _builtins.str
+    execution_evidence_json: _builtins.bytes
+    """Versioned validation and simulation observations, not chain receipts."""
     @_builtins.property
     def tx_hashes(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]: ...
     @_builtins.property
@@ -4463,8 +4473,9 @@ class ExecutionResult(_message.Message):
         submission_provenance: Global___SubmissionProvenance.ValueType = ...,
         execution_plan_hash: _builtins.str = ...,
         submission_transactions: _abc.Iterable[Global___SubmissionTransactionEvidence] | None = ...,
+        execution_evidence_json: _builtins.bytes = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "error_code", b"error_code", "execution_id", b"execution_id", "execution_plan_hash", b"execution_plan_hash", "receipts", b"receipts", "submission_provenance", b"submission_provenance", "submission_transactions", b"submission_transactions", "success", b"success", "total_gas_used", b"total_gas_used", "tx_hashes", b"tx_hashes"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "error_code", b"error_code", "execution_evidence_json", b"execution_evidence_json", "execution_id", b"execution_id", "execution_plan_hash", b"execution_plan_hash", "receipts", b"receipts", "submission_provenance", b"submission_provenance", "submission_transactions", b"submission_transactions", "success", b"success", "total_gas_used", b"total_gas_used", "tx_hashes", b"tx_hashes"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ExecutionResult: _TypeAlias = ExecutionResult  # noqa: Y015
@@ -6178,7 +6189,7 @@ class SimulateBundleRequest(_message.Message):
     chain: _builtins.str
     """Chain name (e.g., "arbitrum")"""
     simulator: _builtins.str
-    """Optional: "tenderly", "alchemy", or empty for auto"""
+    """Optional: "tenderly", "alchemy", "rpc", or empty for configured selection"""
     @_builtins.property
     def transactions(self) -> _containers.RepeatedCompositeFieldContainer[Global___SimulateTransaction]:
         """Transactions to simulate"""
@@ -6212,6 +6223,7 @@ class SimulateBundleResponse(_message.Message):
     SIMULATION_URL_FIELD_NUMBER: _builtins.int
     SIMULATOR_USED_FIELD_NUMBER: _builtins.int
     ERROR_FIELD_NUMBER: _builtins.int
+    SIMULATION_EVIDENCE_JSON_FIELD_NUMBER: _builtins.int
     success: _builtins.bool
     """True if all transactions would succeed"""
     simulated: _builtins.bool
@@ -6224,6 +6236,8 @@ class SimulateBundleResponse(_message.Message):
     """Which simulator was used"""
     error: _builtins.str
     """Error message if simulation failed"""
+    simulation_evidence_json: _builtins.bytes
+    """Measured backend observations; absent means unmeasured"""
     @_builtins.property
     def gas_estimates(self) -> _containers.RepeatedScalarFieldContainer[_builtins.int]:
         """Gas estimate per transaction"""
@@ -6243,8 +6257,9 @@ class SimulateBundleResponse(_message.Message):
         simulation_url: _builtins.str = ...,
         simulator_used: _builtins.str = ...,
         error: _builtins.str = ...,
+        simulation_evidence_json: _builtins.bytes = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "gas_estimates", b"gas_estimates", "revert_reason", b"revert_reason", "simulated", b"simulated", "simulation_url", b"simulation_url", "simulator_used", b"simulator_used", "success", b"success", "warnings", b"warnings"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["error", b"error", "gas_estimates", b"gas_estimates", "revert_reason", b"revert_reason", "simulated", b"simulated", "simulation_evidence_json", b"simulation_evidence_json", "simulation_url", b"simulation_url", "simulator_used", b"simulator_used", "success", b"success", "warnings", b"warnings"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___SimulateBundleResponse: _TypeAlias = SimulateBundleResponse  # noqa: Y015

@@ -802,9 +802,9 @@ class TestAnvilFundingDefaultNativeGas:
         mock_manager.fund_tokens_report.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_partial_funding_below_default_is_topped_up(self):
-        """anvil_funding with a small native amount -> topped up to default."""
-        gw = self._make_gateway("optimism", anvil_funding={NATIVE_SENTINEL: "0.5"})
+    @pytest.mark.parametrize("amount", ["0", "0.0005", "0.5"])
+    async def test_explicit_native_funding_is_exact(self, amount):
+        gw = self._make_gateway("optimism", anvil_funding={NATIVE_SENTINEL: amount})
 
         mock_manager = AsyncMock()
         mock_manager.fund_wallet = AsyncMock()
@@ -815,9 +815,7 @@ class TestAnvilFundingDefaultNativeGas:
 
         mock_manager.fund_wallet.assert_awaited_once()
         funded_amount = mock_manager.fund_wallet.await_args.args[1]
-        assert funded_amount == ManagedGateway.DEFAULT_ANVIL_NATIVE_GAS_AMOUNT, (
-            "0.5 ETH < default 100 ETH; helper must top up so gas is never the bottleneck"
-        )
+        assert funded_amount == Decimal(amount)
 
     @pytest.mark.asyncio
     async def test_funding_above_default_is_respected(self):

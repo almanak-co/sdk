@@ -413,11 +413,7 @@ class TestSwapExactInput:
         assert result.transactions == []
         assert "zero output" in (result.error or "").lower()
 
-    def test_onchain_quote_without_oracle_skips_impact_guard(self):
-        """VIB-2058: an executable quote with no oracle price_ratio (partial oracle)
-        compiles — the executable quote already proved pool existence; depth is left
-        unguarded (SKIPPED_NO_ORACLE), mirroring the V3 swap path.
-        """
+    def test_onchain_quote_without_oracle_refuses_swap(self):
         config = UniswapV4Config(
             chain="arbitrum",
             wallet_address=_TEST_WALLET,
@@ -436,9 +432,10 @@ class TestSwapExactInput:
             price_ratio=None,
         )
 
-        assert result.success is True
+        assert result.success is False
         assert result.quote_source == "onchain_quoter"
-        assert result.amount_out_minimum > 0
+        assert result.transactions == []
+        assert result.price_impact_check["reason"] == "oracle_unavailable"
 
     def _thin_quote_swap(self, *, rpc_url: str, managed_fork: bool | None):
         config = UniswapV4Config(

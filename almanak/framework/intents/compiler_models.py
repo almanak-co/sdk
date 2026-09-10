@@ -4,6 +4,7 @@ These are extracted from compiler.py for file-size management.
 All symbols remain importable from ``almanak.framework.intents.compiler``.
 """
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -229,6 +230,19 @@ class CompilationResult:
     peg_tokens: list[str] = field(default_factory=list)
     intent_id: str = ""
     compiled_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    compiler_evidence: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def compilation_evidence(self) -> dict[str, Any] | None:
+        """Diagnostic evidence of the terminal compile, never an execution artifact."""
+        if self.status != CompilationStatus.FAILED or not self.compiler_evidence:
+            return None
+        return {
+            "schema_version": 1,
+            "intent_id": self.intent_id,
+            "compiled_at": self.compiled_at.isoformat(),
+            "compiler_evidence": deepcopy(self.compiler_evidence),
+        }
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -246,6 +260,7 @@ class CompilationResult:
             "peg_tokens": self.peg_tokens,
             "intent_id": self.intent_id,
             "compiled_at": self.compiled_at.isoformat(),
+            "compiler_evidence": deepcopy(self.compiler_evidence),
         }
 
 

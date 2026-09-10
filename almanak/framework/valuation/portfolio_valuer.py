@@ -2018,6 +2018,7 @@ class PortfolioValuer:
                 numeraire=_resolve_numeraire_hint(strategy),
                 base_token=_resolve_base_token_hint(strategy),
                 dust_floor=_resolve_swap_dust_floor(strategy),
+                allow_address_aliases=len(chains) == 1,
             )
             # VIB-5738: a discovered wallet pseudo-position (a ``PositionType.TOKEN``
             # row overlapping the wallet, kept for operator/teardown visibility)
@@ -2484,6 +2485,7 @@ class PortfolioValuer:
         numeraire: str | None = None,
         base_token: str | None = None,
         dust_floor: Decimal = _DEFAULT_SWAP_DUST_FLOOR_USD,
+        allow_address_aliases: bool = True,
     ) -> _SwapInventoryClassification:
         """Classify this snapshot's open swap-inventory lots (VIB-5057).
 
@@ -2526,7 +2528,14 @@ class PortfolioValuer:
                 )
             return _NO_SWAP_INVENTORY
         try:
+            from .inventory_identity import align_swap_inventory_inputs
+
             lot_totals = self._open_swap_lot_totals()
+            # Multi-chain wallet maps aggregate by symbol and cannot prove address ownership on one chain.
+            if allow_address_aliases:
+                balances, prices, numeraire, base_token = align_swap_inventory_inputs(
+                    list(lot_totals), balances, prices, chain, numeraire, base_token
+                )
             return _classify_swap_inventory(
                 lot_totals,
                 balances,

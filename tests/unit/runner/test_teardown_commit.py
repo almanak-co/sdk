@@ -120,6 +120,7 @@ def _make_runner(*, live_mode: bool = True, execution_mode: str | None = None) -
     # hooks. Tests that need failure inject their own AsyncMock on
     # ``save_position_event``.
     runner.state_manager = MagicMock(name="StateManager")
+    runner.state_manager.get_ledger_entry_by_id = AsyncMock(return_value=None)
     runner.state_manager.save_position_event = AsyncMock(return_value=True)
     runner._recent_open_events = {}
     runner._hydrate_lp_close_from_durable_store = AsyncMock(return_value=None)
@@ -1749,3 +1750,131 @@ async def test_teardown_drain_timeout_degrades_without_cancelling_risk_reduction
     )
     assert not next_outcome.accounting_degraded
     assert not runner._pending_drain_tasks
+
+
+@pytest.mark.asyncio
+async def test_failed_attempt_retains_result_without_success_side_effects(
+    fake_strategy, local_db_dir, patch_enricher_and_sidecar
+):
+    runner = _make_runner()
+    runner._write_ledger_entry = AsyncMock(side_effect=lambda *a, **kw: kw["ledger_entry_id"] or "failed-ledger")
+    result = _make_execution_result(success=False)
+    result.error = "Receipt reconciliation required after partial submission"
+    result.transaction_results.append(SimpleNamespace(tx_hash="0xunconfirmed", success=False, receipt=None))
+    set_cycle_id("outer")
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        _make_intent("SWAP"),
+        execution_result=result,
+        execution_context=SimpleNamespace(),
+        teardown_cycle_id="teardown-failed",
+    )
+    assert outcome.ledger_entry_id == runner._write_ledger_entry.await_args.kwargs["ledger_entry_id"]
+    assert not outcome.accounting_degraded
+    kwargs = runner._write_ledger_entry.await_args.kwargs
+    assert kwargs["result"] is result
+    assert kwargs["success"] is False
+    assert kwargs["emit_position_event"] is False
+    assert kwargs["error"] == result.error
+    runner.state_manager.save_position_event.assert_not_awaited()
+    assert get_cycle_id() == "outer"
+    clear_cycle_id()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("writer_failure", [RuntimeError("database unavailable"), None])
+async def test_failed_attempt_persistence_is_loud_but_does_not_raise(fake_strategy, local_db_dir, writer_failure):
+    runner = _make_runner()
+    runner._write_ledger_entry = AsyncMock(side_effect=writer_failure, return_value=None)
+    outcome = await commit_teardown_intent(
+        runner,
+        fake_strategy,
+        _make_intent("LP_CLOSE"),
+        execution_result=_make_execution_result(success=False),
+        execution_context=SimpleNamespace(),
+        teardown_cycle_id="teardown-failed",
+    )
+    assert outcome.accounting_degraded
+    assert outcome.ledger_entry_id is None
+    assert len(_read_deferred_log(local_db_dir)) == 1
+    runner.state_manager.save_position_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_manager_dispatches_failed_result_to_commit_without_closure():
+    from almanak.framework.teardown.teardown_manager import TeardownManager, _IntentAttemptState
+
+    manager = object.__new__(TeardownManager)
+    result = _make_execution_result(success=False)
+    outcome = TeardownCommitOutcome("failed-ledger", False, None)
+    manager.orchestrator = SimpleNamespace(execute=AsyncMock(return_value=result))
+    manager.runner_helpers = SimpleNamespace(has_commit=True, commit=AsyncMock(return_value=outcome))
+    manager._capture_pre_attempt_snapshots = AsyncMock(return_value=(None, None, None, None))
+    manager._capture_native_exit = MagicMock(return_value=None)
+    manager._complete_native_exit = MagicMock()
+    manager._prepare_async_submission = MagicMock()
+    state = _IntentAttemptState()
+    actual = await manager._execute_and_commit_attempt(
+        SimpleNamespace(deployment_id="dep-1"),
+        _make_intent("SWAP"),
+        SimpleNamespace(action_bundle=SimpleNamespace(metadata={})),
+        SimpleNamespace(),
+        "teardown-failed",
+        [],
+        state,
+        0,
+        1,
+    )
+    assert actual == (result, outcome, None)
+    assert manager.runner_helpers.commit.await_args.kwargs["execution_result"] is result
+    assert not state.submission_landed
+    manager._prepare_async_submission.assert_not_called()
+    manager._complete_native_exit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_failed_teardown_receipts_are_idempotent_and_immutable(fake_strategy, local_db_dir):
+    from almanak.framework.observability.ledger import _build_extracted_data_json
+
+    runner = _make_runner()
+    rows = {}
+    result = _make_execution_result(tx_hash="0x" + "a" * 64, success=False, block_number=123)
+    result.transaction_results[0].gas_used = 57916
+    result.transaction_results[0].receipt.gas_used = 57916
+    result.transaction_results[0].receipt.effective_gas_price = 1000000000
+    result.transaction_results[0].receipt.status = 1
+
+    async def save(*args, **kwargs):
+        key = kwargs["ledger_entry_id"]
+        rows[key] = {
+            "deployment_id": fake_strategy.deployment_id,
+            "intent_type": "SWAP",
+            "protocol": getattr(args[1], "protocol", "") or "",
+            "chain": kwargs["chain"],
+            "success": False,
+            "extracted_data_json": _build_extracted_data_json(kwargs["result"]),
+        }
+        return key
+
+    runner._write_ledger_entry = AsyncMock(side_effect=save)
+    runner.state_manager.get_ledger_entry_by_id = AsyncMock(side_effect=lambda key, **kw: rows.get(key))
+    args = {
+        "execution_result": result,
+        "execution_context": SimpleNamespace(chain="base", wallet_address="0xOTHER"),
+        "teardown_cycle_id": "teardown-failed",
+    }
+    first = await commit_teardown_intent(runner, fake_strategy, _make_intent("SWAP"), **args)
+    second = await commit_teardown_intent(runner, fake_strategy, _make_intent("SWAP"), **args)
+    assert first.ledger_entry_id == second.ledger_entry_id
+    assert first.ledger_entry_id is not None
+    assert not first.accounting_degraded and not second.accounting_degraded
+    runner._write_ledger_entry.assert_awaited_once()
+    assert runner._write_ledger_entry.await_args.kwargs["wallet_address"] == "0xOTHER"
+    wrong_intent = await commit_teardown_intent(runner, fake_strategy, _make_intent("LP_CLOSE"), **args)
+    assert wrong_intent.accounting_degraded
+    runner._write_ledger_entry.assert_awaited_once()
+    result.transaction_results[0].receipt.gas_used += 1
+    conflict = await commit_teardown_intent(runner, fake_strategy, _make_intent("SWAP"), **args)
+    assert conflict.accounting_degraded
+    runner._write_ledger_entry.assert_awaited_once()

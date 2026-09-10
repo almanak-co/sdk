@@ -159,6 +159,7 @@ class MovingHeadPositionGateway(PositionGateway):
     """Advance latest after the position bracket while honoring numbered reads."""
 
     def __init__(self):
+        super().__init__()
         self.head_reads = 0
         self.numbered_reads = []
 
@@ -238,3 +239,44 @@ def test_reorg_between_position_and_venue_brackets_refuses_compilation(operation
     gateway = ReorganizedPositionGateway()
     with pytest.raises(ValueError, match="position observation was reorganized during venue verification"):
         compile_withdrawal(adapter_for(gateway), gateway, operation)
+
+
+@pytest.mark.parametrize(
+    "configured_bps,explicit_tolerance,expected_bps",
+    [(50, None, 50), (125, None, 125), (0, None, 0), (125, Decimal("0"), 0), (50, Decimal("0.02"), 200)],
+)
+def test_close_encodes_configured_default_or_explicit_slippage(configured_bps, explicit_tolerance, expected_bps):
+    from eth_abi import decode
+
+    from almanak.connectors.uniswap_v4.position import observe_position, withdrawal_minima
+
+    gateway = PositionGateway()
+    adapter = UniswapV4Adapter(
+        config=UniswapV4Config(chain="base", wallet_address=WALLET, default_slippage_bps=configured_bps),
+        venue_verification_gateway_factory=lambda: gateway,
+    )
+    intent = LPCloseIntent(position_id="42", pool=KEY.pool_id, protocol="uniswap_v4", max_slippage=explicit_tolerance)
+    bundle = adapter.compile_lp_close_intent(intent, gateway.liquidity, KEY.currency0, KEY.currency1)
+    position = observe_position(gateway, chain="base", token_id=42, wallet=WALLET)
+    expected = withdrawal_minima(position, position.liquidity, expected_bps)
+    inner, _ = decode(["bytes", "uint256"], bytes.fromhex(bundle.transactions[-1]["data"][10:]))
+    _, parameters = decode(["bytes", "bytes[]"], inner)
+    token_id, liquidity, minimum0, minimum1, _ = decode(
+        ["uint256", "uint256", "uint128", "uint128", "bytes"], parameters[0]
+    )
+    assert (token_id, liquidity, minimum0, minimum1) == (42, position.liquidity, *expected)
+    assert (int(bundle.metadata["amount0_min"]), int(bundle.metadata["amount1_min"])) == expected
+    assert all(value > 0 for value in expected)
+    validate_execution(bundle, chain="base", wallet=WALLET, is_safe=False, gateway=gateway)
+
+
+@pytest.mark.parametrize("configured_bps", [-1, 10000, True])
+def test_invalid_default_close_tolerance_cannot_compile(configured_bps):
+    gateway = PositionGateway()
+    adapter = UniswapV4Adapter(
+        config=UniswapV4Config(chain="base", wallet_address=WALLET, default_slippage_bps=configured_bps),
+        venue_verification_gateway_factory=lambda: gateway,
+    )
+    intent = LPCloseIntent(position_id="42", pool=KEY.pool_id, protocol="uniswap_v4")
+    with pytest.raises(ValueError, match="slippage below 100%"):
+        adapter.compile_lp_close_intent(intent, gateway.liquidity, KEY.currency0, KEY.currency1)

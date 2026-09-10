@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 class TeardownCommitOutcome:
     """Outcome of the per-intent teardown commit pipeline.
 
-    Returned by :func:`commit_teardown_intent` for every successful on-chain
+    Returned by :func:`commit_teardown_intent` for every dispatched
     teardown intent. Carries the IDs the caller needs (ledger_entry_id) plus
     a structured degradation report for the TeardownManager loop and the
     eventual TeardownResult.
@@ -321,6 +321,91 @@ async def _emit_teardown_position_event(
         await runner._run_position_event_attribution(pos_event)
 
 
+async def _failed_teardown_ledger_identity(
+    runner: StrategyRunner, strategy: StrategyProtocol, intent: AnyIntent, execution_result: Any, chain: str
+) -> tuple[str | None, bool]:
+    """Deduplicate identical failed receipt sets while refusing changed evidence."""
+    import json
+    from uuid import NAMESPACE_URL, uuid5
+
+    from ..execution.reconciliation import submitted_transaction_hashes
+    from ..observability.ledger import _build_extracted_data_json
+
+    hashes = submitted_transaction_hashes(execution_result)
+    if not hashes:
+        return None, False
+    ledger_id = str(uuid5(NAMESPACE_URL, repr(("teardown-failed-v1", strategy.deployment_id, chain, sorted(hashes)))))
+    existing = await runner.state_manager.get_ledger_entry_by_id(ledger_id, strict=True)
+    if existing is None:
+        return ledger_id, False
+    expected = json.loads(_build_extracted_data_json(execution_result) or "{}")
+    saved = json.loads(existing.get("extracted_data_json") or "{}")
+    if (
+        existing.get("deployment_id") != strategy.deployment_id
+        or existing.get("chain") != chain
+        or existing.get("success") not in (False, 0)
+        or existing.get("intent_type") != _intent_type_str(intent)
+        or existing.get("protocol") != (getattr(intent, "protocol", "") or "")
+        or not expected.get("sub_transactions")
+        or saved.get("sub_transactions") != expected["sub_transactions"]
+    ):
+        raise ValueError("Persisted failed teardown receipt evidence conflicts with execution")
+    return ledger_id, True
+
+
+async def _persist_failed_teardown_attempt(
+    runner: StrategyRunner,
+    strategy: StrategyProtocol,
+    intent: AnyIntent,
+    execution_result: Any,
+    pre_snapshot: Any,
+    lending_pre_state: Any,
+    teardown_cycle_id: str,
+    execution_context: Any,
+) -> TeardownCommitOutcome:
+    """Retain receipt costs and uncertainty without materializing a successful action."""
+    try:
+        from .strategy_runner import _build_pre_state_for_ledger
+
+        chain = getattr(execution_context, "chain", None) or strategy.chain
+        ledger_id, existing = await _failed_teardown_ledger_identity(runner, strategy, intent, execution_result, chain)
+        if existing:
+            return TeardownCommitOutcome(ledger_id, False, None)
+        persisted_id = await runner._write_ledger_entry(
+            strategy,
+            intent,
+            result=execution_result,
+            success=False,
+            error=getattr(execution_result, "error", "") or "Teardown execution failed",
+            price_oracle=getattr(runner, "_teardown_price_oracle", None),
+            pre_state=_build_pre_state_for_ledger(
+                pre_snapshot, lending_pre_state, protocol=(getattr(intent, "protocol", "") or "").lower()
+            ),
+            emit_position_event=False,
+            ledger_entry_id=ledger_id,
+            chain=chain,
+            wallet_address=getattr(execution_context, "wallet_address", None) or strategy.wallet_address,
+        )
+        if persisted_id is None or (ledger_id is not None and persisted_id != ledger_id):
+            raise RuntimeError("Failed teardown attempt ledger was not acknowledged")
+        return TeardownCommitOutcome(persisted_id, False, None)
+    except Exception as exc:  # noqa: BLE001 — accounting cannot block risk reduction
+        logger.error("Failed teardown accounting persistence for %s: %s", strategy.deployment_id, exc)
+        record = DeferredWrite.now(
+            kind="ledger",
+            deployment_id=strategy.deployment_id,
+            cycle_id=teardown_cycle_id,
+            intent_type=_intent_type_str(intent),
+            tx_hash=_first_tx_hash(execution_result),
+            error=str(exc),
+        )
+        try:
+            deferred_append(record)
+        except Exception:  # noqa: BLE001 — retain degradation even if its durable backstop fails
+            logger.exception("Failed to persist teardown accounting degradation for %s", strategy.deployment_id)
+        return TeardownCommitOutcome(None, True, str(exc), (record,))
+
+
 async def commit_teardown_intent(
     runner: StrategyRunner,
     strategy: StrategyProtocol,
@@ -336,7 +421,7 @@ async def commit_teardown_intent(
     v4_lp_close_fees: tuple[int, int] | None = None,
     v4_lp_close_native_principal: tuple[int | None, int | None] | None = None,
 ) -> TeardownCommitOutcome:
-    """Run the full success-path commit pipeline for one teardown intent.
+    """Persist every teardown attempt; materialize actions only after success.
 
     Mirrors :py:meth:`StrategyRunner._single_chain_handle_success`'s body
     for steps 1–4 (enrich → ledger → outbox+fire → sidecar) but **never
@@ -412,6 +497,17 @@ async def commit_teardown_intent(
     enriched_result = execution_result
     with structlog.contextvars.bound_contextvars(cycle_id=teardown_cycle_id, correlation_id=teardown_cycle_id):
         try:
+            if execution_result.success is False:
+                return await _persist_failed_teardown_attempt(
+                    runner,
+                    strategy,
+                    intent,
+                    execution_result,
+                    pre_snapshot,
+                    lending_pre_state,
+                    teardown_cycle_id,
+                    execution_context,
+                )
             # ----- Step 1: ResultEnricher (best-effort) ----------------------
             try:
                 from ..execution.result_enricher import ResultEnricher

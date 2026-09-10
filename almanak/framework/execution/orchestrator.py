@@ -1746,24 +1746,36 @@ class ExecutionOrchestrator:
 
     async def _validate_connector_operation(self, state: ExecutionPipelineState) -> ExecutionResult | None:
         from .connector_validation import validate_connector_execution
+        from .interfaces import ConnectorValidationError
 
         try:
-            await asyncio.to_thread(
+            observations = await asyncio.to_thread(
                 validate_connector_execution,
                 state.action_bundle,
                 chain=self.chain,
                 wallet=state.context.wallet_address,
                 is_safe=isinstance(self.signer, SafeSigner),
                 observer_factory=self.operation_observer_factory,
+                managed_fork=self.managed_fork,
             )
+            if observations:
+                evidence = state.result.extracted_data.setdefault("execution_evidence", {"schema_version": 1})
+                evidence.setdefault("connector_validation", []).append(
+                    {"status": "accepted", "phase": state.result.phase.value, "observations": observations}
+                )
         except (ValueError, TypeError, KeyError) as exc:
             state.result.error = f"Connector operation refused: {exc}"
             state.result.error_phase = ExecutionPhase.VALIDATION
+            details: dict[str, Any] = {"status": "refused", "phase": state.result.phase.value, "error": str(exc)}
+            if isinstance(exc, ConnectorValidationError):
+                details.update(code=exc.code, observation=exc.evidence)
+            evidence = state.result.extracted_data.setdefault("execution_evidence", {"schema_version": 1})
+            evidence.setdefault("connector_validation", []).append(details)
             self._complete_session(state.session, success=False, error=state.result.error)
             self._emit_event(
                 ExecutionEventType.RISK_BLOCKED,
                 state.context,
-                {"violations": [state.result.error]},
+                {"violations": [state.result.error], "connector_validation": details},
             )
             return state.result
         return None
@@ -1807,6 +1819,9 @@ class ExecutionOrchestrator:
             state.unsigned_txs, context.chain, state_overrides=state_overrides
         )
         result.simulation_result = simulation_result
+        result.extracted_data.setdefault("execution_evidence", {"schema_version": 1})["simulation"] = (
+            simulation_result.to_dict()
+        )
         from .submission import execution_plan_hash
 
         logger.info(

@@ -25,6 +25,58 @@ TARGET = VenueTargetRef(
 )
 
 
+@pytest.mark.parametrize("transport", ["client", "gateway"])
+@pytest.mark.parametrize("mutation", [None, "number", "hash", "timestamp", "boolean_timestamp"])
+def test_verification_block_identity_is_complete_and_pinned(monkeypatch, transport, mutation):
+    number, timestamp, block_hash = 123, 1_766_000_000, b"\xab" * 32
+    if mutation == "number":
+        number = 124
+    elif mutation == "hash":
+        block_hash = b"\xab" * 31
+    elif mutation == "timestamp":
+        timestamp = 0
+    elif mutation == "boolean_timestamp":
+        timestamp = True
+    if transport == "client":
+        client = MagicMock()
+        client.is_connected = True
+        client.config.timeout = 12.0
+        client.rpc.Call.return_value = SimpleNamespace(
+            success=True,
+            result=json.dumps(
+                {
+                    "number": hex(number),
+                    "hash": "0x" + block_hash.hex(),
+                    "timestamp": timestamp if type(timestamp) is bool else hex(timestamp),
+                }
+            ),
+            error="",
+        )
+        gateway = GatewayClientVenueVerificationGateway(client)
+    else:
+        web3 = MagicMock()
+        web3.eth.get_block.return_value = {"number": number, "hash": block_hash, "timestamp": timestamp}
+        monkeypatch.setattr(
+            "almanak.gateway.services.venue_verification_gateway.get_cached_web3", lambda *args: web3
+        )
+        gateway = GatewayRpcVenueVerificationGateway(chain="robinhood", network=Network.MAINNET)
+    if mutation is not None:
+        with pytest.raises(ValueError):
+            gateway.block_identity(chain="robinhood", block_number=123)
+    else:
+        block = gateway.block_identity(chain="robinhood", block_number=123)
+        assert (block.number, block.block_hash, block.timestamp) == (123, "0x" + "ab" * 32, 1_766_000_000)
+    if transport == "client":
+        request = client.rpc.Call.call_args.args[0]
+        assert request.chain == "robinhood"
+        assert request.method == "eth_getBlockByNumber"
+        assert json.loads(request.params) == ["0x7b", False]
+    else:
+        web3.eth.get_block.assert_called_once_with(123)
+        with pytest.raises(ValueError, match="bound to"):
+            gateway.block_identity(chain="base", block_number=123)
+
+
 def test_gateway_client_adapter_pins_every_rpc_to_the_requested_chain_and_block() -> None:
     client = MagicMock()
     client.is_connected = True

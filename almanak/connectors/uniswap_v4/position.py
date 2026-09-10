@@ -86,7 +86,7 @@ def observe_position(
 
 
 def withdrawal_minima(position: PositionObservation, liquidity: int, slippage_bps: int) -> tuple[int, int]:
-    """Loose per-leg backstop, measured from principal; fees are not fabricated."""
+    """Per-leg principal minima at the requested tolerance, excluding unmeasured fees."""
     if type(liquidity) is not int or not 0 < liquidity <= position.liquidity:
         raise ValueError("Withdrawal liquidity must be positive and bounded by the measured NFT liquidity")
     if type(slippage_bps) is not int or not 0 <= slippage_bps < 10000:

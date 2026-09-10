@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
 
@@ -340,6 +341,56 @@ class TestSetupGatewayManaged:
 
     def _write_config(self, working_dir: Path, chain: str) -> None:
         (working_dir / "config.json").write_text(json.dumps({"chain": chain}))
+
+    @pytest.mark.parametrize(
+        "network,wallet,forks", [("mainnet", "default", True), ("anvil", "isolated", True), ("anvil", "default", False)]
+    )
+    def test_default_key_cannot_escape_managed_evm_default_wallet(self, monkeypatch, network, wallet, forks):
+        from almanak.framework.cli import _run_components, _run_gateway
+
+        def refuse_prompt():
+            pytest.fail("Default EVM wallet must not be selected for this surface")
+
+        monkeypatch.setattr(_run_components, "_accept_anvil_default_wallet_or_exit", refuse_prompt)
+        assert (
+            _run_gateway._resolve_default_anvil_key(None, network=network, wallet=wallet, has_evm_forks=forks) is None
+        )
+
+    def test_default_anvil_identity_is_resolved_before_gateway_start(self, monkeypatch, tmp_path):
+        from almanak.framework.cli import _run_components
+        from almanak.framework.cli.run import ANVIL_DEFAULT_PRIVATE_KEY
+
+        _install_gateway_fakes(monkeypatch)
+        monkeypatch.delenv("ALMANAK_PRIVATE_KEY", raising=False)
+        self._write_config(tmp_path, "robinhood")
+        observed = []
+        monkeypatch.setattr(
+            _run_components, "_accept_anvil_default_wallet_or_exit", lambda: observed.append("accepted")
+        )
+
+        def start(managed, timeout):
+            assert observed == ["accepted"]
+            assert managed.settings.private_key == ANVIL_DEFAULT_PRIVATE_KEY
+            assert run_helpers._runtime_private_key_override.get() == ANVIL_DEFAULT_PRIVATE_KEY
+            observed.append("gateway-started-with-identity")
+            managed.started = True
+
+        monkeypatch.setattr(_FakeManagedGateway, "start", start)
+        run_helpers._setup_gateway(
+            working_dir=str(tmp_path),
+            config_file=None,
+            network="anvil",
+            gateway_host="127.0.0.1",
+            gateway_port=50051,
+            no_gateway=False,
+            anvil_ports=(),
+            wallet="default",
+            keep_anvil=False,
+            reset_fork=False,
+            once=False,
+        )
+        assert observed == ["accepted", "gateway-started-with-identity"]
+        assert "ALMANAK_PRIVATE_KEY" not in os.environ
 
     def test_managed_happy_path_starts_and_registers_atexit(
         self,
@@ -1279,12 +1330,12 @@ class TestResolveIdentity:
 class TestIdentityInfoShape:
     def test_identity_info_is_frozen(self) -> None:
         info = IdentityInfo(deployment_id="d", run_id="r", strategy_name="s")
-        with pytest.raises(Exception):
+        with pytest.raises(FrozenInstanceError):
             info.deployment_id = "changed"  # type: ignore[misc]
 
     def test_resume_info_is_frozen(self) -> None:
         info = ResumeInfo(is_resume=True, version=1, state_keys=["a"])
-        with pytest.raises(Exception):
+        with pytest.raises(FrozenInstanceError):
             info.is_resume = False  # type: ignore[misc]
 
 

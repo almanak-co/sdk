@@ -1511,6 +1511,8 @@ message CompilationResult {
   bytes action_bundle = 2;  // JSON-serialized ActionBundle
   string error = 3;
   string error_code = 4;  // Structured error code
+  bytes compilation_evidence = 5;  // JSON diagnostics bound to the failed intent; no executable transactions
+  bool is_safety_refusal = 6;
 }
 
 message ExecuteRequest {
@@ -1558,6 +1560,7 @@ message ExecutionResult {
   SubmissionProvenance submission_provenance = 8;
   string execution_plan_hash = 9;
   repeated SubmissionTransactionEvidence submission_transactions = 10;
+  bytes execution_evidence_json = 11; // Versioned validation and simulation observations, not chain receipts.
 }
 
 message TxStatusRequest {
@@ -2126,7 +2129,7 @@ message SimulateBundleRequest {
   string chain = 1;                             // Chain name (e.g., "arbitrum")
   repeated SimulateTransaction transactions = 2; // Transactions to simulate
   repeated SimulateStateOverride state_overrides = 3; // Optional state overrides
-  string simulator = 4;                         // Optional: "tenderly", "alchemy", or empty for auto
+  string simulator = 4;                         // Optional: "tenderly", "alchemy", "rpc", or empty for configured selection
 }
 
 message SimulateBundleResponse {
@@ -2138,6 +2141,7 @@ message SimulateBundleResponse {
   string simulation_url = 6;          // Tenderly dashboard URL (if available)
   string simulator_used = 7;          // Which simulator was used
   string error = 8;                   // Error message if simulation failed
+  bytes simulation_evidence_json = 9; // Measured backend observations; absent means unmeasured
 }
 
 // =============================================================================

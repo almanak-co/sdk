@@ -1654,7 +1654,7 @@ def _apply_template_heuristics(
             continue
         # Secondary tolerance: for LP, accept 'pool' OR 'fee_tier' OR
         # 'pool_address' since strategies disagree on naming.
-        if template == "lp" and ({"pool", "pool_address", "fee_tier"} & config_keys):
+        if template == "lp" and ({"pool", "pool_address", "fee_tier"} & config_keys or _has_explicit_pool_key(config)):
             continue
         report.add(
             Finding(
@@ -1671,6 +1671,11 @@ def _apply_template_heuristics(
 # =============================================================================
 # Config-level placeholder scan (separate from AST so config-only dirs still work)
 # =============================================================================
+
+
+def _has_explicit_pool_key(config: dict[str, Any] | None) -> bool:
+    key = config.get("pool_key") if isinstance(config, dict) else None
+    return isinstance(key, dict) and set(key) == {"currency0", "currency1", "fee", "tick_spacing", "hooks"}
 
 
 def _scan_config_placeholders(config: dict[str, Any] | None, config_path: Path | None, report: CheckReport) -> None:
@@ -1690,6 +1695,14 @@ def _scan_config_placeholders(config: dict[str, Any] | None, config_path: Path |
             for idx, value in enumerate(obj):
                 _walk(value, f"{path}[{idx}]")
         else:
+            # V4 encodes native currency and the absence of hooks as zero;
+            # connector validation owns whether the complete key is admissible.
+            if (
+                _has_explicit_pool_key(config)
+                and path in {"pool_key.currency0", "pool_key.hooks"}
+                and obj == "0x0000000000000000000000000000000000000000"
+            ):
+                return
             hit = _is_placeholder_value(obj) if isinstance(obj, str) else None
             if hit:
                 report.add(

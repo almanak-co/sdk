@@ -1,0 +1,30 @@
+{
+  "source_repository": "https://github.com/whetstoneresearch/doppler",
+  "source_commit": "bda077cf05c834f3bb5eb311f5b86376910d7912",
+  "compiler": "0.8.26+commit.8a97fa7a",
+  "via_ir": true,
+  "optimizer_runs": 0,
+  "evm_version": "cancun",
+  "append_cbor": false,
+  "runtime_source_reproduced": [
+    "RehypeDopplerHookInitializer",
+    "Quoter"
+  ],
+  "chain_id": 4663,
+  "gateway_observation_block": 59112974,
+  "scope": "Reproduced public hook and periphery runtimes plus pinned administrative state for Doppler/Rehype exact-input admission. Runtime reproduction is not an E2E execution proof.",
+  "periphery_sources": {
+    "quoter": {
+      "url": "https://sourcify.dev/server/v2/contract/4663/0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94?fields=all",
+      "sha256": "96183e76ffd5a1a5e57401a08c491e181551fd7d03cc6d90038cc22fd1111ede",
+      "match_id": "47290713",
+      "compiled_runtime_reproduced": true
+    },
+    "router": {
+      "url": "https://sourcify.dev/server/v2/contract/4663/0x8876789976dEcBfCbBbe364623C63652db8C0904?fields=all",
+      "sha256": "ffe65cb3ffe793a4a24303669d1fa2dc21966c00ff1869cba6ed32a22b33b52e",
+      "match_id": "46997781",
+      "compiled_runtime_reproduced": true
+    }
+  }
+}

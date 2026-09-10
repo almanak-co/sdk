@@ -160,6 +160,7 @@ almanak strat new              # Create new strategy from template
 almanak strat run --once       # Run single iteration (auto-starts gateway)
 almanak strat run --network anvil --once  # Run on local Anvil fork (auto-starts Anvil + gateway)
 almanak strat run --network anvil --dashboard  # Run with live dashboard
+almanak strat run --network anvil --confirm-start  # Inspect funded wallet before starting execution
 
 # Strategy reporting (reads the persisted local SQLite state DB; no gateway call)
 almanak strat pnl -s <deployment_id>          # Per-strategy PnL breakdown (human text)

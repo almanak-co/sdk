@@ -75,3 +75,51 @@ def test_operator_gateway_reports_the_underlying_connection_state() -> None:
     web3.is_connected.return_value = False
 
     assert OperatorGatewayClient(web3, "arbitrum").is_connected is False
+
+
+def test_anvil_adapter_implements_the_direct_verification_surface() -> None:
+    from almanak.framework.venues.verifier import VenueVerificationGateway
+
+    adapter = AnvilEthCallAdapter(MagicMock())
+    for name, method in vars(VenueVerificationGateway).items():
+        if name.startswith("_") or not callable(method):
+            continue
+        implementation = getattr(adapter, name)
+        arguments = {
+            parameter: MagicMock() for parameter in inspect.signature(method).parameters if parameter != "self"
+        }
+        inspect.signature(implementation).bind(**arguments)
+
+
+def test_anvil_block_identity_preserves_the_pinned_header() -> None:
+    web3 = MagicMock()
+    web3.provider.make_request.return_value = {
+        "result": {"number": "0x2a", "timestamp": "0x6553f100", "hash": "0x" + "AB" * 32}
+    }
+
+    header = AnvilEthCallAdapter(web3).block_identity(chain="base", block_number=42)
+
+    assert (header.number, header.timestamp, header.block_hash) == (42, 1700000000, "0x" + "ab" * 32)
+    web3.provider.make_request.assert_called_once_with("eth_getBlockByNumber", ["0x2a", False])
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("number", "0x2b"), ("timestamp", "0x0"), ("timestamp", None), ("hash", "0x1234")],
+)
+def test_anvil_block_identity_rejects_unusable_headers(field, value) -> None:
+    web3 = MagicMock()
+    block = {"number": "0x2a", "timestamp": "0x6553f100", "hash": "0x" + "ab" * 32}
+    block[field] = value
+    web3.provider.make_request.return_value = {"result": block}
+
+    with pytest.raises(ValueError):
+        AnvilEthCallAdapter(web3).block_identity(chain="base", block_number=42)
+
+
+def test_anvil_block_identity_propagates_rpc_failure() -> None:
+    web3 = MagicMock()
+    web3.provider.make_request.return_value = {"error": {"code": -32000, "message": "header unavailable"}}
+
+    with pytest.raises(ValueError, match="header unavailable"):
+        AnvilEthCallAdapter(web3).block_identity(chain="base", block_number=42)

@@ -30,6 +30,7 @@ from almanak.framework.execution.orchestrator import (
 from almanak.framework.execution.result_enricher import enrich_result
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.vocabulary import IntentType, LPOpenIntent
+from tests.intents._price_evidence import assert_lp_price_provenance
 from tests.intents.conftest import (
     CHAIN_CONFIGS,
     assert_accounting_persisted,
@@ -379,9 +380,7 @@ class TestUniswapV4LPOpenIntent:
         }
         assert amounts_by_symbol["WETH"] == (Decimal(weth_spent) / Decimal(10**weth_decimals))
         assert amounts_by_symbol["USDC"] == (Decimal(usdc_spent) / Decimal(10**usdc_decimals))
-        assert payload["confidence"] == "HIGH", (
-            f"V4 LP_OPEN with the Anvil eth_call reader must persist confidence=HIGH, got {payload['confidence']!r}"
-        )
+        assert_lp_price_provenance(payload, price_oracle)
         assert payload["tick_lower"] is not None
         assert payload["tick_upper"] is not None
         assert payload["liquidity"] is not None

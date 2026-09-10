@@ -851,7 +851,7 @@ def test_g10_still_catches_dup_writes_for_same_intent():
 # ─── VIB-3869: G6 null-count audit + leveraged-notional tolerance ───────
 
 
-def _swap_payload(*, amount_in_usd: str | None, realized_pnl_usd: str | None) -> str:
+def _swap_payload(*, amount_in_usd: str | None, realized_pnl_usd: str | None, amount_out_usd: str = "3.0") -> str:
     """Build a Pydantic-compliant SwapEventPayload with optionally-null
     economic fields for G6 input testing."""
     in_usd = "null" if amount_in_usd is None else f'"{amount_in_usd}"'
@@ -860,7 +860,7 @@ def _swap_payload(*, amount_in_usd: str | None, realized_pnl_usd: str | None) ->
         '{"event_type": "SWAP", "protocol": "uniswap_v3", '
         '"token_in": "WETH", "token_out": "USDC", '
         '"amount_in": "0.001", "amount_out": "3.0", '
-        f'"amount_in_usd": {in_usd}, "amount_out_usd": "3.0", '
+        f'"amount_in_usd": {in_usd}, "amount_out_usd": "{amount_out_usd}", '
         f'"realized_pnl_usd": {rpnl}, "confidence": "HIGH", '
         '"matching_policy_version": 1}'
     )
@@ -989,7 +989,7 @@ def test_g6_fails_when_capital_is_small_and_gap_exceeds_floor():
     Setup: one SWAP with `amount_in_usd=10` (the notional source) and
     `realized_pnl_usd=0`. Snapshot delta encodes the wallet PnL gap.
     """
-    payloads = [_swap_payload(amount_in_usd="10", realized_pnl_usd="0")]
+    payloads = [_swap_payload(amount_in_usd="10", amount_out_usd="10", realized_pnl_usd="0")]
     # initial=$5, final=$5.40 → wallet_pnl=$0.40, component=$0 → gap=$0.40
     db_path = _make_db_with_n_swaps(payloads, initial_equity="5", final_equity="5.40")
     try:
@@ -1009,7 +1009,7 @@ def test_g6_passes_when_capital_is_small_and_gap_under_floor():
     PASS. Belt and braces: small capital is no longer a free pass for
     larger drift (that's the prior bug), but legitimately tight runs still
     reconcile."""
-    payloads = [_swap_payload(amount_in_usd="10", realized_pnl_usd="0")]
+    payloads = [_swap_payload(amount_in_usd="10", amount_out_usd="10", realized_pnl_usd="0")]
     db_path = _make_db_with_n_swaps(payloads, initial_equity="5", final_equity="5.04")
     try:
         report = run_against_sqlite(db_path, primitive="lp")

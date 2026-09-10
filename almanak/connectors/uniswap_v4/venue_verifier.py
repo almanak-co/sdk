@@ -27,6 +27,7 @@ from almanak.framework.venues import (
 
 from .addresses import UNISWAP_V4
 from .pool_key import PoolKey
+from .router_deployments import router_deployment
 
 VERIFIER_REF = "almanak.connectors.uniswap_v4.venue_verifier:V4VenueVerifier"
 CONTRACT_VERSION = "v4_exact_pool.v1"
@@ -96,7 +97,10 @@ class V4VenueVerifier(BaseVenueVerifier):
         operational = tuple(sorted((manager, route), key=lambda ref: ref.sort_key))
         try:
             block = gateway.block_number(chain=request.chain) if block_number is None else block_number
-            block_hash = gateway.block_hash(chain=request.chain, block_number=block)
+            header = gateway.block_identity(chain=request.chain, block_number=block)
+            if header.number != block:
+                raise ValueError("Gateway returned a different V4 observation block")
+            block_hash = header.block_hash
             # StateView is immutable periphery; verify it actually reads the selected manager.
             manager_bytes = gateway.read(
                 chain=request.chain,
@@ -120,7 +124,12 @@ class V4VenueVerifier(BaseVenueVerifier):
                 code = gateway.code(chain=request.chain, target=target, block_number=block)
                 if not code:
                     raise ValueError(f"Operational target {target.reference} has no deployed code")
-                code_facts.append(VenueObservedFact("code_hash", "0x" + keccak(code).hex(), target))
+                code_hash = "0x" + keccak(code).hex()
+                if request.primitive is Primitive.SWAP and target == route:
+                    deployment = router_deployment(request.chain, target.reference)
+                    if deployment.runtime_hash is not None and deployment.runtime_hash != code_hash:
+                        raise ValueError("V4 router runtime differs from its qualified calldata layout")
+                code_facts.append(VenueObservedFact("code_hash", code_hash, target))
             if gateway.block_hash(chain=request.chain, block_number=block) != block_hash:
                 raise ValueError("Block hash changed during V4 venue verification")
         except Exception as exc:
@@ -130,6 +139,7 @@ class V4VenueVerifier(BaseVenueVerifier):
                 detail=f"Cannot verify initialized V4 pool {key.pool_id}: {exc}",
             )
         facts = code_facts + [
+            VenueObservedFact("block_timestamp", str(header.timestamp)),
             VenueObservedFact("sqrt_price_x96", str(price)),
             VenueObservedFact("tick", str(tick)),
             VenueObservedFact("stored_lp_fee", str(stored_fee)),

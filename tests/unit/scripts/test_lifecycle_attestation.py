@@ -230,3 +230,132 @@ def test_quant_sealer_invokes_close_and_guard_attestation_gate(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="mandatory guard price-impact.*got skipped_environment"):
         qa._validate_lifecycle_evidence(tmp_path, {"strategy": "PASS"})
+
+
+def _created_position_case(bundle):
+    contract = _close_contract()
+    coverage = _close_coverage(bundle)
+    obligation = contract["requirements"][0]["close_obligation"]
+    obligation.pop("position_identity")
+    identity = "eip155:8453/erc721:0x" + "22" * 20 + "/5763809"
+    coverage["observations"][0]["close_attestation"]["position_identity"] = identity
+    obligation["position_binding"] = {
+        "mode": "unique_created_erc721",
+        "requirement_id": "open",
+        "namespace": identity.rsplit("/", 1)[0],
+    }
+    contract["requirements"].insert(0, {"id": "open", "phase": "runtime", "intent_type": "LP_OPEN", "min_executed": 1})
+    mint_tx = "0x" + "cd" * 32
+    (bundle / "mint.json").write_text("{}\n")
+    coverage["observations"].insert(
+        0,
+        {
+            "requirement_id": "open",
+            "phase": "runtime",
+            "intent_type": "LP_OPEN",
+            "executed": 1,
+            "transaction_ids": [mint_tx],
+            "created_positions": [
+                {
+                    "position_identity": identity,
+                    "resource_identity": obligation["resource_identity"],
+                    "transaction_id": mint_tx,
+                    "block_number": 34199999,
+                    "source": "decoded_mint_receipt",
+                    "evidence_refs": ["mint.json"],
+                }
+            ],
+        },
+    )
+    return contract, coverage
+
+
+def test_close_binds_to_unique_runtime_minted_position(tmp_path):
+    contract, coverage = _created_position_case(tmp_path)
+    assert validate_lifecycle_attestations(contract, coverage, bundle=tmp_path)["closes_proved"] == 1
+
+
+@pytest.mark.parametrize(
+    "mutation,expected_error",
+    [
+        ("different_nft", "position identity mismatch"),
+        ("wrong_contract", "created position namespace mismatch"),
+        ("wrong_resource", "created resource identity mismatch"),
+        ("unbound_transaction", "creation is not bound"),
+        ("missing_receipt", "does not exist in the evidence bundle"),
+        ("two_positions", "exactly one created position"),
+        ("missing_positions", "exactly one created position"),
+        ("two_actions", "exactly one executed creation action"),
+        ("future_mint", "creation postdates"),
+        ("self_reference", "earlier creation requirement"),
+        ("both_identity_modes", "exactly one fixed identity or creation binding"),
+        ("wrong_mode", "has invalid mode"),
+        ("noncanonical_token", "canonical non-negative base-unit string"),
+        ("unmeasured_source", "decoded mint receipt evidence"),
+    ],
+)
+def test_runtime_mint_binding_rejects_ambiguous_or_unrelated_evidence(tmp_path, mutation, expected_error):
+    contract, coverage = _created_position_case(tmp_path)
+    obligation = contract["requirements"][1]["close_obligation"]
+    creation = coverage["observations"][0]
+    position = creation["created_positions"][0]
+    if mutation == "different_nft":
+        position["position_identity"] = position["position_identity"].rsplit("/", 1)[0] + "/2"
+    elif mutation == "wrong_contract":
+        obligation["position_binding"]["namespace"] = "eip155:8453/erc721:0x" + "11" * 20
+    elif mutation == "wrong_resource":
+        position["resource_identity"] = "another-pool"
+    elif mutation == "unbound_transaction":
+        position["transaction_id"] = TX_ID
+    elif mutation == "missing_receipt":
+        position["evidence_refs"] = ["missing.json"]
+    elif mutation == "two_positions":
+        creation["created_positions"].append(dict(position))
+    elif mutation == "missing_positions":
+        creation["created_positions"] = []
+    elif mutation == "two_actions":
+        creation["executed"] = 2
+    elif mutation == "future_mint":
+        position["block_number"] = 34200002
+    elif mutation == "self_reference":
+        obligation["position_binding"]["requirement_id"] = contract["requirements"][1]["id"]
+    elif mutation == "both_identity_modes":
+        obligation["position_identity"] = position["position_identity"]
+    elif mutation == "wrong_mode":
+        obligation["position_binding"]["mode"] = "guess"
+    elif mutation == "noncanonical_token":
+        position["position_identity"] = position["position_identity"].rsplit("/", 1)[0] + "/01"
+    elif mutation == "unmeasured_source":
+        position["source"] = "strategy_state"
+    with pytest.raises(ValueError, match=expected_error):
+        validate_lifecycle_attestations(contract, coverage, bundle=tmp_path)
+
+
+@pytest.mark.parametrize("executed", [True, "1", None])
+def test_creation_execution_count_must_be_measured_integer(tmp_path, executed):
+    contract, coverage = _created_position_case(tmp_path)
+    coverage["observations"][0]["executed"] = executed
+    with pytest.raises(ValueError, match="exactly one executed"):
+        validate_lifecycle_attestations(contract, coverage, bundle=tmp_path)
+
+
+@pytest.mark.parametrize(
+    "field,value,expected_error",
+    [
+        ("namespace", "eip155:1/erc721:0x" + "22" * 20, "namespace and resource chain mismatch"),
+        ("requirement_id", "missing", "earlier creation requirement"),
+    ],
+)
+def test_creation_binding_requires_same_chain_and_declared_source(tmp_path, field, value, expected_error):
+    contract, coverage = _created_position_case(tmp_path)
+    contract["requirements"][1]["close_obligation"]["position_binding"][field] = value
+    with pytest.raises(ValueError, match=expected_error):
+        validate_lifecycle_attestations(contract, coverage, bundle=tmp_path)
+
+
+def test_creation_transaction_ids_must_be_an_array(tmp_path):
+    contract, coverage = _created_position_case(tmp_path)
+    creation = coverage["observations"][0]
+    creation["transaction_ids"] = creation["transaction_ids"][0]
+    with pytest.raises(ValueError, match="not bound"):
+        validate_lifecycle_attestations(contract, coverage, bundle=tmp_path)

@@ -216,6 +216,13 @@ Usage: almanak strat run [OPTIONS]
     Execute decide() but don't submit transactions.
 
 
+* `confirm_start`:
+    * Type: BOOL
+    * Default: `False`
+    * Usage: `--confirm-start`
+    Wait for confirmation after wallet setup, before strategy execution. Defaults to no on EOF.
+
+
 * `interval`:
     * Type: INT
     * Default: `None`
@@ -375,6 +382,9 @@ Options:
   --list                          List all available strategies and exit.
   --dry-run                       Execute decide() but don't submit
                                   transactions.
+  --confirm-start                 Wait for confirmation after wallet setup,
+                                  before strategy execution. Defaults to no on
+                                  EOF.
   -i, --interval INTEGER          Loop interval in seconds. Defaults to
                                   [tool.almanak.run].interval or 60.
   --once                          Run single iteration then exit.

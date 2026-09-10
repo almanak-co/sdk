@@ -2447,39 +2447,38 @@ class TeardownManager:
         pre_snapshot, lending_pre, v4_fees, v4_native = snapshots
         native_anchor = await asyncio.to_thread(self._capture_native_exit, strategy, intent, context)
         exec_result = await self.orchestrator.execute(compilation_result.action_bundle, context)
-        if not exec_result.success:
-            return exec_result, None, None
-
-        attempt_state.submission_landed = True
         bundle_metadata = getattr(compilation_result.action_bundle, "metadata", None) or None
-        async_submission = self._prepare_async_submission(
-            strategy,
-            intent,
-            exec_result,
-            context,
-            bundle_metadata,
-        )
-        if async_submission[1] is None:
-            tx_hash = exec_result.transaction_results[0].tx_hash if exec_result.transaction_results else "unknown"
-            logger.info(
-                f"Intent {intent_index + 1}/{intent_count} executed successfully. "
-                f"TX: {tx_hash}, Gas used: {exec_result.total_gas_used}"
-            )
+        async_submission = None
         post_recon: dict[str, Any] | None = None
-        if self.runner_helpers.has_per_intent_balances and pre_snapshot is not None:
-            try:
-                post_recon = await self.runner_helpers.reconcile_post_balances(  # type: ignore[misc]
-                    strategy,
-                    intent,
-                    exec_result,
-                    pre_snapshot=pre_snapshot,
+        if exec_result.success:
+            attempt_state.submission_landed = True
+            async_submission = self._prepare_async_submission(
+                strategy,
+                intent,
+                exec_result,
+                context,
+                bundle_metadata,
+            )
+            if async_submission[1] is None:
+                tx_hash = exec_result.transaction_results[0].tx_hash if exec_result.transaction_results else "unknown"
+                logger.info(
+                    f"Intent {intent_index + 1}/{intent_count} executed successfully. "
+                    f"TX: {tx_hash}, Gas used: {exec_result.total_gas_used}"
                 )
-            except Exception as exc:  # noqa: BLE001 — best-effort accounting observer
-                logger.debug(
-                    "teardown post-intent reconcile failed for %s: %s",
-                    strategy.deployment_id,
-                    exc,
-                )
+            if self.runner_helpers.has_per_intent_balances and pre_snapshot is not None:
+                try:
+                    post_recon = await self.runner_helpers.reconcile_post_balances(  # type: ignore[misc]
+                        strategy,
+                        intent,
+                        exec_result,
+                        pre_snapshot=pre_snapshot,
+                    )
+                except Exception as exc:  # noqa: BLE001 — best-effort accounting observer
+                    logger.debug(
+                        "teardown post-intent reconcile failed for %s: %s",
+                        strategy.deployment_id,
+                        exc,
+                    )
 
         if not self.runner_helpers.has_commit:
             return exec_result, None, async_submission
@@ -2504,7 +2503,7 @@ class TeardownManager:
                 intent_count,
                 outcome.degraded_reason or "unknown",
             )
-        if not outcome.accounting_degraded and native_anchor is not None:
+        if exec_result.success and not outcome.accounting_degraded and native_anchor is not None:
             await asyncio.to_thread(self._complete_native_exit, strategy, native_anchor, exec_result)
         return exec_result, outcome, async_submission
 

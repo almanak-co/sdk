@@ -42,6 +42,24 @@ from almanak.framework.teardown.models import (
 CHAIN = "ethereum"
 
 
+def test_robinhood_target_address_is_not_stranded_dust():
+    usdg = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+    market = FakeMarket({usdg: Decimal("3.05")}, {usdg: Decimal("1")})
+    plan = plan_consolidation(
+        market=market,
+        chain="robinhood",
+        asset_policy=TeardownAssetPolicy.TARGET_TOKEN,
+        target_token="USDG",
+        token_consolidation_cfg=None,
+        token_universe=[usdg],
+        mode=TeardownMode.SOFT,
+    )
+    assert not plan.intents
+    assert not plan.warnings
+    assert plan.decisions[0].reason == "target"
+    assert not market.balance_calls
+
+
 class FakeMarket:
     """Minimal market double: per-token balances + prices, call-recording."""
 
