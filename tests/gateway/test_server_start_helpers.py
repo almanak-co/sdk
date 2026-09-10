@@ -637,38 +637,36 @@ class TestAcquireLocalDbFlock:
         plain = MagicMock(return_value=4242)
         fallback = MagicMock()
         self._patch_lock_helpers(monkeypatch, resolved=resolved, plain=plain, fallback=fallback)
-        s = _settings(standalone=False, gateway_db_path="/tmp/gw.db")
+        s = _settings(standalone=False)
 
         handle = acquire_local_db_flock(s)
 
         assert handle == 4242
         plain.assert_called_once_with(resolved)
         fallback.assert_not_called()
-        # Strategy-pinned never touches the operational-store path.
-        assert s.gateway_db_path == "/tmp/gw.db"
+        assert s.gateway_db_path == str(resolved)
 
-    def test_standalone_uncontended_keeps_gateway_db_path(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    def test_standalone_uncontended_pins_gateway_db_path(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         resolved = tmp_path / "utility" / "almanak_state.db"
         # No contention → the fallback returns the SAME (canonical) path.
         fallback = MagicMock(return_value=(777, resolved))
         plain = MagicMock()
         self._patch_lock_helpers(monkeypatch, resolved=resolved, plain=plain, fallback=fallback)
-        s = _settings(standalone=True, gateway_db_path="/tmp/gw.db")
+        s = _settings(standalone=True)
 
         handle = acquire_local_db_flock(s)
 
         assert handle == 777
         plain.assert_not_called()
         assert fallback.call_args.args[0] == resolved
-        # Effective path == resolved ⇒ no rebind (warm shared gateway.db kept).
-        assert s.gateway_db_path == "/tmp/gw.db"
+        assert s.gateway_db_path == str(resolved)
 
     def test_standalone_fallback_pins_session_db(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         resolved = tmp_path / "utility" / "almanak_state.db"
         session = tmp_path / "utility" / "sessions" / "gw-1-abcd" / "almanak_state.db"
         fallback = MagicMock(return_value=(999, session))
         self._patch_lock_helpers(monkeypatch, resolved=resolved, fallback=fallback)
-        s = _settings(standalone=True, gateway_db_path="/tmp/gw.db")
+        s = _settings(standalone=True)
 
         handle = acquire_local_db_flock(s)
 
@@ -676,6 +674,198 @@ class TestAcquireLocalDbFlock:
         # Fallback fired (effective != resolved) ⇒ operational stores follow
         # the state backend onto the private session DB.
         assert s.gateway_db_path == str(session)
+
+    @pytest.mark.parametrize("field", ["gateway_db_path", "timeline_db_path"])
+    def test_explicit_mismatch_refused_before_lock(self, monkeypatch, tmp_path, field):
+        resolved = tmp_path / "state.db"
+        plain, fallback = MagicMock(), MagicMock()
+        self._patch_lock_helpers(monkeypatch, resolved=resolved, plain=plain, fallback=fallback)
+        settings = _settings(standalone=True, **{field: str(tmp_path / "other.db")})
+        with pytest.raises(RuntimeError, match="must match the canonical state DB"):
+            acquire_local_db_flock(settings)
+        plain.assert_not_called()
+        fallback.assert_not_called()
+        assert not (tmp_path / "other.db").exists()
+
+    @pytest.mark.parametrize("field", ["gateway_db_path", "timeline_db_path"])
+    def test_explicit_matching_path_pins_utility_ownership(self, monkeypatch, tmp_path, field):
+        resolved = tmp_path / "state.db"
+        plain, fallback = MagicMock(return_value=42), MagicMock()
+        self._patch_lock_helpers(monkeypatch, resolved=resolved, plain=plain, fallback=fallback)
+        settings = _settings(standalone=True, **{field: str(resolved)})
+        assert acquire_local_db_flock(settings) == 42
+        plain.assert_called_once_with(resolved)
+        fallback.assert_not_called()
+        assert settings.gateway_db_path == str(resolved)
+
+    def test_env_explicit_default_path_is_not_implicit(self, monkeypatch, tmp_path):
+        from almanak.gateway.core.settings import DEFAULT_GATEWAY_DB_PATH
+
+        monkeypatch.setenv("ALMANAK_GATEWAY_GATEWAY_DB_PATH", DEFAULT_GATEWAY_DB_PATH)
+        settings = _settings(standalone=True)
+        self._patch_lock_helpers(monkeypatch, resolved=tmp_path / "state.db")
+        with pytest.raises(RuntimeError, match="gateway_db_path must match"):
+            acquire_local_db_flock(settings)
+
+    def test_hosted_explicit_paths_unchanged(self, monkeypatch):
+        monkeypatch.setattr("almanak.framework.deployment.is_hosted", lambda: True)
+        settings = _settings(gateway_db_path="/a.db", timeline_db_path="/b.db")
+        assert acquire_local_db_flock(settings) is None
+        assert settings.gateway_db_path == "/a.db"
+        assert settings.timeline_db_path == "/b.db"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("standalone", [False, True])
+    async def test_real_registry_startup_cannot_reconcile_other_database(self, monkeypatch, tmp_path, standalone):
+        import sqlite3
+        from datetime import UTC, datetime
+
+        from almanak.framework.local_paths import release_local_db_lock
+        from almanak.gateway.registry.store import InstanceRegistry, StrategyInstance
+
+        other = tmp_path / "legacy-gateway.db"
+        owned = tmp_path / "owned.db"
+        registry = InstanceRegistry(other)
+        now = datetime.now(UTC)
+        registry.register(
+            StrategyInstance(
+                deployment_id="deployment:other",
+                strategy_name="other",
+                template_name="Other",
+                chain="base",
+                protocol="uniswap_v3",
+                wallet_address="0x0000000000000000000000000000000000000001",
+                config_json="{}",
+                chains="base",
+                chain_wallets="{}",
+                status="RUNNING",
+                archived=False,
+                created_at=now,
+                updated_at=now,
+                last_heartbeat_at=now,
+                version="test",
+            )
+        )
+        with sqlite3.connect(other) as conn:
+            before = conn.execute("SELECT * FROM strategy_instances").fetchall()
+        monkeypatch.setenv("ALMANAK_STATE_DB", str(owned))
+        monkeypatch.setattr("almanak.framework.deployment.is_hosted", lambda: False)
+        monkeypatch.setattr("almanak.gateway.registry.get_instance_registry", lambda db_path: InstanceRegistry(db_path))
+        settings = _settings(standalone=standalone)
+        # Stand in for the legacy default without ever opening a user's real DB.
+        settings.__dict__["gateway_db_path"] = str(other)
+        handle = acquire_local_db_flock(settings)
+        try:
+            from almanak.gateway.lifecycle.sqlite_store import SQLiteLifecycleStore
+            from almanak.gateway.timeline.store import TimelineStore
+
+            monkeypatch.setattr(
+                "almanak.gateway._server_start_helpers.get_lifecycle_store",
+                lambda **kwargs: SQLiteLifecycleStore(db_path=kwargs["sqlite_path"]),
+            )
+            lifecycle = initialize_lifecycle_store(settings)
+            lifecycle.initialize()
+            lifecycle.close()
+            from almanak.gateway._server_start_helpers import validate_state_schema_at_boot
+            from almanak.gateway.timeline.store import TimelineEvent
+
+            timeline = TimelineStore(db_path=owned)
+            initialize_timeline_store(settings, lambda **kwargs: timeline.initialize())
+            timeline.add_event(TimelineEvent("first", "deployment:owned", now, "STATE_CHANGE", "running"))
+            for _ in range(2):
+                await validate_state_schema_at_boot(settings)
+                with sqlite3.connect(owned) as conn:
+                    assert conn.execute("SELECT description FROM timeline_events").fetchall() == [("running",)]
+            timeline.add_event(TimelineEvent("second", "deployment:owned", now, "STATE_CHANGE", "still running"))
+            actual = initialize_instance_registry(settings)
+            with sqlite3.connect(owned) as conn:
+                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                assert "timeline_events" in tables
+                assert "strategy_instances" in tables
+            assert actual.db_path == owned
+            assert actual.list_all() == []
+            with sqlite3.connect(other) as conn:
+                assert conn.execute("SELECT * FROM strategy_instances").fetchall() == before
+        finally:
+            release_local_db_lock(handle)
+
+    def test_real_utility_contention_falls_back_without_touching_owner(self, monkeypatch, tmp_path):
+        from almanak.framework import local_paths
+
+        for name in ("ALMANAK_STATE_DB", "ALMANAK_STRATEGY_FOLDER", "ALMANAK_GATEWAY_DB_PATH"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(local_paths, "_utility_data_dir", lambda: tmp_path / "utility")
+        monkeypatch.setattr("almanak.framework.deployment.is_hosted", lambda: False)
+        owned = local_paths.local_db_path()
+        first = local_paths.acquire_local_db_lock(owned)
+        fallback = local_paths.acquire_local_db_lock_with_utility_fallback
+        monkeypatch.setattr(
+            local_paths,
+            "acquire_local_db_lock_with_utility_fallback",
+            lambda path, logger: fallback(path, logger, retry_budget_s=0),
+        )
+        settings = _settings(standalone=True)
+        second = None
+        try:
+            second = acquire_local_db_flock(settings)
+            assert settings.gateway_db_path != str(owned)
+            assert settings.gateway_db_path == str(local_paths.local_db_path())
+            with pytest.raises(local_paths.LocalDbLockError):
+                local_paths.acquire_local_db_lock(owned)
+            with pytest.raises(local_paths.LocalDbLockError):
+                local_paths.acquire_local_db_lock(local_paths.local_db_path())
+        finally:
+            local_paths.release_local_db_lock(second)
+            local_paths.release_local_db_lock(first)
+
+    def test_symlinked_utility_dir_still_falls_back(self, monkeypatch, tmp_path):
+        """The utility fallback keys on the resolver's own unresolved path form.
+
+        Collapsing symlinks before the lock call makes the path stop matching
+        ``utility_db_path()``, which reads as an operator-pinned path and
+        hard-fails every concurrent standalone session instead of falling back.
+        """
+        from almanak.framework import local_paths
+
+        for name in ("ALMANAK_STATE_DB", "ALMANAK_STRATEGY_FOLDER", "ALMANAK_GATEWAY_DB_PATH"):
+            monkeypatch.delenv(name, raising=False)
+        real = tmp_path / "real"
+        real.mkdir()
+        (tmp_path / "linked").symlink_to(real)
+        monkeypatch.setattr(local_paths, "_utility_data_dir", lambda: tmp_path / "linked" / "utility")
+        monkeypatch.setattr("almanak.framework.deployment.is_hosted", lambda: False)
+        owned = local_paths.local_db_path()
+        assert owned.resolve() != owned
+        first = local_paths.acquire_local_db_lock(owned)
+        fallback = local_paths.acquire_local_db_lock_with_utility_fallback
+        monkeypatch.setattr(
+            local_paths,
+            "acquire_local_db_lock_with_utility_fallback",
+            lambda path, logger: fallback(path, logger, retry_budget_s=0),
+        )
+        second = None
+        try:
+            second = acquire_local_db_flock(_settings(standalone=True))
+            assert second is not None
+        finally:
+            local_paths.release_local_db_lock(second)
+            local_paths.release_local_db_lock(first)
+
+    def test_explicit_symlinked_path_matching_canonical_is_accepted(self, monkeypatch, tmp_path):
+        """Path comparison collapses symlinks, so the same file spelled two ways matches."""
+        real = tmp_path / "real"
+        real.mkdir()
+        (tmp_path / "linked").symlink_to(real)
+        resolved = tmp_path / "linked" / "state.db"
+        plain, fallback = MagicMock(return_value=7), MagicMock()
+        self._patch_lock_helpers(monkeypatch, resolved=resolved, plain=plain, fallback=fallback)
+        settings = _settings(standalone=True, gateway_db_path=str(real / "state.db"))
+
+        assert acquire_local_db_flock(settings) == 7
+
+        plain.assert_called_once_with(resolved)
+        fallback.assert_not_called()
+        assert settings.gateway_db_path == str(resolved)
 
 
 # ---------------------------------------------------------------------------

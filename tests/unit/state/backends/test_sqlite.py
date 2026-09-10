@@ -495,13 +495,8 @@ class TestFilePersistence:
         # WAL file should exist (or be empty after checkpoint)
         await store.close()
 
-    async def test_legacy_timeline_events_table_dropped_on_upgrade(self, temp_db_path):
-        """VIB-4044 / PR5 (CodeRabbit review): existing local SDK databases
-        carry the deprecated `timeline_events` table from earlier SDK versions.
-        Dropping the DDL from `SCHEMA_SQL` only affects fresh databases, so
-        upgraded users would carry the table forever. The migration in
-        `_run_migrations` must drop it on upgrade.
-        """
+    async def test_existing_timeline_events_preserved_on_upgrade(self, temp_db_path):
+        """State migrations cannot discard gateway-owned or legacy timeline data."""
         import sqlite3
 
         # Set up a database that pre-dates PR5 by manually creating the
@@ -530,13 +525,14 @@ class TestFilePersistence:
         await store.initialize()
         await store.close()
 
-        # Confirm the migration dropped the table.
         with sqlite3.connect(str(temp_db_path)) as conn:
             cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='timeline_events'")
-            assert cursor.fetchone() is None, "legacy timeline_events table must be dropped on upgrade"
+            assert cursor.fetchone() is not None
+            row = conn.execute("SELECT deployment_id, description FROM timeline_events").fetchone()
+            assert row == ("legacy_strategy", "old data")
 
-    async def test_legacy_timeline_events_drop_is_idempotent(self, temp_db_path):
-        """The migration must be a no-op on fresh databases (PR5)."""
+    async def test_state_initialization_does_not_create_timeline_table(self, temp_db_path):
+        """Only the gateway timeline store owns timeline schema creation."""
         import sqlite3
 
         # Fresh database: no `timeline_events` table exists at all.

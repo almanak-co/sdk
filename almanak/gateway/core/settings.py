@@ -205,7 +205,8 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
 
     gateway_db_path: str = DEFAULT_GATEWAY_DB_PATH
 
-    # timeline_db_path overrides gateway_db_path only for timeline events.
+    # Local boot binds both operational paths to the canonical, locked state DB.
+    # Explicit paths must match it; hosted database routing is unchanged.
     timeline_db_path: str | None = None
 
     # Bound startup hydration so shared hosted history cannot exhaust gateway memory.

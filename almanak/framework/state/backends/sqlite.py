@@ -13,11 +13,9 @@ Features:
 Important: Each strategy uses exactly one gateway and vice versa.
 No two strategies share a gateway.
 
-VIB-4044 / PR5: SDK-side `timeline_events` table and its CRUD methods are
-hard-deleted. Production timeline_events lives gateway-side in
-`almanak/gateway/timeline/store.py`. The 3-demo empirical inspection in PR1
-confirmed zero rows ever land in the SDK-side table on real runs — it was
-test-only dead code.
+Timeline events are owned by `almanak/gateway/timeline/store.py`.
+Local gateways share this file with the state backend; state migrations
+must preserve gateway-owned tables and their contents.
 
 Usage:
     config = SQLiteConfig(db_path="./state.db")
@@ -626,7 +624,7 @@ CREATE TABLE IF NOT EXISTS strategy_state (
 );
 
 -- VIB-4044 / PR5: SDK-side `timeline_events` table is removed.
--- Gateway-side timeline_events lives in ~/.config/almanak/gateway.db (local)
+-- Gateway-side timeline_events shares the canonical local DB
 -- or hosted Postgres (deployed). See almanak/gateway/timeline/store.py.
 
 -- CLOB orders table for Polymarket order tracking.
@@ -1283,21 +1281,6 @@ class SQLiteStore:
                 logger.info(f"Migration: added {table}.{column}")
                 return True
             return False
-
-        def _drop_table_if_exists(table: str, reason: str) -> None:
-            """Drop a deprecated table from upgraded databases.
-
-            Idempotent — DROP TABLE IF EXISTS is a no-op on fresh databases
-            (the SCHEMA_SQL above never created it).
-            """
-            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
-            if cursor.fetchone() is not None:
-                conn.execute(f"DROP TABLE IF EXISTS {table}")
-                logger.info(f"Migration: dropped legacy {table} table ({reason})")
-
-        # Timeline events are gateway-owned; remove the unused SDK table to avoid two persistence authorities.
-
-        _drop_table_if_exists("timeline_events", "moved to gateway-side store")
 
         # ALTER TABLE backfills the default, so use '' to preserve unmeasured legacy NAV rather than claim zero.
         # The decoder maps this sentinel back to None.

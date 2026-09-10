@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 from importlib.metadata import entry_points
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from grpc_health.v1 import health_pb2
@@ -324,36 +325,43 @@ def acquire_local_db_flock(settings: GatewaySettings) -> int | None:
     )
 
     warn_if_legacy_cwd_db_exists(logger)
-    db_path = resolve_gateway_local_db_path(settings)
-    if settings.standalone:
-        # Utility-mode contention tolerance (VIB-5550). The helper only
-        # falls back when db_path is the canonical utility DB; a standalone
-        # gateway pinned to a strategy folder / explicit path still
-        # hard-fails on contention.
-        handle, effective_path = acquire_local_db_lock_with_utility_fallback(db_path, logger)
-        if effective_path != db_path:
-            # Fallback fired: the canonical utility DB was contended and we
-            # locked a fresh per-session DB instead. The fallback exports
-            # ALMANAK_GATEWAY_DB_PATH so resolver-based consumers (the state
-            # backend via ``resolve_gateway_local_db_path``, logs, the
-            # deferred accounting log) follow it — but the gateway's own
-            # operational stores (timeline / instance registry / lifecycle)
-            # read ``settings.gateway_db_path``, which that env export does
-            # NOT feed. Pin it explicitly (the field is mutable and no boot
-            # phase before this one reads it) so a fallback gateway is fully
-            # self-contained on its session DB. Without this, standalone
-            # gateways — now able to coexist because the fallback stops them
-            # dying on the flock — would interleave registry / lifecycle /
-            # timeline writes on the shared ~/.config/almanak/gateway.db, and
-            # each boot's reconcile-stale would mark the others' RUNNING rows
-            # STALE.
-            settings.gateway_db_path = str(effective_path)
-        db_path = effective_path
+    # Keep the resolver's own path form: ``acquire_local_db_lock_with_utility_fallback``
+    # recognises the implicit utility default by comparing against ``utility_db_path()``,
+    # which is unresolved, so collapsing symlinks here would make a symlinked HOME /
+    # XDG_DATA_HOME read as an operator-pinned path and silently disable the
+    # per-session fallback. Symlinks are collapsed only where paths are compared.
+    db_path = resolve_gateway_local_db_path(settings).expanduser()
+    explicitly_pinned = validate_local_operational_paths(settings, db_path)
+    if settings.standalone and not explicitly_pinned:
+        handle, db_path = acquire_local_db_lock_with_utility_fallback(db_path, logger)
     else:
         handle = acquire_local_db_lock(db_path)
+    # Operational stores must use the same file protected by the state DB lock.
+    settings.gateway_db_path = str(db_path)
+    if settings.timeline_db_path is not None:
+        settings.timeline_db_path = str(db_path)
     mode = "STANDALONE" if settings.standalone else "STRATEGY-PINNED"
     logger.info("Local DB flock acquired on %s (%s, single-writer guard)", db_path, mode)
     return handle
+
+
+def validate_local_operational_paths(settings: GatewaySettings, db_path: Path) -> bool:
+    """Reject explicit split-store configuration before opening any local store."""
+    explicit_paths = {}
+    if "gateway_db_path" in settings.model_fields_set:
+        explicit_paths["gateway_db_path"] = settings.gateway_db_path
+    if settings.timeline_db_path is not None:
+        explicit_paths["timeline_db_path"] = settings.timeline_db_path
+    canonical = db_path.resolve()
+    for field, value in explicit_paths.items():
+        if not value.strip() or Path(value).expanduser().resolve() != canonical:
+            raise RuntimeError(
+                f"Local {field} must match the canonical state DB ({db_path}). "
+                f"Unset ALMANAK_GATEWAY_{field.upper()} / the {field} setting, "
+                "or set it to the same path as ALMANAK_STATE_DB / the strategy-folder DB. "
+                "Existing database files are unchanged; do not overwrite or move them over the active DB."
+            )
+    return bool(explicit_paths)
 
 
 def resolve_gateway_local_db_path(settings: GatewaySettings):
