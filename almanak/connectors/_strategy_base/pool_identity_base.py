@@ -324,7 +324,6 @@ def identify_erc20(
         return None
     return {
         "kind": "erc20",
-        "pool_address": address.lower(),
         "symbol": decode_word_string(call(address, SYMBOL_SELECTOR)),
         "decimals": decimals,
         "factory_verified": "unverified",
@@ -332,6 +331,7 @@ def identify_erc20(
         "notes": [
             "ERC-20 interface only — a receipt or LP token whose parent product no registered "
             "probe recognised (it answered neither a pool ABI nor ERC-4626 asset()/totalAssets()); "
-            "not usable as a pool execution target."
+            "not usable as a pool execution target. Discover candidate pools with "
+            f"`uv run almanak ax -c {chain} dex-pools {address.lower()}`, then verify the exact pool before execution."
         ],
     }

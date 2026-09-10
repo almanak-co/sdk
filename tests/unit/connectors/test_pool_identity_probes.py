@@ -148,6 +148,9 @@ def test_erc20_fallback_classifies_non_pool():
     assert payload is not None
     assert payload["kind"] == "erc20"
     assert payload["decimals"] == 18
+    assert "pool_address" not in payload
+    assert any(f"uv run almanak ax -c base dex-pools {WETH}" in note for note in payload["notes"])
+    assert any("then verify the exact pool before execution" in note for note in payload["notes"])
 
 
 def test_curve_probe_wraps_meta_registry_resolution():

@@ -71,7 +71,7 @@ async def test_vault_probe_answers_before_the_erc20_fallback(executor: ToolExecu
 
 @pytest.mark.asyncio
 async def test_non_vault_falls_through_to_the_erc20_verdict(executor: ToolExecutor) -> None:
-    erc20_payload = {"kind": "erc20", "pool_address": VAULT, "symbol": "X", "decimals": 18}
+    erc20_payload = {"kind": "erc20", "symbol": "X", "decimals": 18}
     with (
         _no_pool_probes(),
         patch(f"{_PROBES}.identify_erc4626_vault", return_value=None) as vault_probe,
@@ -81,6 +81,8 @@ async def test_non_vault_falls_through_to_the_erc20_verdict(executor: ToolExecut
 
     assert response.status == ToolResponseStatus.SUCCESS
     assert response.data["kind"] == "erc20"
+    assert response.data["address"] == VAULT
+    assert "pool_address" not in response.data
     vault_probe.assert_called_once()
     erc20_probe.assert_called_once()
 
