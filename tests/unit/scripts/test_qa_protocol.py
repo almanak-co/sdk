@@ -1217,3 +1217,55 @@ def test_protocol_git_provenance_is_derived_and_fail_closed(
     outputs[("status", "--porcelain")] = " M qa_protocol.py"
     with pytest.raises(ValueError, match="clean committed"):
         protocol_module._clean_git_provenance("a" * 40)
+
+
+@pytest.mark.parametrize(
+    "profile,paths,ready",
+    [
+        ("v4_swap.v1", ["safe", "eoa"], True),
+        ("swap.v1", ["safe", "eoa"], False),
+        ("v4_swap.v1", ["safe"], False),
+    ],
+)
+def test_v4_swap_owner_does_not_promote_hook_or_lp_coverage(protocol_module, profile, paths, ready):
+    owner = {
+        "cells": [
+            {
+                "id": "intent.uniswap_v4.robinhood.SWAP",
+                "protocol": "uniswap_v4",
+                "chain": "robinhood",
+                "intent": "SWAP",
+                "proof_recipe": {
+                    "roles": [
+                        {
+                            "role": "positive_runtime",
+                            "nodes": [
+                                {
+                                    "exec_path": path,
+                                    "contract_profile": profile,
+                                    "proof_id": f"v4.{path}",
+                                    "nodeid": f"tests/intents/robinhood/test_uniswap_v4_exact_swap.py::test_{path}",
+                                }
+                                for path in paths
+                            ],
+                        }
+                    ]
+                },
+            }
+        ]
+    }
+    catalog = protocol_module.build_protocol_catalog(owner_catalogs={"intent": owner})
+    plan = protocol_module.protocol_capability_plan(
+        catalog=catalog,
+        protocol="uniswap_v4",
+        chain="robinhood",
+        network="anvil",
+        exec_path="eoa",
+    )
+    capabilities = {row["id"]: row for row in plan["capabilities"]}
+    swap = capabilities["exact_pool_swap"]
+    assert bool(swap["recipes"]) is ready
+    assert not capabilities["pool_key_hook_identity"]["recipes"]
+    assert not capabilities["custom_fee_tick_spacing"]["recipes"]
+    if ready:
+        assert swap["recipes"][0]["cell_id"] == "intent.uniswap_v4.robinhood.SWAP.anvil.eoa"

@@ -2076,16 +2076,17 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 # Module-Scoped Baseline Snapshot / Revert for Test Isolation
 # =============================================================================
 
-# Baseline map: (chain_id, module_path) -> baseline_snapshot_id
-# Captured once per module after funding is complete, re-armed after each revert.
-_module_baselines: dict[tuple[int, str], str] = {}
+# Snapshot IDs belong to an Anvil endpoint, not to its chain ID. Different
+# calibrated blocks for the same chain run on independent fork processes.
+_module_baselines: dict[tuple[int, str, str], str] = {}
+_session_pristine: dict[tuple[int, str], str] = {}
 
-# Session pristine map: chain_id -> pristine_snapshot_id
-# Captured lazily on first module's setup per chain and re-captured after each
-# revert (Anvil consumes snapshot IDs on revert). Used by `reset_fork_to_pristine`
-# to give every test module a clean fork independent of prior modules on the
-# same chain's session-scoped Anvil fork (VIB-3059).
-_session_pristine: dict[int, str] = {}
+
+def _fork_endpoint(web3_instance: Web3) -> str:
+    endpoint = getattr(web3_instance.provider, "endpoint_uri", None)
+    if not isinstance(endpoint, str) or not endpoint:
+        raise RuntimeError("Fork snapshot isolation requires an explicit provider endpoint")
+    return endpoint
 
 
 class _PristineTransportError(RuntimeError):
@@ -2103,7 +2104,7 @@ class _PristineTransportError(RuntimeError):
 def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
     """Revert fork to session pristine state, then recapture pristine for next module.
 
-    On the first call for a chain: captures current fork state as the pristine
+    On the first call for a fork: captures current fork state as the pristine
     baseline and returns immediately (no revert — caller is expected to invoke
     this at the start of the first module before any seeding mutates the fork).
 
@@ -2111,7 +2112,7 @@ def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
     immediately recaptures a new pristine snapshot at the just-reverted state
     so the NEXT module can revert too.
 
-    Also purges stale `_module_baselines` entries for this chain, since Anvil's
+    Also purges stale `_module_baselines` entries for this fork, since Anvil's
     `evm_revert` invalidates all snapshots taken after the reverted one.
 
     Returns:
@@ -2126,12 +2127,12 @@ def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
             The caller (`reset_fork_to_pristine`) catches this to drive its
             retry-with-backoff loop against transient RPC flakes.
     """
-    snap_id = _session_pristine.get(chain_id)
+    fork_key = (chain_id, _fork_endpoint(web3_instance))
+    snap_id = _session_pristine.get(fork_key)
 
     if snap_id is None:
-        # First time for this chain — capture current state as pristine.
         # A transport exception here is safe to retry: no state has been
-        # mutated yet and `_session_pristine[chain_id]` has not been written.
+        # mutated yet and `_session_pristine[fork_key]` has not been written.
         try:
             resp = web3_instance.provider.make_request("evm_snapshot", [])
         except Exception as e:
@@ -2140,7 +2141,7 @@ def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
         if new_snap is None:
             print(f"WARNING: evm_snapshot returned no result for chain {chain_id}: {resp}")
             return False
-        _session_pristine[chain_id] = new_snap
+        _session_pristine[fork_key] = new_snap
         print(f"  [pristine] Captured session pristine {new_snap} for chain {chain_id}")
         return True
 
@@ -2161,7 +2162,7 @@ def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
         raise _PristineTransportError(f"pristine revert transport error for chain {chain_id}: {e}") from e
 
     for old_key in list(_module_baselines):
-        if old_key[0] == chain_id:
+        if (old_key[0], old_key[2]) == fork_key:
             del _module_baselines[old_key]
 
     if not reverted:
@@ -2183,17 +2184,17 @@ def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
             new_snap = resp.get("result") if isinstance(resp, dict) else None
         except Exception as e:
             print(f"WARNING: could not recapture pristine after failed revert for chain {chain_id}: {e}")
-            _session_pristine.pop(chain_id, None)
+            _session_pristine.pop(fork_key, None)
             return False
         if new_snap is None:
-            _session_pristine.pop(chain_id, None)
+            _session_pristine.pop(fork_key, None)
             return False
-        _session_pristine[chain_id] = new_snap
+        _session_pristine[fork_key] = new_snap
         return False
 
     # Recapture pristine at the just-reverted state so the next module can revert.
     # A transport exception here is safe to retry: the revert already succeeded,
-    # `snap_id` has been consumed by Anvil, and `_session_pristine[chain_id]`
+    # `snap_id` has been consumed by Anvil, and `_session_pristine[fork_key]`
     # still holds the now-stale id. On retry, the next attempt will see
     # `evm_revert(stale_id) -> False` and fall deterministically into the
     # best-effort recapture branch above — no path exists where a retry turns
@@ -2208,9 +2209,9 @@ def _ensure_pristine_and_rearm(web3_instance: Web3, chain_id: int) -> bool:
     new_snap = resp.get("result") if isinstance(resp, dict) else None
     if new_snap is None:
         print(f"WARNING: evm_snapshot returned no result after revert for chain {chain_id}: {resp}")
-        _session_pristine.pop(chain_id, None)
+        _session_pristine.pop(fork_key, None)
         return False
-    _session_pristine[chain_id] = new_snap
+    _session_pristine[fork_key] = new_snap
     print(f"  [pristine] Re-armed session pristine {new_snap} for chain {chain_id}")
     return True
 
@@ -2299,24 +2300,12 @@ def reset_fork_to_pristine(
     return ok
 
 
-def _get_baseline_key(request: pytest.FixtureRequest) -> tuple[int, str]:
-    """Build a baseline map key from the current test request.
-
-    Returns:
-        Tuple of (chain_id_or_-1, module_path)
-    """
-    chain_id = -1
-    try:
-        chain_id = int(request.getfixturevalue("chain_id"))
-    except Exception:
-        try:
-            web3 = request.getfixturevalue("web3")
-            if web3 is not None:
-                chain_id = int(web3.eth.chain_id)
-        except Exception:
-            pass
+def _get_baseline_key(request: pytest.FixtureRequest) -> tuple[int, str, str]:
+    """Bind a module baseline to the exact fork endpoint and chain."""
+    web3 = request.getfixturevalue("web3")
+    chain_id = int(web3.eth.chain_id)
     module_path = request.fspath.strpath if hasattr(request, "fspath") else str(request.node.module)
-    return (chain_id, module_path)
+    return (chain_id, module_path, _fork_endpoint(web3))
 
 
 def _capture_baseline(web3_instance: Any) -> str | None:
@@ -2424,7 +2413,7 @@ def anvil_snapshot(request):
     # No teardown revert needed; the NEXT test's setup reverts to baseline
 
 
-def _attempt_recovery(request: pytest.FixtureRequest, web3_instance: Any, key: tuple[int, str]) -> bool:
+def _attempt_recovery(request: pytest.FixtureRequest, web3_instance: Any, key: tuple[int, str, str]) -> bool:
     """Attempt to recover from a failed baseline revert.
 
     Tries to restart the Anvil fork via the anvil_instance fixture,

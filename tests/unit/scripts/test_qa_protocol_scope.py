@@ -20,9 +20,15 @@ def scope_module() -> ModuleType:
     return module
 
 
-def test_exact_four_focus_protocols_have_reviewed_non_verdict_scope(scope_module: ModuleType) -> None:
+def test_exact_focus_protocols_have_reviewed_non_verdict_scope(scope_module: ModuleType) -> None:
     scope_module.validate_scope_reviews()
-    assert set(scope_module.PROTOCOL_SCOPE_REVIEWS) == {"aave_v3", "uniswap_v3", "euler_v2", "gmx_v2"}
+    assert set(scope_module.PROTOCOL_SCOPE_REVIEWS) == {
+        "aave_v3",
+        "uniswap_v3",
+        "uniswap_v4",
+        "euler_v2",
+        "gmx_v2",
+    }
     for protocol in scope_module.PROTOCOL_SCOPE_REVIEWS:
         review = scope_module.reviewed_scope(protocol)
         assert review["review_id"].startswith(f"protocol-scope.{protocol}.")

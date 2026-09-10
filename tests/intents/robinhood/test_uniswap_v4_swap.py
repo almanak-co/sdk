@@ -37,11 +37,11 @@ from tests.intents.conftest import (
     CHAIN_CONFIGS,
     SWAP_MAX_SLIPPAGE,
     format_token_amount,
+    fund_erc20_token,
     get_token_balance,
     get_token_decimals,
 )
 from tests.intents.pool_helpers import fail_if_v4_pool_missing
-
 
 CHAIN_NAME = "robinhood"
 # The V4 adapter routes single-hop swaps through its default 0.30% tier.
@@ -305,10 +305,19 @@ class TestUniswapV4SwapIntent:
         token_out = tokens["WETH"]
         fail_if_v4_pool_missing(web3, CHAIN_NAME, token_in, token_out, SWAP_FEE_TIER)
 
+        # Keep the quote within the real pool's depth while making the wallet
+        # unable to fund it; an oversized quote tests liquidity, not balance refusal.
+        in_decimals = get_token_decimals(web3, token_in)
+        fund_erc20_token(
+            funded_wallet,
+            token_in,
+            10**in_decimals,
+            CHAIN_CONFIGS[CHAIN_NAME]["balance_slots"]["USDG"],
+            web3.provider.endpoint_uri,
+        )
         usdg_balance = get_token_balance(web3, token_in, funded_wallet)
         weth_before = get_token_balance(web3, token_out, funded_wallet)
         assert usdg_balance > 0, "funded_wallet must hold USDG for this test"
-        in_decimals = get_token_decimals(web3, token_in)
         balance_decimal = Decimal(usdg_balance) / Decimal(10**in_decimals)
 
         excessive_amount = balance_decimal * Decimal("100")

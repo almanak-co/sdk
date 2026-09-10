@@ -28,7 +28,9 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
+from almanak.connectors.uniswap_v3.addresses import UNISWAP_V3
 from almanak.connectors.uniswap_v3.receipt_parser import UniswapV3ReceiptParser
+from almanak.connectors.uniswap_v3.sdk import compute_pool_address
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import (
     IntentCompiler,
@@ -729,10 +731,7 @@ class TestUniswapV3CollectFeesIntent:
       3. Issue CollectFeesIntent(protocol="uniswap_v3", protocol_params={"position_id": ...}).
       4. Verify wallet balances increased and deltas equal parsed Collect amounts.
 
-    Unlike the ethereum/arbitrum/monad sister tests (xfail on VIB-5968's
-    cross-fee-tier routing blocker), Robinhood's only pool with real depth IS
-    the fee-500 WETH/USDG pool the position sits in — the fee-accrual swap has
-    nowhere else to route, so this test asserts the full pass outright.
+    Fee-generating swaps bind the exact fee-500 pool holding the position.
     """
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES)
@@ -773,12 +772,9 @@ class TestUniswapV3CollectFeesIntent:
         liquidity_before = query_position_liquidity(web3, POSITION_MANAGER, position_id)
         assert liquidity_before > 0, "Setup LP_OPEN must yield positive liquidity"
 
-        # 2. Execute a same-pool swap to generate trading fees. The swap must be
-        # large enough that the router's best-execution fee-tier selection picks
-        # the deep fee-500 pool (~$3.5M) the position sits in — a small swap
-        # routes to the thin fee-100 pool (~$0.23M) and accrues fees elsewhere
-        # (the VIB-5968 cross-tier blocker on the sister-chain tests). 20,000
-        # USDG at 0.05% = 10 USDG of fees spread across in-range liquidity.
+        # Fee accrual must target the minted position's pool; best-route selection
+        # may legitimately choose another fee tier with no stake in this position.
+        pool_address = compute_pool_address(UNISWAP_V3[CHAIN_NAME]["factory"], weth_addr, usdg_addr, 500)
         swap_intent = SwapIntent(
             from_token="USDG",
             to_token="WETH",
@@ -786,6 +782,7 @@ class TestUniswapV3CollectFeesIntent:
             max_slippage=Decimal("0.05"),
             protocol="uniswap_v3",
             chain=CHAIN_NAME,
+            swap_params={"pool": Web3.to_checksum_address(pool_address)},
         )
         compiler = IntentCompiler(
             chain=CHAIN_NAME,
