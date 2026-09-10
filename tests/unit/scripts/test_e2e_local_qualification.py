@@ -107,7 +107,7 @@ def test_release_completion_keeps_both_immutable_summaries(tmp_path, monkeypatch
     assert after["e2e_admission"] == "UNMEASURED"
 
 
-def test_actor_exits_before_release_but_subject_release_precedes_worker_exit(tmp_path, monkeypatch):
+def test_owned_actors_exit_before_fork_release(tmp_path, monkeypatch):
     sequence = []
     monkeypatch.setattr(qualification, "cleanup_subject", lambda *a, **kw: {"status": "PASS"})
     monkeypatch.setattr(qualification, "cleanup_stimulus", lambda *a, **kw: {"status": "PASS"})
@@ -118,7 +118,7 @@ def test_actor_exits_before_release_but_subject_release_precedes_worker_exit(tmp
     worker = SimpleNamespace(wait=lambda **kw: sequence.append("subject_stopped"), returncode=0)
     store = SimpleNamespace(request_cleanup=Mock(), release_fork=lambda lease: sequence.append("release"))
     result = qualification._close(SimpleNamespace(root=tmp_path), store, "lease", "wallet", worker, actors=[actor])
-    assert sequence == ["release", "subject_stopped", "actor_stopped"]
+    assert sequence == ["actor_stopped", "release", "subject_stopped"]
     assert result["actor_returncodes"] == [0]
     assert result["e2e_admission"] == "UNMEASURED"
 
@@ -149,7 +149,7 @@ def test_live_actor_prevents_fork_release(tmp_path, monkeypatch):
     store = SimpleNamespace(request_cleanup=Mock(), release_fork=Mock())
     with pytest.raises(subprocess.TimeoutExpired):
         qualification._close(SimpleNamespace(root=tmp_path), store, "lease", "wallet", None, actors=[actor])
-    store.release_fork.assert_called_once_with("lease")
+    store.release_fork.assert_not_called()
     assert not (tmp_path / "qualification-cleanup.json").exists()
 
 
@@ -195,3 +195,41 @@ def test_bundle_is_assembled_after_process_shutdown_and_retains_controller_failu
     assert result["bundle_assembly"]["status"] == "INCOMPLETE"
     assert result["terminal_boundary"]["status"] == "UNMEASURED"
     assert result["e2e_admission"] == "UNMEASURED"
+
+
+def test_full_close_binds_terminal_boundary_before_final_subject(tmp_path, monkeypatch):
+    from qa_lab import e2e_bundle, e2e_final_state, e2e_terminal_boundary
+
+    sequence = []
+    monkeypatch.setattr(qualification, "cleanup_subject", lambda *a, **kw: {"status": "PASS"})
+    monkeypatch.setattr(qualification, "cleanup_stimulus", lambda *a, **kw: {"status": "PASS"})
+    actor = SimpleNamespace(wait=lambda **kw: sequence.append("actor"), returncode=0)
+    worker = SimpleNamespace(wait=lambda **kw: sequence.append("worker"), returncode=0)
+    (tmp_path / "fork-shutdown.json").write_text(
+        json.dumps({"processes_stopped": True, "reason": "RELEASED", "observation_complete": True})
+    )
+    store = SimpleNamespace(request_cleanup=Mock(), release_fork=lambda lease: sequence.append("release"))
+
+    def terminal(*args, **kwargs):
+        sequence.append("terminal")
+        return {"status": "CAPTURED"}
+
+    def final(*args, **kwargs):
+        sequence.append("final")
+        return {"status": "CAPTURED", "terminal_boundary_sha256": "bound"}
+
+    monkeypatch.setattr(e2e_terminal_boundary, "capture_terminal_boundary", terminal)
+    monkeypatch.setattr(e2e_final_state, "capture_final_subject", final)
+    monkeypatch.setattr(e2e_bundle, "assemble_bundle", lambda *args, **kwargs: {"status": "INCOMPLETE"})
+    result = qualification._close(
+        SimpleNamespace(root=tmp_path, require_owned=lambda path: path),
+        store,
+        "lease",
+        "wallet",
+        worker,
+        actors=[actor],
+        assemble=True,
+    )
+    assert sequence == ["actor", "release", "worker", "terminal", "final"]
+    assert result["terminal_boundary"]["status"] == "CAPTURED"
+    assert result["subject_final_capture"]["terminal_boundary_sha256"] == "bound"
