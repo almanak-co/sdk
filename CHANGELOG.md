@@ -7,6 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **`MarketSnapshot.market_session("NYSE")`** — strategy-facing regular-session
+  status (`OPEN` / `CLOSED` / `UNKNOWN`) of a named exchange, evaluated from the
+  published calendar at the snapshot timestamp. Accepts any
+  `pandas_market_calendars` name (never a token or ticker symbol), so any
+  US-listed tokenized stock gates on NYSE with no catalog entry. No oracle,
+  gateway, or chain read, so it behaves identically on live chain, Anvil, and
+  backtests. This is the supported way to gate on market hours; do not call
+  `reference_price()` for that.
+
+### Changed
+- **`reference_price()` docs now carry a usage warning.** Coverage is a curated
+  catalog (XAU, GOOGL, TSLA, GOOGLB on BSC as of 2026-09-10) and the GOOGLB
+  composition cannot pass the hosted smoke ladder on a frozen Anvil fork: the
+  30-second multiplier observation age is measured against a block that never
+  advances (ALM-10047). The worked examples were removed from the market API
+  page so agents stop designing around the feed until it is testable.
 - **Opt-in forced exit for Morpho Vault V2 (`allow_force_deallocate`).** A V2
   redeem that the vault's idle assets + liquidity market cannot cover fails
   closed by default. `Intent.vault_redeem(..., allow_force_deallocate=True,

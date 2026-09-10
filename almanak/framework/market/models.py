@@ -255,6 +255,32 @@ class ReferenceMarketStatus(StrEnum):
     UNKNOWN = "unknown"
 
 
+@dataclass(frozen=True)
+class MarketSessionData:
+    """Regular-session state of one exchange, with no price attached.
+
+    Produced by :meth:`MarketSnapshot.market_session`. The status comes from the
+    published exchange calendar (holidays, early closes, DST), evaluated at the
+    snapshot timestamp, so it is identical on a live chain, an Anvil fork, and a
+    historical backtest tick. ``UNKNOWN`` is the fail-closed answer for an
+    unknown exchange or a calendar failure; treat it as closed for any decision
+    that should only run inside the regular session.
+
+    ``exchange`` is the resolved calendar name (e.g. ``"NYSE"``), empty when the
+    requested name was not recognised.
+    """
+
+    exchange: str
+    status: ReferenceMarketStatus
+    as_of: datetime
+    source: str
+
+    @property
+    def is_open(self) -> bool:
+        """``True`` only for a positively observed open session."""
+        return self.status is ReferenceMarketStatus.OPEN
+
+
 class ReferencePriceBasis(StrEnum):
     UNSPECIFIED = "unspecified"
     UNDERLYING_SHARE = "underlying_share"

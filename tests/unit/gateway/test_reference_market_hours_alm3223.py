@@ -72,3 +72,24 @@ def test_every_bsc_reference_feed_has_a_measured_session_calendar():
     for pair in CATALOG.feeds("bsc", kind=FeedKind.REFERENCE):
         result = reference_market_status(pair, as_of=datetime(2026, 9, 8, 15, tzinfo=UTC))
         assert result.status is not ReferenceMarketStatus.UNKNOWN, pair
+
+
+@pytest.mark.parametrize(
+    ("pair", "expected_calendar"),
+    [("GOOGL/USD", "NYSE"), ("TSLA/USD", "NYSE"), ("XAU/USD", "CMEGlobex_Gold")],
+)
+def test_reference_pair_resolves_to_its_catalogued_calendar(pair, expected_calendar):
+    """The gateway-only pair mapping delegates to the shared evaluator and reports which calendar it used."""
+    result = reference_market_status(pair, as_of=datetime(2026, 8, 10, 18, tzinfo=UTC))
+
+    assert result.status is ReferenceMarketStatus.OPEN
+    assert result.calendar == expected_calendar
+    assert result.source == f"pandas_market_calendars:{expected_calendar}"
+
+
+def test_unsupported_pair_reports_no_calendar():
+    result = reference_market_status("NVDA/USD", as_of=datetime(2026, 8, 10, 18, tzinfo=UTC))
+
+    assert result.status is ReferenceMarketStatus.UNKNOWN
+    assert result.calendar == ""
+    assert result.source == "unsupported"

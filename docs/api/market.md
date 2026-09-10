@@ -33,41 +33,42 @@ in `decide()` and reuse the captured value when stamping fill state there.
 See [Time in Strategies](../getting-started.md#time-in-strategies) for the
 full pattern.
 
-## Non-crypto reference prices
+## Market hours (tokenized equities and commodities)
 
-Use an explicit underlying instrument, separately from the execution token.
-The example below enforces a strategy that requires a 120-second observation;
-the BSC push feeds cannot guarantee that contract, so this example will often
-HOLD even during an open session. It is a rejection example, not a provider
-configuration that unblocks such a strategy:
+Tokenized stocks and commodities trade on-chain around the clock, but their
+issuer's primary market only runs during the exchange session. Outside it the
+pool has no arbitrage anchor, liquidity thins, and the price can gap at the next
+open. To gate on the session, ask for the session — not for a price:
 
 ```python
-reference = market.reference_price("GOOGL", chain="bsc", quote="USD")
-reason = reference.trade_block_reason(max_age_seconds=120, now=market.timestamp)
-if reason is not None:
-    return Intent.hold(reason=f"reference guard: {reason}")
+session = market.market_session("NYSE")   # regular session, incl. holidays
+if not session.is_open:
+    return Intent.hold(reason=f"nyse_{session.status.value}")
 ```
 
-BSC reference support uses these Chainlink consumer proxies:
+`market_session()` reads the published exchange calendar at `market.timestamp`.
+It makes no oracle or chain read, so it behaves identically on a live chain, an
+Anvil fork, and a historical backtest tick. It takes an **exchange** name, never
+a token or ticker symbol: any calendar published by `pandas_market_calendars`
+(`NYSE`, `NASDAQ`, `HKEX`, `CMEGlobex_Gold`, … — matched case-insensitively), with
+scheduled lunch breaks and interruptions counted as closed. For any
+US-listed tokenized stock use `"NYSE"` — NYSE and NASDAQ share the same regular
+session, holidays and early closes. An unknown exchange returns `UNKNOWN`, which
+is the fail-closed answer — treat it as closed. Do not derive session state from
+oracle freshness, and do not call `reference_price()` just to learn whether the
+market is open.
 
-| Instrument | Proxy | Provider heartbeat | Session calendar |
-| --- | --- | --- | --- |
-| `XAU` | `0x86896fEB19D8A607c3b11f2aF50A0f239Bd71CD0` | 600 seconds | CME Globex Gold |
-| `GOOGL` | `0xeDA73F8acb669274B15A977Cb0cdA57a84F18c2a` | 86400 seconds | NYSE regular session |
-| `TSLA` | `0xEEA2ae9c074E87596A85ABE698B2Afebc9B57893` | 86400 seconds | NYSE regular session |
+## Non-crypto reference prices
 
-The equity feeds use 8 decimals and a 0.5% deviation trigger. Their provider
-metadata specifies the NYSE session convention, including holidays, early closes,
-and daylight-saving changes. See the provider's [GOOGL feed](https://data.chain.link/feeds/bsc/mainnet/googl-usd)
-and [TSLA feed](https://data.chain.link/feeds/bsc/mainnet/tsla-usd).
-
-**A daily heartbeat does not guarantee a 120- or 300-second observation.** `stale`
-reflects the provider heartbeat; `trade_block_reason(max_age_seconds=...)` also
-enforces the strategy's stricter age limit. Preserve that limit: old observations,
-closed or unknown sessions, and unavailable data must block new trades. Confidence
-is the source's policy score (0.95 within heartbeat, 0.85 when stale), not a measured
-statistical confidence interval. `observed_at` is the Chainlink round's `updatedAt`,
-not an exchange tick timestamp or the time the gateway fetched it.
+`market.reference_price()` exists for strategies that need an underlying
+share or commodity quote to compare against a pool price. **It is a curated
+catalog, not a symbol lookup, and it is paused for hosted strategies** while the
+hosted test ladder cannot exercise it. Read the warning in the
+`MarketSnapshot.reference_price` docstring (rendered above under
+`almanak.framework.market`) before designing around it; the warning is kept
+current with the catalog and
+the release gates (ALM-10047, ALM-10062). Strategies that only need session
+gating should use `market_session()` above.
 
 `GOOGL` refers to the catalogued Alphabet reference instrument. `GOOGLB`, `GOOGLX`,
 `GOOGLON`, `GOOG`, and token contract addresses are not aliases. A strategy must
@@ -151,33 +152,20 @@ def decide(self, market: MarketSnapshot) -> Intent:
 
 ### Token-adjusted equity references
 
-For a curated token identity, use the existing reference API with an optional
-explicit token address:
+A curated token identity (today only `GOOGLB` on BSC) composes the underlying
+share quote with the issuer's on-chain multiplier and returns it with
+`basis=RAW_TOKEN`, a bound `token_address`, and full two-leg `composition`
+provenance. For the pinned implementation, `composition.multiplier_effective_at`
+preserves the activation timestamp verified from contract storage, so
+quote/adjustment alignment survives gateway restarts; the underlying quote must
+still be strictly newer than that activation. Pending adjustments, changed
+implementations, expired contract observations and unaligned pairs fail closed,
+and the equity source timestamp is never replaced by composition time.
 
-```python
-reference = market.reference_price(
-    "GOOGLB", chain="bsc", quote="USD",
-    token_address="0x3f53de71c126bdabae20f9cd64848d317f6c3238",
-)
-if reason := reference.trade_block_reason(max_age_seconds=120):
-    return Intent.hold(reason=reason)
-```
-
-The exact registered `GOOGLB` symbol also resolves to that address when
-`token_address` is omitted. `reference_price("GOOGL", chain="bsc")` remains an
-underlying share quote. A token reference has `basis=RAW_TOKEN`, a bound
-`token_address`, and `composition` containing the underlying quote, active
-multiplier, contract block and implementation provenance. Compare this raw-token
-reference with a raw-token pool quote; do not multiply it again by the multiplier.
-It does not change `market.price()` or wallet transfer units.
-
-For the pinned implementation, `composition.multiplier_effective_at` preserves
-the activation timestamp verified from contract storage even after the public
-`effectiveAt()` getter resets to zero. Alignment therefore survives gateway
-restarts; the underlying quote must still be strictly newer than that activation.
-
-Missing or incompatible gateway fields, changed implementation, expired contract
-observations and unaligned adjustments fail closed. The equity source timestamp
-is never replaced by composition time. Catalog availability alone does not prove
-that a provider meets a 120-second requirement, and fork/injected tests do not
-qualify hosted data access or asset eligibility.
+The multiplier observation must be under 30 seconds old measured against the
+block timestamp. A default Anvil fork does not advance its block, so the
+composition cannot currently be satisfied on the hosted smoke ladder — see the
+warning on `MarketSnapshot.reference_price` and ALM-10047 before relying on it.
+Catalog availability alone does not prove that a provider meets a 120-second
+requirement, and fork/injected tests do not qualify hosted data access or asset
+eligibility.

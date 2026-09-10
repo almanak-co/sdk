@@ -44,6 +44,7 @@ from .models import (
     LendingMarketInfo,
     MACDData,
     MAData,
+    MarketSessionData,
     OBVData,
     PerpMarketData,
     PriceData,
@@ -1100,6 +1101,57 @@ class MarketSnapshot:
             index_symbol=index_symbol,
         )
 
+    def market_session(self, exchange: str) -> MarketSessionData:
+        """Report whether the named exchange's regular session is open at ``self.timestamp``.
+
+        This is the strategy-facing way to gate on market hours for tokenized
+        equities and commodities. It evaluates the published exchange calendar
+        (regular session, holidays, early closes, DST) at ``self.timestamp`` and
+        returns a typed status. It performs **no oracle, gateway, or chain
+        read**, so the answer is identical on a live chain, an Anvil fork, and a
+        historical backtest tick, and it never triggers a critical-data failure.
+
+        Do not infer session state from oracle freshness, and do not call
+        :meth:`reference_price` just to learn whether the market is open — that
+        path is a curated price feed with its own fail-closed gates.
+
+        ``exchange`` is a calendar name published by ``pandas_market_calendars``
+        (``"NYSE"``, ``"NASDAQ"``, ``"HKEX"``, ``"CMEGlobex_Gold"``, ... —
+        matched case-insensitively). Scheduled lunch breaks and interruptions
+        count as CLOSED. Token or ticker symbols are deliberately not accepted:
+        session hours belong to the listing exchange, not to a symbol, and there
+        is no reliable symbol-to-exchange catalog. For any US-listed equity use
+        ``"NYSE"`` — NYSE and NASDAQ share the same regular session, holidays and
+        early closes. For gold use ``"CMEGlobex_Gold"``. An unknown exchange
+        returns :attr:`ReferenceMarketStatus.UNKNOWN`, the fail-closed answer —
+        treat it as closed for any decision that should only run inside the
+        session.
+
+        Args:
+            exchange: Exchange calendar name, e.g. ``"NYSE"``.
+
+        Returns:
+            :class:`MarketSessionData` with ``status``, ``exchange`` (the
+            resolved calendar name, empty when unknown), ``as_of`` (the snapshot
+            timestamp the calendar was evaluated at) and ``source``.
+
+        Example:
+            ```python
+            session = market.market_session("NYSE")
+            if not session.is_open:
+                return Intent.hold(reason=f"nyse_{session.status.value}")
+            ```
+        """
+        from almanak.core.market_sessions import exchange_market_status
+
+        observation = exchange_market_status(exchange, as_of=self._timestamp)
+        return MarketSessionData(
+            exchange=observation.calendar,
+            status=ReferenceMarketStatus(observation.status.value),
+            as_of=observation.as_of,
+            source=observation.source,
+        )
+
     def reference_price(
         self,
         instrument: str,
@@ -1109,6 +1161,32 @@ class MarketSnapshot:
         token_address: str | None = None,
     ) -> ReferencePriceData:
         """Read one gateway-verified non-crypto reference price.
+
+        Warning:
+            **Not for market-hours gating, and not yet available to hosted
+            strategies.** Use :meth:`market_session` if the strategy only needs
+            to know whether the exchange session is open.
+
+            Coverage is a curated catalog, not a symbol lookup. As of
+            2026-09-10 it is: ``XAU``, ``GOOGL``, ``TSLA`` (underlying quotes)
+            and ``GOOGLB`` (raw-token composition), all on ``bsc``. Any other
+            instrument, issuer token (xStocks, Ondo, Dinari, Backed, ...), or
+            chain fails closed with ``verified_reference_provider_unavailable``
+            or ``reference_token_chain_unsupported``. Check the catalog and the
+            release notes before designing a strategy around this call.
+
+            The ``GOOGLB`` composition cannot currently pass the hosted
+            ``run_test`` smoke step. Its multiplier observation must be under
+            30 seconds old measured against the block timestamp, and a default
+            Anvil fork does not advance its block, so from roughly 30 seconds
+            after the gateway's first read every iteration returns ``HOLD``
+            with ``multiplier_observation_stale`` as a critical-data failure.
+            (Quote/adjustment alignment itself now survives cold starts via
+            on-chain activation evidence, so ``reference_adjustment_alignment_unproven``
+            is no longer the fork blocker.) Tracked under ALM-10047. Until a
+            fork-aware test path lands, a strategy gated on this reference is
+            not deployable through the platform; offer a monitor-only design or
+            a design without a reference gate instead.
 
         This surface is deliberately separate from :meth:`price`: it selects a
         single catalogued provider feed, preserves that feed's ``updatedAt``,
