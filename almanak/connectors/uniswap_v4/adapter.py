@@ -441,6 +441,7 @@ class UniswapV4Adapter:
             )
 
         transactions: list[SwapTransaction] = []
+        approval_checks: list[dict[str, Any]] = []
 
         # ERC-20 path needs approve then Permit2 grant; native ETH skips both as msg.value.
         is_native = token_in_addr.lower() == NATIVE_CURRENCY
@@ -449,6 +450,7 @@ class UniswapV4Adapter:
                 self._erc20_permit2_approvals(
                     token_in_addr,
                     amount_in_raw,
+                    evidence=approval_checks,
                     block_number=verified.evidence.block_number if verified is not None else None,
                 )
             )
@@ -491,6 +493,7 @@ class UniswapV4Adapter:
             token_out=token_out_addr,
             hook_data=selection.hook_data or b"",
             price_impact_check=impact_evidence,
+            approval_checks=approval_checks,
         )
 
     def _observation_gateway(self) -> Any:
@@ -782,6 +785,7 @@ class UniswapV4Adapter:
             # Whether minOut came from an executable quote or an offline estimate.
             "quote_source": result.quote_source,
             "price_impact_check": result.price_impact_check,
+            "v4_approval_checks": result.approval_checks,
         }
         if result.pool_key is not None:
             metadata["pool_key"] = result.pool_key.to_wire()
@@ -1052,8 +1056,15 @@ class UniswapV4Adapter:
             slippage_bps=slippage_bps,
         )
 
-    def _erc20_permit2_approvals(self, token: str, amount: int, *, block_number: int | None) -> list[SwapTransaction]:
-        from .approvals import approval_amounts, observe_permit2_allowance
+    def _erc20_permit2_approvals(
+        self,
+        token: str,
+        amount: int,
+        *,
+        block_number: int | None,
+        evidence: list[dict[str, Any]] | None = None,
+    ) -> list[SwapTransaction]:
+        from .approvals import allowance_evidence, approval_amounts, observe_permit2_allowance
 
         current = None
         if block_number is not None:
@@ -1064,9 +1075,20 @@ class UniswapV4Adapter:
                 wallet=self.wallet_address,
                 block_number=block_number,
             )
-        return [
-            self._sdk.build_approve_tx(token, PERMIT2_ADDRESS, value) for value in approval_amounts(current, amount)
-        ]
+        amounts = approval_amounts(current, amount)
+        if evidence is not None:
+            evidence.append(
+                allowance_evidence(
+                    chain=self.chain,
+                    token=token,
+                    wallet=self.wallet_address,
+                    block_number=block_number,
+                    current=current,
+                    required=amount,
+                    amounts=amounts,
+                )
+            )
+        return [self._sdk.build_approve_tx(token, PERMIT2_ADDRESS, value) for value in amounts]
 
     def _build_lp_open_transactions(
         self,
@@ -1074,6 +1096,7 @@ class UniswapV4Adapter:
         liquidity: _LPOpenLiquidity,
         *,
         block_number: int | None = None,
+        approval_checks: list[dict[str, Any]] | None = None,
     ) -> list[SwapTransaction]:
         """Build Permit2 approvals followed by the PositionManager mint."""
         mint_params = LPMintParams(
@@ -1094,7 +1117,11 @@ class UniswapV4Adapter:
         ]:
             if token_addr.lower() == NATIVE_CURRENCY:
                 continue
-            transactions.extend(self._erc20_permit2_approvals(token_addr, amount_max, block_number=block_number))
+            transactions.extend(
+                self._erc20_permit2_approvals(
+                    token_addr, amount_max, block_number=block_number, evidence=approval_checks
+                )
+            )
             transactions.append(self._sdk.build_permit2_approve_tx(token_addr, position_manager, amount_max))
 
         transactions.append(
@@ -1224,10 +1251,15 @@ class UniswapV4Adapter:
                     transactions=[],
                     metadata={"error": "Computed liquidity is zero — check amounts and price range"},
                 )
+            approval_checks: list[dict[str, Any]] = []
             transactions = self._build_lp_open_transactions(
-                pool, liquidity, block_number=verified.evidence.block_number if verified is not None else None
+                pool,
+                liquidity,
+                block_number=verified.evidence.block_number if verified is not None else None,
+                approval_checks=approval_checks,
             )
             bundle = self._build_lp_open_bundle(intent, pool, price, liquidity, transactions)
+            bundle.metadata["v4_approval_checks"] = approval_checks
             if verified is not None:
                 from .operation import bind_lp_operation
 
@@ -1564,6 +1596,7 @@ class SwapResult:
     token_out: str = ""
     hook_data: bytes = b""
     price_impact_check: dict[str, Any] | None = None
+    approval_checks: list[dict[str, Any]] | None = None
 
 
 def tx_to_dict(tx: SwapTransaction) -> dict[str, Any]:

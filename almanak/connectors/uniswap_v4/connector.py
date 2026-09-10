@@ -98,7 +98,7 @@ def _production_lifecycle_declarations():
 CONNECTOR = Connector(
     name="uniswap_v4",
     kind=ProtocolKind.LP,
-    execution_evidence_keys=("v4_operation", "price_impact_check"),
+    execution_evidence_keys=("v4_operation", "price_impact_check", "v4_approval_checks"),
     execution_validator=ImportRef(module="almanak.connectors.uniswap_v4.operation", attribute="validate_execution"),
     venue_verifiers=(
         VenueVerifierDecl(

@@ -102,3 +102,69 @@ def test_simulation_call_coverage_round_trips_as_observations_not_receipts():
     }
     result = SimpleNamespace(extracted_data={"execution_evidence": evidence})
     assert json.loads(_execution_evidence_bytes(result)) == evidence
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current", [0, 1, 2**256 - 1])
+@pytest.mark.parametrize("revoked", [False, True])
+async def test_allowance_read_and_plan_survive_gateway_and_ledger(current, revoked):
+    from almanak.framework.observability.ledger import deserialize_extracted_data, serialize_extracted_data
+    from tests.unit.connectors.uniswap_v4.test_approval_planning import AllowanceGateway, compile_operation
+    from tests.unit.execution.test_compiler_evidence_retention import enrich
+
+    gateway = AllowanceGateway()
+    gateway.allowance = 2**256 - 1 if revoked else current
+    bundle = compile_operation(gateway, "swap")
+    original = deepcopy(bundle)
+    gateway.allowance = current
+    signer = MagicMock()
+    signer.address = WALLET
+    orchestrator = ExecutionOrchestrator(
+        signer=signer,
+        submitter=MagicMock(),
+        simulator=MagicMock(),
+        chain="base",
+        managed_fork=False,
+        operation_observer_factory=lambda: gateway,
+    )
+    result = ExecutionResult(success=False, phase=ExecutionPhase.VALIDATION)
+    state = ExecutionPipelineState(
+        action_bundle=bundle,
+        context=ExecutionContext(chain="base", wallet_address=WALLET),
+        result=result,
+    )
+    refusal = await orchestrator._validate_connector_operation(state)
+    rejected = revoked and current < 2**256 - 1
+    assert (refusal is not None) == rejected
+    assert bundle == original
+    assert signer.mock_calls == []
+    response = gateway_pb2.ExecutionResult(
+        success=False,
+        execution_plan_hash=execution_plan_hash(bundle),
+        execution_evidence_json=_execution_evidence_bytes(result),
+    )
+    received = _execution_result_from_proto(
+        gateway_pb2.ExecutionResult.FromString(response.SerializeToString()),
+        chain="base",
+        expected_plan_hash=execution_plan_hash(bundle),
+    )
+    enrich("uniswap_v4", bundle.metadata, received)
+    restored = deserialize_extracted_data(serialize_extracted_data(received.extracted_data))
+    compile_checks = restored["compiler_evidence"]["v4_approval_checks"]
+    validation = restored["execution_evidence"]["connector_validation"][0]
+    if rejected:
+        assert validation["code"] == "INSUFFICIENT_ERC20_ALLOWANCE"
+        observed = validation["observation"]["approval_checks"][0]
+        assert observed["current_raw"] == str(current)
+        assert observed["return_data"] == "0x" + current.to_bytes(32, "big").hex()
+        assert observed["block_number"] == gateway.head
+        assert observed["decision"] == "refuse_insufficient"
+        assert compile_checks[0]["current_raw"] == str(2**256 - 1)
+        assert received.tx_hashes == []
+        return
+    checks = validation["observations"][0]["approval_checks"]
+    assert compile_checks[0]["current_raw"] == str(current)
+    assert checks[0]["approval_amounts_raw"] == compile_checks[0]["approval_amounts_raw"]
+    assert checks[0]["current_raw"] == (str(current) if current == 2**256 - 1 else None)
+    assert checks[0]["permit2_call_data"] == bundle.transactions[-2]["data"]
+    assert received.tx_hashes == []

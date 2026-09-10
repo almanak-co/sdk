@@ -3446,6 +3446,22 @@ def _wire_v4_verified_gateway(request: pytest.FixtureRequest, monkeypatch: pytes
 
     monkeypatch.setattr(IntentCompiler, "__init__", _init_with_verified_gateway)
 
+    from almanak.framework.execution.orchestrator import ExecutionOrchestrator
+    from tests.intents._uniswap_v4_approval_evidence import assert_approval_evidence
+
+    original_validate = ExecutionOrchestrator._validate_connector_operation
+
+    async def _validate_with_allowance_witnesses(self, state):
+        refusal = await original_validate(self, state)
+        if refusal is None and state.action_bundle.metadata.get("protocol") == "uniswap_v4":
+            validation = state.result.extracted_data["execution_evidence"]["connector_validation"][-1]
+            observations = [item for item in validation["observations"] if item["protocol"] == "uniswap_v4"]
+            assert len(observations) == 1
+            assert_approval_evidence(state.action_bundle, observations[0], gateway)
+        return refusal
+
+    monkeypatch.setattr(ExecutionOrchestrator, "_validate_connector_operation", _validate_with_allowance_witnesses)
+
 
 @pytest.fixture
 def _zodiac_intent_recorder(

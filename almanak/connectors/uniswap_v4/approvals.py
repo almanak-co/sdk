@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from eth_abi import encode
 from eth_utils import keccak
@@ -43,3 +43,32 @@ def approval_amounts(current: int | None, required: int) -> tuple[int, ...]:
         # Zero-first approval supports tokens that forbid replacing nonzero allowance.
         return (0, required)
     return (required,)
+
+
+def allowance_evidence(
+    *,
+    chain: str,
+    token: str,
+    wallet: str,
+    block_number: int | None,
+    current: int | None,
+    required: int,
+    amounts: tuple[int, ...],
+) -> dict[str, Any]:
+    """Describe the actual read and plan without promoting offline estimates to observations."""
+    payload = keccak(text="allowance(address,address)")[:4] + encode(["address", "address"], [wallet, PERMIT2_ADDRESS])
+    return {
+        "schema_version": 1,
+        "chain": chain,
+        "token": token.lower(),
+        "owner": wallet.lower(),
+        "spender": PERMIT2_ADDRESS.lower(),
+        "block_number": block_number,
+        "measured": current is not None,
+        "call_data": "0x" + payload.hex() if current is not None else None,
+        "return_data": "0x" + current.to_bytes(32, "big").hex() if current is not None else None,
+        "current_raw": str(current) if current is not None else None,
+        "required_raw": str(required),
+        "approval_amounts_raw": [str(value) for value in amounts],
+        "decision": "skip_sufficient" if not amounts else "reset_then_approve" if len(amounts) == 2 else "approve",
+    }

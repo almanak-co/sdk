@@ -113,13 +113,12 @@ def test_pause_publishes_marker_before_waiting_and_times_out(fork, monkeypatch):
     configure(context.root, action="pause", pause_timeout_seconds=1)
     output = context.root / "bundle"
     times = iter([0, 0, 2])
-    monkeypatch.setattr(faults.time, "monotonic", lambda: next(times))
     observed = []
 
     def observe_pause(_seconds):
         observed.append(json.loads((output / "lifecycle-checkpoints/selected-fault.json").read_text()))
 
-    monkeypatch.setattr(faults.time, "sleep", observe_pause)
+    monkeypatch.setattr(faults, "time", SimpleNamespace(monotonic=lambda: next(times), sleep=observe_pause))
     with pytest.raises(faults.InjectedLifecycleFailure, match="pause timed out"):
         faults.checkpoint("after_broadcast", output=output, phase="execution")
     assert len(observed) == 1

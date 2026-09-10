@@ -11,6 +11,7 @@ from typing import Any
 from eth_abi import decode
 
 from almanak.connectors._strategy_base.slippage import compute_min_amount_out_from_bps
+from almanak.framework.execution.interfaces import ConnectorValidationError
 from almanak.framework.models.reproduction_bundle import ActionBundle
 from almanak.framework.venues import VenueBindingFailure, VenueVerificationGateway
 
@@ -179,7 +180,7 @@ def validate_execution(
         raise ValueError("V4 operation transactions changed after quoting")
     if artifact["hook_evidence"] is not None and is_safe:
         raise ValueError("Hooked Safe routes require separate outer-route qualification")
-    _validate_approvals(bundle, artifact, key, gateway=gateway)
+    approval_checks = _validate_approvals(bundle, artifact, key, gateway=gateway)
     if bundle.intent_type != "SWAP":
         _validate_lp_encoding(bundle, artifact, key, wallet)
     else:
@@ -191,6 +192,7 @@ def validate_execution(
         "protocol": "uniswap_v4",
         "operation_schema_version": artifact["schema_version"],
         "freshness": asdict(observation),
+        "approval_checks": approval_checks,
     }
 
 
@@ -261,7 +263,7 @@ def _validate_approvals(
     key: PoolKey,
     *,
     gateway: VenueVerificationGateway | None = None,
-) -> None:
+) -> list[dict[str, Any]]:
     sdk = UniswapV4SDK(artifact["chain"])
     if bundle.intent_type == "SWAP":
         budgets = [(artifact["token_in"], int(artifact["amount_in"]))]
@@ -279,11 +281,13 @@ def _validate_approvals(
     approvals = bundle.transactions[:-1]
     cursor = 0
     observation_block = None
+    checks: list[dict[str, Any]] = []
     for token, amount in budgets:
+        current = None
         first_approval = cursor
         cursor = _consume_erc20_approvals(approvals, cursor, token, amount, sdk)
         if cursor == first_approval:
-            from .approvals import observe_permit2_allowance
+            from .approvals import allowance_evidence, observe_permit2_allowance
 
             if gateway is None:
                 raise ValueError("V4 omitted ERC20 approval requires gateway allowance observation")
@@ -297,7 +301,21 @@ def _validate_approvals(
                 block_number=observation_block,
             )
             if current < amount:
-                raise ValueError("V4 ERC20 allowance decreased; recompile before execution")
+                refused_check = allowance_evidence(
+                    chain=artifact["chain"],
+                    token=token,
+                    wallet=artifact["wallet"],
+                    block_number=observation_block,
+                    current=current,
+                    required=amount,
+                    amounts=(),
+                )
+                refused_check["decision"] = "refuse_insufficient"
+                raise ConnectorValidationError(
+                    "V4 ERC20 allowance decreased; recompile before execution",
+                    code="INSUFFICIENT_ERC20_ALLOWANCE",
+                    evidence={"protocol": "uniswap_v4", "approval_checks": [*checks, refused_check]},
+                )
         if cursor >= len(approvals):
             raise ValueError("V4 operation is missing its bounded Permit2 approval")
         permit = approvals[cursor]
@@ -315,8 +333,31 @@ def _validate_approvals(
             expected.data.lower(),
         ):
             raise ValueError("V4 Permit2 approval differs from the operation token, spender or budget")
+        from .approvals import allowance_evidence
+
+        amounts = tuple(
+            decode(["address", "uint256"], bytes.fromhex(tx["data"][10:]))[1]
+            for tx in approvals[first_approval : cursor - 1]
+        )
+        checks.append(
+            {
+                **allowance_evidence(
+                    chain=artifact["chain"],
+                    token=token,
+                    wallet=artifact["wallet"],
+                    block_number=observation_block if current is not None else None,
+                    current=current,
+                    required=amount,
+                    amounts=amounts,
+                ),
+                "permit2_spender": spender.lower(),
+                "permit2_expiration": expiration,
+                "permit2_call_data": permit["data"],
+            }
+        )
     if cursor != len(approvals):
         raise ValueError("V4 operation contains unexpected approval or auxiliary transactions")
+    return checks
 
 
 def _validate_position_continuity(
