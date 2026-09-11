@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from qa_lab.chains import CHAINS
 from qa_lab.mainnet_intent_envelope import (
     MainnetEnvelopeError,
     _validate_uniswap_close_components,
@@ -18,6 +19,7 @@ from qa_lab.mainnet_intent_envelope import (
     validate_mainnet_envelope,
 )
 from qa_lab.mainnet_intent_recipe import (
+    RECIPES,
     UNISWAP_V3_ARBITRUM_LP_CLOSE_EOA,
     UNISWAP_V3_ARBITRUM_LP_COLLECT_FEES_EOA,
     UNISWAP_V3_ARBITRUM_LP_OPEN_EOA,
@@ -36,12 +38,8 @@ from tests.unit.scripts.test_intent_semantic_contract import (
     _word,
 )
 
-LP_RECIPES = (
-    UNISWAP_V3_ARBITRUM_LP_OPEN_EOA,
-    UNISWAP_V3_ARBITRUM_LP_CLOSE_EOA,
-    UNISWAP_V3_ARBITRUM_LP_COLLECT_FEES_EOA,
-    UNISWAP_V3_BASE_LP_OPEN_EOA,
-    UNISWAP_V3_BASE_LP_CLOSE_EOA,
+LP_RECIPES = tuple(
+    recipe for recipe in RECIPES.values() if recipe.protocol == "uniswap_v3" and recipe.intent.startswith("LP_")
 )
 
 
@@ -64,14 +62,14 @@ def test_lp_recipe_is_one_exact_dynamic_nft_lifecycle(recipe) -> None:
         assert recipe.cleanup == ("SWEEP_TO_MASTER",)
     else:
         assert recipe.setup[0].startswith("LP_OPEN:")
-        assert recipe.setup[1].startswith("SWAP:WETH:USDC:")
+        assert recipe.setup[1].startswith(f"SWAP:WETH:{recipe.output_asset_symbol}:")
         assert recipe.target == ("LP_COLLECT_FEES:SETUP_POSITION",)
         assert recipe.cleanup[0] == "LP_CLOSE:SETUP_POSITION:FULL"
 
 
 def _lp_identity(recipe) -> dict:
     return {
-        "chain_id": 42161 if recipe.chain == "arbitrum" else 8453,
+        "chain_id": CHAINS[recipe.chain][0],
         "block_number": 1,
         "block_hash": "0x" + "ab" * 32,
         "factory": recipe.factory_address,
@@ -102,7 +100,7 @@ def _lp_mint_guard(recipe) -> dict:
 
 @pytest.mark.parametrize("recipe", LP_RECIPES)
 def test_lp_identity_and_two_sided_mint_bounds_are_mandatory(recipe) -> None:
-    chain_id = 42161 if recipe.chain == "arbitrum" else 8453
+    chain_id = CHAINS[recipe.chain][0]
     _validate_uniswap_guard(
         guard_id="uniswap_v3_exact_pool_identity",
         observation=_lp_identity(recipe),
@@ -164,6 +162,35 @@ def test_lp_close_setup_receipt_proves_the_exact_bounded_nft_mint() -> None:
     payload = deepcopy(payload)
     payload["raw_receipt"]["logs"][0]["topics"][2] = "0x" + ("77" * 20).zfill(64)
     with pytest.raises(MainnetEnvelopeError, match="NFT mint"):
+        _validate_uniswap_phase_action(
+            payload=payload,
+            action_spec=recipe.setup[0],
+            recipe=recipe,
+            wallet=ACCOUNT,
+        )
+
+
+def test_robinhood_lp_close_setup_reaches_receipt_validation_for_usdg_obligation() -> None:
+    recipe = next(recipe for recipe in LP_RECIPES if recipe.cell_id.endswith("robinhood.LP_CLOSE.mainnet.eoa"))
+    payload = _v3_lp_open_payload()
+    replacements = {
+        "0x4200000000000000000000000000000000000006": recipe.asset_address,
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": recipe.output_asset_address,
+    }
+
+    def replace(value):
+        if isinstance(value, dict):
+            return {key: replace(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [replace(item) for item in value]
+        if isinstance(value, str):
+            for old, new in replacements.items():
+                value = value.replace(old, new).replace(old.upper(), new)
+        return value
+
+    payload = replace(payload)
+    payload["chain"] = recipe.chain
+    with pytest.raises(MainnetEnvelopeError, match="bounded exact-pool mint"):
         _validate_uniswap_phase_action(
             payload=payload,
             action_spec=recipe.setup[0],

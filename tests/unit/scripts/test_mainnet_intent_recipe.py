@@ -14,13 +14,16 @@ from web3 import Web3
 
 from almanak.connectors.uniswap_v3.sdk import compute_pool_address
 from qa_lab.mainnet_intent_recipe import (
-    RECIPES,
     AAVE_V3_ARBITRUM_SUPPLY_EOA,
     MAINNET_ASSET_DECIMALS,
+    RECIPES,
     TRADERJOE_V2_AVALANCHE_SWAP_EOA,
     UNISWAP_V3_ARBITRUM_LP_COLLECT_FEES_EOA,
     UNISWAP_V3_ARBITRUM_SWAP_EOA,
     UNISWAP_V3_BASE_SWAP_EOA,
+    UNISWAP_V3_ROBINHOOD_LP_CLOSE_EOA,
+    UNISWAP_V3_ROBINHOOD_LP_OPEN_EOA,
+    UNISWAP_V3_ROBINHOOD_SWAP_EOA,
     asset_decimals,
     build_approval,
     build_run_plan,
@@ -133,6 +136,27 @@ def test_uniswap_arbitrum_collect_fees_recipe_separates_fee_setup_target_and_clo
     assert recipe.cleanup == ("LP_CLOSE:SETUP_POSITION:FULL", "SWEEP_TO_MASTER")
     assert recipe.funding_tokens == ("WETH:0.0011", "USDC:1")
     assert resolve_recipe(recipe.cell_id) is recipe
+
+
+@pytest.mark.parametrize("recipe", [UNISWAP_V3_ROBINHOOD_LP_OPEN_EOA, UNISWAP_V3_ROBINHOOD_LP_CLOSE_EOA])
+def test_uniswap_robinhood_lp_recipes_bind_usdg_and_exact_lifecycle(recipe) -> None:
+    assert recipe.chain == "robinhood"
+    assert recipe.exec_path == "eoa"
+    assert recipe.output_asset_symbol == "USDG"
+    assert recipe.output_asset_decimals == 6
+    assert recipe.target[0].startswith("LP_OPEN:WETH:0.001:USDG:1:") or recipe.target == (
+        "LP_CLOSE:SETUP_POSITION:FULL",
+    )
+    assert recipe.nodeid.endswith("_eoa")
+    assert resolve_recipe(recipe.cell_id) is recipe
+
+
+def test_uniswap_robinhood_swap_recipe_binds_usdg() -> None:
+    recipe = UNISWAP_V3_ROBINHOOD_SWAP_EOA
+    assert recipe.output_asset_symbol == "WETH"
+    assert recipe.asset_symbol == "USDG"
+    assert recipe.asset_decimals == 6
+    assert recipe.target[0].startswith("SWAP:USDG:WETH:0.5:")
 
 
 def test_traderjoe_swap_recipe_is_exact_pair_and_inverse_cleanup() -> None:

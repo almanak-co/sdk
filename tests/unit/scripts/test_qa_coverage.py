@@ -2305,7 +2305,7 @@ def test_aave_mainnet_eoa_cells_are_routable_only_with_exact_recipes(modules, ch
     assert len(plan["proof_recipe"]["nodeids"]) == 1
 
 
-@pytest.mark.parametrize("chain", ["arbitrum", "base"])
+@pytest.mark.parametrize("chain", ["arbitrum", "base", "robinhood"])
 def test_uniswap_v3_swap_mainnet_eoa_is_routable_only_with_exact_recipe(modules, chain: str) -> None:
     qa, _, _ = modules
 
@@ -2316,7 +2316,7 @@ def test_uniswap_v3_swap_mainnet_eoa_is_routable_only_with_exact_recipe(modules,
     assert len(plan["proof_recipe"]["nodeids"]) == 1
 
 
-@pytest.mark.parametrize("chain", ["arbitrum", "base"])
+@pytest.mark.parametrize("chain", ["arbitrum", "base", "robinhood"])
 @pytest.mark.parametrize("intent", ["LP_OPEN", "LP_CLOSE"])
 def test_uniswap_v3_lp_mainnet_eoa_is_routable_only_with_exact_lifecycle_recipe(
     modules, chain: str, intent: str
