@@ -221,6 +221,23 @@ WRAPPED_NATIVE_TOKENS: Mapping[str, str] = wrapped_native_deposit_address_map()
 
 _EVM_TOKEN_ADDRESS_RE = re.compile(r"^0[xX][0-9a-fA-F]{40}$")
 
+# Upper bound on provider-controlled JSON-RPC error text kept in a log line.
+_RPC_ERROR_DETAIL_LIMIT = 300
+
+_UPSTREAM_URL_PLACEHOLDER = "<upstream-rpc>"
+
+# Below this length a password is too common a substring to replace outside URL shape.
+_BARE_SECRET_MIN_LEN = 8
+
+_ABSOLUTE_URL_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://\S+")
+
+# Deliberately wider than ForkManagerConfig._mask_url's list: this one guards log
+# sinks, where an unrecognised parameter name is a silent leak rather than a
+# cosmetic miss.
+_SENSITIVE_QUERY_PARAM_RE = (
+    r"(?<=[?&])(api[_-]?key|apikey|key|token|auth|password|passwd|secret|access[_-]?token|session)=([^&\s]+)"
+)
+
 # Upper bound for a single ``anvil_dealERC20`` call. The node discovers the
 # balance slot by tracing ``balanceOf``, and a few pathological contracts make
 # that trace run effectively forever; because the work happens server-side, a
@@ -482,25 +499,99 @@ class RollingForkManager:
         """
         return self._last_start_error
 
-    def _record_start_error(self, message: str) -> None:
-        """Store a masked failure reason for the caller to surface."""
+    def _mask_upstream_secrets(self, text: str) -> str:
+        """Strip the configured upstream URL and its key from third-party text.
+
+        Applies to any string this manager did not author: Anvil's stderr, an
+        aiohttp exception, or an upstream JSON-RPC error body. All three echo
+        the request URL verbatim, and for Alchemy/Infura/QuickNode/Ankr that
+        URL carries the provider key in its path.
+        """
         from urllib.parse import urlsplit
 
-        masked = message.replace(self.rpc_url, ForkManagerConfig._mask_url(self.rpc_url))
+        # Placeholder, not _mask_url output: _mask_url can return its input
+        # unchanged, and substituting a URL for itself redacts nothing.
+        masked = text.replace(self.rpc_url, _UPSTREAM_URL_PLACEHOLDER) if self.rpc_url else text
+        # A truncated or reformatted echo never matches the exact URL above.
+        masked = re.sub(r"(?<=://)[^/\s@]+@", "***@", masked)
+        # The scheme is not always present in an echo ("connect failed to
+        # user:pw@host"), so also replace the userinfo we KNOW, at any offset.
+        parsed = urlsplit(self.rpc_url) if self.rpc_url else None
+        if parsed is not None and parsed.password:
+            masked = masked.replace(f"{parsed.username or ''}:{parsed.password}@", "***@")
+            # The bare replace has a length floor. A short password is a common
+            # substring ("test", "a"), and this text reaches skip messages and
+            # JUnit XML -- replacing it everywhere shreds the diagnostic into
+            # "la*** block fetch failed". The two userinfo forms above already
+            # cover a short password wherever it appears in URL shape.
+            if len(parsed.password) >= _BARE_SECRET_MIN_LEN:
+                masked = masked.replace(parsed.password, "***")
         # The surest scrub is the key we already KNOW: the last path segment of
         # the configured upstream URL, replaced at ANY truncation offset. This
         # also covers providers with no /vN/ prefix (QuickNode, Ankr).
         key_segment = urlsplit(self.rpc_url).path.strip("/").split("/")[-1] if self.rpc_url else ""
         if len(key_segment) >= 20:
             masked = masked.replace(key_segment, "***")
-        masked = re.sub(r"(api[_-]?key|apikey|key|token)=([^&\s]+)", r"\1=***", masked, flags=re.IGNORECASE)
+        masked = re.sub(_SENSITIVE_QUERY_PARAM_RE, r"\1=***", masked, flags=re.IGNORECASE)
         # Alchemy/Infura carry the key in the URL PATH (/v2/<key>). Truncated stderr
         # can defeat the exact-URL replace above, so scrub key-shaped segments behind
         # a version-prefix from the body too -- anchored so ordinary long filesystem
         # path segments in diagnostics survive, and terminator-agnostic so reqwest's
         # "(https://.../v2/<key>)" form is covered.
-        masked = re.sub(r"(/v\d+/)[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])", r"\1***", masked)
-        self._last_start_error = masked
+        return re.sub(r"(/v\d+/)[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])", r"\1***", masked)
+
+    def _scrub_third_party(self, text: str) -> str:
+        """Full scrub for text this manager did not author.
+
+        `_mask_upstream_secrets` alone only removes the URL we KNOW. Third-party
+        text can name a different one -- a redirect, a fallback endpoint, a
+        provider-internal host -- whose credentials we cannot enumerate, so every
+        absolute URL is replaced wholesale afterwards. Text without a URL survives
+        intact, which is the point: that is where the diagnostic lives.
+
+        Every renderer of third-party text goes through here, so the exception and
+        JSON-RPC paths cannot drift apart on which scrub they apply.
+        """
+        return _ABSOLUTE_URL_RE.sub("<url>", self._mask_upstream_secrets(text))
+
+    def _describe_exception(self, exc: BaseException) -> str:
+        """Render an exception for a log sink: class plus message, no traceback.
+
+        Without the message an AttributeError in our own helper leaves no cause
+        recorded anywhere, which is what this module exists to prevent.
+        """
+        detail = self._scrub_third_party(str(exc))
+        return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+    def _describe_rpc_error(self, error: object) -> str:
+        """Render an upstream JSON-RPC error member for a log line.
+
+        The member is third-party text: `message` can echo the credentialed
+        request URL, and can equally name a FOREIGN credentialed one we never
+        configured, so it goes through the full third-party scrub. Scrubbing
+        precedes truncation so a key cannot ride out on the retained prefix.
+
+        `data` is kept. It is unbounded, but on the LOCAL funding ladder
+        (anvil_dealERC20, the whale transfer, decimals eth_call) it carries the
+        revert bytes, and for a custom error those bytes are the only evidence
+        of the cause -- `message` is a bare "execution reverted". Dropping it
+        would delete the diagnostic this module exists to surface. The shared
+        length cap bounds it.
+        """
+        if isinstance(error, dict):
+            rendered = f"code={error.get('code')!r} message={error.get('message')!r}"
+            if (data := error.get("data")) is not None:
+                rendered = f"{rendered} data={data!r}"
+        else:
+            rendered = repr(error)
+        masked = self._scrub_third_party(rendered)
+        if len(masked) > _RPC_ERROR_DETAIL_LIMIT:
+            masked = f"{masked[:_RPC_ERROR_DETAIL_LIMIT]}...(truncated)"
+        return masked
+
+    def _record_start_error(self, message: str) -> None:
+        """Store a masked failure reason for the caller to surface."""
+        self._last_start_error = self._mask_upstream_secrets(message)
 
     async def _validate_source_chain_id(self) -> None:
         """Validate the source RPC URL returns the expected chain ID.
@@ -531,7 +622,10 @@ class RollingForkManager:
                 ) as response:
                     result_data: dict[str, Any] = await response.json()
                     if "error" in result_data:
-                        logger.warning("Could not verify source RPC chain ID: %s", result_data["error"])
+                        logger.warning(
+                            "Could not verify source RPC chain ID: %s",
+                            self._describe_rpc_error(result_data["error"]),
+                        )
                         return
 
                     source_chain_id = int(result_data["result"], 16)
@@ -550,9 +644,14 @@ class RollingForkManager:
 
                     logger.debug("Source RPC chain_id validated: %d (%s)", source_chain_id, self.chain)
         except (TimeoutError, aiohttp.ClientError, OSError) as e:
-            logger.warning("Could not verify source RPC chain ID due to a network error: %s", e)
+            # Exception class only. Unlike _rpc_call_raw, which talks to the local
+            # fork, this call targets the credentialed upstream, and aiohttp errors
+            # echo that URL — including the provider key in its path.
+            logger.warning("Could not verify source RPC chain ID due to a network error: %s", type(e).__name__)
         except (KeyError, ValueError) as e:
-            logger.warning("Failed to parse chain ID from RPC response: %s", e)
+            # The message quotes the provider's own payload, so it gets the same
+            # scrub as the error member above.
+            logger.warning("Failed to parse chain ID from RPC response: %s", self._mask_upstream_secrets(str(e)))
 
     async def start(self) -> bool:
         """Start the Anvil fork.
@@ -582,8 +681,10 @@ class RollingForkManager:
                 f"Starting Anvil fork: chain={self.chain}, port={self.anvil_port}, "
                 f"fork_block={self.fork_block_number or 'latest'}"
             )
-            masked_cmd = [ForkManagerConfig._mask_url(arg) for arg in cmd]
-            logger.debug(f"Anvil command: {' '.join(masked_cmd)}")
+            # Scrub the joined line, not each arg through _mask_url: the command
+            # carries --fork-url verbatim, and _mask_url leaves basic-auth userinfo
+            # and auth=/secret= parameters untouched.
+            logger.debug("Anvil command: %s", self._mask_upstream_secrets(" ".join(cmd)))
 
             # Start Anvil process. When keep_alive_detached is set, put Anvil in its
             # own session so a `--keep-anvil` fork outlives the runner's exit and is
@@ -647,7 +748,10 @@ class RollingForkManager:
             return False
         except Exception as e:
             self._record_start_error(f"{type(e).__name__}: {e}")
-            logger.exception(f"Failed to start Anvil fork: {e}")
+            # No exc_info: a traceback ends with the raw exception message, which is
+            # the same text _record_start_error just masked. The masked detail keeps
+            # the class and cause; the stack is not worth re-leaking the fork URL.
+            logger.error("Failed to start Anvil fork: %s", self._last_start_error)
             await self.stop()
             return False
 
@@ -936,6 +1040,8 @@ class RollingForkManager:
         self,
         address: str,
         tokens: dict[str, Decimal],
+        *,
+        failure_reasons: dict[str, str] | None = None,
     ) -> list[str]:
         """Fund a wallet with address-keyed ERC-20 amounts, reporting failures per token.
 
@@ -958,6 +1064,8 @@ class RollingForkManager:
         Args:
             address: Wallet address to fund
             tokens: Dict mapping ERC-20 contract address to amount
+            failure_reasons: Optional call-scoped output for sanitized per-token
+                diagnostics. Cleared before use; contains only failed keys.
 
         Returns:
             The token keys that could NOT be funded, in request order; empty
@@ -965,8 +1073,11 @@ class RollingForkManager:
             blame only these keys — naming the whole batch sent debuggers
             chasing tokens that funded fine.
         """
+        reasons = failure_reasons if failure_reasons is not None else {}
+        reasons.clear()
         if not self.is_running:
             logger.error("Cannot fund tokens: Anvil fork not running")
+            reasons.update(dict.fromkeys(tokens, "fork is not running; start or recreate the managed fork"))
             return list(tokens)
 
         from almanak.framework.data.tokens import get_token_resolver
@@ -988,6 +1099,7 @@ class RollingForkManager:
                     token_key,
                 )
                 failed.append(token_key)
+                reasons[token_key] = "invalid token identity; supply an exact chain-specific ERC-20 contract address"
                 continue
 
             token_address = token_key.lower()
@@ -1011,12 +1123,16 @@ class RollingForkManager:
                     f"Unknown decimals for {display_name} on {self.chain}, skipping (refusing to default to 18)"
                 )
                 failed.append(token_key)
+                reasons[token_key] = (
+                    "decimals unavailable from registry and on-chain lookup; verify ERC-20 metadata and fork RPC access"
+                )
                 continue
 
             # Convert to token units (hex string)
             token_units = int(amount * Decimal(10**decimals))
             amount_hex = hex(token_units)
 
+            attempted: list[str] = []
             try:
                 funded = False
                 skip_storage_fallback = False
@@ -1027,6 +1143,7 @@ class RollingForkManager:
                 # more reliable than storage slot manipulation (proxy/slot issues).
                 wrapped_native = WRAPPED_NATIVE_TOKENS.get(self.chain)
                 if wrapped_native == token_address:
+                    attempted.append("wrapped-native deposit")
                     funded = await self._fund_wrapped_native_via_deposit(
                         address, token_address, amount_hex, amount, display_name
                     )
@@ -1045,6 +1162,7 @@ class RollingForkManager:
                     whale_tokens = WHALE_FUNDED_TOKENS.get(self.chain, {})
                     whale_address = whale_tokens.get(token_address)
                     if whale_address:
+                        attempted.append("whale transfer")
                         funded = await self._fund_token_via_whale(
                             address, token_address, amount_hex, whale_address, display_name
                         )
@@ -1070,6 +1188,7 @@ class RollingForkManager:
                 if not funded and not skip_storage_fallback:
                     known_slot = known_slots.get(token_address)
                     if known_slot is not None:
+                        attempted.append("known balance slot")
                         funded = await self._set_balance_at_slot(
                             address, token_address, amount_hex, known_slot, display_name
                         )
@@ -1079,6 +1198,7 @@ class RollingForkManager:
                 if not funded and not skip_storage_fallback:
                     balance_seed = balance_storage_seeds.get(token_address)
                     if balance_seed is not None:
+                        attempted.append("seeded balance storage")
                         funded = await self._set_balance_at_seed(
                             address, token_address, amount_hex, balance_seed, display_name
                         )
@@ -1094,17 +1214,24 @@ class RollingForkManager:
                 # anvil_setERC20Balance) — so this tier was silently dead.
                 # Param order is (account, token, balance), NOT (token, account).
                 if not funded and not skip_deal_erc20:
+                    attempted.append("anvil_dealERC20")
                     funded = await self._fund_token_via_deal_erc20(
                         address, token_address, amount_hex, amount, display_name
                     )
 
                 # Priority 3: Brute-force storage slot probing
                 if not funded and not skip_storage_fallback:
+                    attempted.append("balance storage probe")
                     funded = await self._fund_token_via_storage(address, token_address, amount_hex, display_name)
 
                 if not funded:
                     logger.error(f"Failed to fund {display_name} for {address[:10]}...")
                     failed.append(token_key)
+                    reasons[token_key] = (
+                        "no funding attempt succeeded: "
+                        + ", ".join(attempted)
+                        + "; inspect transfer restrictions and balance storage support"
+                    )
 
             except _ForkDegradedError:
                 # Ordered before the generic handler below: the fork can no
@@ -1114,12 +1241,28 @@ class RollingForkManager:
                 # whale-funded USDC went from 1.6s to a hard failure), so stop
                 # here and report the untouched remainder honestly.
                 failed.append(token_key)
-                failed.extend(key for key, _ in token_items[token_index + 1 :])
+                reasons[token_key] = "anvil_dealERC20 degraded the fork; recreate the managed fork before retrying"
+                remaining = [key for key, _ in token_items[token_index + 1 :]]
+                failed.extend(remaining)
+                reasons.update(
+                    dict.fromkeys(
+                        remaining,
+                        "not attempted because a prior funding operation degraded the fork; recreate the managed fork",
+                    )
+                )
                 return failed
 
             except Exception as e:
-                logger.exception(f"Error funding {display_name}: {e}")
+                # Class AND masked message, never the traceback. Dropping the message
+                # outright also erased SDK-internal causes (an AttributeError in our
+                # own helper), leaving "inspect gateway logs" pointing at a line that
+                # repeats what the caller already had. The scrubber is what makes the
+                # message safe to keep here.
+                category = type(e).__name__
+                stage = attempted[-1] if attempted else "funding setup"
+                logger.error("Error funding %s at %s: %s", display_name, stage, self._describe_exception(e))
                 failed.append(token_key)
+                reasons[token_key] = f"{stage} raised {category}; inspect gateway logs for this token"
 
         return failed
 
@@ -1639,7 +1782,11 @@ class RollingForkManager:
                     f"Anvil process for {self.chain} exited during startup"
                     f" (code {self._process.returncode}): {detail or 'no output'}"
                 )
-                logger.error(f"Anvil process exited unexpectedly. stdout: {stdout.decode()}, stderr: {stderr.decode()}")
+                logger.error(
+                    "Anvil process exited unexpectedly. stdout: %s, stderr: %s",
+                    self._mask_upstream_secrets(stdout.decode(errors="replace")),
+                    self._mask_upstream_secrets(stderr.decode(errors="replace")),
+                )
                 return False
 
             await asyncio.sleep(0.5)
@@ -1737,7 +1884,10 @@ class RollingForkManager:
                 ) as response:
                     result_data: dict[str, Any] = await response.json()
                     if "error" in result_data:
-                        logger.debug(f"RPC error for {method}: {result_data['error']}")
+                        # Local Anvil, but anvil_reset carries the credentialed
+                        # upstream in its params and Anvil echoes it back on a
+                        # failed re-fork, so the error member is still masked.
+                        logger.debug("RPC error for %s: %s", method, self._describe_rpc_error(result_data["error"]))
                         return (False, None)
                     return (True, result_data.get("result"))
         except TimeoutError:

@@ -854,9 +854,12 @@ class TestStartFailureReason:
         assert reason is not None
         assert "exited during startup" in reason
         assert "rate limited" in reason, "the upstream's own words must survive to the operator"
-        assert "***" in reason and rpc_url.rsplit("/", 1)[-1] not in reason, (
+        # Asserts the property, not one redaction spelling: the whole upstream URL is
+        # now replaced by a placeholder, which subsumes the old partial "***" masking.
+        assert rpc_url not in reason and rpc_url.rsplit("/", 1)[-1] not in reason, (
             "the API key must be masked: this string is embedded in skip messages and JUnit XML"
         )
+        assert "<upstream-rpc>" in reason, "the redaction must stay legible as a redaction"
 
     @pytest.mark.asyncio
     async def test_timeout_reason_names_chain_port_and_masked_upstream(self, rpc_url: str) -> None:

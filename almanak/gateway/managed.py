@@ -643,19 +643,29 @@ class ManagedGateway:
                 if erc20_tokens:
                     # VIB-2570: Log each ERC20 token being funded so failures are traceable
                     logger.info(f"Funding ERC20 tokens on {chain}: {list(erc20_tokens.keys())}")
-                    failed_tokens = await manager.fund_tokens_report(wallet, erc20_tokens)
+                    failure_reasons: dict[str, str] = {}
+                    failed_tokens = await manager.fund_tokens_report(
+                        wallet, erc20_tokens, failure_reasons=failure_reasons
+                    )
                     if failed_tokens:
                         # Name ONLY the tokens that actually failed. Listing the
                         # whole batch sent debuggers chasing tokens (e.g. USDT)
                         # that funded fine on the same chain (ALM-3264).
-                        funding_failures.append(f"{chain}: could not provision ERC-20 addresses {failed_tokens}")
+                        details = [
+                            f"{token}: {failure_reasons[token]}" if token in failure_reasons else token
+                            for token in failed_tokens
+                        ]
+                        funding_failures.append(f"{chain}: could not provision ERC-20 addresses {details}")
                 if not any(failure.startswith(f"{chain}:") for failure in funding_failures):
                     logger.info(f"Anvil funding complete for {chain}")
             except Exception as e:
-                # VIB-2570: Log at ERROR (not WARNING) when funding fails after restart —
-                # the strategy WILL fail with INSUFFICIENT_FUNDS if this is not resolved.
-                logger.error(f"Anvil funding failed for {chain}: {e}")
-                funding_failures.append(f"{chain}: {e}")
+                # Class only at THIS layer. The per-token sink inside
+                # fund_tokens_report records the masked message, and this wrapper has
+                # no masker for an arbitrary chain's URL without reaching into the
+                # manager's internals -- which the mock-based tests correctly reject.
+                category = type(e).__name__
+                logger.error("Anvil funding failed for %s: %s", chain, category)
+                funding_failures.append(f"{chain}: funding operation failed ({category}); inspect gateway logs")
 
         if funding_failures:
             raise RuntimeError(

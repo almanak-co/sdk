@@ -756,7 +756,9 @@ class TestAnvilFundingNativeIdentity:
         await gw._fund_anvil_wallets()
 
         mock_manager.fund_wallet.assert_awaited_once_with(gw._wallet_address, Decimal("250"))
-        mock_manager.fund_tokens_report.assert_awaited_once_with(gw._wallet_address, {BSC_USDC: Decimal("1000")})
+        mock_manager.fund_tokens_report.assert_awaited_once_with(
+            gw._wallet_address, {BSC_USDC: Decimal("1000")}, failure_reasons={}
+        )
 
 
 class TestAnvilFundingDefaultNativeGas:
@@ -934,6 +936,7 @@ class TestAnvilFundingAddressIdentity:
         manager.fund_tokens_report.assert_awaited_once_with(
             gateway._wallet_address,
             {JITOSOL_BASE: Decimal("10")},
+            failure_reasons={},
         )
 
     @pytest.mark.asyncio
@@ -953,6 +956,42 @@ class TestAnvilFundingAddressIdentity:
         message = str(excinfo.value)
         assert JITOSOL_BASE in message
         assert ARBITRUM_USDC not in message, "tokens that funded fine must not be blamed"
+
+    @pytest.mark.asyncio
+    async def test_observed_failure_reason_reaches_startup_refusal(self) -> None:
+        gateway = self._gateway({JITOSOL_BASE: 10, ARBITRUM_USDC: 500})
+        manager = AsyncMock()
+        manager.fund_wallet = AsyncMock(return_value=True)
+
+        async def report(_wallet, _tokens, *, failure_reasons):
+            failure_reasons[JITOSOL_BASE] = "decimals unavailable; verify ERC-20 metadata and fork RPC access"
+            return [JITOSOL_BASE]
+
+        manager.fund_tokens_report = AsyncMock(side_effect=report)
+        gateway._anvil_managers["base"] = manager
+        with pytest.raises(RuntimeError) as excinfo:
+            await gateway._fund_anvil_wallets()
+        assert "decimals unavailable" in str(excinfo.value)
+        assert JITOSOL_BASE in str(excinfo.value)
+        assert ARBITRUM_USDC not in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_provider_exception_is_not_exposed_in_startup_refusal(self, caplog) -> None:
+        gateway = self._gateway({JITOSOL_BASE: 10})
+        manager = AsyncMock()
+        manager.fund_wallet = AsyncMock(side_effect=RuntimeError("https://provider.invalid/secret-api-key"))
+        gateway._anvil_managers["base"] = manager
+        with pytest.raises(RuntimeError) as excinfo:
+            await gateway._fund_anvil_wallets()
+        assert "funding operation failed" in str(excinfo.value)
+        # The class survives sanitization; without it the refusal and the log it
+        # points at would both name no cause at all.
+        assert "RuntimeError" in str(excinfo.value)
+        assert "secret-api-key" not in str(excinfo.value)
+        assert "https://" not in str(excinfo.value)
+        assert "Anvil funding failed for base: RuntimeError" in caplog.text
+        assert "secret-api-key" not in caplog.text
+        assert "https://" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_per_chain_sections_keep_contract_identity_chain_local(self) -> None:
@@ -976,10 +1015,12 @@ class TestAnvilFundingAddressIdentity:
         base_manager.fund_tokens_report.assert_awaited_once_with(
             gateway._wallet_address,
             {JITOSOL_BASE: Decimal("10")},
+            failure_reasons={},
         )
         arbitrum_manager.fund_tokens_report.assert_awaited_once_with(
             gateway._wallet_address,
             {ARBITRUM_USDC: Decimal("500")},
+            failure_reasons={},
         )
 
     def test_per_chain_section_accepts_alias_and_caip_chain_refs(self) -> None:

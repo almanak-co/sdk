@@ -1,7 +1,8 @@
 """Unit tests for RollingForkManager Anvil flag detection and command building."""
 
+import logging
 from decimal import Decimal
-from unittest.mock import AsyncMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -368,9 +369,12 @@ class TestFundTokensWrappedNativeFallback:
             patch.object(manager, "_fund_token_via_storage", new_callable=AsyncMock, return_value=True) as brute,
             patch.object(manager, "_rpc_call_raw", side_effect=timing_out_rpc) as mock_rpc,
         ):
+            reasons = {}
             failed = await manager.fund_tokens_report(
-                self.WALLET, {self.WAVAX_ADDRESS: Decimal("10"), second_token: Decimal("5")}
+                self.WALLET, {self.WAVAX_ADDRESS: Decimal("10"), second_token: Decimal("5")}, failure_reasons=reasons
             )
+            assert "degraded the fork" in reasons[self.WAVAX_ADDRESS]
+            assert "not attempted" in reasons[second_token]
 
         assert failed == [self.WAVAX_ADDRESS, second_token], (
             "the timed-out token and every unprocessed token must be reported failed"
@@ -1106,8 +1110,11 @@ class TestFundTokensReport:
             "0xaf88d065e77c8cc2239327c5edb3a432268e5831": Decimal("1"),
             "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": Decimal("2"),
         }
-        failed = await mgr.fund_tokens_report("0x" + "1" * 40, tokens)
+        reasons = {}
+        failed = await mgr.fund_tokens_report("0x" + "1" * 40, tokens, failure_reasons=reasons)
         assert failed == list(tokens)
+        assert set(reasons) == set(tokens)
+        assert all("fork is not running" in reason for reason in reasons.values())
 
     @pytest.mark.parametrize(("failed", "expected"), [([], True), (["0x" + "a" * 40], False)])
     @pytest.mark.asyncio()
@@ -1128,8 +1135,10 @@ class TestFundTokensReport:
         key, not just flip a global bool."""
         mgr = self._manager()
         with patch.object(RollingForkManager, "is_running", new_callable=PropertyMock, return_value=True):
-            failed = await mgr.fund_tokens_report("0x" + "1" * 40, {"USDC": Decimal("1")})
+            reasons = {}
+            failed = await mgr.fund_tokens_report("0x" + "1" * 40, {"USDC": Decimal("1")}, failure_reasons=reasons)
         assert failed == ["USDC"]
+        assert "exact chain-specific" in reasons["USDC"]
 
     @pytest.mark.asyncio()
     async def test_unknown_decimals_token_reported_alone(self):
@@ -1157,12 +1166,336 @@ class TestFundTokensReport:
                 raise TokenNotFoundError(token=address, chain=chain)
 
             resolver.resolve.side_effect = _resolve
+            reasons = {}
             failed = await mgr.fund_tokens_report(
                 "0x" + "1" * 40,
                 {good: Decimal("1"), bad: Decimal("1")},
+                failure_reasons=reasons,
             )
 
         assert failed == [bad]
+        assert list(reasons) == [bad]
+        assert "decimals unavailable" in reasons[bad]
+
+    @pytest.mark.asyncio
+    async def test_exhaustion_reports_only_attempted_stages_and_clears_stale_reasons(self):
+        token = "0x" + "a" * 40
+        manager = self._manager()
+        reasons = {"stale": "previous call"}
+        with (
+            patch.object(RollingForkManager, "is_running", new_callable=PropertyMock, return_value=True),
+            patch("almanak.framework.data.tokens.get_token_resolver") as factory,
+            patch.object(manager, "_fund_token_via_deal_erc20", new=AsyncMock(return_value=False)),
+            patch.object(manager, "_fund_token_via_storage", new=AsyncMock(return_value=False)),
+        ):
+            factory.return_value.resolve.return_value.decimals = 18
+            failed = await manager.fund_tokens_report("0x" + "1" * 40, {token: Decimal("1")}, failure_reasons=reasons)
+        assert failed == [token]
+        assert list(reasons) == [token]
+        assert "anvil_dealERC20, balance storage probe" in reasons[token]
+        assert "whale" not in reasons[token]
+        assert "known balance slot" not in reasons[token]
+
+    @pytest.mark.asyncio
+    async def test_failed_tier_exception_has_sanitized_stage_reason(self, caplog):
+        token = "0x" + "a" * 40
+        manager = self._manager()
+        reasons = {}
+        caplog.set_level(logging.DEBUG)
+        with (
+            patch.object(RollingForkManager, "is_running", new_callable=PropertyMock, return_value=True),
+            patch("almanak.framework.data.tokens.get_token_resolver") as factory,
+            patch.object(
+                manager,
+                "_fund_token_via_deal_erc20",
+                new=AsyncMock(side_effect=RuntimeError("https://rpc.invalid/key")),
+            ),
+        ):
+            factory.return_value.resolve.return_value.decimals = 18
+            failed = await manager.fund_tokens_report("0x" + "1" * 40, {token: Decimal("1")}, failure_reasons=reasons)
+        assert failed == [token]
+        assert reasons[token] == "anvil_dealERC20 raised RuntimeError; inspect gateway logs for this token"
+        # Negative control for the sanitization: the tier and the exception class
+        # must reach the log, the provider URL and its key must not — at any level.
+        assert "Error funding" in caplog.text
+        assert "anvil_dealERC20" in caplog.text
+        assert "RuntimeError" in caplog.text
+        assert "rpc.invalid" not in caplog.text
+        assert "/key" not in caplog.text
+
+
+class _FakeResponse:
+    """Minimal stand-in for the aiohttp response `_validate_source_chain_id` reads."""
+
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    async def json(self):
+        return self._payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class _FakeSession:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def post(self, *args, **kwargs):
+        return _FakeResponse(self._payload)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+class TestRpcExceptionSanitization:
+    """The credentialed upstream URL must never reach a log sink. The local fork
+    URL carries no credentials, so its exception text stays readable."""
+
+    UPSTREAM = "https://arb-mainnet.g.alchemy.com/v2/sEcReTkEy0123456789abcdef"
+
+    def _manager(self) -> RollingForkManager:
+        return RollingForkManager(rpc_url=self.UPSTREAM, chain="arbitrum", anvil_port=9999)
+
+    @pytest.mark.asyncio
+    async def test_source_chain_id_network_error_hides_upstream_credentials(self, caplog):
+        manager = self._manager()
+        caplog.set_level(logging.DEBUG)
+        with patch("aiohttp.ClientSession", side_effect=OSError(f"Cannot connect to {self.UPSTREAM}")):
+            await manager._validate_source_chain_id()
+        assert "Could not verify source RPC chain ID" in caplog.text
+        assert "OSError" in caplog.text
+        assert "sEcReTkEy0123456789abcdef" not in caplog.text
+        assert "alchemy.com" not in caplog.text
+
+    def test_rpc_call_raw_targets_the_local_fork_not_the_credentialed_upstream(self):
+        """Guards the rejection of the _rpc_call_raw sanitization request: its
+        exception text can only name 127.0.0.1, never the provider key."""
+        manager = self._manager()
+        assert manager.get_rpc_url() == "http://127.0.0.1:9999"
+        assert "sEcReTkEy0123456789abcdef" not in manager.get_rpc_url()
+
+    @pytest.mark.asyncio
+    async def test_source_chain_id_jsonrpc_error_hides_upstream_credentials(self, caplog):
+        """A provider that echoes the request URL in its JSON-RPC error must not
+        thereby write the key into our logs."""
+        error = {
+            "code": -32001,
+            "message": f"project id not found for {self.UPSTREAM}",
+            "data": {"request": self.UPSTREAM},
+        }
+        # Negative control: the payload really does carry the key, so a raw log
+        # of it would leak. Without this the assertions below are vacuous.
+        assert "sEcReTkEy0123456789abcdef" in str(error)
+
+        manager = self._manager()
+        caplog.set_level(logging.DEBUG)
+        with patch("aiohttp.ClientSession", return_value=_FakeSession({"jsonrpc": "2.0", "id": 1, "error": error})):
+            await manager._validate_source_chain_id()
+
+        assert "Could not verify source RPC chain ID" in caplog.text
+        assert "-32001" in caplog.text
+        assert "project id not found" in caplog.text
+        assert "sEcReTkEy0123456789abcdef" not in caplog.text
+        # `data` is retained and masked, not dropped: on the local funding ladder it
+        # carries the revert bytes, which for a custom error are the only evidence.
+        assert "'request'" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_source_chain_id_jsonrpc_error_detail_is_length_capped(self, caplog):
+        manager = self._manager()
+        caplog.set_level(logging.DEBUG)
+        error = {"code": -32000, "message": "x" * 5000}
+        with patch("aiohttp.ClientSession", return_value=_FakeSession({"error": error})):
+            await manager._validate_source_chain_id()
+        assert "...(truncated)" in caplog.text
+        assert "x" * 5000 not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_source_chain_id_parse_failure_hides_upstream_credentials(self, caplog):
+        """The parse path quotes the provider's own payload back into the message."""
+        manager = self._manager()
+        caplog.set_level(logging.DEBUG)
+        with patch("aiohttp.ClientSession", return_value=_FakeSession({"result": f"not-hex {self.UPSTREAM}"})):
+            await manager._validate_source_chain_id()
+        assert "Failed to parse chain ID from RPC response" in caplog.text
+        assert "sEcReTkEy0123456789abcdef" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_anvil_process_exit_log_hides_upstream_credentials(self, caplog):
+        """`--fork-url` puts the key on Anvil's command line, so its stderr echoes it."""
+        stderr = f"Error: could not instantiate forked backend at {self.UPSTREAM}".encode()
+        stdout = f"anvil forking {self.UPSTREAM}".encode()
+        assert b"sEcReTkEy0123456789abcdef" in stderr and b"sEcReTkEy0123456789abcdef" in stdout
+
+        manager = self._manager()
+        manager.startup_timeout_seconds = 0.1
+        caplog.set_level(logging.DEBUG)
+        process = MagicMock()
+        process.poll.return_value = 1
+        process.returncode = 1
+        process.communicate.return_value = (stdout, stderr)
+        manager._process = process
+
+        with patch.object(RollingForkManager, "_is_port_open", return_value=False):
+            assert await manager._wait_for_ready() is False
+
+        assert "Anvil process exited unexpectedly" in caplog.text
+        assert "could not instantiate forked backend" in caplog.text
+        assert "sEcReTkEy0123456789abcdef" not in caplog.text
+        assert "sEcReTkEy0123456789abcdef" not in (manager.last_start_error or "")
+
+    @pytest.mark.asyncio
+    async def test_start_failure_log_hides_upstream_credentials(self, caplog):
+        """The stored detail is masked, so the log must use it and not the raw
+        exception -- including via a traceback, whose last line is that message."""
+        manager = self._manager()
+        caplog.set_level(logging.DEBUG)
+        with (
+            # start() runs the chain-id preflight first; without this the test POSTs
+            # to the real Alchemy-shaped host before reaching the injected failure.
+            patch.object(RollingForkManager, "_validate_source_chain_id", new=AsyncMock()),
+            patch.object(
+                RollingForkManager,
+                "_build_anvil_command",
+                side_effect=RuntimeError(f"boom while forking {self.UPSTREAM}"),
+            ),
+        ):
+            assert await manager.start() is False
+
+        assert "Failed to start Anvil fork" in caplog.text
+        assert "RuntimeError" in caplog.text
+        assert "sEcReTkEy0123456789abcdef" not in caplog.text
+        assert "Traceback" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_anvil_reset_error_hides_upstream_credentials(self, caplog):
+        """`anvil_reset` is a LOCAL call that carries the credentialed upstream in
+        its params, so Anvil echoes it back when the re-fork fails."""
+        error = {"code": -32603, "message": f"Failed to fork from {self.UPSTREAM}: 401 Unauthorized"}
+        assert "sEcReTkEy0123456789abcdef" in str(error)
+
+        manager = self._manager()
+        caplog.set_level(logging.DEBUG)
+        with patch("aiohttp.ClientSession", return_value=_FakeSession({"error": error})):
+            success, result = await manager._rpc_call_raw("anvil_reset", [{"forking": {"jsonRpcUrl": manager.rpc_url}}])
+
+        assert (success, result) == (False, None)
+        assert "RPC error for anvil_reset" in caplog.text
+        assert "-32603" in caplog.text
+        assert "401 Unauthorized" in caplog.text
+        assert "sEcReTkEy0123456789abcdef" not in caplog.text
+
+    @pytest.mark.parametrize(
+        "url,secret",
+        [
+            ("https://user:s3cr3tpass@rpc.example.com/mainnet", "s3cr3tpass"),
+            ("https://rpc.example.com/rpc?auth=s3cr3tpass", "s3cr3tpass"),
+            ("https://rpc.example.com/rpc?secret=s3cr3tpass", "s3cr3tpass"),
+            ("https://arb-mainnet.g.alchemy.com/v2/sEcReTkEy0123456789abcdef", "sEcReTkEy0123456789abcdef"),
+        ],
+    )
+    def test_credential_url_shapes_are_redacted(self, url, secret):
+        """_mask_url only knows key-shaped path segments and a short parameter list,
+        so basic-auth userinfo and auth=/secret= survive it untouched."""
+        manager = RollingForkManager(rpc_url=url, chain="arbitrum", anvil_port=9999)
+        assert secret not in manager._mask_upstream_secrets(f"could not fork from {url}")
+
+    @pytest.mark.parametrize(
+        "echo",
+        [
+            "reqwest error (https://user:s3cr3tpass@rpc.example.com/main",  # truncated
+            "connect failed to user:s3cr3tpass@rpc.example.com",  # no scheme
+            "auth rejected token s3cr3tpass",  # bare secret
+        ],
+    )
+    def test_reformatted_echoes_are_redacted(self, echo):
+        """An echo that is truncated or reformatted never matches the exact URL."""
+        manager = RollingForkManager(
+            rpc_url="https://user:s3cr3tpass@rpc.example.com/mainnet", chain="arbitrum", anvil_port=9999
+        )
+        assert "s3cr3tpass" not in manager._mask_upstream_secrets(echo)
+
+    def test_masking_leaves_credential_free_text_intact(self):
+        """The scrubber must not chew up ordinary diagnostics."""
+        manager = RollingForkManager(rpc_url="http://127.0.0.1:8545", chain="arbitrum", anvil_port=9999)
+        text = "plain message about /usr/local/lib/python3.12 and https://docs.example.com/v2/guide"
+        assert manager._mask_upstream_secrets(text) == text
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://user:s3cr3tpass@rpc.example.com/mainnet",
+            "https://rpc.example.com/mainnet?auth=s3cr3tpass",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_anvil_command_log_hides_upstream_credentials(self, url, caplog):
+        """`--fork-url` is on the command line verbatim; the debug echo of it went
+        through _mask_url, which leaves userinfo and auth= untouched."""
+        manager = RollingForkManager(rpc_url=url, chain="base", anvil_port=9999)
+        caplog.set_level(logging.DEBUG)
+        with (
+            patch.object(RollingForkManager, "_validate_source_chain_id", new=AsyncMock()),
+            patch.object(RollingForkManager, "_wait_for_ready", new=AsyncMock(return_value=False)),
+            patch.object(RollingForkManager, "stop", new=AsyncMock()),
+            patch("subprocess.Popen", return_value=MagicMock(poll=lambda: None, returncode=None)),
+        ):
+            assert await manager.start() is False
+
+        assert "Anvil command" in caplog.text
+        assert "--port" in caplog.text, "the command must stay diagnosable"
+        assert "s3cr3tpass" not in caplog.text
+        assert "s3cr3tpass" not in (manager.last_start_error or "")
+
+    @pytest.mark.asyncio
+    async def test_jsonrpc_error_naming_a_foreign_upstream_is_redacted(self, caplog):
+        """A provider can name a redirect or fallback host we never configured, so
+        masking only our own URL is not enough."""
+        foreign = "https://fallback.example.com/v2/f0reignK3y0123456789abc"
+        error = {"code": -32603, "message": f"upstream {foreign} refused", "data": "0x08c379a0deadbeef"}
+        assert "f0reignK3y0123456789abc" in str(error)
+
+        manager = self._manager()
+        caplog.set_level(logging.DEBUG)
+        with patch("aiohttp.ClientSession", return_value=_FakeSession({"error": error})):
+            await manager._validate_source_chain_id()
+
+        assert "-32603" in caplog.text and "refused" in caplog.text
+        # The local revert bytes are the diagnostic; they must survive the scrub.
+        assert "0x08c379a0deadbeef" in caplog.text
+        assert "f0reignK3y0123456789abc" not in caplog.text
+        assert "fallback.example.com" not in caplog.text
+
+    def test_describe_exception_keeps_the_cause_and_drops_every_url(self):
+        """Class-only logging erased SDK-internal causes; the scrubber alone cannot
+        help, because it only knows the URL we configured."""
+        manager = self._manager()
+        internal = manager._describe_exception(AttributeError("'NoneType' object has no attribute 'decimals'"))
+        assert internal == "AttributeError: 'NoneType' object has no attribute 'decimals'"
+
+        # A URL we never configured, so no known-secret substitution can reach it.
+        foreign = manager._describe_exception(RuntimeError("POST https://rpc.invalid/key failed: 401"))
+        assert "rpc.invalid" not in foreign and "401" in foreign
+
+        assert "sEcReTkEy0123456789abcdef" not in manager._describe_exception(
+            RuntimeError(f"fork {self.UPSTREAM} died")
+        )
+        assert manager._describe_exception(RuntimeError()) == "RuntimeError"
+
+    @pytest.mark.asyncio
+    async def test_source_chain_id_mismatch_still_raises(self, caplog):
+        """Sanitization must not swallow the misconfiguration this check exists for."""
+        manager = self._manager()
+        with patch("aiohttp.ClientSession", return_value=_FakeSession({"result": hex(8453)})):
+            with pytest.raises(RuntimeError, match="chain_id mismatch"):
+                await manager._validate_source_chain_id()
 
 
 def test_priority_fee_suggestion_override_requires_explicit_configuration():
