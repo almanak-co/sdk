@@ -1357,8 +1357,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         ``compute_inventory_revaluation`` deliberately consumes the same JSON
         columns the Accountant Test reads from SQLite/Postgres rows. Hosted
         dashboard callers receive typed ``PortfolioSnapshot`` instances from the
-        StateManager facade, so convert only the persisted wallet/price payloads
-        needed for that read-only calculation. Empty lists/maps stay explicit
+        StateManager facade, so preserve wallet rows, position marks, and their
+        persisted endpoint identity evidence. Empty lists/maps stay explicit
         empty JSON, not fabricated zero values.
         """
         if snapshot is None:
@@ -1369,13 +1369,20 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             wallet_balances.append(
                 {
                     "symbol": str(getattr(balance, "symbol", "") or ""),
-                    "balance": str(getattr(balance, "balance", "") or ""),
-                    "value_usd": str(getattr(balance, "value_usd", "") or ""),
+                    "balance": None if balance.balance is None else str(balance.balance),
+                    "value_usd": None if balance.value_usd is None else str(balance.value_usd),
                     "address": str(getattr(balance, "address", "") or ""),
                     "price_usd": None if price_usd is None else str(price_usd),
+                    "chain": getattr(balance, "chain", None),
+                    "wallet_address": getattr(balance, "wallet_address", None),
                 }
             )
-        return {"wallet_balances_json": json.dumps(wallet_balances)}
+        return {
+            "deployment_id": snapshot.deployment_id,
+            "chain": snapshot.chain,
+            "wallet_balances_json": json.dumps(wallet_balances),
+            "positions_json": json.dumps(snapshot.to_positions_payload(), default=str),
+        }
 
     async def _get_reconciliation_endpoint_snapshots(
         self,

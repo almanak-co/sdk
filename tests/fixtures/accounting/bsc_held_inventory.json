@@ -1,0 +1,66 @@
+{
+  "provenance": {
+    "source_head": "7e4522301d07b05154a02e1b059756b5fbec41e7",
+    "network": "managed_anvil",
+    "fork_block": 120716248,
+    "source_db_sha256": "76bfc8e19ad26fa6f45dbae7dda6a14af9c3c71a2b4189a30b63d70d6a8700b6",
+    "evidence_url": "https://github.com/almanak-co/almanak-sdk-private/pull/3956#issuecomment-5622847164"
+  },
+  "deployment_id": "deployment:fac44675cacf",
+  "snapshot_initial": {
+    "id": 1,
+    "deployment_id": "deployment:fac44675cacf",
+    "cycle_id": "boot-deployment:fac44675cacf",
+    "execution_mode": "live",
+    "timestamp": "2026-09-10T17:29:43+00:00",
+    "iteration_number": 0,
+    "total_value_usd": "0",
+    "available_cash_usd": "71117.00",
+    "deployed_capital_usd": "0",
+    "wallet_total_value_usd": "71117.00",
+    "value_confidence": "ESTIMATED",
+    "positions_json": "{\"schema_version\": 1, \"positions\": [], \"metadata\": {\"capital_flows\": {\"cursors\": {}, \"deposits_usd\": \"0\", \"era_start\": {}, \"pending_unclassified\": [], \"schema_version\": 1, \"status\": \"pending\", \"unclassified_in_usd\": \"0\", \"unclassified_out_usd\": \"0\", \"unmeasured_reason\": null, \"withdrawals_usd\": \"0\"}, \"gas_aggregator_status\": \"ok\", \"gas_native_status\": \"ok\"}, \"reconciliation\": {}}",
+    "token_prices_json": "{\"bsc:0x3f53de71c126bdabae20f9cd64848d317f6c3238\": {\"confidence\": \"ESTIMATED\", \"decimals\": 18, \"fetched_at\": \"2026-09-10T17:29:43+00:00\", \"observed_at\": \"2026-09-10T17:29:43+00:00\", \"oracle_source\": \"aggregated\", \"price_usd\": \"331.845\", \"raw_confidence\": 0.8, \"stale\": false, \"symbol\": \"0x3f53de71c126bdabae20f9cd64848d317f6c3238\"}, \"bsc:0x55d398326f99059ff775485246999027b3197955\": {\"confidence\": \"ESTIMATED\", \"decimals\": 18, \"fetched_at\": \"2026-09-10T17:29:43+00:00\", \"observed_at\": \"2026-09-10T17:29:43+00:00\", \"oracle_source\": \"stablecoin_peg\", \"price_usd\": \"1\", \"raw_confidence\": 0.95, \"stale\": false, \"symbol\": \"0x55d398326f99059ff775485246999027b3197955\"}, \"bsc:0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\": {\"confidence\": \"ESTIMATED\", \"decimals\": 18, \"fetched_at\": \"2026-09-10T17:29:43+00:00\", \"observed_at\": \"2026-09-10T17:29:43+00:00\", \"oracle_source\": \"aggregated\", \"price_usd\": \"711.16\", \"raw_confidence\": 0.85, \"stale\": false, \"symbol\": \"BNB\"}}",
+    "wallet_balances_json": "[{\"symbol\": \"0x55d398326f99059ff775485246999027b3197955\", \"balance\": \"1\", \"value_usd\": \"1\", \"address\": \"\", \"price_usd\": \"1\"}, {\"symbol\": \"BNB\", \"balance\": \"100\", \"value_usd\": \"71116.00\", \"address\": \"\", \"price_usd\": \"711.16\"}]",
+    "chain": "bsc",
+    "created_at": "2026-09-10T17:29:55.804534+00:00"
+  },
+  "snapshot_final": {
+    "id": 2,
+    "deployment_id": "deployment:fac44675cacf",
+    "cycle_id": "53bb443a-19fc-4ffc-880e-37d1dea35007",
+    "execution_mode": "live",
+    "timestamp": "2026-09-10T17:30:22+00:00",
+    "iteration_number": 2,
+    "total_value_usd": "0.9792685419804411877307867027",
+    "available_cash_usd": "71117.81898691050000000000000",
+    "deployed_capital_usd": "0.979283297111558210475",
+    "wallet_total_value_usd": "71118.79825545248044118773079",
+    "value_confidence": "ESTIMATED",
+    "positions_json": "{\"schema_version\": 1, \"positions\": [{\"position_type\": \"TOKEN\", \"protocol\": \"pancakeswap_v3\", \"chain\": \"bsc\", \"value_usd\": \"0.9792685419804411877307867027\", \"label\": \"pancakeswap_v3 TOKEN\", \"tokens\": [], \"details\": {\"address\": \"0x3f53de71c126bdabae20f9cd64848d317f6c3238\", \"amount\": \"0.002951026223422255\", \"asset\": \"0x3f53de71c126bdabae20f9cd64848d317f6c3238\", \"close_swap_params\": {\"fee_tier\": 2500, \"pool\": \"0x89001d846f7ca36ee089f73eefc25657e1798144\"}, \"token_address\": \"0x3f53de71c126bdabae20f9cd64848d317f6c3238\"}}, {\"position_type\": \"TOKEN\", \"protocol\": \"wallet\", \"chain\": \"bsc\", \"value_usd\": \"0.9792685419804411877307867027\", \"label\": \"swap inventory googlb\", \"tokens\": [\"googlb\"], \"details\": {\"asset\": \"googlb\", \"capped\": false, \"classification\": \"deployed_inventory\", \"lot_remaining\": \"0.002951026223422255\", \"quantity\": \"0.002951026223422255\", \"source\": \"swap_inventory_lots\"}, \"cost_basis_usd\": \"0.979283297111558210475\", \"unrealized_pnl_usd\": \"-0.0000147551311170227442132973\"}], \"metadata\": {\"capital_flows\": {\"cursors\": {\"bsc\": 120716251}, \"deposits_usd\": \"0\", \"era_start\": {\"bsc\": 120716251}, \"pending_unclassified\": [], \"schema_version\": 1, \"status\": \"measured\", \"unclassified_in_usd\": \"0\", \"unclassified_out_usd\": \"0\", \"unmeasured_reason\": null, \"withdrawals_usd\": \"0\"}, \"gas_aggregator_status\": \"ok\", \"gas_native_status\": \"ok\", \"swap_inventory\": {\"cost_usd\": \"0.979283297111558210475\", \"status\": \"applied\", \"tokens\": {\"googlb\": {\"capped\": false, \"cost_usd\": \"0.979283297111558210475\", \"quantity\": \"0.002951026223422255\", \"value_usd\": \"0.9792685419804411877307867027\"}}, \"value_usd\": \"0.9792685419804411877307867027\"}}, \"reconciliation\": {}}",
+    "token_prices_json": "{\"bsc:0x3f53de71c126bdabae20f9cd64848d317f6c3238\": {\"confidence\": \"ESTIMATED\", \"decimals\": 18, \"fetched_at\": \"2026-09-10T17:30:22+00:00\", \"observed_at\": \"2026-09-10T17:30:22+00:00\", \"oracle_source\": \"aggregated\", \"price_usd\": \"331.84000000000003\", \"raw_confidence\": 0.8, \"stale\": false, \"symbol\": \"0x3f53de71c126bdabae20f9cd64848d317f6c3238\"}, \"bsc:0x55d398326f99059ff775485246999027b3197955\": {\"confidence\": \"ESTIMATED\", \"decimals\": 18, \"fetched_at\": \"2026-09-10T17:30:22+00:00\", \"observed_at\": \"2026-09-10T17:30:22+00:00\", \"oracle_source\": \"stablecoin_peg\", \"price_usd\": \"1\", \"raw_confidence\": 0.95, \"stale\": false, \"symbol\": \"0x55d398326f99059ff775485246999027b3197955\"}, \"bsc:0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\": {\"confidence\": \"ESTIMATED\", \"decimals\": 18, \"fetched_at\": \"2026-09-10T17:30:24+00:00\", \"observed_at\": \"2026-09-10T17:30:24+00:00\", \"oracle_source\": \"aggregated\", \"price_usd\": \"711.18\", \"raw_confidence\": 0.85, \"stale\": false, \"symbol\": \"BNB\"}}",
+    "wallet_balances_json": "[{\"symbol\": \"0x3f53de71c126bdabae20f9cd64848d317f6c3238\", \"balance\": \"0.002951026223422255\", \"value_usd\": \"0.9792685419804411877307867027\", \"address\": \"\", \"price_usd\": \"331.84000000000003\"}, {\"symbol\": \"BNB\", \"balance\": \"99.999745475\", \"value_usd\": \"71117.81898691050\", \"address\": \"\", \"price_usd\": \"711.18\"}]",
+    "chain": "bsc",
+    "created_at": "2026-09-10T17:30:35.177328+00:00"
+  },
+  "accounting_events": [
+    {
+      "id": "d88f2ebf-2fcc-528c-a198-7613c734206e",
+      "deployment_id": "deployment:fac44675cacf",
+      "cycle_id": "53bb443a-19fc-4ffc-880e-37d1dea35007",
+      "execution_mode": "live",
+      "timestamp": "2026-09-10T17:30:22+00:00",
+      "chain": "bsc",
+      "protocol": "pancakeswap_v3",
+      "wallet_address": "0x11709D8D09e074E28819D864dEc4B35FA752F759",
+      "event_type": "SWAP",
+      "position_key": "",
+      "ledger_entry_id": "9deac829-9aae-4202-b050-d30a5e99a598",
+      "tx_hash": "0x0408f9068d0366e936f35a6b8c8b714f3e792817ff104e5bea16e32288836c7a",
+      "confidence": "ESTIMATED",
+      "payload_json": "{\"amount_in\": \"1\", \"amount_in_usd\": \"1\", \"amount_out\": \"0.002951026223422255\", \"amount_out_usd\": \"0.979283297111558210475\", \"confidence\": \"ESTIMATED\", \"cost_basis_recorded\": true, \"effective_price\": \"0.002951026223422255\", \"event_type\": \"SWAP\", \"formula_version\": 1, \"gas_usd\": \"0.18100799900\", \"matching_policy_version\": 4, \"price_observed_at\": \"2026-09-10T17:30:00+00:00\", \"price_out_observed_at\": \"2026-09-10T17:30:00+00:00\", \"price_out_source\": \"aggregated\", \"price_source\": \"stablecoin_peg\", \"primitive_version\": 7, \"protocol\": \"pancakeswap_v3\", \"realized_pnl_usd\": null, \"realized_pnl_usd_matched\": null, \"schema_version\": 1, \"slippage_bps\": 0, \"swap_position_key\": \"swap:bsc:0x11709d8d09e074e28819d864dec4b35fa752f759\", \"token_in\": \"USDT\", \"token_out\": \"GOOGLB\", \"unavailable_reason\": \"price provenance degraded: USDT=ESTIMATED, GOOGLB=ESTIMATED\", \"unmatched_amount_in\": \"1\", \"unmatched_proceeds_usd\": \"1\"}",
+      "schema_version": 1,
+      "position_reference": null
+    }
+  ]
+}

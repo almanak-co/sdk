@@ -36,16 +36,20 @@ from pathlib import Path
 
 from almanak.framework.accounting.payload_schemas import (
     FORMULA_VERSION,
-    MATCHING_POLICY_VERSION as _GLOBAL_MATCHING_POLICY_VERSION,
     PRIMITIVE_VERSIONS,
     SCHEMA_VERSION,
+)
+from almanak.framework.accounting.payload_schemas import (
+    MATCHING_POLICY_VERSION as _GLOBAL_MATCHING_POLICY_VERSION,
 )
 from almanak.framework.primitives.types import Primitive
 
 # Per-primitive map only exists post-T2; fall back to the global value at
 # precursor time so the same generator can produce both baselines.
 try:
-    from almanak.framework.accounting.payload_schemas import MATCHING_POLICY_VERSIONS as _PER_PRIMITIVE_VERSIONS  # type: ignore[attr-defined]
+    from almanak.framework.accounting.payload_schemas import (
+        MATCHING_POLICY_VERSIONS as _PER_PRIMITIVE_VERSIONS,  # type: ignore[attr-defined]
+    )
 except ImportError:  # pragma: no cover — precursor path
     _PER_PRIMITIVE_VERSIONS = None
 
@@ -468,12 +472,15 @@ def _insert_portfolio_snapshot(
     token_prices_json: str = "{}",
     wallet_balances_json: str = "[]",
 ) -> None:
-    # The three JSON columns default to the historical empty literals so every
-    # fixture authored before VIB-6560 regenerates byte-identically. Those
-    # defaults are exactly the structural blindness VIB-6560 measured on the
-    # ``looping`` fixture (1 distinct positions_json = ``[]``): a NAV fold over
-    # positions reads the same on every row, so no position-sourced defect can
-    # move a cell. ``looping_debt_open`` populates all three.
+    positions = json.loads(positions_json)
+    if isinstance(positions, list):
+        positions = {"positions": positions}
+    positions.setdefault("metadata", {})["wallet_scope"] = {"schema_version": 1, "chain_wallets": {chain: _WALLET}}
+    balances = json.loads(wallet_balances_json)
+    for balance in balances:
+        balance.update(chain=chain, wallet_address=_WALLET)
+    positions_json = json.dumps(positions)
+    wallet_balances_json = json.dumps(balances)
     conn.execute(
         """
         INSERT INTO portfolio_snapshots
@@ -570,7 +577,7 @@ def generate_lp_fixture(db_path: str | Path) -> None:
             chain=chain,
             protocol=protocol,
             event_type="SWAP",
-            position_key="swap:WETH-USDC",
+            position_key=f"swap:{chain}:{_WALLET}",
             ledger_entry_id=ledger_swap,
             tx_hash="0x1111",
             payload={
@@ -1875,7 +1882,7 @@ def generate_perp_fixture(db_path: str | Path) -> None:
             chain=chain,
             protocol=protocol,
             event_type="SWAP",
-            position_key="swap:USDC-USDC",
+            position_key=f"swap:{chain}:{_WALLET}",
             ledger_entry_id=ledger_swap_in,
             tx_hash="0xp1",
             payload={
@@ -2046,7 +2053,7 @@ def generate_perp_fixture(db_path: str | Path) -> None:
             chain=chain,
             protocol=protocol,
             event_type="SWAP",
-            position_key="swap:USDC-USDC",
+            position_key=f"swap:{chain}:{_WALLET}",
             ledger_entry_id=ledger_swap_out,
             tx_hash="0xp4",
             payload={
@@ -2068,13 +2075,58 @@ def generate_perp_fixture(db_path: str | Path) -> None:
             primitive_name="swap",
         )
 
+        _insert_acct_event(
+            conn,
+            row_id="ae-perp-settle-0000000000000000000005",
+            cycle_id=cycle,
+            timestamp=_ts(120),
+            chain=chain,
+            protocol=protocol,
+            event_type="PERP_SETTLEMENT",
+            position_key="0x" + "cd" * 32,
+            ledger_entry_id=ledger_close,
+            tx_hash="0xkeeper",
+            payload={
+                "event_type": "PERP_SETTLEMENT",
+                "protocol": "gmx_v2",
+                "position_key": "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+                "submission_ledger_entry_id": "tl-perp-00000000000000000000000000000003",
+                "order_key": "0xabababababababababababababababababababababababababababababababab",
+                "keeper_tx_hash": "0xkeeper",
+                "settlement_state": "EXECUTED",
+                "is_open": False,
+                "is_long": True,
+                "market": "0xmkt",
+                "collateral_token": "0xusdc",
+                "entry_price": None,
+                "exit_price": "3000",
+                "size_delta_usd": "2000",
+                "collateral_delta_amount": "8000000",
+                "price_impact_usd": "-0.1",
+                "realized_pnl_usd": "5.0",
+                "position_fee_usd": "0.5",
+                "funding_fee_usd": "0",
+                "borrowing_fee_usd": "0",
+                "block_number": 123,
+                "unavailable_reason": None,
+                "confidence": "HIGH",
+                "schema_version": 1,
+                "formula_version": 1,
+                "matching_policy_version": 1,
+                "primitive_version": 2,
+                "keeper_execution_fee_usd": "0.25",
+            },
+            primitive_name="perp",
+            stamp=False,
+        )
+
         for i, offset in enumerate((0, 60, 120, 180), start=1):
             _insert_portfolio_snapshot(
                 conn,
                 cycle_id=cycle,
                 iteration_number=i,
                 timestamp=_ts(offset),
-                total_value_usd=str(Decimal("100") + Decimal(i)),
+                total_value_usd="103.25" if i == 4 else str(Decimal("100") + Decimal(i)),
                 available_cash_usd="100.0",
                 deployed_capital_usd="100.0",
                 chain=chain,

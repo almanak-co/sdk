@@ -6,6 +6,7 @@ don't depend on a strategy run.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 from decimal import Decimal
@@ -893,43 +894,47 @@ def _make_db_with_n_swaps(
         CREATE TABLE position_events (id TEXT, cycle_id TEXT, deployment_id TEXT, event_type TEXT, position_id TEXT);
         CREATE TABLE accounting_events (
             id TEXT, cycle_id TEXT, deployment_id TEXT,
-            timestamp TEXT, chain TEXT, protocol TEXT, event_type TEXT,
+            timestamp TEXT, chain TEXT, protocol TEXT, wallet_address TEXT, event_type TEXT,
             position_key TEXT, ledger_entry_id TEXT, tx_hash TEXT,
             confidence TEXT, payload_json TEXT
         );
         CREATE TABLE portfolio_snapshots (
             id INTEGER PRIMARY KEY, deployment_id TEXT, total_value_usd TEXT,
             available_cash_usd TEXT, value_confidence TEXT,
-            iteration_number INTEGER, timestamp TEXT, chain TEXT
+            iteration_number INTEGER, timestamp TEXT, chain TEXT, positions_json TEXT
         );
         CREATE TABLE portfolio_metrics (deployment_id TEXT, initial_value_usd TEXT);
         """
+    )
+    wallet = "0x" + "11" * 20
+    endpoint = json.dumps(
+        {"positions": [], "metadata": {"wallet_scope": {"schema_version": 1, "chain_wallets": {"arbitrum": wallet}}}}
     )
     for i, pj in enumerate(payloads):
         cur.execute(
             "INSERT INTO transaction_ledger VALUES "
             "(?, 'cyc-1', 's', ?, 'SWAP', 'WETH', '0.001', 'USDC', '3.0', "
             "100000, '0', ?, 'arbitrum', 1, "
-            "'{\"WETH\": {\"price_usd\": \"3000\", \"oracle_source\": \"chainlink\"}}', 1, 1, 1)",
+            '\'{"WETH": {"price_usd": "3000", "oracle_source": "chainlink"}}\', 1, 1, 1)',
             (f"led-{i}", f"2026-05-01T00:0{i}:00Z", f"0x{i:x}"),
         )
         cur.execute(
             "INSERT INTO accounting_events VALUES "
-            "(?, 'cyc-1', 's', ?, 'arbitrum', 'uniswap_v3', 'SWAP', 'pos-1', "
+            "(?, 'cyc-1', 's', ?, 'arbitrum', 'uniswap_v3', ?, 'SWAP', 'pos-1', "
             "?, ?, 'HIGH', ?)",
-            (f"ae-{i}", f"2026-05-01T00:0{i}:00Z", f"led-{i}", f"0x{i:x}", pj),
+            (f"ae-{i}", f"2026-05-01T00:0{i}:00Z", wallet, f"led-{i}", f"0x{i:x}", pj),
         )
     cur.execute(
         "INSERT INTO portfolio_snapshots (deployment_id, total_value_usd, available_cash_usd, "
-        "value_confidence, iteration_number, timestamp, chain) "
-        "VALUES ('s', ?, '0', 'HIGH', 0, '2026-05-01T00:00:00Z', 'arbitrum')",
-        (initial_equity,),
+        "value_confidence, iteration_number, timestamp, chain, positions_json) "
+        "VALUES ('s', ?, '0', 'HIGH', 0, '2026-05-01T00:00:00Z', 'arbitrum', ?)",
+        (initial_equity, endpoint),
     )
     cur.execute(
         "INSERT INTO portfolio_snapshots (deployment_id, total_value_usd, available_cash_usd, "
-        "value_confidence, iteration_number, timestamp, chain) "
-        "VALUES ('s', ?, '0', 'HIGH', 1, '2026-05-01T00:10:00Z', 'arbitrum')",
-        (final_equity,),
+        "value_confidence, iteration_number, timestamp, chain, positions_json) "
+        "VALUES ('s', ?, '0', 'HIGH', 1, '2026-05-01T00:10:00Z', 'arbitrum', ?)",
+        (final_equity, endpoint),
     )
     conn.commit()
     conn.close()

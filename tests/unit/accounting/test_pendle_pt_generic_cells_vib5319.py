@@ -238,7 +238,16 @@ def _snapshots() -> list[dict[str, Any]]:
             "available_cash_usd": "100.0",
             "value_confidence": "HIGH",
             "wallet_balances_json": json.dumps(
-                [{"symbol": "wstETH", "balance": "0.04", "value_usd": "85.75", "price_usd": "2143.8"}]
+                [
+                    {
+                        "chain": "arbitrum",
+                        "wallet_address": "0x0000000000000000000000000000000000000001",
+                        "symbol": "wstETH",
+                        "balance": "0.04",
+                        "value_usd": "85.75",
+                        "price_usd": "2143.8",
+                    }
+                ]
             ),
         },
         {
@@ -248,14 +257,23 @@ def _snapshots() -> list[dict[str, Any]]:
             "available_cash_usd": "100.0",
             "value_confidence": "HIGH",
             "wallet_balances_json": json.dumps(
-                [{"symbol": "wstETH", "balance": "0.05", "value_usd": "107.16", "price_usd": "2143.1"}]
+                [
+                    {
+                        "chain": "arbitrum",
+                        "wallet_address": "0x0000000000000000000000000000000000000001",
+                        "symbol": "wstETH",
+                        "balance": "0.05",
+                        "value_usd": "107.16",
+                        "price_usd": "2143.1",
+                    }
+                ]
             ),
         },
     ]
 
 
 def _balanced_snapshots(component_pnl: str) -> list[dict[str, Any]]:
-    # Endpoints with no ambient inventory (empty wallet balances → measured-zero
+    # Endpoints with explicitly scoped empty inventory (measured-zero
     # revaluation) and equity that moves by exactly ``component_pnl``. Pairs with
     # a zero-gas ledger so wallet_pnl == component_pnl and G6 reaches a clean PASS.
     final_cash = Decimal("100.0") + Decimal(component_pnl)
@@ -267,6 +285,17 @@ def _balanced_snapshots(component_pnl: str) -> list[dict[str, Any]]:
             "available_cash_usd": "100.0",
             "value_confidence": "HIGH",
             "wallet_balances_json": "[]",
+            "positions_json": json.dumps(
+                {
+                    "positions": [],
+                    "metadata": {
+                        "wallet_scope": {
+                            "schema_version": 1,
+                            "chain_wallets": {"arbitrum": "0x0000000000000000000000000000000000000001"},
+                        }
+                    },
+                }
+            ),
         },
         {
             "deployment_id": "deployment:pt",
@@ -275,6 +304,17 @@ def _balanced_snapshots(component_pnl: str) -> list[dict[str, Any]]:
             "available_cash_usd": str(final_cash),
             "value_confidence": "HIGH",
             "wallet_balances_json": "[]",
+            "positions_json": json.dumps(
+                {
+                    "positions": [],
+                    "metadata": {
+                        "wallet_scope": {
+                            "schema_version": 1,
+                            "chain_wallets": {"arbitrum": "0x0000000000000000000000000000000000000001"},
+                        }
+                    },
+                }
+            ),
         },
     ]
 
@@ -297,9 +337,7 @@ def test_g6_pass_books_pt_disposal_realized_yield() -> None:
         _pt_sell_event(ledger_id=_LEDGER_SELL_ID, realized_yield_usd=rpnl, sy_price="2143.1"),
     ]
     payloads, errors, _ = _typed_acct_payloads(acct)
-    cell, decomp = _cell_g6_reconciliation(
-        _balanced_snapshots(rpnl), ledger, [], acct, "pendle_pt", payloads, errors
-    )
+    cell, decomp = _cell_g6_reconciliation(_balanced_snapshots(rpnl), ledger, [], acct, "pendle_pt", payloads, errors)
     assert cell.status == "PASS", cell.diagnostic
     # The realized-PnL delta is booked into the SWAP bucket (not gross proceeds).
     assert decomp["Σ_swaps_usd"] == rpnl
@@ -317,9 +355,7 @@ def test_g6_xfail_on_unmeasured_pt_realized_usd_for_pendle_pt_profile() -> None:
         _pt_sell_event(ledger_id=_LEDGER_SELL_ID, realized_yield_usd=None, sy_price=None),
     ]
     payloads, errors, _ = _typed_acct_payloads(acct)
-    cell, decomp = _cell_g6_reconciliation(
-        _snapshots(), ledger, [], acct, "pendle_pt", payloads, errors
-    )
+    cell, decomp = _cell_g6_reconciliation(_snapshots(), ledger, [], acct, "pendle_pt", payloads, errors)
     assert cell.status == "XFAIL", cell.diagnostic
     assert "VIB-5276" in cell.diagnostic
     # The null bucket is surfaced (not folded to zero).
@@ -340,9 +376,7 @@ def test_g6_fail_on_null_realized_usd_with_measured_sy_price_vib5403() -> None:
         _pt_sell_event(ledger_id=_LEDGER_SELL_ID, realized_yield_usd=None, sy_price="2143.1"),
     ]
     payloads, errors, _ = _typed_acct_payloads(acct)
-    cell, decomp = _cell_g6_reconciliation(
-        _snapshots(), ledger, [], acct, "pendle_pt", payloads, errors
-    )
+    cell, decomp = _cell_g6_reconciliation(_snapshots(), ledger, [], acct, "pendle_pt", payloads, errors)
     assert cell.status == "FAIL", cell.diagnostic
     assert decomp["Σ_pt_realized_usd_null_count"] == "0"
     assert decomp["Σ_pt_amount_null_count"] == "1"
@@ -375,9 +409,7 @@ def test_g6_no_prior_basis_pt_disposal_is_non_failing() -> None:
         ),
     ]
     payloads, errors, _ = _typed_acct_payloads(acct)
-    cell, decomp = _cell_g6_reconciliation(
-        _balanced_snapshots("0"), ledger, [], acct, "pendle_pt", payloads, errors
-    )
+    cell, decomp = _cell_g6_reconciliation(_balanced_snapshots("0"), ledger, [], acct, "pendle_pt", payloads, errors)
     assert cell.status == "PASS", cell.diagnostic
     assert decomp["Σ_pt_no_prior_basis_count"] == "1"
     assert decomp["Σ_pt_realized_usd_null_count"] == "0"
@@ -401,9 +433,7 @@ def test_g6_fail_on_unmeasured_disposal_amount_even_for_pendle_pt_profile() -> N
         ),
     ]
     payloads, errors, _ = _typed_acct_payloads(acct)
-    cell, decomp = _cell_g6_reconciliation(
-        _snapshots(), ledger, [], acct, "pendle_pt", payloads, errors
-    )
+    cell, decomp = _cell_g6_reconciliation(_snapshots(), ledger, [], acct, "pendle_pt", payloads, errors)
     assert cell.status == "FAIL", cell.diagnostic
     assert "VIB-5276" not in cell.diagnostic
     assert decomp["Σ_pt_amount_null_count"] == "1"

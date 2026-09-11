@@ -59,10 +59,9 @@ as a null-bucket FAIL with a diagnostic, never a silent pass.
 
 Boundary
 --------
-Leaf module under ``accounting/``: imports only ``decimal`` / ``dataclasses`` /
-the standard library and ``basis.py``. NO new on-chain reads and NO fresh price
-reads — the marks are the exact prices the wallet (equity) method already used,
-read off the same persisted snapshot rows.
+The identity adapter reads the versioned bundled token catalog, never a mutable
+resolver cache or provider. There are no on-chain or fresh price reads: marks
+are the exact prices from the same persisted endpoint observations.
 """
 
 from __future__ import annotations
@@ -542,7 +541,7 @@ def _resolve_held_quantity(
     return _HeldResolution(held=held, lot_remaining=open_remaining.get(sym, Decimal("0")))
 
 
-def compute_inventory_revaluation(
+def _compute_scoped_inventory_revaluation(
     *,
     snapshot_initial: dict[str, Any] | None,
     snapshot_final: dict[str, Any] | None,
@@ -773,3 +772,41 @@ def compute_inventory_revaluation(
         confidence="measured",
         excluded_tokens=sorted(tracked),
     )
+
+
+def compute_inventory_revaluation(
+    *,
+    snapshot_initial: dict[str, Any] | None,
+    snapshot_final: dict[str, Any] | None,
+    accounting_events: list[dict[str, Any]],
+    deployment_id: str,
+) -> InventoryRevaluation:
+    """Revalue only inventory whose persisted endpoint and replay identities agree."""
+    from .inventory_scope import InventoryIdentityError, ScopedInventoryInputs
+
+    try:
+        if not deployment_id:
+            raise InventoryIdentityError("Deployment scope is missing")
+        inputs = ScopedInventoryInputs(deployment_id)
+        initial = inputs.snapshot(snapshot_initial)
+        final = inputs.snapshot(snapshot_final)
+        events = inputs.events(accounting_events)
+    except ValueError:
+        # ValueError only, deliberately NOT TypeError. Every intended refusal in
+        # this path is a ValueError: InventoryIdentityError subclasses it, and so
+        # do the parse failures we mean to fail closed on -- json.JSONDecodeError,
+        # AssetIdentity.from_caip19's unsupported-namespace, ChainRegistry.resolve
+        # on an unknown chain. A TypeError is a claim about OUR code, not the
+        # data; reporting it as `unmeasured_identity` dresses a defect as a
+        # measured refusal, which a negative test can read as success.
+        return InventoryRevaluation(total_usd=None, confidence="unmeasured_identity")
+
+    result = _compute_scoped_inventory_revaluation(
+        snapshot_initial=initial,
+        snapshot_final=final,
+        accounting_events=events,
+        deployment_id=deployment_id,
+    )
+    result.per_token = {inputs.label(key): value for key, value in result.per_token.items()}
+    result.excluded_tokens = [inputs.label(key) for key in result.excluded_tokens]
+    return result

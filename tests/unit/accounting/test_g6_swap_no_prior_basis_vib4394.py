@@ -103,6 +103,8 @@ def _wallet_balances(usdc_qty: str) -> str:
     return json.dumps(
         [
             {
+                "chain": _CHAIN,
+                "wallet_address": _WALLET,
                 "symbol": "USDC",
                 "balance": usdc_qty,
                 "value_usd": usdc_qty,

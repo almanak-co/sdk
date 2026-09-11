@@ -20,8 +20,10 @@ Two things these tests are deliberately built to catch:
 
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
+import tempfile
 from decimal import Decimal
 from pathlib import Path
 
@@ -57,6 +59,55 @@ _PROFILES = {
 # The ONE fixture whose baseline snapshot post-dates its first ledger row.
 # Measured, not assumed: LP_OPEN at 03:21:59 vs priced[0] at 03:22:01.
 _LATE_BASELINE_FIXTURE = "pendle_lp"
+
+
+def _add_synthetic_scope(db: Path) -> None:
+    """Supply an explicit test wallet to a disposable copy for window-only oracles.
+
+    This is not recovered provenance and never changes the committed captures.
+    Quantities, marks, timestamps and economic payloads remain the original inputs.
+    """
+    wallet = "0x0000000000000000000000000000000000000001"
+    chain = "arbitrum"
+    with sqlite3.connect(db) as conn:
+        for row_id, raw_balances, raw_positions in conn.execute(
+            "SELECT id, wallet_balances_json, positions_json FROM portfolio_snapshots"
+        ).fetchall():
+            balances = json.loads(raw_balances or "[]")
+            for balance in balances:
+                balance.update(chain=chain, wallet_address=wallet)
+            positions = json.loads(raw_positions or "[]")
+            if isinstance(positions, list):
+                positions = {"positions": positions}
+            positions.setdefault("metadata", {})["wallet_scope"] = {
+                "schema_version": 1,
+                "chain_wallets": {chain: wallet},
+            }
+            conn.execute(
+                "UPDATE portfolio_snapshots SET wallet_balances_json=?, positions_json=? WHERE id=?",
+                (json.dumps(balances), json.dumps(positions), row_id),
+            )
+        for event_id, position_key, raw in conn.execute(
+            "SELECT id, position_key, payload_json FROM accounting_events"
+        ).fetchall():
+            payload = json.loads(raw or "{}")
+            if str(position_key).startswith("swap:"):
+                position_key = f"swap:{chain}:{wallet}"
+            if payload.get("swap_position_key"):
+                payload["swap_position_key"] = f"swap:{chain}:{wallet}"
+            conn.execute(
+                "UPDATE accounting_events SET chain=?,wallet_address=?,position_key=?,payload_json=? WHERE id=?",
+                (chain, wallet, position_key, json.dumps(payload), event_id),
+            )
+
+
+def _synthetic_scoped_g6(primitive: str):
+    with tempfile.TemporaryDirectory() as directory:
+        db = Path(directory) / "scope-enriched.sqlite"
+        shutil.copy2(_FIXTURE_BASE / primitive / "expected_baseline.sqlite", db)
+        _add_synthetic_scope(db)
+        report = run_against_sqlite(db, primitive=_PROFILES[primitive], strict_lifecycle=True)
+        return next(cell for cell in report.cells if cell.cell_id == "G6")
 
 
 def _g6(primitive: str):
@@ -211,12 +262,15 @@ def test_exactly_one_fixture_has_a_late_baseline() -> None:
     fixture in ``_PROFILES``, the guard has become a blanket XFAIL and the cell
     stops meaning anything.
     """
-    late = [p for p in _PROFILES if _g6(p).status == "XFAIL" and "does not cover" in _g6(p).diagnostic]
+    late = [p for p in _PROFILES if _g6(p).decomposition["initial_endpoint_covers_run"] == "False"]
     assert late == [_LATE_BASELINE_FIXTURE]
 
 
-def test_late_baseline_fixture_xfails_with_the_magnitude_attributed() -> None:
-    cell = _g6(_LATE_BASELINE_FIXTURE)
+def test_late_baseline_window_oracle_with_explicit_synthetic_scope() -> None:
+    historical = _g6(_LATE_BASELINE_FIXTURE)
+    assert historical.status == "XFAIL"
+    assert historical.decomposition["inventory_reval_confidence"] == "unmeasured_identity"
+    cell = _synthetic_scoped_g6(_LATE_BASELINE_FIXTURE)
     assert cell.status == "XFAIL"
     decomp = cell.decomposition
     assert decomp["initial_endpoint_covers_run"] == "False"
@@ -260,8 +314,8 @@ def test_gap_is_unchanged_by_the_guard() -> None:
     tempting repair VIB-5854 rejects) would shrink these gaps, so this assertion
     is what turns red if someone later ships it.
     """
-    assert Decimal(_g6("pendle_lp").decomposition["gap_usd"]) == Decimal("0.700260884980000000000")
-    assert Decimal(_g6("lp").decomposition["gap_usd"]) == Decimal("10.0")
+    assert Decimal(_synthetic_scoped_g6("pendle_lp").decomposition["gap_usd"]) == Decimal("0.700260884980000000000")
+    assert Decimal(_synthetic_scoped_g6("lp").decomposition["gap_usd"]) == Decimal("10.0")
 
 
 # ------------------------------------------------- end-to-end negative control
@@ -279,6 +333,7 @@ def test_unavailable_zero_row_cannot_become_g6_opening_endpoint(tmp_path: Path) 
     src = _FIXTURE_BASE / "lp" / "expected_baseline.sqlite"
     db = tmp_path / "lp.sqlite"
     shutil.copy(src, db)
+    _add_synthetic_scope(db)
 
     before = run_against_sqlite(db, primitive="lp", strict_lifecycle=True)
     g6_before = next(c for c in before.cells if c.cell_id == "G6")
@@ -333,6 +388,7 @@ def test_a_late_baseline_does_not_excuse_an_unrelated_gap(tmp_path: Path) -> Non
     src = _FIXTURE_BASE / "lp" / "expected_baseline.sqlite"
     db = tmp_path / "lp.sqlite"
     shutil.copy(src, db)
+    _add_synthetic_scope(db)
 
     before = run_against_sqlite(db, primitive="lp", strict_lifecycle=True)
     g6_before = next(c for c in before.cells if c.cell_id == "G6")
@@ -412,6 +468,7 @@ def test_a_books_error_of_the_OPPOSITE_sign_is_not_waived(tmp_path: Path) -> Non
     src = _FIXTURE_BASE / "pendle_lp" / "expected_baseline.sqlite"
     db = tmp_path / "pendle_lp.sqlite"
     shutil.copy(src, db)
+    _add_synthetic_scope(db)
 
     # Raise the OPENING equity so wallet_pnl falls by ~2G: the discrepancy keeps
     # its magnitude and flips sign. Nothing about the ledger, the gas, or the
@@ -460,6 +517,7 @@ def test_a_near_zero_gap_can_still_hide_a_large_residue(tmp_path: Path) -> None:
     src = _FIXTURE_BASE / "pendle_lp" / "expected_baseline.sqlite"
     db = tmp_path / "pendle_lp.sqlite"
     shutil.copy(src, db)
+    _add_synthetic_scope(db)
 
     conn = sqlite3.connect(str(db))
     try:
@@ -510,6 +568,7 @@ def test_unmeasurable_pre_window_gas_cannot_explain_a_gap(tmp_path: Path) -> Non
     src = _FIXTURE_BASE / "pendle_lp" / "expected_baseline.sqlite"
     db = tmp_path / "pendle_lp.sqlite"
     shutil.copy(src, db)
+    _add_synthetic_scope(db)
 
     # pendle_lp's gap IS explained by its pre-baseline gas (that is why it XFAILs).
     # Blank only that row's gas: nothing else about the run changes.

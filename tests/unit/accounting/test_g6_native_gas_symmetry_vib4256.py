@@ -122,6 +122,8 @@ def _wallet_balances(eth_qty: Decimal) -> str:
     return json.dumps(
         [
             {
+                "chain": _CHAIN,
+                "wallet_address": _WALLET,
                 "symbol": "ETH",
                 "balance": str(eth_qty),
                 "value_usd": str(eth_qty * _ETH_PRICE),
@@ -151,7 +153,7 @@ def _build_db(path: Path, *, native_drain_reflected: bool) -> None:
         for ddl in _DDL:
             conn.execute(ddl)
 
-        swap_key = "swap:arbitrum:uniswap_v3:wallet:USDC-USDT"
+        swap_key = f"swap:{_CHAIN}:{_WALLET}"
 
         # SWAP — USDC→USDT at par, realized PnL $0, gas $1.50. The swap itself is
         # economically flat; the ONLY money that moves is the native gas burn.

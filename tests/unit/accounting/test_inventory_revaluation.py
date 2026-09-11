@@ -29,6 +29,7 @@ from almanak.framework.accounting.inventory_revaluation import (
 )
 
 _DEP = "deployment:test"
+_WALLET = "0x0000000000000000000000000000000000000001"
 
 
 def _snapshot(balances: list[dict], *, deployment_id: str = _DEP) -> dict:
@@ -47,12 +48,20 @@ def _snapshot(balances: list[dict], *, deployment_id: str = _DEP) -> dict:
                     "balance": str(b["balance"]) if b.get("balance") is not None else None,
                     "value_usd": b.get("value_usd"),
                     "address": b.get("address"),
+                    "chain": "arbitrum",
+                    "wallet_address": _WALLET,
                     "price_usd": (None if b.get("price_usd") is None else str(b["price_usd"])),
                 }
                 for b in balances
             ]
         ),
         "token_prices_json": "{}",
+        "positions_json": json.dumps(
+            {
+                "positions": [],
+                "metadata": {"wallet_scope": {"schema_version": 1, "chain_wallets": {"arbitrum": _WALLET}}},
+            }
+        ),
     }
 
 
@@ -73,6 +82,7 @@ def _pt_position(
     PT amount, and the three ``*_unmeasured`` flags live under ``details``.
     """
     details: dict = {
+        "wallet_address": _WALLET,
         "source": "pt_inventory_lots",
         "classification": "deployed_inventory",
         "pt_symbol": pt_symbol,
@@ -115,8 +125,10 @@ def _snapshot_with_positions(
     ``envelope=True`` writes the versioned ``{"positions": [...]}`` envelope shape
     (VIB-3923); otherwise a legacy bare list. Both are read-tolerated.
     """
-    snap = _snapshot(balances, deployment_id=deployment_id)
-    snap["positions_json"] = json.dumps({"positions": positions} if envelope else positions)
+    observed = balances or [{"symbol": "ETH", "balance": "0", "price_usd": "0"}]
+    snap = _snapshot(observed, deployment_id=deployment_id)
+    metadata = json.loads(snap["positions_json"])["metadata"]
+    snap["positions_json"] = json.dumps({"positions": positions, "metadata": metadata} if envelope else positions)
     return snap
 
 
@@ -138,7 +150,7 @@ def _pt_buy_event(
         "event_type": "PT_BUY",
         "position_key": "pendle_pt",
         "chain": "arbitrum",
-        "wallet_address": "0xwallet",
+        "wallet_address": _WALLET,
         "timestamp": "2026-01-01T00:00:00+00:00",
         "payload_json": json.dumps(
             {
@@ -174,7 +186,7 @@ def _swap_event(
         "event_type": "SWAP",
         "position_key": "",  # SWAP rows persist an empty position_key (VIB-5010)
         "chain": "arbitrum",
-        "wallet_address": "0xwallet",
+        "wallet_address": _WALLET,
         "timestamp": "2026-01-01T00:00:00+00:00",
         "payload_json": json.dumps(
             {
@@ -526,33 +538,20 @@ def test_empty_deployment_id_with_events_fails_closed() -> None:
         snapshot_initial=si, snapshot_final=sf, accounting_events=[ev], deployment_id=""
     )
     assert out.total_usd is None
-    assert out.confidence == "unmeasured_basis"
+    assert out.confidence == "unmeasured_identity"
 
 
-def test_empty_deployment_id_no_events_measures_pure_ambient() -> None:
-    """Empty deployment_id but NO events ⇒ ambient term is exact, still measured.
-
-    With no trading activity to attribute there are no open lots to miss, so the
-    ambient term is fully correct even without a deployment scope. Failing closed
-    here would be needlessly conservative.
-    """
+def test_empty_deployment_id_no_events_remains_unscoped() -> None:
+    """Matching display names cannot establish deployment ownership."""
     si = _snapshot([{"symbol": "WETH", "balance": "1", "price_usd": "1000"}], deployment_id="")
     sf = _snapshot([{"symbol": "WETH", "balance": "1", "price_usd": "1500"}], deployment_id="")
     out = compute_inventory_revaluation(snapshot_initial=si, snapshot_final=sf, accounting_events=[], deployment_id="")
-    # 1 WETH × ($1500 − $1000) = $500.
-    assert out.total_usd == Decimal("500")
-    assert out.confidence == "measured"
-    assert out.per_token["WETH"] == "500"
+    assert out.total_usd is None
+    assert out.confidence == "unmeasured_identity"
 
 
-def test_empty_deployment_id_non_swap_events_still_measures() -> None:
-    """Empty deployment_id + only NON-swap events ⇒ no open lots to miss, measures.
-
-    A window carrying an LP / lending event but no SWAP creates no FIFO swap
-    lots, so ambient-everything is exact even without a deployment scope. The
-    fail-closed branch must NOT fire here — the trigger is unattributable SWAP
-    activity, not event-list non-emptiness.
-    """
+def test_empty_deployment_id_non_swap_events_remains_unscoped() -> None:
+    """The absence of swap events does not supply missing ownership evidence."""
     si = _snapshot([{"symbol": "WETH", "balance": "1", "price_usd": "1000"}], deployment_id="")
     sf = _snapshot([{"symbol": "WETH", "balance": "1", "price_usd": "1500"}], deployment_id="")
     lp_event = {
@@ -563,9 +562,8 @@ def test_empty_deployment_id_non_swap_events_still_measures() -> None:
     out = compute_inventory_revaluation(
         snapshot_initial=si, snapshot_final=sf, accounting_events=[lp_event], deployment_id=""
     )
-    # 1 WETH × ($1500 − $1000) = $500 — measured, not fail-closed.
-    assert out.total_usd == Decimal("500")
-    assert out.confidence == "measured"
+    assert out.total_usd is None
+    assert out.confidence == "unmeasured_identity"
 
 
 def test_unmeasured_final_balance_fails_closed_not_zero() -> None:
@@ -593,6 +591,8 @@ def test_reads_payload_json_string_column() -> None:
     sf = _snapshot([{"symbol": "WETH", "balance": "0.7", "price_usd": "1100"}])
     ev = {
         "deployment_id": _DEP,
+        "chain": "arbitrum",
+        "wallet_address": _WALLET,
         "event_type": "SWAP",
         "timestamp": "2026-01-01T00:00:00+00:00",
         "payload_json": json.dumps({"event_type": "SWAP", "token_in": "WETH", "token_out": "USDC", "amount_in": "0.3"}),
@@ -804,7 +804,7 @@ def test_round_trip_pt_redeemed_contributes_zero() -> None:
         "event_type": "PT_REDEEM",
         "position_key": "pendle_pt",
         "chain": "arbitrum",
-        "wallet_address": "0xwallet",
+        "wallet_address": _WALLET,
         "timestamp": "2026-01-02T00:00:00+00:00",
         "payload_json": json.dumps(
             {
@@ -885,7 +885,7 @@ def test_held_pt_disposed_by_final_contributes_zero() -> None:
         "event_type": "PT_SELL",
         "position_key": "pendle_pt",
         "chain": "arbitrum",
-        "wallet_address": "0xwallet",
+        "wallet_address": _WALLET,
         "timestamp": "2026-01-02T00:00:00+00:00",
         "payload_json": json.dumps(
             {

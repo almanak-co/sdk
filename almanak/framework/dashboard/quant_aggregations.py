@@ -1171,14 +1171,10 @@ def compute_reconciliation(
     duplicate for the local (no-pytest) read path. If the formula
     upstream changes, both sites move together (small, audit-friendly).
 
-    Ambient inventory revaluation (blueprint 27 §11.5): when the caller supplies
-    the endpoint snapshots (``snapshot_initial`` / ``snapshot_final``) it folds
-    the SAME ``compute_inventory_revaluation`` term the Accountant Test G6 cell
-    adds, so the dashboard G6 and the harness G6 produce a byte-identical
-    ``component_pnl_usd`` on the same DB. Callers that have not yet been wired to
-    pass snapshots get the back-compat behaviour (term = 0); an UNMEASURED term
-    (Empty≠Zero) leaves the component sum unchanged and flags ``has_unmeasured``
-    so the surface can degrade rather than silently fold in a zero.
+    Deployment-scoped calls require both persisted inventory endpoints and use
+    the same inventory term as Accountant G6. Missing identity or prices leave
+    that term unmeasured and prevent PASS. Component-only utility calls without
+    a deployment or endpoints retain their narrower component-sum contract.
     """
     status = ReconciliationStatus()
     status.wallet_pnl_usd = nav_usd - initial_value_usd
@@ -1233,7 +1229,7 @@ def compute_reconciliation(
     # Folded only when the caller supplied endpoint snapshots; unmeasured terms
     # stay out of the sum and flag has_unmeasured instead of coercing to zero.
     sum_inventory_reval = Decimal("0")
-    if snapshot_initial is not None or snapshot_final is not None:
+    if deployment_id or snapshot_initial is not None or snapshot_final is not None:
         from almanak.framework.accounting.inventory_revaluation import (
             compute_inventory_revaluation,
         )
@@ -1254,7 +1250,7 @@ def compute_reconciliation(
 
     status.component_pnl_usd = component_pnl
     status.gap_usd = (status.wallet_pnl_usd - component_pnl).copy_abs()
-    status.passed = status.has_data and status.gap_usd <= status.epsilon_usd
+    status.passed = status.has_data and not status.has_unmeasured and status.gap_usd <= status.epsilon_usd
     status.sum_swap = sum_swap
     status.sum_lp = sum_lp
     status.sum_perp = sum_perp

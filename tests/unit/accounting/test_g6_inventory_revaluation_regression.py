@@ -107,6 +107,8 @@ def _wallet_balances(weth_qty: str, weth_price: str) -> str:
         [
             {
                 "symbol": "WETH",
+                "chain": _CHAIN,
+                "wallet_address": _WALLET,
                 "balance": weth_qty,
                 "value_usd": str(Decimal(weth_qty) * Decimal(weth_price)),
                 "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",

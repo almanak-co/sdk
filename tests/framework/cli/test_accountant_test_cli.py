@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -22,6 +23,13 @@ def _make_minimal_passing_lp_db() -> Path:
     path = Path(tmp.name)
     conn = sqlite3.connect(path)
     cur = conn.cursor()
+    wallet = "0x1111111111111111111111111111111111111111"
+    positions = json.dumps(
+        {
+            "positions": [],
+            "metadata": {"wallet_scope": {"schema_version": 1, "chain_wallets": {"arbitrum": wallet}}},
+        }
+    )
     cur.executescript(
         """
         CREATE TABLE transaction_ledger (
@@ -45,13 +53,14 @@ def _make_minimal_passing_lp_db() -> Path:
             id TEXT, cycle_id TEXT, deployment_id TEXT,
             timestamp TEXT, chain TEXT, protocol TEXT, event_type TEXT,
             position_key TEXT, ledger_entry_id TEXT, tx_hash TEXT,
-            confidence TEXT, payload_json TEXT
+            confidence TEXT, payload_json TEXT, wallet_address TEXT
         );
         CREATE TABLE portfolio_snapshots (
             id INTEGER PRIMARY KEY, deployment_id TEXT,
             cycle_id TEXT, total_value_usd TEXT, available_cash_usd TEXT,
             deployed_capital_usd TEXT, value_confidence TEXT,
-            iteration_number INTEGER, timestamp TEXT, chain TEXT
+            iteration_number INTEGER, timestamp TEXT, chain TEXT,
+            wallet_balances_json TEXT, positions_json TEXT
         );
         CREATE TABLE portfolio_metrics (
             deployment_id TEXT, initial_value_usd TEXT, total_value_usd TEXT,
@@ -84,15 +93,16 @@ def _make_minimal_passing_lp_db() -> Path:
         "\"token0\": \"WETH\", \"token1\": \"USDC\", \"amount0\": \"0.001\", "
         "\"amount1\": \"3.0\", \"amount0_usd\": \"3.0\", \"amount1_usd\": \"3.0\", "
         "\"cost_basis_usd\": \"6.0\", \"tick_lower\": 100, \"tick_upper\": 200, "
-        "\"liquidity\": 1234567, \"confidence\": \"HIGH\", \"matching_policy_version\": 1}')"
+        "\"liquidity\": 1234567, \"confidence\": \"HIGH\", \"matching_policy_version\": 1}', ?)",
+        (wallet,),
     )
     for i, val in enumerate(["10.0", "10.0001", "10.0002"]):
         cur.execute(
             "INSERT INTO portfolio_snapshots (deployment_id, cycle_id, "
             "total_value_usd, available_cash_usd, deployed_capital_usd, "
-            "value_confidence, iteration_number, timestamp, chain) "
-            "VALUES ('lp-test', 'cyc-1', ?, '0', ?, 'HIGH', ?, ?, 'arbitrum')",
-            (val, val, i, f"2026-05-01T00:0{i}:00Z"),
+            "value_confidence, iteration_number, timestamp, chain, wallet_balances_json, positions_json) "
+            "VALUES ('lp-test', 'cyc-1', ?, '0', ?, 'HIGH', ?, ?, 'arbitrum', '[]', ?)",
+            (val, val, i, f"2026-05-01T00:0{i}:00Z", positions),
         )
     cur.execute(
         "INSERT INTO portfolio_metrics VALUES ('lp-test', '10.0', '10.0002', "

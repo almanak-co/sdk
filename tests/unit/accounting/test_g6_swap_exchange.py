@@ -35,7 +35,7 @@ def evaluate(received="7"):
             "event_type": "SWAP",
             "deployment_id": "dep",
             "chain": "base",
-            "position_key": "swap:base:wallet",
+            "position_key": "swap:base:0x0000000000000000000000000000000000000001",
             "timestamp": f"2026-09-09T00:0{i + 1}:00+00:00",
             "payload_json": json.dumps(payload),
         }
@@ -50,7 +50,17 @@ def evaluate(received="7"):
             "available_cash_usd": value,
             "value_confidence": "HIGH",
             "positions_json": "[]",
-            "wallet_balances_json": json.dumps([{"symbol": "USDC", "balance": value, "price_usd": "1"}]),
+            "wallet_balances_json": json.dumps(
+                [
+                    {
+                        "symbol": "USDC",
+                        "balance": value,
+                        "price_usd": "1",
+                        "chain": "base",
+                        "wallet_address": "0x0000000000000000000000000000000000000001",
+                    }
+                ]
+            ),
         }
         for i, value in enumerate(("10", "7"))
     ]

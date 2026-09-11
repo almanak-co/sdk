@@ -2164,7 +2164,9 @@ def _cell_g6_reconciliation(  # noqa: C901
     to exactly zero when there is no untraded inventory at either endpoint. An
     unmeasured term (a held token with no persisted mark, or an open lot with no
     basis) is a NULL input (Empty≠Zero) and FAILs the cell with a diagnostic,
-    never a silent zero.
+    never a silent zero. The one exception is ``unmeasured_identity`` when it is
+    the only empty bucket: ownership is unproven, so the cell is XFAIL
+    (cannot certify) rather than FAIL (books do not tie).
     """
     # Invalid payloads must fail before missing fields can collapse into zero contribution.
     blocked = _payload_block_cell(
@@ -2590,6 +2592,24 @@ def _cell_g6_reconciliation(  # noqa: C901
                     f"PT/SY price); wallet=${wallet_pnl} component=${component_pnl} "
                     f"gap=${gap} — measured-but-blocked, not a books error. "
                     "Flips to PASS once the sell-side SY price lands.",
+                    decomposition=decomp,
+                ),
+                decomp,
+            )
+        # Absent provenance is unproven ownership, not a measured books error.
+        # Other null buckets (price, basis, PT quantity, …) still FAIL.
+        if set(nonzero) == {"Σ_inventory_reval_usd_null_count"} and inv.confidence == "unmeasured_identity":
+            return (
+                CellResult(
+                    "G6",
+                    "Reconciliation",
+                    "XFAIL",
+                    "inventory identity unmeasured: ambient revaluation refused "
+                    "because endpoint (deployment, chain, wallet, asset) provenance "
+                    f"is absent or conflicting; wallet=${wallet_pnl} "
+                    f"component=${component_pnl} gap=${gap} — unproven ownership, "
+                    "not a books error. Flips to PASS once both endpoints record "
+                    "wallet scope.",
                     decomposition=decomp,
                 ),
                 decomp,
