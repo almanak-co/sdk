@@ -325,7 +325,7 @@ def test_live_pool_reserves_returns_real_data():
 
 
 def test_gateway_pool_reserve_reader_computes_tvl_from_price_oracle():
-    oracle = _FakePriceOracle({"USDC": Decimal("1"), "WETH": Decimal("3000")})
+    oracle = _FakePriceOracle({_TOKEN0_ADDR: Decimal("1"), _TOKEN1_ADDR: Decimal("3000")})
     reader = GatewayPoolReserveReader(
         rpc_call=lambda chain, to, data: _to_bytes(_crafted_eth_call(chain, to, data)),
         token_resolver=_FakeTokenResolver(),
@@ -335,7 +335,7 @@ def test_gateway_pool_reserve_reader_computes_tvl_from_price_oracle():
     reserves = reader._read_pool_reserves_sync("0xPoolAddress0000000000000000000000000000", "base")
 
     assert reserves.tvl_usd == Decimal("14000")
-    assert oracle.calls == [("USDC", "USD", "base"), ("WETH", "USD", "base")]
+    assert oracle.calls == [(_TOKEN0_ADDR, "USD", "base"), (_TOKEN1_ADDR, "USD", "base")]
 
 
 def test_live_liquidity_depth_returns_real_envelope():

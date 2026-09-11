@@ -131,6 +131,7 @@ class PoolReserves:
         stable: Solidly pool-type flag (None for non-Solidly pools)
         tvl_usd: Total value locked in USD, or None when it could not be measured
         last_updated: When the data was observed
+        tvl_unpriced_reason: Machine-readable price failure and token identity, when available
     """
 
     pool_address: str
@@ -146,6 +147,7 @@ class PoolReserves:
     tick: int | None = None
     liquidity: int | None = None
     stable: bool | None = None
+    tvl_unpriced_reason: str | None = None
 
     def __post_init__(self) -> None:
         """Validate and normalize fields."""
@@ -178,6 +180,7 @@ class PoolReserves:
             if not isinstance(val, Decimal):
                 object.__setattr__(self, field_name, Decimal(str(val)))
         object.__setattr__(self, "tvl_usd", _normalize_optional_decimal(self.tvl_usd))
+        self._validate_tvl_unpriced_reason()
 
         # Validate reserves are non-negative
         if self.reserve0 < 0:
@@ -187,6 +190,13 @@ class PoolReserves:
 
         if self.sqrt_price_x96 is not None and self.sqrt_price_x96 < 0:
             raise ValueError("sqrt_price_x96 must be non-negative")
+
+    def _validate_tvl_unpriced_reason(self) -> None:
+        if self.tvl_unpriced_reason is not None:
+            if not isinstance(self.tvl_unpriced_reason, str) or not self.tvl_unpriced_reason.strip():
+                raise ValueError("tvl_unpriced_reason must be a non-empty string or None")
+            if self.tvl_usd is not None:
+                raise ValueError("A measured TVL cannot carry an unpriced reason")
 
     @property
     def is_v3(self) -> bool:
@@ -280,6 +290,7 @@ class PoolReserves:
             "reserve1": str(self.reserve1),
             "fee_tier": self.fee_tier,
             "tvl_usd": str(self.tvl_usd) if self.tvl_usd is not None else None,
+            "tvl_unpriced_reason": self.tvl_unpriced_reason,
             "last_updated": self.last_updated.isoformat(),
         }
 
@@ -319,6 +330,7 @@ class PoolReserves:
             tick=data.get("tick"),
             liquidity=data.get("liquidity"),
             stable=data.get("stable"),
+            tvl_unpriced_reason=data.get("tvl_unpriced_reason"),
         )
 
 

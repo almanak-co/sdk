@@ -282,7 +282,7 @@ def test_tvl_computed_from_oracle():
     reader = GatewayPoolReserveReader(
         rpc_call=_make_rpc_call(),
         token_resolver=_Resolver(),
-        price_oracle=_AsyncOracle({"USDC": Decimal("1"), "WETH": Decimal("3000")}),
+        price_oracle=_AsyncOracle({_TOKEN0_ADDR: Decimal("1"), _TOKEN1_ADDR: Decimal("3000")}),
     )
     # 5000 USDC * 1 + 3 WETH * 3000 = 14000
     assert _read(reader).tvl_usd == Decimal("14000")
@@ -290,31 +290,41 @@ def test_tvl_computed_from_oracle():
 
 def test_tvl_unmeasured_without_oracle():
     reader = GatewayPoolReserveReader(rpc_call=_make_rpc_call(), token_resolver=_Resolver())
-    assert _read(reader).tvl_usd is None
+    reserves = _read(reader)
+    assert reserves.tvl_usd is None
+    assert reserves.tvl_unpriced_reason == "no_price_oracle"
 
 
 def test_tvl_zero_leg_needs_no_symbol_or_price():
-    oracle = _AsyncOracle({"WETH": Decimal("3000")})
+    oracle = _AsyncOracle({_TOKEN1_ADDR: Decimal("3000")})
     reader = GatewayPoolReserveReader(rpc_call=_make_rpc_call(), token_resolver=_Resolver(), price_oracle=oracle)
-    assert reader._calculate_tvl_usd(Decimal("0"), Decimal("3"), "UNKNOWN", "WETH", "base") == Decimal("9000")
+    assert reader._calculate_tvl_usd(Decimal("0"), Decimal("3"), _TOKEN0_ADDR, _TOKEN1_ADDR, "base") == (
+        Decimal("9000"),
+        None,
+    )
     assert oracle.calls == 1
 
 
 def test_tvl_both_zero_is_measured_without_oracle():
     reader = GatewayPoolReserveReader(rpc_call=_make_rpc_call(), token_resolver=_Resolver())
-    assert reader._calculate_tvl_usd(Decimal("0"), Decimal("0"), "UNKNOWN", "UNKNOWN", "base") == Decimal("0")
+    assert reader._calculate_tvl_usd(Decimal("0"), Decimal("0"), _TOKEN0_ADDR, _TOKEN1_ADDR, "base") == (
+        Decimal("0"),
+        None,
+    )
 
 
-def test_tvl_unmeasured_and_unpriced_when_symbol_unknown():
-    oracle = _AsyncOracle({"USDC": Decimal("1")})
-    # token1 unresolved -> symbol "UNKNOWN" -> oracle must NOT be called.
+def test_tvl_prices_unknown_symbol_by_exact_address():
+    oracle = _AsyncOracle({_TOKEN0_ADDR: Decimal("1"), _TOKEN1_ADDR: Decimal("3000")})
     reader = GatewayPoolReserveReader(
         rpc_call=_make_rpc_call(),
         token_resolver=_Resolver(resolve_token1=False),
         price_oracle=oracle,
     )
-    assert _read(reader).tvl_usd is None
-    assert oracle.calls == 0
+    reserves = _read(reader)
+    assert reserves.tvl_usd == Decimal("14000")
+    assert reserves.tvl_unpriced_reason is None
+    assert reserves.token1.symbol == "UNKNOWN"
+    assert oracle.calls == 2
 
 
 def test_tvl_unmeasured_when_oracle_price_is_none():
@@ -586,7 +596,7 @@ def test_solidly_tvl_computed_from_oracle():
     reader = GatewayPoolReserveReader(
         rpc_call=_make_solidly_rpc_call(stable=False),
         token_resolver=_Resolver(),
-        price_oracle=_AsyncOracle({"USDC": Decimal("1"), "WETH": Decimal("3000")}),
+        price_oracle=_AsyncOracle({_TOKEN0_ADDR: Decimal("1"), _TOKEN1_ADDR: Decimal("3000")}),
     )
     # 5000 USDC * 1 + 3 WETH * 3000 = 14000
     assert _read(reader).tvl_usd == Decimal("14000")
@@ -663,3 +673,45 @@ def test_cached_solidly_pool_transient_short_get_reserves_keeps_cache():
         _read(reader)
     assert reader._pool_shape_cache[("base", _POOL)] == ("get_reserves", False)
     assert _read(reader).dex == "solidly_v2"
+
+
+@pytest.mark.parametrize("price", [None, Decimal("0"), Decimal("-1"), Decimal("NaN"), Decimal("Infinity")])
+def test_unpriced_reason_preserves_exact_missing_identity(price):
+    from almanak.framework.data.defi.pools import PoolReserves
+
+    class Oracle:
+        async def get_aggregated_price(self, token, quote="USD", *, chain=None):
+            assert token == _TOKEN0_ADDR
+            assert chain == "base"
+            return SimpleNamespace(price=price)
+
+    reader = GatewayPoolReserveReader(rpc_call=_make_rpc_call(), token_resolver=_Resolver(), price_oracle=Oracle())
+    reserves = _read(reader)
+    assert reserves.tvl_usd is None
+    reason = "missing_price_for_token" if price is None else "invalid_price_for_token"
+    assert reserves.tvl_unpriced_reason == f"{reason}:base:{_TOKEN0_ADDR}"
+    restored = PoolReserves.from_dict(reserves.to_dict())
+    assert restored.tvl_usd is None
+    assert restored.tvl_unpriced_reason == reserves.tvl_unpriced_reason
+    assert restored.reserve0 == reserves.reserve0
+    assert restored.reserve1 == reserves.reserve1
+
+
+def test_unpriced_reason_does_not_expose_oracle_error_details():
+    class Oracle:
+        async def get_aggregated_price(self, *args, **kwargs):
+            raise RuntimeError("provider-url-with-secret")
+
+    reader = GatewayPoolReserveReader(rpc_call=_make_rpc_call(), token_resolver=_Resolver(), price_oracle=Oracle())
+    reserves = _read(reader)
+    assert reserves.tvl_usd is None
+    assert reserves.tvl_unpriced_reason == f"price_oracle_error:base:{_TOKEN0_ADDR}"
+    assert "provider-url" not in str(reserves.to_dict())
+
+
+def test_unpriced_reason_cannot_accompany_measured_tvl():
+    from dataclasses import replace
+
+    reader = GatewayPoolReserveReader(rpc_call=_make_rpc_call(), token_resolver=_Resolver())
+    with pytest.raises(ValueError, match="measured TVL"):
+        replace(_read(reader), tvl_usd=Decimal("0"), tvl_unpriced_reason="no_price_oracle")

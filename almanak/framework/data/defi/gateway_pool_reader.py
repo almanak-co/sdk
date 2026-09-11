@@ -144,9 +144,8 @@ class GatewayPoolReserveReader:
             a synthetic ``UNKNOWN`` symbol.
         price_oracle: Optional framework ``PriceOracle`` used to compute
             ``tvl_usd`` via ``get_aggregated_price``. When ``None`` ``tvl_usd``
-            is ``Decimal("0")`` (the same documented behaviour as the legacy
-            reader — TVL is informational and not required for the reserve
-            snapshot).
+            is unavailable for nonzero reserves; the reserve snapshot remains
+            measured and carries ``tvl_unpriced_reason="no_price_oracle"``.
     """
 
     def __init__(
@@ -239,7 +238,9 @@ class GatewayPoolReserveReader:
         # TVL is informational and deliberately OUTSIDE the data-unavailable
         # contract: _calculate_tvl_usd swallows its own oracle failures and
         # returns None (unmeasured), so it never blocks a valid reserve snapshot.
-        tvl_usd = self._calculate_tvl_usd(reserve0, reserve1, token0.symbol, token1.symbol, chain)
+        tvl_usd, tvl_unpriced_reason = self._calculate_tvl_usd(
+            reserve0, reserve1, token0.address, token1.address, chain
+        )
 
         with self._assembly_guard(pool_address, chain):
             return PoolReserves(
@@ -254,6 +255,7 @@ class GatewayPoolReserveReader:
                 tick=int(tick),
                 liquidity=int(liquidity),
                 tvl_usd=tvl_usd,
+                tvl_unpriced_reason=tvl_unpriced_reason,
                 last_updated=datetime.now(UTC),
             )
 
@@ -320,7 +322,9 @@ class GatewayPoolReserveReader:
         # failure never pins a wrong shape for the reader's lifetime.
         self._pool_shape_cache[(chain, pool_address.lower())] = (_SHAPE_RESERVES, stable)
 
-        tvl_usd = self._calculate_tvl_usd(reserve0, reserve1, token0.symbol, token1.symbol, chain)
+        tvl_usd, tvl_unpriced_reason = self._calculate_tvl_usd(
+            reserve0, reserve1, token0.address, token1.address, chain
+        )
 
         with self._assembly_guard(pool_address, chain):
             return PoolReserves(
@@ -333,6 +337,7 @@ class GatewayPoolReserveReader:
                 fee_tier=fee_tier,
                 stable=stable,
                 tvl_usd=tvl_usd,
+                tvl_unpriced_reason=tvl_unpriced_reason,
                 last_updated=datetime.now(UTC),
             )
 
@@ -532,52 +537,58 @@ class GatewayPoolReserveReader:
         self,
         reserve0: Decimal,
         reserve1: Decimal,
-        token0_symbol: str,
-        token1_symbol: str,
+        token0_address: str,
+        token1_address: str,
         chain: str,
-    ) -> Decimal | None:
-        if reserve0 == 0 and reserve1 == 0:
-            return Decimal("0")
-        if self._price_oracle is None:
-            return None
-        if (reserve0 != 0 and token0_symbol == _UNKNOWN_SYMBOL) or (reserve1 != 0 and token1_symbol == _UNKNOWN_SYMBOL):
-            # A registry miss leaves the symbol unresolved; pricing "UNKNOWN"
-            # would fail anyway for a non-zero leg. A zero reserve needs no price.
-            _LOG.debug(
-                "pool_reserves tvl_usd unmeasured: unresolved token symbol(s) on %s (%s / %s)",
-                chain,
-                token0_symbol,
-                token1_symbol,
-            )
-            return None
-        try:
-            price0 = Decimal("0") if reserve0 == 0 else self._get_price_sync(token0_symbol, chain)
-            price1 = Decimal("0") if reserve1 == 0 else self._get_price_sync(token1_symbol, chain)
-            if price0 is None or price1 is None:
-                _LOG.debug("pool_reserves tvl_usd unmeasured: price miss on %s", chain)
-                return None
-            return reserve0 * price0 + reserve1 * price1
-        except Exception:  # noqa: BLE001 — TVL is informational; never block the snapshot.
-            _LOG.debug("pool_reserves tvl_usd unmeasured: oracle error on %s", chain, exc_info=True)
-            return None
+    ) -> tuple[Decimal | None, str | None]:
+        """Value non-zero reserves by exact token contract.
 
-    def _get_price_sync(self, token_symbol: str, chain: str) -> Decimal | None:
+        Returns ``(tvl_usd, tvl_unpriced_reason)``. Empty != Zero: a leg whose
+        price cannot be measured yields ``(None, <reason>)`` for the whole
+        pool, never a partial sum presented as a full valuation. Two measured
+        zero reserves are a measured ``Decimal("0")`` and need no price. A
+        non-positive or non-finite price is treated as unmeasured, not as a
+        real mark.
+        """
+        if reserve0 == 0 and reserve1 == 0:
+            return Decimal("0"), None
+        if self._price_oracle is None:
+            return None, "no_price_oracle"
+        total = Decimal("0")
+        for reserve, address in ((reserve0, token0_address), (reserve1, token1_address)):
+            if reserve == 0:
+                continue
+            try:
+                price = self._get_price_sync(address, chain)
+            except Exception:  # noqa: BLE001 — unavailable valuation does not erase measured pool state.
+                _LOG.debug("pool_reserves TVL price read failed on %s for %s", chain, address, exc_info=True)
+                return None, f"price_oracle_error:{chain}:{address}"
+            if price is None:
+                return None, f"missing_price_for_token:{chain}:{address}"
+            if not price.is_finite() or price <= 0:
+                return None, f"invalid_price_for_token:{chain}:{address}"
+            total += reserve * price
+        return total, None
+
+    def _get_price_sync(self, token_address: str, chain: str) -> Decimal | None:
         # Price exclusively via the documented PriceOracle Protocol method,
         # async ``get_aggregated_price(token, "USD", *, chain=...)`` — the
-        # live-wired GatewayPriceOracle implements it. We deliberately do NOT
-        # fall back to a sync ``get_price``: there is no single sync get_price
-        # signature in the framework (data_provider, dashboard api_client and
-        # prediction_provider all differ), so guessing one would silently
-        # mis-price. An oracle without get_aggregated_price yields unmeasured TVL
-        # (best-effort informational). A ``price`` of None remains unmeasured,
-        # never Decimal("None") or a fabricated zero.
+        # live-wired GatewayPriceOracle implements it, and resolves a contract
+        # address on-chain so tokens absent from the symbol registry still
+        # price. We deliberately do NOT fall back to a sync ``get_price``:
+        # there is no single sync get_price signature in the framework
+        # (data_provider, dashboard api_client and prediction_provider all
+        # differ), so guessing one would silently mis-price. An oracle without
+        # get_aggregated_price yields unmeasured TVL (best-effort
+        # informational). A ``price`` of None remains unmeasured, never
+        # Decimal("None") or a fabricated zero.
         get_aggregated_price = getattr(self._price_oracle, "get_aggregated_price", None)
         if not callable(get_aggregated_price):
             return None
         if _supports_chain_kwarg(get_aggregated_price):
-            result = asyncio.run(get_aggregated_price(token_symbol, "USD", chain=chain))
+            result = asyncio.run(get_aggregated_price(token_address, "USD", chain=chain))
         else:
-            result = asyncio.run(get_aggregated_price(token_symbol, "USD"))
+            result = asyncio.run(get_aggregated_price(token_address, "USD"))
         price = getattr(result, "price", None)
         return None if price is None else Decimal(str(price))
 
