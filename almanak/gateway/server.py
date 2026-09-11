@@ -37,6 +37,7 @@ from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.lifecycle import reset_lifecycle_store
 from almanak.gateway.metrics import MetricsServer
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
+from almanak.gateway.registry import reset_instance_registry
 from almanak.gateway.services import (
     DashboardServiceServicer,
     ExecutionServiceServicer,
@@ -57,6 +58,7 @@ from almanak.gateway.services import (
     TokenServiceServicer,
 )
 from almanak.gateway.timeline import get_timeline_store
+from almanak.gateway.timeline.store import reset_timeline_store
 
 logger = logging.getLogger(__name__)
 
@@ -657,12 +659,28 @@ class GatewayServer:
                 )
         # Let aiohttp finalize TCP cleanup before the event loop exits.
         await asyncio.sleep(_AIOHTTP_SHUTDOWN_GRACE_SECONDS)
-        reset_lifecycle_store()
-        if self._local_db_lock is not None:
-            from almanak.framework.local_paths import release_local_db_lock
+        # All three bind a db_path on first construction only. They are pinned per
+        # strategy now, so leaving them behind would let the next gateway in this
+        # process keep writing into the previous strategy's database. Each store
+        # closes its own handles, so one failure must not skip its siblings --
+        # and must never strand the flock, which would lock the next gateway out
+        # of this strategy's database for the life of the process.
+        try:
+            for label, reset in (
+                ("lifecycle", reset_lifecycle_store),
+                ("instance registry", reset_instance_registry),
+                ("timeline", reset_timeline_store),
+            ):
+                try:
+                    reset()
+                except Exception:
+                    logger.exception("Error resetting %s store during shutdown", label)
+        finally:
+            if self._local_db_lock is not None:
+                from almanak.framework.local_paths import release_local_db_lock
 
-            release_local_db_lock(self._local_db_lock)
-            self._local_db_lock = None
+                release_local_db_lock(self._local_db_lock)
+                self._local_db_lock = None
 
     async def wait_for_termination(self) -> None:
         """Wait until server is terminated."""

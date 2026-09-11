@@ -578,7 +578,11 @@ def acquire_local_db_lock(db_path: Path, *, timeout: float = 0.0, poll_interval:
     conflicting path so the operator can locate the other process.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = _lock_file_path(db_path)
+    # One lock file per underlying database file. The lock name is derived from
+    # the DB name, so when the DB itself is a symlink the two spellings produce
+    # two *different* real lock files and both gateways acquire -- unlike a
+    # symlinked parent directory, which open() already collapses to one inode.
+    lock_path = _lock_file_path(db_path.resolve())
     fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
     try:
         # Local import: ``fcntl`` is POSIX-only, but every supported

@@ -104,6 +104,15 @@ class TimelineEvent:
         )
 
 
+# Index names created by ``_init_sqlite``; the quarantine must free exactly these.
+_SQLITE_INDEX_NAMES = (
+    "idx_timeline_deployment_id",
+    "idx_timeline_timestamp",
+    "idx_timeline_event_type",
+    "idx_timeline_related_ledger",
+)
+
+
 class TimelineStore:
     """Stores and retrieves timeline events.
 
@@ -579,6 +588,7 @@ class TimelineStore:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
         with sqlite3.connect(str(self._db_path)) as conn:
+            self._quarantine_pre_gateway_table(conn)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS timeline_events (
                     event_id TEXT PRIMARY KEY,
@@ -635,6 +645,46 @@ class TimelineStore:
                 WHERE related_ledger_entry_id IS NOT NULL AND related_ledger_entry_id != ''
             """)
             conn.commit()
+
+    @staticmethod
+    def _quarantine_pre_gateway_table(conn: sqlite3.Connection) -> None:
+        """Move a pre-gateway SDK ``timeline_events`` table out of the way.
+
+        This store now shares its file with the state backend, whose older
+        versions owned a ``timeline_events`` table of a different shape
+        (``event_data`` / ``correlation_id``, no ``event_id``). ``CREATE TABLE IF
+        NOT EXISTS`` is a no-op against it and the index DDL below then fails on
+        the missing ``timestamp`` column, aborting gateway boot for good. Rename
+        rather than drop: the rows are unreadable here but they are still the
+        operator's, and the rename is what lets this store own the real name.
+        """
+        row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='timeline_events'").fetchone()
+        if row is None:
+            return
+        columns = {info[1] for info in conn.execute("PRAGMA table_info(timeline_events)")}
+        if "event_id" in columns:
+            return
+        # Every sqlite_master name, not just tables: RENAME TO also collides with
+        # a view, and picking a name an index already holds fails just as hard.
+        existing = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+        quarantined = "timeline_events_pre_gateway"
+        suffix = 2
+        while quarantined in existing:
+            quarantined = f"timeline_events_pre_gateway_{suffix}"
+            suffix += 1
+        # Indexes follow the table under RENAME, so release exactly the names this
+        # store is about to create. A wider match would destroy legacy indexes
+        # that collide with nothing, and CREATE INDEX IF NOT EXISTS below is a
+        # silent no-op for any name left attached to the quarantined table.
+        for index in _SQLITE_INDEX_NAMES:
+            conn.execute(f'DROP INDEX IF EXISTS "{index}"')
+        conn.execute(f'ALTER TABLE timeline_events RENAME TO "{quarantined}"')
+        logger.warning(
+            "Renamed pre-gateway timeline_events table in %s to %s: its columns predate the "
+            "gateway timeline schema and cannot be read here. No rows were deleted.",
+            conn.execute("PRAGMA database_list").fetchone()[2],
+            quarantined,
+        )
 
     def _load_from_sqlite(self) -> None:
         """Load events from SQLite into cache."""

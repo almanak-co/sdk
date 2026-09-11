@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -181,6 +182,15 @@ class TestInitializeTimelineStore:
             factory,
         )
         factory.assert_called_once_with(db_path="/tmp/tl.db")
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\t"])
+    def test_blank_timeline_override_falls_through_to_gateway_db(self, blank: str) -> None:
+        factory = MagicMock()
+        initialize_timeline_store(
+            _settings(database_url=None, gateway_db_path="/tmp/gw.db", timeline_db_path=blank),
+            factory,
+        )
+        factory.assert_called_once_with(db_path="/tmp/gw.db")
 
 
 # ---------------------------------------------------------------------------
@@ -616,6 +626,12 @@ class TestAcquireLocalDbFlock:
             "almanak.framework.local_paths.warn_if_legacy_cwd_db_exists",
             MagicMock(),
         )
+        # Never probe the developer's real legacy DB: it makes the suite
+        # environment-dependent and injects a warning into caplog scopes.
+        monkeypatch.setattr(
+            "almanak.gateway.core.settings.DEFAULT_GATEWAY_DB_PATH",
+            str(Path(resolved).parent / "absent-legacy-gateway.db"),
+        )
         monkeypatch.setattr(
             "almanak.gateway._server_start_helpers.resolve_gateway_local_db_path",
             lambda _settings: resolved,
@@ -707,6 +723,184 @@ class TestAcquireLocalDbFlock:
         with pytest.raises(RuntimeError, match="gateway_db_path must match"):
             acquire_local_db_flock(settings)
 
+    def test_blank_timeline_override_is_treated_as_unset(self, monkeypatch, tmp_path):
+        """Whitespace is unset: flock must not pin it, and the store must follow the lock."""
+        resolved = tmp_path / "state.db"
+        plain, fallback = MagicMock(), MagicMock(return_value=(5, resolved))
+        self._patch_lock_helpers(monkeypatch, resolved=resolved, plain=plain, fallback=fallback)
+        settings = _settings(standalone=True, timeline_db_path="   ")
+
+        assert acquire_local_db_flock(settings) == 5
+
+        fallback.assert_called_once()
+        plain.assert_not_called()
+        # Cleared, not filled in: a rewritten value reads as an operator pin
+        # on the next boot, and leftover whitespace is a truthy second path.
+        assert settings.timeline_db_path is None
+
+        factory = MagicMock()
+        initialize_timeline_store(settings, factory)
+        factory.assert_called_once_with(db_path=str(resolved))
+
+        assert acquire_local_db_flock(settings) == 5
+
+        assert fallback.call_count == 2
+        plain.assert_not_called()
+
+    def test_second_boot_on_the_same_settings_keeps_the_utility_fallback(self, monkeypatch, tmp_path):
+        """The path write-back must not read back as an operator pin.
+
+        Plain attribute assignment adds the field to ``model_fields_set``, which
+        is the same signal the guard uses to detect an operator-pinned path.
+        """
+        resolved = tmp_path / "utility" / "almanak_state.db"
+        fallback = MagicMock(return_value=(11, resolved))
+        plain = MagicMock()
+        self._patch_lock_helpers(monkeypatch, resolved=resolved, plain=plain, fallback=fallback)
+        settings = _settings(standalone=True)
+
+        acquire_local_db_flock(settings)
+        acquire_local_db_flock(settings)
+
+        assert fallback.call_count == 2
+        plain.assert_not_called()
+
+    def test_populated_legacy_gateway_db_is_named_at_boot(self, monkeypatch, tmp_path, caplog):
+        """Orphaned operational history must be announced, not silently dropped."""
+        import sqlite3
+
+        resolved = tmp_path / "state.db"
+        self._patch_lock_helpers(monkeypatch, resolved=resolved, fallback=MagicMock(return_value=(3, resolved)))
+        legacy = tmp_path / "legacy-gateway.db"
+        with sqlite3.connect(legacy) as conn:
+            conn.execute("CREATE TABLE strategy_instances (deployment_id TEXT)")
+            conn.execute("INSERT INTO strategy_instances VALUES ('deployment:old')")
+            conn.commit()
+        monkeypatch.setattr("almanak.gateway.core.settings.DEFAULT_GATEWAY_DB_PATH", str(legacy))
+
+        with caplog.at_level(logging.WARNING, logger="almanak.gateway._server_start_helpers"):
+            acquire_local_db_flock(_settings(standalone=True))
+
+        assert str(legacy) in caplog.text
+        assert "no longer served" in caplog.text
+
+    def test_empty_legacy_gateway_db_is_not_announced(self, monkeypatch, tmp_path, caplog):
+        """An empty legacy file is not orphaned history; warning on it is noise."""
+        import sqlite3
+
+        resolved = tmp_path / "state.db"
+        self._patch_lock_helpers(monkeypatch, resolved=resolved, fallback=MagicMock(return_value=(3, resolved)))
+        legacy = tmp_path / "legacy-gateway.db"
+        with sqlite3.connect(legacy) as conn:
+            conn.execute("CREATE TABLE strategy_instances (deployment_id TEXT)")
+            conn.commit()
+        monkeypatch.setattr("almanak.gateway.core.settings.DEFAULT_GATEWAY_DB_PATH", str(legacy))
+
+        with caplog.at_level(logging.WARNING, logger="almanak.gateway._server_start_helpers"):
+            acquire_local_db_flock(_settings(standalone=True))
+
+        assert "no longer served" not in caplog.text
+
+    def test_sequential_gateways_bind_their_own_databases(self, monkeypatch, tmp_path):
+        """Once released, the initializers rebind to the new gateway's path.
+
+        This is the half of the contract that ``stop()`` depends on; that
+        ``stop()`` performs the release is covered separately.
+        """
+        from almanak.gateway.registry import reset_instance_registry
+        from almanak.gateway.timeline.store import reset_timeline_store
+
+        first, second = tmp_path / "a.db", tmp_path / "b.db"
+        reset_instance_registry()
+        reset_timeline_store()
+        try:
+            settings_a = _settings()
+            settings_a.__dict__["gateway_db_path"] = str(first)
+            assert initialize_instance_registry(settings_a).db_path == first
+
+            reset_instance_registry()
+            reset_timeline_store()
+
+            settings_b = _settings()
+            settings_b.__dict__["gateway_db_path"] = str(second)
+            assert initialize_instance_registry(settings_b).db_path == second
+        finally:
+            reset_instance_registry()
+            reset_timeline_store()
+
+    @pytest.mark.asyncio
+    async def test_stop_releases_the_pinned_store_singletons(self, monkeypatch):
+        """``stop()`` is the only place those singletons can be released."""
+        from almanak.gateway import server as server_module
+
+        called = []
+        for name in ("reset_lifecycle_store", "reset_instance_registry", "reset_timeline_store"):
+            monkeypatch.setattr(server_module, name, lambda n=name: called.append(n))
+
+        gateway = server_module.GatewayServer(_settings())
+
+        await gateway.stop()
+
+        assert called == ["reset_lifecycle_store", "reset_instance_registry", "reset_timeline_store"]
+
+    @pytest.mark.asyncio
+    async def test_stop_actually_clears_the_pinned_store_singletons(self, tmp_path):
+        """Run the real resets, not stand-ins.
+
+        Asserting only that ``stop()`` calls three names would still pass if a
+        reset were a broken no-op, and it is the cleared singleton -- not the
+        call -- that stops the next gateway inheriting this strategy's stores.
+        """
+        from almanak.gateway import registry as registry_module
+        from almanak.gateway import server as server_module
+        from almanak.gateway.registry import store as registry_store
+        from almanak.gateway.timeline import store as timeline_store
+
+        registry_module.reset_instance_registry()
+        timeline_store.reset_timeline_store()
+        try:
+            registry_module.get_instance_registry(db_path=tmp_path / "a.db")
+            timeline_store.get_timeline_store(db_path=tmp_path / "a.db")
+            assert registry_store._instance_registry is not None
+            assert timeline_store._timeline_store is not None
+
+            await server_module.GatewayServer(_settings()).stop()
+
+            assert registry_store._instance_registry is None
+            assert timeline_store._timeline_store is None
+
+            # And the next gateway's initializer binds its own file.
+            second = _settings()
+            second.__dict__["gateway_db_path"] = str(tmp_path / "b.db")
+            assert initialize_instance_registry(second).db_path == tmp_path / "b.db"
+        finally:
+            registry_module.reset_instance_registry()
+            timeline_store.reset_timeline_store()
+
+    @pytest.mark.asyncio
+    async def test_stop_releases_the_flock_even_when_a_reset_raises(self, monkeypatch):
+        """A stranded flock locks the next gateway out for the life of the process."""
+        from almanak.gateway import server as server_module
+
+        called = []
+        failing = MagicMock(side_effect=RuntimeError("store close failed"))
+        monkeypatch.setattr(server_module, "reset_lifecycle_store", failing)
+        monkeypatch.setattr(server_module, "reset_instance_registry", lambda: called.append("registry"))
+        monkeypatch.setattr(server_module, "reset_timeline_store", lambda: called.append("timeline"))
+        released = MagicMock()
+        monkeypatch.setattr("almanak.framework.local_paths.release_local_db_lock", released)
+
+        gateway = server_module.GatewayServer(_settings())
+        gateway._local_db_lock = 4242
+
+        await gateway.stop()
+
+        # The raising reset was attempted, not skipped over.
+        failing.assert_called_once_with()
+        assert called == ["registry", "timeline"]
+        released.assert_called_once_with(4242)
+        assert gateway._local_db_lock is None
+
     def test_hosted_explicit_paths_unchanged(self, monkeypatch):
         monkeypatch.setattr("almanak.framework.deployment.is_hosted", lambda: True)
         settings = _settings(gateway_db_path="/a.db", timeline_db_path="/b.db")
@@ -769,8 +963,17 @@ class TestAcquireLocalDbFlock:
             from almanak.gateway._server_start_helpers import validate_state_schema_at_boot
             from almanak.gateway.timeline.store import TimelineEvent
 
-            timeline = TimelineStore(db_path=owned)
-            initialize_timeline_store(settings, lambda **kwargs: timeline.initialize())
+            # Build the store from the path the helper hands the factory, so the
+            # assertions below fail if routing regresses to the legacy DB.
+            built: dict[str, TimelineStore] = {}
+
+            def _timeline_factory(**kwargs):
+                built["store"] = TimelineStore(db_path=Path(kwargs["db_path"]))
+                built["store"].initialize()
+
+            initialize_timeline_store(settings, _timeline_factory)
+            timeline = built["store"]
+            assert timeline._db_path == owned
             timeline.add_event(TimelineEvent("first", "deployment:owned", now, "STATE_CHANGE", "running"))
             for _ in range(2):
                 await validate_state_schema_at_boot(settings)

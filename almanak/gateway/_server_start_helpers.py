@@ -35,7 +35,7 @@ from __future__ import annotations
 import logging
 from importlib.metadata import entry_points
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from grpc_health.v1 import health_pb2
 from grpc_reflection.v1alpha import reflection
@@ -53,6 +53,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from almanak.gateway.core.settings import GatewaySettings
 
 logger = logging.getLogger(__name__)
+
+
+def _present(value: str | None) -> TypeGuard[str]:
+    """Treat None and whitespace-only strings as unset."""
+    return value is not None and bool(value.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -80,15 +85,6 @@ def validate_deployment_invariants(settings: GatewaySettings) -> None:
     operator can fix every issue in one pass instead of N restart cycles.
     """
     from almanak.framework.deployment import is_hosted
-
-    def _present(value: str | None) -> bool:
-        """Treat whitespace-only strings as unset.
-
-        ``ALMANAK_GATEWAY_DATABASE_URL=" "`` would otherwise pass the
-        invariant guard with a value that is unusable in practice —
-        defeats the "fail fast on bad deployment shape" goal of plan §A4.
-        """
-        return value is not None and bool(value.strip())
 
     errors: list[str] = []
     if is_hosted():
@@ -250,7 +246,8 @@ def initialize_timeline_store(settings: GatewaySettings, timeline_factory: Any) 
         )
         logger.debug("TimelineStore initialized with PostgreSQL backend (scope=%s)", scope or "unscoped")
     else:
-        effective_timeline_db = settings.timeline_db_path or settings.gateway_db_path
+        timeline_path = settings.timeline_db_path
+        effective_timeline_db = timeline_path if _present(timeline_path) else settings.gateway_db_path
         timeline_factory(db_path=effective_timeline_db)
         logger.debug(f"TimelineStore initialized with SQLite: {effective_timeline_db}")
 
@@ -337,9 +334,19 @@ def acquire_local_db_flock(settings: GatewaySettings) -> int | None:
     else:
         handle = acquire_local_db_lock(db_path)
     # Operational stores must use the same file protected by the state DB lock.
-    settings.gateway_db_path = str(db_path)
-    if settings.timeline_db_path is not None:
-        settings.timeline_db_path = str(db_path)
+    # Write through ``__dict__``: plain assignment would add these fields to
+    # ``model_fields_set``, so a second boot on the same settings object would
+    # read this write-back as an operator pin and lose the utility fallback.
+    settings.__dict__["gateway_db_path"] = str(db_path)
+    # Rewrite a real override onto the locked file. A blank one is unset:
+    # filling it in would pin the next boot, and leaving whitespace in place
+    # would bind a second SQLite file because a spaces-only path is truthy.
+    timeline_path = settings.timeline_db_path
+    if _present(timeline_path):
+        settings.__dict__["timeline_db_path"] = str(db_path)
+    elif timeline_path is not None:
+        settings.__dict__["timeline_db_path"] = None
+    warn_if_legacy_gateway_db_has_data(db_path)
     mode = "STANDALONE" if settings.standalone else "STRATEGY-PINNED"
     logger.info("Local DB flock acquired on %s (%s, single-writer guard)", db_path, mode)
     return handle
@@ -350,18 +357,68 @@ def validate_local_operational_paths(settings: GatewaySettings, db_path: Path) -
     explicit_paths = {}
     if "gateway_db_path" in settings.model_fields_set:
         explicit_paths["gateway_db_path"] = settings.gateway_db_path
-    if settings.timeline_db_path is not None:
-        explicit_paths["timeline_db_path"] = settings.timeline_db_path
+    # A blank timeline override is unset, not a conflicting pin: treating it as
+    # one would turn a previously working environment into a boot failure.
+    timeline_path = settings.timeline_db_path
+    if _present(timeline_path):
+        explicit_paths["timeline_db_path"] = timeline_path
     canonical = db_path.resolve()
     for field, value in explicit_paths.items():
         if not value.strip() or Path(value).expanduser().resolve() != canonical:
             raise RuntimeError(
                 f"Local {field} must match the canonical state DB ({db_path}). "
-                f"Unset ALMANAK_GATEWAY_{field.upper()} / the {field} setting, "
-                "or set it to the same path as ALMANAK_STATE_DB / the strategy-folder DB. "
+                f"Unset the gateway setting {field} (environment variable "
+                f"ALMANAK_GATEWAY_{field.upper()}, which is a different variable from the "
+                "ALMANAK_GATEWAY_DB_PATH path resolver), or set it to the same path as "
+                "ALMANAK_STATE_DB / the strategy-folder DB. "
                 "Existing database files are unchanged; do not overwrite or move them over the active DB."
             )
     return bool(explicit_paths)
+
+
+def warn_if_legacy_gateway_db_has_data(db_path: Path) -> None:
+    """Name the pre-isolation shared gateway DB when it still holds operational rows.
+
+    Registry, lifecycle and timeline rows now live in the locked state DB, so a
+    populated shared file is history the gateway silently stops serving. Nothing
+    is copied or deleted -- the operator decides. Best-effort: a failure to read
+    the legacy file must never block boot.
+    """
+    from almanak.gateway.core.settings import DEFAULT_GATEWAY_DB_PATH
+
+    legacy = Path(DEFAULT_GATEWAY_DB_PATH).expanduser()
+    try:
+        if not legacy.is_file() or legacy.resolve() == db_path.resolve():
+            return
+        import contextlib
+        import sqlite3
+
+        # ``EXISTS``, not ``COUNT``: this runs on every local boot and the legacy
+        # file grows without bound. ``timeout=0`` so a busy legacy file cannot
+        # stall boot behind the default five-second wait; the connection is
+        # closed explicitly because sqlite3's context manager only commits.
+        with contextlib.closing(sqlite3.connect(f"file:{legacy}?mode=ro", uri=True, timeout=0)) as conn:
+            populated = any(
+                conn.execute(f'SELECT EXISTS(SELECT 1 FROM "{table}")').fetchone()[0]
+                for table in (
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' "
+                        "AND name IN ('strategy_instances', 'timeline_events', 'agent_state', 'agent_command')"
+                    )
+                )
+            )
+    except Exception:
+        logger.debug("Legacy gateway DB probe failed", exc_info=True)
+        return
+    if populated:
+        logger.warning(
+            "Legacy shared gateway DB %s still holds registry / lifecycle / timeline rows. "
+            "This gateway now uses %s, so that history is no longer served. "
+            "Nothing was copied, moved or deleted.",
+            legacy,
+            db_path,
+        )
 
 
 def resolve_gateway_local_db_path(settings: GatewaySettings):

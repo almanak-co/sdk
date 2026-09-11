@@ -173,6 +173,25 @@ def test_t_3761_9_flock_acquire_release_roundtrip(clean_env, tmp_path) -> None:
     release_local_db_lock(handle)
 
 
+def test_symlinked_db_file_cannot_take_a_second_lock(clean_env, tmp_path) -> None:
+    """Two names for one database file must contend on one lock.
+
+    The lock name is derived from the DB name, so a symlinked DB yields two
+    distinct real lock files and lets a second gateway onto a database another
+    gateway already owns. A symlinked parent directory does not alias -- open()
+    collapses it to one inode -- so this is the shape that needs the guard.
+    """
+    real = tmp_path / "real.db"
+    real.touch()
+    (tmp_path / "alias.db").symlink_to(real)
+    holder = acquire_local_db_lock(real)
+    try:
+        with pytest.raises(LocalDbLockError):
+            acquire_local_db_lock(tmp_path / "alias.db")
+    finally:
+        release_local_db_lock(holder)
+
+
 def test_t_3761_10_second_acquire_blocks(clean_env, tmp_path) -> None:
     """T-3761-10: a second non-blocking acquire raises LocalDbLockError.
 

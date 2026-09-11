@@ -467,6 +467,176 @@ class TestTimelineStoreSQLite:
             assert store2.get_events("test") == []
 
 
+class TestPreGatewayTimelineTable:
+    """A local state DB written before the gateway owned timeline_events.
+
+    That table shares this file now, and its columns are not a subset of the
+    gateway schema, so ``CREATE TABLE IF NOT EXISTS`` cannot upgrade it.
+    """
+
+    @staticmethod
+    def _seed_legacy(db_path):
+        import sqlite3
+
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                """
+                CREATE TABLE timeline_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    event_data TEXT NOT NULL,
+                    correlation_id TEXT,
+                    cycle_id TEXT DEFAULT '',
+                    phase TEXT DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            # Two of these names collide with ones the gateway store is about to
+            # create, and one does not -- the collision is what needs releasing.
+            conn.execute("CREATE INDEX idx_timeline_event_type ON timeline_events (event_type)")
+            conn.execute("CREATE INDEX idx_timeline_deployment_id ON timeline_events (strategy_id)")
+            conn.execute("CREATE INDEX idx_legacy_correlation ON timeline_events (correlation_id)")
+            conn.execute(
+                "INSERT INTO timeline_events (strategy_id, event_type, event_data, created_at)"
+                " VALUES ('old', 'TRADE', '{}', '2026-01-01T00:00:00Z')"
+            )
+            conn.commit()
+
+    def test_initialize_succeeds_and_keeps_the_rows(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "almanak_state.db"
+            self._seed_legacy(db_path)
+
+            store = TimelineStore(db_path=db_path)
+            store.initialize()
+            store.add_event(
+                TimelineEvent(
+                    event_id="new-1",
+                    deployment_id="deployment:abc",
+                    timestamp=datetime.now(UTC),
+                    event_type="TRADE",
+                    description="after quarantine",
+                )
+            )
+
+            with sqlite3.connect(str(db_path)) as conn:
+                assert conn.execute("SELECT COUNT(*) FROM timeline_events_pre_gateway").fetchone()[0] == 1
+                assert conn.execute("SELECT description FROM timeline_events").fetchall() == [("after quarantine",)]
+
+    def test_colliding_index_names_are_released_to_the_new_table(self):
+        """Indexes follow the table under RENAME.
+
+        A name left attached to the quarantined table makes the store's own
+        ``CREATE INDEX IF NOT EXISTS`` a silent no-op, so the live table ships
+        permanently missing an index with no error anywhere.
+        """
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "almanak_state.db"
+            self._seed_legacy(db_path)
+
+            TimelineStore(db_path=db_path).initialize()
+
+            with sqlite3.connect(str(db_path)) as conn:
+                owned = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='timeline_events'"
+                    )
+                }
+                quarantined = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='timeline_events_pre_gateway'"
+                    )
+                }
+            assert {
+                "idx_timeline_deployment_id",
+                "idx_timeline_timestamp",
+                "idx_timeline_event_type",
+                "idx_timeline_related_ledger",
+            } <= owned
+            # A legacy index that collides with nothing is not collateral.
+            assert "idx_legacy_correlation" in quarantined
+
+    def test_repeated_boots_do_not_stack_quarantined_tables(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "almanak_state.db"
+            self._seed_legacy(db_path)
+
+            for _ in range(3):
+                TimelineStore(db_path=db_path).initialize()
+
+            with sqlite3.connect(str(db_path)) as conn:
+                names = sorted(
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'timeline_events%'"
+                    )
+                )
+            assert names == ["timeline_events", "timeline_events_pre_gateway"]
+
+    def test_quarantine_name_avoids_a_view_of_the_same_name(self):
+        """RENAME TO collides with a view as hard as with a table."""
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "almanak_state.db"
+            self._seed_legacy(db_path)
+            with sqlite3.connect(str(db_path)) as conn:
+                conn.execute("CREATE TABLE other (x INTEGER)")
+                conn.execute("CREATE VIEW timeline_events_pre_gateway AS SELECT * FROM other")
+                conn.commit()
+
+            TimelineStore(db_path=db_path).initialize()
+
+            with sqlite3.connect(str(db_path)) as conn:
+                names = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE name LIKE 'timeline_events_pre_gateway%%'"
+                    )
+                }
+                assert "timeline_events_pre_gateway_2" in names
+                assert conn.execute("SELECT COUNT(*) FROM timeline_events_pre_gateway_2").fetchone()[0] == 1
+
+    def test_gateway_owned_table_is_never_renamed(self):
+        import sqlite3
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "almanak_state.db"
+            first = TimelineStore(db_path=db_path)
+            first.initialize()
+            first.add_event(
+                TimelineEvent(
+                    event_id="keep-1",
+                    deployment_id="deployment:abc",
+                    timestamp=datetime.now(UTC),
+                    event_type="TRADE",
+                    description="gateway data",
+                )
+            )
+
+            TimelineStore(db_path=db_path).initialize()
+
+            with sqlite3.connect(str(db_path)) as conn:
+                names = [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'timeline_events%'"
+                    )
+                ]
+                assert names == ["timeline_events"]
+                assert conn.execute("SELECT description FROM timeline_events").fetchall() == [("gateway data",)]
+
+
 class TestTimelineStoreThreadSafety:
     """Tests for thread safety of TimelineStore."""
 

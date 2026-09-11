@@ -495,41 +495,81 @@ class TestFilePersistence:
         # WAL file should exist (or be empty after checkpoint)
         await store.close()
 
-    async def test_existing_timeline_events_preserved_on_upgrade(self, temp_db_path):
-        """State migrations cannot discard gateway-owned or legacy timeline data."""
+    async def test_gateway_timeline_events_preserved_on_upgrade(self, temp_db_path):
+        """State migrations cannot discard gateway-owned timeline data.
+
+        The gateway timeline store shares this file locally, so a migration that
+        touches its table destroys live history the gateway is still serving.
+        """
         import sqlite3
 
-        # Set up a database that pre-dates PR5 by manually creating the
-        # legacy table with the old shape.
+        from almanak.gateway.timeline.store import TimelineStore
+
+        store = TimelineStore(db_path=temp_db_path)
+        store.initialize()
+        with sqlite3.connect(str(temp_db_path)) as conn:
+            conn.execute(
+                "INSERT INTO timeline_events (event_id, deployment_id, timestamp, event_type, description)"
+                " VALUES (?, ?, ?, ?, ?)",
+                ("evt-1", "deployment:abc", "2026-01-01T00:00:00Z", "TRADE", "gateway data"),
+            )
+            conn.commit()
+
+        state_store = SQLiteStore(SQLiteConfig(db_path=temp_db_path))
+        await state_store.initialize()
+        await state_store.close()
+
+        with sqlite3.connect(str(temp_db_path)) as conn:
+            row = conn.execute("SELECT deployment_id, description FROM timeline_events").fetchone()
+            assert row == ("deployment:abc", "gateway data")
+
+    async def test_pre_gateway_timeline_table_is_left_to_the_gateway_store(self, temp_db_path):
+        """State migrations neither drop nor reshape a pre-gateway timeline table.
+
+        Quarantining it belongs to ``TimelineStore``, which opens this file
+        earlier in gateway boot than the state backend does.
+        """
+        import sqlite3
+
         with sqlite3.connect(str(temp_db_path)) as legacy_conn:
             legacy_conn.execute(
                 """
                 CREATE TABLE timeline_events (
-                    id INTEGER PRIMARY KEY,
-                    deployment_id TEXT,
-                    timestamp TEXT,
-                    event_type TEXT,
-                    description TEXT
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    strategy_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    event_data TEXT NOT NULL,
+                    correlation_id TEXT,
+                    cycle_id TEXT DEFAULT '',
+                    phase TEXT DEFAULT '',
+                    created_at TEXT NOT NULL
                 )
                 """
             )
             legacy_conn.execute(
-                "INSERT INTO timeline_events (deployment_id, timestamp, event_type, description) VALUES (?, ?, ?, ?)",
-                ("legacy_strategy", "2026-01-01T00:00:00Z", "TRADE", "old data"),
+                "INSERT INTO timeline_events (strategy_id, event_type, event_data, created_at)"
+                " VALUES ('old', 'TRADE', '{}', '2026-01-01T00:00:00Z')"
             )
             legacy_conn.commit()
 
-        # Open the store — initialize() runs SCHEMA_SQL + migrations.
-        config = SQLiteConfig(db_path=temp_db_path)
-        store = SQLiteStore(config)
-        await store.initialize()
-        await store.close()
+        state_store = SQLiteStore(SQLiteConfig(db_path=temp_db_path))
+        await state_store.initialize()
+        await state_store.close()
 
         with sqlite3.connect(str(temp_db_path)) as conn:
-            cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='timeline_events'")
-            assert cursor.fetchone() is not None
-            row = conn.execute("SELECT deployment_id, description FROM timeline_events").fetchone()
-            assert row == ("legacy_strategy", "old data")
+            columns = [row[1] for row in conn.execute("PRAGMA table_info(timeline_events)")]
+            rows = conn.execute("SELECT strategy_id, event_data FROM timeline_events").fetchall()
+        assert columns == [
+            "id",
+            "strategy_id",
+            "event_type",
+            "event_data",
+            "correlation_id",
+            "cycle_id",
+            "phase",
+            "created_at",
+        ]
+        assert rows == [("old", "{}")]
 
     async def test_state_initialization_does_not_create_timeline_table(self, temp_db_path):
         """Only the gateway timeline store owns timeline schema creation."""

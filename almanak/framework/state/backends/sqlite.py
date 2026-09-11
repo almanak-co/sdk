@@ -15,7 +15,9 @@ No two strategies share a gateway.
 
 Timeline events are owned by `almanak/gateway/timeline/store.py`.
 Local gateways share this file with the state backend; state migrations
-must preserve gateway-owned tables and their contents.
+must preserve gateway-owned tables and their contents. Quarantining a
+pre-gateway `timeline_events` table belongs to the gateway store, which
+opens the file first at boot.
 
 Usage:
     config = SQLiteConfig(db_path="./state.db")
