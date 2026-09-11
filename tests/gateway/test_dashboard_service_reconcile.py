@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import grpc
 import pytest
 
+from almanak.framework.market.models import TokenBalance
 from almanak.framework.portfolio.models import PortfolioSnapshot, ValueConfidence
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
@@ -72,7 +74,9 @@ def _portfolio_snapshot(*, chain: str = "base", wallet: str = "0xwallet") -> Por
     )
     # PortfolioSnapshot doesn't declare wallet_address — attach via setattr
     # to mirror the legacy shape some callers expect.
-    object.__setattr__(snap, "wallet_address", wallet) if hasattr(snap, "__dict__") else setattr(snap, "wallet_address", wallet)
+    object.__setattr__(snap, "wallet_address", wallet) if hasattr(snap, "__dict__") else setattr(
+        snap, "wallet_address", wallet
+    )
     return snap
 
 
@@ -142,7 +146,9 @@ def _reconcile_response(
     return response
 
 
-def _wire_state_manager(dashboard_service: DashboardServiceServicer, snap: PortfolioSnapshot | None = None) -> MagicMock:
+def _wire_state_manager(
+    dashboard_service: DashboardServiceServicer, snap: PortfolioSnapshot | None = None
+) -> MagicMock:
     sm = MagicMock()
     sm.get_latest_snapshot = AsyncMock(return_value=snap)
     sm.get_position_registry_open_rows = AsyncMock(return_value=[])
@@ -321,7 +327,9 @@ class TestCategorizeApplyResult:
         assert "re-issue PreviewReconcile" in detail
 
     def test_partial_when_primitive_errors_present(self) -> None:
-        err = gateway_pb2.PrimitiveError(primitive="lp", chain="base", code="BACKEND_TIMEOUT", message="timed out", recoverable=True)
+        err = gateway_pb2.PrimitiveError(
+            primitive="lp", chain="base", code="BACKEND_TIMEOUT", message="timed out", recoverable=True
+        )
         rr = _reconcile_response(primitive_errors=[err])
         result, _ = categorize_apply_result(reconcile_response=rr, fingerprint_matched=True)
         assert result == "PARTIAL_SUCCESS"
@@ -339,14 +347,18 @@ class TestCategorizeApplyResult:
 
 @pytest.mark.asyncio
 class TestGetReconciliationReport:
-    async def test_invalid_deployment_id(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_invalid_deployment_id(
+        self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock
+    ) -> None:
         dashboard_service._initialized = True
         req = gateway_pb2.GetReconciliationReportRequest(deployment_id="")
         resp = await dashboard_service.GetReconciliationReport(req, mock_context)
         assert isinstance(resp, gateway_pb2.GetReconciliationReportResponse)
         mock_context.set_code.assert_called_with(grpc.StatusCode.INVALID_ARGUMENT)
 
-    async def test_no_chain_wallet_returns_empty_report(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_no_chain_wallet_returns_empty_report(
+        self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock
+    ) -> None:
         dashboard_service._initialized = True
         _wire_state_manager(dashboard_service, snap=None)
         req = gateway_pb2.GetReconciliationReportRequest(deployment_id="test_strategy")
@@ -354,7 +366,9 @@ class TestGetReconciliationReport:
         assert len(resp.findings) == 0
         assert resp.as_of != ""  # timestamp set even when degraded
 
-    async def test_happy_path_returns_findings(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_happy_path_returns_findings(
+        self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock
+    ) -> None:
         dashboard_service._initialized = True
         _wire_state_manager(dashboard_service, snap=_portfolio_snapshot())
         rr = _reconcile_response(matched_count=2, phantom_count=1)
@@ -370,7 +384,9 @@ class TestGetReconciliationReport:
         call_args = ps.Reconcile.await_args
         assert call_args.args[0].apply is False
 
-    async def test_second_call_within_ttl_uses_cache(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_second_call_within_ttl_uses_cache(
+        self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock
+    ) -> None:
         dashboard_service._initialized = True
         _wire_state_manager(dashboard_service, snap=_portfolio_snapshot())
         rr = _reconcile_response(matched_count=1)
@@ -390,7 +406,9 @@ class TestGetReconciliationReport:
 
 @pytest.mark.asyncio
 class TestPreviewApplyReconcile:
-    async def test_preview_returns_token_and_diff(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_preview_returns_token_and_diff(
+        self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock
+    ) -> None:
         dashboard_service._initialized = True
         _wire_state_manager(dashboard_service, snap=_portfolio_snapshot())
         rr = _reconcile_response(matched_count=1, phantom_count=2)
@@ -405,7 +423,9 @@ class TestPreviewApplyReconcile:
         assert len(resp.phantom_missing) == 2
         assert resp.source_block_number == 1000
 
-    async def test_apply_with_matching_fingerprint_succeeds(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_apply_with_matching_fingerprint_succeeds(
+        self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock
+    ) -> None:
         dashboard_service._initialized = True
         _wire_state_manager(dashboard_service, snap=_portfolio_snapshot())
         rr_preview = _reconcile_response(matched_count=1, phantom_count=1)
@@ -427,7 +447,9 @@ class TestPreviewApplyReconcile:
         assert apply_resp.result == "SUCCESS"
         assert len(apply_resp.rebuilt) == 1
 
-    async def test_apply_with_drift_returns_state_drift(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_apply_with_drift_returns_state_drift(
+        self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock
+    ) -> None:
         dashboard_service._initialized = True
         _wire_state_manager(dashboard_service, snap=_portfolio_snapshot())
         rr_preview = _reconcile_response(source_block_number=1000)
@@ -473,9 +495,7 @@ class TestPreviewApplyReconcile:
         ps.Reconcile = AsyncMock(return_value=rr_drifted)
 
         apply_resp = await dashboard_service.ApplyReconcile(
-            gateway_pb2.ApplyReconcileRequest(
-                deployment_id="test_strategy", preview_token=preview_resp.preview_token
-            ),
+            gateway_pb2.ApplyReconcileRequest(deployment_id="test_strategy", preview_token=preview_resp.preview_token),
             mock_context,
         )
 
@@ -488,8 +508,7 @@ class TestPreviewApplyReconcile:
         assert sole_call is not None
         req = sole_call.args[0]
         assert req.apply is False, (
-            "On drift, only the dry-run (apply=False) should fire; the "
-            "mutating call (apply=True) must NOT be invoked."
+            "On drift, only the dry-run (apply=False) should fire; the mutating call (apply=True) must NOT be invoked."
         )
 
     async def test_apply_no_drift_invokes_both_dry_run_and_apply(
@@ -509,9 +528,7 @@ class TestPreviewApplyReconcile:
         ps.Reconcile = AsyncMock(return_value=rr)
 
         apply_resp = await dashboard_service.ApplyReconcile(
-            gateway_pb2.ApplyReconcileRequest(
-                deployment_id="test_strategy", preview_token=preview_resp.preview_token
-            ),
+            gateway_pb2.ApplyReconcileRequest(deployment_id="test_strategy", preview_token=preview_resp.preview_token),
             mock_context,
         )
 
@@ -523,7 +540,9 @@ class TestPreviewApplyReconcile:
         assert first_req.apply is False
         assert second_req.apply is True
 
-    async def test_apply_with_unknown_token_returns_not_found(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_apply_with_unknown_token_returns_not_found(
+        self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock
+    ) -> None:
         dashboard_service._initialized = True
         _wire_state_manager(dashboard_service, snap=_portfolio_snapshot())
         apply_resp = await dashboard_service.ApplyReconcile(
@@ -532,7 +551,9 @@ class TestPreviewApplyReconcile:
         )
         assert apply_resp.result == "NOT_FOUND"
 
-    async def test_apply_missing_token_returns_invalid_argument(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_apply_missing_token_returns_invalid_argument(
+        self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock
+    ) -> None:
         dashboard_service._initialized = True
         apply_resp = await dashboard_service.ApplyReconcile(
             gateway_pb2.ApplyReconcileRequest(deployment_id="test_strategy", preview_token=""),
@@ -549,14 +570,18 @@ class TestPreviewApplyReconcile:
 
 @pytest.mark.asyncio
 class TestRefreshRegistryFromChain:
-    async def test_invalid_deployment_id(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_invalid_deployment_id(
+        self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock
+    ) -> None:
         dashboard_service._initialized = True
         resp = await dashboard_service.RefreshRegistryFromChain(
             gateway_pb2.RefreshRegistryFromChainRequest(deployment_id=""), mock_context
         )
         assert resp.result == "INVALID_ARGUMENT"
 
-    async def test_happy_path_returns_counts(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_happy_path_returns_counts(
+        self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock
+    ) -> None:
         dashboard_service._initialized = True
         _wire_state_manager(dashboard_service, snap=_portfolio_snapshot())
         rr = _reconcile_response(matched_count=3, phantom_count=0, rebuilt_count=2, source_block_number=5000)
@@ -570,7 +595,9 @@ class TestRefreshRegistryFromChain:
         assert resp.events_emitted == 2
         assert resp.source_block_number == 5000
 
-    async def test_no_chain_wallet_returns_failed(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_no_chain_wallet_returns_failed(
+        self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock
+    ) -> None:
         dashboard_service._initialized = True
         _wire_state_manager(dashboard_service, snap=None)
         resp = await dashboard_service.RefreshRegistryFromChain(
@@ -578,7 +605,9 @@ class TestRefreshRegistryFromChain:
         )
         assert resp.result == "FAILED"
 
-    async def test_concurrent_call_returns_rate_limited(self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock) -> None:
+    async def test_concurrent_call_returns_rate_limited(
+        self, dashboard_service: DashboardServiceServicer, mock_context: MagicMock
+    ) -> None:
         dashboard_service._initialized = True
         _wire_state_manager(dashboard_service, snap=_portfolio_snapshot())
 
@@ -678,3 +707,74 @@ class TestOperatorAuthorizationGate:
         ctx = self._ctx_with_metadata({"x-operator-token": b"secret-op"})
         ok = await dashboard_service._require_operator_authorization(ctx)
         assert ok is True
+
+
+class TestResolveChainAndWalletActivation:
+    """`TokenBalance.wallet_address` did not exist before the snapshot-provenance
+    change, so `_resolve_chain_and_wallet` returned ("<chain>", "") in every
+    production call and all four reconcile RPCs short-circuited -- including the
+    two `apply=True` registry-mutating ones. Adding the field activates them for
+    single-chain deployments. These tests pin that transition, and the fact that a
+    multi-chain aggregate still leaves them disabled.
+
+    They deliberately do NOT setattr `wallet_address` onto the snapshot the way the
+    fixture above does; that monkey-patch is what hid the empty production path.
+    """
+
+    def _snapshot_with_rows(self, rows: list[TokenBalance]) -> PortfolioSnapshot:
+        return PortfolioSnapshot(
+            deployment_id="test_strategy",
+            timestamp=datetime(2026, 5, 17, 12, 0, tzinfo=UTC),
+            total_value_usd=1000.0,
+            available_cash_usd=100.0,
+            deployed_capital_usd=900.0,
+            wallet_total_value_usd=1000.0,
+            value_confidence=ValueConfidence.HIGH,
+            positions=[],
+            token_prices={},
+            wallet_balances=rows,
+            chain="arbitrum",
+        )
+
+    def _with_snapshot(self, dashboard_service, snap) -> None:
+        state_manager = MagicMock()
+        state_manager.get_latest_snapshot = AsyncMock(return_value=snap)
+        dashboard_service._state_manager = state_manager
+
+    async def _resolve(self, dashboard_service, snap) -> tuple[str, str]:
+        self._with_snapshot(dashboard_service, snap)
+        return await dashboard_service._resolve_chain_and_wallet("test_strategy")
+
+    @pytest.mark.asyncio
+    async def test_scoped_single_chain_row_now_resolves_a_wallet(self, dashboard_service):
+        """The activation itself: this returned ("arbitrum", "") before the field existed."""
+        row = TokenBalance(symbol="USDC", balance=Decimal("1"), balance_usd=Decimal("1"))
+        row.chain, row.wallet_address = "arbitrum", "0xabcdef0000000000000000000000000000000001"
+        chain, wallet = await self._resolve(dashboard_service, self._snapshot_with_rows([row]))
+        assert (chain, wallet) == ("arbitrum", "0xabcdef0000000000000000000000000000000001")
+
+    @pytest.mark.asyncio
+    async def test_unscoped_row_leaves_the_reconcile_rpcs_disabled(self, dashboard_service):
+        """WalletScopeCapture leaves wallet_address None for a multi-chain aggregate,
+        so the apply=True paths stay unreachable there."""
+        row = TokenBalance(symbol="USDC", balance=Decimal("1"), balance_usd=Decimal("1"))
+        assert row.wallet_address is None
+        chain, wallet = await self._resolve(dashboard_service, self._snapshot_with_rows([row]))
+        assert (chain, wallet) == ("arbitrum", "")
+
+    @pytest.mark.asyncio
+    async def test_no_balances_leaves_the_reconcile_rpcs_disabled(self, dashboard_service):
+        chain, wallet = await self._resolve(dashboard_service, self._snapshot_with_rows([]))
+        assert (chain, wallet) == ("arbitrum", "")
+
+    @pytest.mark.asyncio
+    async def test_disabled_resolution_still_refuses_the_mutating_rpc(self, dashboard_service, mock_context):
+        """The guard that matters: an unscoped snapshot must not reach apply=True."""
+        row = TokenBalance(symbol="USDC", balance=Decimal("1"), balance_usd=Decimal("1"))
+        self._with_snapshot(dashboard_service, self._snapshot_with_rows([row]))
+        response = await dashboard_service.RefreshRegistryFromChain(
+            gateway_pb2.RefreshRegistryFromChainRequest(deployment_id="test_strategy"),
+            mock_context,
+        )
+        assert response.result == "FAILED"
+        assert "could not resolve chain/wallet" in response.detail

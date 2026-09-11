@@ -3740,8 +3740,11 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         if snap is None:
             return ("", "")
         chain = getattr(snap, "chain", "") or ""
-        wallet = ""
-        # Multi-chain snapshots may place the wallet on their first balance.
+        # SINGLE-chain snapshots only. TokenBalance.wallet_address is populated by
+        # WalletScopeCapture, which refuses any symbol observed under more than one
+        # (chain, wallet) scope -- so a multi-chain aggregate leaves it None here and
+        # the callers below stay disabled. Before that field existed this getattr
+        # always yielded "", which disabled all four reconcile RPCs unconditionally.
         wallet = getattr(snap, "wallet_address", "") or ""
         if not wallet and getattr(snap, "wallet_balances", None):
             try:

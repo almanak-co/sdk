@@ -316,6 +316,8 @@ class TokenBalance:
     value_usd: Decimal
     address: str = ""
     price_usd: Decimal | None = None  # Per-token price; enables redenomination (DB persistence is Week 2)
+    chain: str | None = None
+    wallet_address: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize numeric fields to Decimal."""
@@ -507,6 +509,8 @@ class PortfolioSnapshot:
                     "value_usd": str(b.value_usd),
                     "price_usd": str(b.price_usd) if b.price_usd is not None else None,
                     "address": b.address,
+                    "chain": b.chain,
+                    "wallet_address": b.wallet_address,
                 }
                 for b in self.wallet_balances
             ],
@@ -591,6 +595,8 @@ class PortfolioSnapshot:
                     balance=Decimal(b["balance"]),
                     value_usd=Decimal(b["value_usd"]),
                     address=b.get("address", ""),
+                    chain=b.get("chain"),
+                    wallet_address=b.get("wallet_address"),
                     price_usd=Decimal(price_usd) if price_usd is not None else None,
                 )
             )

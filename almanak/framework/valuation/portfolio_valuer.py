@@ -80,6 +80,7 @@ from almanak.framework.valuation.position_discovery import (
 )
 from almanak.framework.valuation.spot_valuer import total_value, value_tokens
 from almanak.framework.valuation.vault_position_reader import VaultPositionReader
+from almanak.framework.valuation.wallet_scope import WalletScopeCapture
 
 if TYPE_CHECKING:
     from almanak.connectors._strategy_base.perps_read_base import PerpsPositionValue
@@ -1700,6 +1701,7 @@ class PortfolioValuer:
         chains: list[str],
         market: MarketDataSource,
         tracked_tokens: list[str],
+        wallet_scope: WalletScopeCapture | None = None,
     ) -> tuple[dict[str, Decimal], dict[str, Decimal], bool]:
         """Fetch wallet balances + prices for ``tracked_tokens`` across ``chains``.
 
@@ -1717,14 +1719,17 @@ class PortfolioValuer:
         other read failure is.
         """
         if len(chains) <= 1:
-            return PortfolioValuer._fetch_wallet_single_chain(chains[0] if chains else "", market, tracked_tokens)
-        return PortfolioValuer._fetch_wallet_multi_chain(chains, market, tracked_tokens)
+            return PortfolioValuer._fetch_wallet_single_chain(
+                chains[0] if chains else "", market, tracked_tokens, wallet_scope
+            )
+        return PortfolioValuer._fetch_wallet_multi_chain(chains, market, tracked_tokens, wallet_scope)
 
     @staticmethod
     def _fetch_wallet_single_chain(
         chain: str,
         market: MarketDataSource,
         tracked_tokens: list[str],
+        wallet_scope: WalletScopeCapture | None = None,
     ) -> tuple[dict[str, Decimal], dict[str, Decimal], bool]:
         """Single-chain wallet read (VIB-5636 body, preserved byte-for-byte).
 
@@ -1739,11 +1744,15 @@ class PortfolioValuer:
         for token in tracked_tokens:
             try:
                 balance_result = market.balance(token, chain=chain_arg)
+                if wallet_scope is not None:
+                    wallet_scope.observe(token, chain_arg or "", balance_result)
                 # MarketSnapshot.balance() returns TokenBalance or Decimal
                 bal = balance_result.balance if hasattr(balance_result, "balance") else Decimal(str(balance_result))
                 if bal > 0:
                     balances[token] = bal
             except Exception:
+                if wallet_scope is not None:
+                    wallet_scope.observe(token, chain_arg or "", None)
                 wallet_data_incomplete = True
                 logger.debug("Could not fetch balance for %s", token)
 
@@ -1761,6 +1770,7 @@ class PortfolioValuer:
         chains: list[str],
         market: MarketDataSource,
         tracked_tokens: list[str],
+        wallet_scope: WalletScopeCapture | None = None,
     ) -> tuple[dict[str, Decimal], dict[str, Decimal], bool]:
         """Multi-chain wallet read — aggregate each token across ``chains`` (VIB-5722).
 
@@ -1797,9 +1807,13 @@ class PortfolioValuer:
             for chain in chains:
                 try:
                     balance_result = market.balance(token, chain=chain)
+                    if wallet_scope is not None:
+                        wallet_scope.observe(token, chain, balance_result)
                     bal = balance_result.balance if hasattr(balance_result, "balance") else Decimal(str(balance_result))
                     accumulated = (accumulated or Decimal("0")) + bal
                 except Exception:
+                    if wallet_scope is not None:
+                        wallet_scope.observe(token, chain, None)
                     # Token not readable on this chain (absent, or unconfigured) —
                     # it may live on another chain; skip the price read here (a
                     # chain with no balance has no meaningful price for this
@@ -1939,8 +1953,9 @@ class PortfolioValuer:
             # Step 2: Fetch wallet balances and prices via gateway. Extracted to
             # ``_fetch_wallet_balances_and_prices`` (VIB-5636) — chain-aware for
             # multi-chain snapshots; keeps ``value`` under the complexity gate.
+            wallet_scope = WalletScopeCapture()
             balances, prices, wallet_data_incomplete = self._fetch_wallet_balances_and_prices(
-                chains, market, tracked_tokens
+                chains, market, tracked_tokens, wallet_scope
             )
 
             # VIB-4225 ACC-02 — append the chain's NATIVE gas-token to the
@@ -1949,7 +1964,9 @@ class PortfolioValuer:
             # snapshot.snapshot_metadata after construction below; runner-level
             # ``_enforce_native_gas_status_in_live`` then halts in live mode if
             # the status is non-ok / non-already_tracked.
-            gas_native_status, native_rows = self._resolve_native_gas_rows(chains, market, balances, prices)
+            gas_native_status, native_rows = self._resolve_native_gas_rows(
+                chains, market, balances, prices, wallet_scope
+            )
 
             # pr-auditor finding #4: when the gas helper reports a non-success
             # status, the snapshot's value_confidence MUST drop to ESTIMATED
@@ -1983,6 +2000,7 @@ class PortfolioValuer:
             for native_row in native_rows:
                 if not any(tb.symbol == native_row.symbol for tb in wallet_balances):
                     wallet_balances.append(native_row)
+            wallet_scope.apply(wallet_balances)
             wallet_value = total_value(wallet_balances)
 
             # VIB-6362: publish the wallet-overlap index BEFORE positions are
@@ -2199,6 +2217,7 @@ class PortfolioValuer:
                     nav_basis_coverage=_nav_basis_coverage(nav_legs),
                 ),
             )
+            framework_snapshot.snapshot_metadata["wallet_scope"] = wallet_scope.metadata()
             # Reconciliation is advisory — never let it downgrade the framework snapshot.
             try:
                 return self._reconcile_with_external(strategy, framework_snapshot)
@@ -2970,6 +2989,7 @@ class PortfolioValuer:
         market: Any,
         balances: dict[str, Decimal],
         prices: dict[str, Decimal],
+        wallet_scope: WalletScopeCapture | None = None,
     ) -> tuple[str, TokenBalance | None]:
         """VIB-4225 ACC-02 — fold the chain's native gas-token into the wallet.
 
@@ -3050,9 +3070,13 @@ class PortfolioValuer:
         # above and the tracked-tokens loop for the multi-chain rationale.
         try:
             balance_result = market.balance(native_symbol, chain=chain)
+            if wallet_scope is not None:
+                wallet_scope.observe(native_symbol, chain, balance_result)
             raw_balance = balance_result.balance if hasattr(balance_result, "balance") else balance_result
             bal = Decimal(str(raw_balance))
         except Exception as e:  # noqa: BLE001 — typed status path
+            if wallet_scope is not None:
+                wallet_scope.observe(native_symbol, chain, None)
             logger.debug("native gas-token balance fetch failed: %s", e)
             return ("balance_failed", None)
 
@@ -3089,6 +3113,7 @@ class PortfolioValuer:
         market: Any,
         balances: dict[str, Decimal],
         prices: dict[str, Decimal],
+        wallet_scope: WalletScopeCapture | None = None,
     ) -> tuple[str, list[TokenBalance]]:
         """Fold every configured chain's native gas-token into the wallet (VIB-5722).
 
@@ -3099,9 +3124,11 @@ class PortfolioValuer:
         ``_resolve_native_gas`` byte-for-byte and wraps its row in a list.
         """
         if len(chains) <= 1:
-            status, row = PortfolioValuer._resolve_native_gas(chains[0] if chains else "", market, balances, prices)
+            status, row = PortfolioValuer._resolve_native_gas(
+                chains[0] if chains else "", market, balances, prices, wallet_scope
+            )
             return status, ([row] if row is not None else [])
-        return PortfolioValuer._resolve_native_gas_multi(chains, market, balances, prices)
+        return PortfolioValuer._resolve_native_gas_multi(chains, market, balances, prices, wallet_scope)
 
     @staticmethod
     def _resolve_native_gas_multi(
@@ -3109,6 +3136,7 @@ class PortfolioValuer:
         market: Any,
         balances: dict[str, Decimal],
         prices: dict[str, Decimal],
+        wallet_scope: WalletScopeCapture | None = None,
     ) -> tuple[str, list[TokenBalance]]:
         """Per-chain native gas fold, aggregated by native symbol (VIB-5722).
 
@@ -3149,9 +3177,13 @@ class PortfolioValuer:
             # or the status.
             try:
                 balance_result = market.balance(native_symbol, chain=chain)
+                if wallet_scope is not None:
+                    wallet_scope.observe(native_symbol, chain, balance_result)
                 raw_balance = balance_result.balance if hasattr(balance_result, "balance") else balance_result
                 bal = Decimal(str(raw_balance))
             except Exception as e:  # noqa: BLE001 — typed status path
+                if wallet_scope is not None:
+                    wallet_scope.observe(native_symbol, chain, None)
                 logger.debug("native gas-token balance fetch failed for %s: %s", chain, e)
                 statuses.append("balance_failed")
                 continue

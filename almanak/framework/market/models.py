@@ -57,6 +57,8 @@ class TokenBalance:
     balance: Decimal
     balance_usd: Decimal
     address: str = ""
+    chain: str | None = None
+    wallet_address: str | None = None
 
     def _to_decimal(self, other: object) -> Decimal | None:
         if isinstance(other, TokenBalance):

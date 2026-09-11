@@ -693,7 +693,10 @@ class TestPortfolioValuer:
         # VIB-4225 ACC-02: gas-native helper stamps `ok` on every framework
         # snapshot. Reconciliation keys are NOT set on the RPC-failure path
         # (no external snapshot to reconcile against).
-        assert snapshot.snapshot_metadata == {"gas_native_status": "ok"}
+        assert snapshot.snapshot_metadata == {
+            "gas_native_status": "ok",
+            "wallet_scope": {"schema_version": 1, "chain_wallets": {}},
+        }
 
 
 class TestPortfolioValuerEdgeCases:

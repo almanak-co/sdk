@@ -316,6 +316,8 @@ class GatewayStateManager:
                         "balance": str(b.balance),
                         "value_usd": str(b.value_usd),
                         "address": b.address,
+                        "chain": b.chain,
+                        "wallet_address": b.wallet_address,
                         "price_usd": str(b.price_usd) if b.price_usd is not None else None,
                     }
                     for b in snapshot.wallet_balances

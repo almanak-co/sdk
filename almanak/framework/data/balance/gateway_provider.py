@@ -187,6 +187,8 @@ class GatewayBalanceProvider(BalanceProvider):
                     if response.timestamp
                     else datetime.now(UTC),
                     stale=response.stale,
+                    chain=self._chain.lower() if response.balance and not response.stale else None,
+                    wallet_address=self._wallet_address if response.balance and not response.stale else None,
                 )
 
                 # Cache the successful result -- but NOT for block-pinned reads,
@@ -235,7 +237,7 @@ class GatewayBalanceProvider(BalanceProvider):
                 _RETRY_POLICY.max_attempts,
                 error_msg,
             )
-            return replace(cached_result, stale=True)
+            return replace(cached_result, stale=True, chain=None, wallet_address=None)
 
         # No cache -- propagate the error
         logger.error("Gateway balance request failed for %s with no cached fallback: %s", token, error_msg)

@@ -428,6 +428,8 @@ async def test_gateway_snapshot_preserves_wire_identity_and_accounting_envelope(
     assert payload["wallet_balances"] == [
         {
             "address": "0xusdc",
+            "chain": None,
+            "wallet_address": None,
             "balance": "20.5",
             "price_usd": "1",
             "symbol": "USDC",
@@ -435,6 +437,8 @@ async def test_gateway_snapshot_preserves_wire_identity_and_accounting_envelope(
         },
         {
             "address": "0xarb",
+            "chain": None,
+            "wallet_address": None,
             "balance": "0",
             "price_usd": None,
             "symbol": "ARB",

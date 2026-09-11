@@ -674,6 +674,8 @@ def create_sync_balance_func(
             balance=result.balance,
             balance_usd=balance_usd,
             address=result.address,
+            chain=getattr(result, "chain", None),
+            wallet_address=getattr(result, "wallet_address", None),
         )
 
     return sync_balance

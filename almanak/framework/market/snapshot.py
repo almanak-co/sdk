@@ -2811,6 +2811,8 @@ class MarketSnapshot:
             balance=tb.balance,
             balance_usd=tb.balance * usd_price,
             address=getattr(tb, "address", "") or "",
+            chain=tb.chain,
+            wallet_address=tb.wallet_address,
         )
         # USD is now measured for this key — stop treating it as unmeasured so
         # later reads don't recompute against a different cached price.
@@ -3050,7 +3052,21 @@ class MarketSnapshot:
             return raw, True
         balance = getattr(raw, "balance", raw)
         if isinstance(balance, Decimal):
-            return TokenBalance(symbol=token, balance=balance, balance_usd=Decimal("0")), False
+            wallet_address = getattr(raw, "wallet_address", None)
+            token_address = getattr(raw, "address", "") or ""
+            # BalanceResult.address is `response.address or self._wallet_address`,
+            # so on an empty gateway token address it holds the WALLET. This column
+            # is the token contract address; never let the fallback land in it.
+            if wallet_address and token_address.lower() == wallet_address.lower():
+                token_address = ""
+            return TokenBalance(
+                symbol=token,
+                balance=balance,
+                balance_usd=Decimal("0"),
+                address=token_address,
+                chain=getattr(raw, "chain", None),
+                wallet_address=wallet_address,
+            ), False
         try:
             return TokenBalance(symbol=token, balance=Decimal(str(balance)), balance_usd=Decimal("0")), False
         except Exception:  # noqa: BLE001

@@ -19,6 +19,7 @@ Example:
 
 import logging
 import time
+from dataclasses import replace
 from decimal import Decimal
 
 from almanak.framework.data.balance.gateway_provider import _RETRY_POLICY, _is_retryable
@@ -116,6 +117,8 @@ class MultiChainGatewayBalanceProvider:
                     symbol=token,
                     balance=balance,
                     balance_usd=balance_usd,
+                    chain=chain_lower if response.balance and not response.stale else None,
+                    wallet_address=effective_wallet if response.balance and not response.stale else None,
                 )
 
                 # Cache successful result
@@ -157,7 +160,7 @@ class MultiChainGatewayBalanceProvider:
                 _RETRY_POLICY.max_attempts,
                 error_msg,
             )
-            return cached_result
+            return replace(cached_result, chain=None, wallet_address=None)
 
         logger.error(f"Failed to get {token} balance on {chain} via gateway (no cache): {error_msg}")
         return TokenBalance(symbol=token, balance=Decimal("0"), balance_usd=Decimal("0"))

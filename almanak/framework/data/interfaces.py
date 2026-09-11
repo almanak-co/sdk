@@ -697,6 +697,8 @@ class BalanceResult:
     raw_balance: int
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     stale: bool = False
+    chain: str | None = None
+    wallet_address: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -708,6 +710,8 @@ class BalanceResult:
             "raw_balance": str(self.raw_balance),
             "timestamp": self.timestamp.isoformat(),
             "stale": self.stale,
+            "chain": self.chain,
+            "wallet_address": self.wallet_address,
         }
 
 
