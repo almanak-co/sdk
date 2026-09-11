@@ -141,3 +141,19 @@ def test_residual_admission_replays_snapshot_but_still_requires_wallet_and_chain
     result = assess_residual_policy(contract, generations=None, quantities=None, actor=None, bundle=root)
     assert result["status"] == "FAIL"
     assert "subject_final_snapshot_failed" in result["reason_codes"]
+
+
+def test_missing_release_artifacts_cannot_leave_final_capture_marked_captured(completed):
+    context, store, lease, worker = completed
+    (context.root / "terminal-boundary.json").write_bytes(canonical({"status": "CAPTURED"}))
+    result = capture_final_subject(context, store, lease, worker, release_started_monotonic_ns=1)
+    assert result["status"] == "UNMEASURED"
+    assert result["error_type"] == "FileNotFoundError"
+
+
+def test_terminal_bound_capture_without_release_timestamp_is_unmeasured(completed):
+    context, store, lease, worker = completed
+    (context.root / "terminal-boundary.json").write_bytes(canonical({"status": "CAPTURED"}))
+    result = capture_final_subject(context, store, lease, worker)
+    assert result["status"] == "UNMEASURED"
+    assert result["error_type"] == "ValueError"

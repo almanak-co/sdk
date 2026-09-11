@@ -230,6 +230,6 @@ def test_full_close_binds_terminal_boundary_before_final_subject(tmp_path, monke
         actors=[actor],
         assemble=True,
     )
-    assert sequence == ["actor", "release", "worker", "terminal", "final"]
+    assert sequence == ["actor", "terminal", "release", "worker", "final"]
     assert result["terminal_boundary"]["status"] == "CAPTURED"
     assert result["subject_final_capture"]["terminal_boundary_sha256"] == "bound"
