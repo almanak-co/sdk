@@ -79,6 +79,7 @@ _TOKEN_REF_KEYS = frozenset(
         "token",
         "collateral_token",
         "borrow_token",
+        "reserve_token",
     }
 )
 
@@ -97,11 +98,17 @@ _TOKEN_ADDRESS_KEYS = frozenset(
 
 
 def _string_token_values(value: Any) -> list[str]:
-    """Return non-empty token strings from a scalar/list-ish config value."""
+    """Read token positions, preferring contract identity over display symbols."""
     if isinstance(value, str):
         return [value.strip()] if value.strip() else []
-    if isinstance(value, Iterable) and not isinstance(value, bytes | bytearray | str | Mapping):
-        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    if isinstance(value, Mapping):
+        address = value.get("address")
+        if isinstance(address, str) and address.strip():
+            return [address.strip()]
+        symbol = value.get("symbol")
+        return [symbol.strip()] if isinstance(symbol, str) and symbol.strip() else []
+    if isinstance(value, Iterable) and not isinstance(value, bytes | bytearray | str):
+        return [ref for item in value for ref in _string_token_values(item)]
     return []
 
 
@@ -115,6 +122,7 @@ def _mapping_token_refs(mapping: Mapping[str, Any] | None) -> list[str]:
     def visit(value: Any) -> None:
         if isinstance(value, Mapping):
             refs.extend(_string_token_values(value.get("tokens")))
+            refs.extend(_string_token_values(value.get("universe")))
             for key, nested in value.items():
                 if isinstance(key, str) and (
                     key in _TOKEN_REF_KEYS or key in _TOKEN_ADDRESS_KEYS or key.endswith("_token_address")

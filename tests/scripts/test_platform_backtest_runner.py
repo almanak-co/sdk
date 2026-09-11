@@ -172,7 +172,7 @@ def test_build_platform_backtest_config_parses_platform_payload() -> None:
     assert config.chain == "base"
     assert config.tokens == ["WETH", "USDC"]
     assert config.include_gas_costs is False
-    assert config.preflight_validation is False
+    assert config.preflight_validation is True
     assert config.allow_hardcoded_fallback is True
 
 
