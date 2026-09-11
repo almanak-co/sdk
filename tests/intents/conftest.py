@@ -15,7 +15,7 @@ import os
 import sqlite3
 import time
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -1827,6 +1827,33 @@ def assert_swap_conservation(
     assert out_after == out_balance_before, (
         f"Output token balance must be unchanged after failed swap. Before: {out_balance_before}, After: {out_after}"
     )
+
+
+def native_fee_paid_by_wallet(web3: Web3, wallet: str, tx_hashes: Iterable[str]) -> int:
+    """Native fee ``wallet`` itself paid across ``tx_hashes``, in wei.
+
+    Only a transaction the wallet sent debits its native balance; under a Safe
+    or Zodiac module the sender is a separate EOA and the wallet pays nothing,
+    so senders are filtered rather than assumed. Fees are read from chain
+    receipts, not from SDK-derived costs, so a native-output assertion built on
+    this stays independent of the accounting under test. OP-stack ``l1Fee`` is
+    an additive charge on top of execution cost; a chain that does not report
+    one did not charge one.
+    """
+    from almanak.framework.execution.receipt_costs import measured_gas_cost_wei, receipt_l1_fee_wei
+
+    sender = Web3.to_checksum_address(wallet)
+    total = 0
+    for tx_hash in tx_hashes:
+        receipt = web3.eth.get_transaction_receipt(tx_hash)
+        if Web3.to_checksum_address(receipt["from"]) != sender:
+            continue
+        total += measured_gas_cost_wei(
+            receipt["gasUsed"],
+            receipt["effectiveGasPrice"],
+            receipt_l1_fee_wei(dict(receipt)),
+        )
+    return total
 
 
 def get_chain_name_from_id(chain_id: int) -> str:

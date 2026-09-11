@@ -18,6 +18,11 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
+from almanak.connectors._strategy_base.v4_pool_abi import (
+    V4_DEFAULT_TICK_SPACING,
+    V4_ZERO_ADDRESS,
+)
+from almanak.connectors.uniswap_v4.pool_key import PoolKey
 from almanak.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents import SwapIntent
@@ -29,6 +34,7 @@ from tests.intents.conftest import (
     format_token_amount,
     get_token_balance,
     get_token_decimals,
+    native_fee_paid_by_wallet,
 )
 
 # =============================================================================
@@ -54,6 +60,11 @@ class TestUniswapV4SwapIntent:
     - Transactions execute successfully on-chain via UniversalRouter
     - UniswapV4ReceiptParser correctly interprets PoolManager Swap events
     - Balance changes match expected amounts
+
+    Pair coverage: the WETH tests exercise the ERC-20 currency pair, and
+    ``test_swap_usdc_to_native_eth_using_intent`` exercises the address(0) pool
+    key. WETH and native ETH are distinct V4 currencies with distinct pools, so
+    neither substitutes for the other.
     """
 
     @pytest.mark.intent(IntentType.SWAP)
@@ -191,6 +202,122 @@ class TestUniswapV4SwapIntent:
         assert weth_received > 0, "Must receive positive WETH"
 
         print("\nALL 4 LAYERS PASSED")
+
+    @pytest.mark.intent(IntentType.SWAP)
+    @pytest.mark.asyncio
+    async def test_swap_usdc_to_native_eth_using_intent(
+        self,
+        web3: Web3,
+        funded_wallet: str,
+        orchestrator: ExecutionOrchestrator,
+        price_oracle: dict[str, Decimal],
+    ):
+        """Test USDC -> native ETH against the address(0) pool key.
+
+        The WETH tests name an ERC-20 currency and cannot reach this pool, so
+        without this case the native-currency router path has no coverage.
+
+        The wallet delta is tied to the pool's own output rather than asserted
+        positive: a router that forwards only the slippage minimum and strands
+        the remainder still leaves a positive delta.
+        """
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        token_in = tokens["USDC"]
+        in_decimals = get_token_decimals(web3, token_in)
+        swap_amount = Decimal("100")  # 100 USDC
+
+        wallet = Web3.to_checksum_address(funded_wallet)
+        usdc_before = get_token_balance(web3, token_in, funded_wallet)
+        native_before = web3.eth.get_balance(wallet)
+
+        expected_usdc_spent = int(swap_amount * Decimal(10**in_decimals))
+        assert usdc_before >= expected_usdc_spent, (
+            f"funded_wallet must hold >= {swap_amount} USDC to run this test "
+            f"(have {format_token_amount(usdc_before, in_decimals)})"
+        )
+
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="ETH",
+            amount=swap_amount,
+            max_slippage=SWAP_MAX_SLIPPAGE,
+            protocol="uniswap_v4",
+            chain=CHAIN_NAME,
+            swap_params={"fee_tier": 500},
+        )
+
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+        )
+
+        compilation_result = compiler.compile(intent)
+
+        assert compilation_result.status.value == "SUCCESS", (
+            f"Compilation failed: {compilation_result.error}"
+        )
+        assert compilation_result.action_bundle is not None, "ActionBundle must be created"
+
+        # Native ETH/USDC fee=500 is a different pool than WETH/USDC; pin the
+        # full key so a different-fee native pool cannot satisfy this test.
+        expected_pool_key = PoolKey(
+            currency0=V4_ZERO_ADDRESS,
+            currency1=token_in,
+            fee=500,
+            tick_spacing=V4_DEFAULT_TICK_SPACING[500],
+        ).to_wire()
+        bundle_metadata = compilation_result.action_bundle.metadata
+        pool_key = bundle_metadata.get("pool_key")
+        assert pool_key is not None, "V4 swap must record the pool key it selected"
+        assert bundle_metadata["to_token"]["is_native"] is True, (
+            f"the output leg must resolve to the native currency, got {bundle_metadata['to_token']}"
+        )
+        assert pool_key == expected_pool_key, (
+            f"native swap must select the fee=500 address(0) pool, got {pool_key}"
+        )
+
+        execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        assert execution_result.success, f"Execution failed: {execution_result.error}"
+
+        parser = UniswapV4ReceiptParser(chain=CHAIN_NAME)
+        extract_kwargs = parser.build_extract_kwargs(
+            field="swap_amounts",
+            bundle_metadata={**bundle_metadata, "pool_key": expected_pool_key},
+        )
+        assert extract_kwargs["swap_pool_key"] == expected_pool_key
+        pool_amount_out = 0
+        for tx_result in execution_result.transaction_results:
+            if not tx_result.receipt:
+                continue
+            parse_result = parser.parse_receipt(tx_result.receipt.to_dict(), **extract_kwargs)
+            if parse_result.swap_result:
+                assert parse_result.swap_result.token_out == V4_ZERO_ADDRESS, (
+                    f"the parsed output side must be the native currency, got {parse_result.swap_result.token_out}"
+                )
+                pool_amount_out += int(parse_result.swap_result.amount_out)
+
+        assert pool_amount_out > 0, "Must find a Swap event reporting positive output"
+
+        # Only fees this wallet itself paid may be added back; under Zodiac the
+        # sender is a separate EOA and the wallet's delta carries no fee at all.
+        gas_paid_by_wallet = native_fee_paid_by_wallet(
+            web3,
+            wallet,
+            [tx_result.tx_hash for tx_result in execution_result.transaction_results if tx_result.receipt],
+        )
+
+        usdc_spent = usdc_before - get_token_balance(web3, token_in, funded_wallet)
+        native_received = web3.eth.get_balance(wallet) - native_before + gas_paid_by_wallet
+
+        assert usdc_spent == expected_usdc_spent, (
+            f"USDC spent must equal swap amount. Expected: {expected_usdc_spent}, Got: {usdc_spent}"
+        )
+        assert native_received == pool_amount_out, (
+            "wallet must receive the pool's entire output; "
+            f"pool paid {pool_amount_out} wei, wallet received {native_received} wei "
+            f"(shortfall {pool_amount_out - native_received} wei)"
+        )
 
     @pytest.mark.intent(IntentType.SWAP)
     @pytest.mark.asyncio
