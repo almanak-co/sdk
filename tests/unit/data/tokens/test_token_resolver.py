@@ -1074,6 +1074,26 @@ class TestBridgedTokenAliases:
         assert token.decimals == 18
         assert token.address.lower() == "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c"
 
+    @pytest.mark.parametrize("symbol", ["BSC-USD", "bsc-usd"])
+    @pytest.mark.parametrize("chain", ["bsc", "eip155:56"])
+    def test_bsc_usd_alias_matches_canonical_usdt(self, temp_cache_file, symbol, chain):
+        """Provider quote spelling selects BSC USDT, including its 18-decimal scale."""
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        token = resolver.resolve(symbol, chain, skip_gateway=True)
+        canonical = resolver.resolve("0x55d398326f99059ff775485246999027b3197955", "bsc")
+
+        assert token == canonical
+        assert token.symbol == "USDT"
+        assert token.chain == "bsc"
+        assert token.decimals == 18
+        assert token.address.lower() == "0x55d398326f99059ff775485246999027b3197955"
+
+    @pytest.mark.parametrize("chain", ["ethereum", "arbitrum", "base", "polygon"])
+    def test_bsc_usd_alias_does_not_select_usdt_on_other_chains(self, temp_cache_file, chain):
+        resolver = TokenResolver(cache_file=temp_cache_file)
+        with pytest.raises(TokenNotFoundError):
+            resolver.resolve("BSC-USD", chain, skip_gateway=True)
+
     @pytest.mark.parametrize(
         "chain,expected_address_prefix",
         [
