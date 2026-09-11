@@ -13,6 +13,7 @@ import json
 import logging
 import time
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import aiohttp
@@ -64,6 +65,42 @@ def _redact_observe_error(error: object, settings: GatewaySettings) -> str:
         if secret and secret.strip():
             message = message.replace(secret.strip(), "***")
     return message
+
+
+def persist_timeline_event(
+    request: gateway_pb2.RecordTimelineEventRequest,
+    timestamp: datetime,
+    details: dict[str, Any],
+    *,
+    timeout: float | None = None,
+) -> str:
+    """Persist an event through the gateway's canonical timeline store."""
+    if not request.deployment_id:
+        raise ValueError("deployment_id is required")
+    if not request.event_type:
+        raise ValueError("event_type is required")
+    event = TimelineEvent(
+        event_id=str(uuid4()),
+        deployment_id=request.deployment_id,
+        timestamp=timestamp,
+        event_type=request.event_type,
+        description=request.description,
+        tx_hash=request.tx_hash if request.tx_hash else None,
+        chain=request.chain if request.chain else None,
+        details=details,
+        cycle_id=request.cycle_id if request.cycle_id else "",
+        phase=request.phase if request.phase else "",
+        related_ledger_entry_id=(request.related_ledger_entry_id if request.related_ledger_entry_id else ""),
+    )
+    if timeout is None:
+        store = get_timeline_store()
+        store.add_event(event)
+    else:
+        from almanak.gateway.timeline.store import get_initialized_timeline_store
+
+        store = get_initialized_timeline_store()
+        store.add_event(event, timeout=timeout)
+    return event.event_id
 
 
 class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
@@ -449,7 +486,6 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
         """
         deployment_id = request.deployment_id
         event_type = request.event_type
-        description = request.description
 
         if not deployment_id:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -507,26 +543,8 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
         else:
             timestamp = datetime.now(UTC)
 
-        # Create event
-        event_id = str(uuid4())
-        event = TimelineEvent(
-            event_id=event_id,
-            deployment_id=deployment_id,
-            timestamp=timestamp,
-            event_type=event_type,
-            description=description,
-            tx_hash=request.tx_hash if request.tx_hash else None,
-            chain=request.chain if request.chain else None,
-            details=details,
-            cycle_id=request.cycle_id if request.cycle_id else "",
-            phase=request.phase if request.phase else "",
-            related_ledger_entry_id=(request.related_ledger_entry_id if request.related_ledger_entry_id else ""),
-        )
-
         try:
-            # Store event
-            store = get_timeline_store()
-            store.add_event(event)
+            event_id = persist_timeline_event(request, timestamp, details)
 
             logger.info(f"Recorded timeline event: {event_type} for {deployment_id}")
 

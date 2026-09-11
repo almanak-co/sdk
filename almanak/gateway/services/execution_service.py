@@ -674,6 +674,23 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         else:
             raise ValueError(f"Unknown wallet kind: {kind}")
 
+    @staticmethod
+    def _persist_execution_timeline_event(event: Any) -> None:
+        from almanak.gateway.services.observe_service import persist_timeline_event
+
+        request = gateway_pb2.RecordTimelineEventRequest(
+            deployment_id=event.deployment_id,
+            event_type=event.event_type.value,
+            description=event.description,
+            tx_hash=event.tx_hash or "",
+            chain=event.chain or "",
+            cycle_id=event.cycle_id or "",
+            phase=event.phase or "",
+            related_ledger_entry_id=event.related_ledger_entry_id or "",
+        )
+        # Synchronous store waits still occupy this gateway loop; the budget is per event.
+        persist_timeline_event(request, event.timestamp, json.loads(json.dumps(event.details or {})), timeout=2.0)
+
     async def _get_orchestrator(self, chain: str, wallet_address: str):
         """Get or create execution orchestrator for a chain.
 
@@ -743,6 +760,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             signer=signer,
             submitter=submitter,
             simulator=simulator,
+            timeline_sink=self._persist_execution_timeline_event,
             chain=chain,
             rpc_url=rpc_url,
             # ALM-3184: the configured network is the positive fork declaration.

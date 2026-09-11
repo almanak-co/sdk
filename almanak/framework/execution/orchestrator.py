@@ -1147,6 +1147,7 @@ class ExecutionOrchestrator:
         registry_preflight: "RegistryPreflightCheck | None" = None,
         managed_fork: bool | None = None,
         operation_observer_factory: Any = None,
+        timeline_sink: Callable[[TimelineEvent], None] | None = None,
     ) -> None:
         """Initialize the orchestrator.
 
@@ -1158,6 +1159,7 @@ class ExecutionOrchestrator:
             rpc_url: RPC URL for nonce queries (optional if submitter provides)
             risk_guard: RiskGuard for validation (uses default if not provided)
             event_callback: Optional callback for execution events
+            timeline_sink: Instance-owned event persistence; defaults to the timeline API.
             gas_buffer_multiplier: Gas buffer multiplier (uses chain default if not provided)
             tx_timeout_seconds: Timeout for transaction confirmation. If None, uses
                 chain-specific default (300s for Ethereum L1, 120s for L2s).
@@ -1190,6 +1192,7 @@ class ExecutionOrchestrator:
         self.rpc_url = rpc_url
         self.risk_guard = risk_guard or RiskGuard()
         self._event_callback = event_callback
+        self._timeline_sink = timeline_sink
 
         from almanak.framework.execution.gas.constants import DEFAULT_TX_TIMEOUT_SECONDS
 
@@ -1348,7 +1351,7 @@ class ExecutionOrchestrator:
             },
         )
 
-        add_event(timeline_event)
+        self._persist_timeline_event(timeline_event)
 
         if self._event_callback:
             try:
@@ -1357,6 +1360,20 @@ class ExecutionOrchestrator:
                 logger.warning(f"Event callback failed: {e}")
 
         logger.debug(f"Event emitted: {event_type.value} for {context.deployment_id}")
+
+    def _persist_timeline_event(self, timeline_event: TimelineEvent) -> None:
+        if self._timeline_sink is None:
+            add_event(timeline_event)
+        else:
+            try:
+                self._timeline_sink(timeline_event)
+            except Exception as exc:
+                logger.warning(
+                    "Execution timeline persistence failed (non-fatal): %s deployment=%s event=%s",
+                    type(exc).__name__,
+                    timeline_event.deployment_id,
+                    timeline_event.event_type.value,
+                )
 
     def _create_session(
         self,

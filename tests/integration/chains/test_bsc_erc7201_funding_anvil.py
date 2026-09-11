@@ -105,10 +105,13 @@ async def test_managed_funding_and_transfer_for_bsc_erc7201_tokens(bsc_fork: Rol
         method: str,
         params: list[Any],
         timeout_override: float | None = None,
+        raise_on_timeout: bool = False,
     ) -> tuple[bool, Any]:
         if method == "anvil_dealERC20":
             return False, None
-        return await original_rpc_call_raw(method, params, timeout_override=timeout_override)
+        return await original_rpc_call_raw(
+            method, params, timeout_override=timeout_override, raise_on_timeout=raise_on_timeout
+        )
 
     with patch.object(bsc_fork, "_rpc_call_raw", side_effect=rpc_call_raw_without_deal) as rpc_mock:
         failed = await bsc_fork.fund_tokens_report(

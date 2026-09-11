@@ -23,7 +23,9 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 from collections import defaultdict
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -489,10 +491,10 @@ class TimelineStore:
             )
             return [self._row_to_event(row) for row in rows]
 
-    def _persist_event_postgres(self, event: TimelineEvent, resolved_id: str) -> None:
+    def _persist_event_postgres(self, event: TimelineEvent, resolved_id: str, timeout: float = 30) -> None:
         """Persist event to PostgreSQL under the canonical deployment_id."""
         try:
-            self._pg_submit(self._async_persist_event(event, resolved_id))
+            self._pg_submit(self._async_persist_event(event, resolved_id), timeout=timeout)
         except Exception:
             logger.exception(f"Failed to persist timeline event {event.event_id} to PostgreSQL")
 
@@ -728,14 +730,16 @@ class TimelineStore:
             if total_events > 0:
                 logger.info(f"Loaded {total_events} timeline events from SQLite")
 
-    def _persist_event_sqlite(self, event: TimelineEvent) -> None:
+    def _persist_event_sqlite(self, event: TimelineEvent, deadline: float | None = None) -> None:
         """Persist a single event to SQLite."""
         if not self._db_path:
             return
 
         details_json = json.dumps(event.details) if event.details else None
 
-        with sqlite3.connect(str(self._db_path)) as conn:
+        with closing(sqlite3.connect(str(self._db_path), timeout=_remaining_wait(deadline, 5.0))) as conn, conn:
+            if deadline is not None:
+                conn.execute(f"PRAGMA busy_timeout = {int(_remaining_wait(deadline, 5.0) * 1000)}")
             conn.execute(
                 """
                 INSERT OR REPLACE INTO timeline_events
@@ -758,26 +762,39 @@ class TimelineStore:
                     event.related_ledger_entry_id,
                 ),
             )
+            if deadline is not None:
+                # Readers can allow INSERT yet block COMMIT's exclusive lock.
+                conn.execute(f"PRAGMA busy_timeout = {int(_remaining_wait(deadline, 5.0) * 1000)}")
             conn.commit()
 
     # =========================================================================
     # Public API (backend-agnostic, reads from in-memory cache)
     # =========================================================================
 
-    def add_event(self, event: TimelineEvent) -> None:
+    def add_event(self, event: TimelineEvent, *, timeout: float | None = None) -> None:
         """Add a new timeline event.
 
         Args:
             event: The timeline event to store
+            timeout: Optional shared budget for lock and database waits. Requires
+                initialization at server startup; does not bound OS scheduling or I/O.
         """
+        deadline = None if timeout is None else time.monotonic() + timeout
         if not self._initialized:
+            if timeout is not None:
+                raise RuntimeError("Bounded timeline writes require an initialized store")
             self.initialize()
 
         # One identity (blueprint 29): event.deployment_id is the canonical
         # deployment_id resolved at runner boot — used directly as the key.
         cache_key = event.deployment_id
 
-        with self._lock:
+        acquired = (
+            self._lock.acquire() if deadline is None else self._lock.acquire(timeout=_remaining_wait(deadline, 0))
+        )
+        if not acquired:
+            raise TimeoutError("Timeline write lock budget exhausted")
+        try:
             # Add to cache under resolved key
             self._cache[cache_key].append(event)
 
@@ -786,9 +803,19 @@ class TimelineStore:
 
             # Persist to database
             if self._uses_postgres:
-                self._persist_event_postgres(event, cache_key)
+                # PostgreSQL logs write failures without raising; cache acceptance is not durability.
+                if deadline is None:
+                    self._persist_event_postgres(event, cache_key)
+                else:
+                    self._persist_event_postgres(event, cache_key, timeout=_remaining_wait(deadline, 30))
             elif self._db_path:
-                self._persist_event_sqlite(event)
+                if deadline is None:
+                    self._persist_event_sqlite(event)
+                else:
+                    self._persist_event_sqlite(event, deadline=deadline)
+
+        finally:
+            self._lock.release()
 
         logger.debug(f"Added timeline event: {event.event_type} for {event.deployment_id}")
 
@@ -947,7 +974,24 @@ class TimelineStore:
 # Singleton accessor
 # =============================================================================
 
+
+def _remaining_wait(deadline: float | None, default: float) -> float:
+    if deadline is None:
+        return default
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Timeline write budget exhausted")
+    return remaining
+
+
 _timeline_store: TimelineStore | None = None
+
+
+def get_initialized_timeline_store() -> TimelineStore:
+    """Return the server-owned store without starting database work during execution."""
+    if _timeline_store is None or not _timeline_store._initialized:
+        raise RuntimeError("Timeline store is not initialized")
+    return _timeline_store
 
 
 def get_timeline_store(
