@@ -89,24 +89,63 @@ class _PinnedCompileGateway:
         return self._gateway.rpc.Call(pinned, timeout=timeout)
 
 
-def _canonical_weth_usdc_pair(weth: str, usdc: str) -> tuple[str, str, Decimal, Decimal, Decimal, Decimal]:
-    """Map WETH/USDC amounts and a USDC-per-WETH range onto pool token0/token1 order.
+@dataclass(frozen=True)
+class CanonicalPair:
+    """Pool-oriented pair, reachable only by name at both ends.
+
+    The two amounts and the two bounds are adjacent and interchangeable by type,
+    so any positional surface between this mapping and its consumer is a place a
+    one-token transposition mints the wrong leg. Keyword-only arguments make a
+    positional call raise; a non-iterable container makes a positional unpack
+    raise. A NamedTuple does NOT do the second -- it subclasses tuple, so the
+    unpack stays legal and the surface is merely unused.
+
+    Still possible, and deliberately so: crossing the values by NAME, here or in
+    a caller's parameter dict. Those read as intentional edits in review, which
+    is the whole of what naming buys.
+    """
+
+    token0: str
+    token1: str
+    amount0: Decimal
+    amount1: Decimal
+    range_lower: Decimal
+    range_upper: Decimal
+
+
+def _canonical_volatile_stable_pair(
+    *,
+    volatile: str,
+    stable: str,
+    volatile_amount: Decimal,
+    stable_amount: Decimal,
+    range_lower: Decimal,
+    range_upper: Decimal,
+) -> CanonicalPair:
+    """Map volatile/stable amounts and a stable-per-volatile range onto token0/token1.
 
     A bare pool address on LPOpenIntent uses the pool contract's canonical
     orientation (token0 < token1 by address). Price bounds are token1 per token0,
-    so the 1000-3000 USDC-per-WETH band inverts when USDC is token0.
+    so a quote-per-base band inverts when the stable is token0.
     """
-    weth_cs = Web3.to_checksum_address(weth)
-    usdc_cs = Web3.to_checksum_address(usdc)
-    if int(weth_cs, 16) < int(usdc_cs, 16):
-        return weth_cs, usdc_cs, WETH_AMOUNT, USDC_AMOUNT, RANGE_LOWER, RANGE_UPPER
-    return (
-        usdc_cs,
-        weth_cs,
-        USDC_AMOUNT,
-        WETH_AMOUNT,
-        Decimal(1) / RANGE_UPPER,
-        Decimal(1) / RANGE_LOWER,
+    volatile_cs = Web3.to_checksum_address(volatile)
+    stable_cs = Web3.to_checksum_address(stable)
+    if int(volatile_cs, 16) < int(stable_cs, 16):
+        return CanonicalPair(
+            token0=volatile_cs,
+            token1=stable_cs,
+            amount0=volatile_amount,
+            amount1=stable_amount,
+            range_lower=range_lower,
+            range_upper=range_upper,
+        )
+    return CanonicalPair(
+        token0=stable_cs,
+        token1=volatile_cs,
+        amount0=stable_amount,
+        amount1=volatile_amount,
+        range_lower=Decimal(1) / range_upper,
+        range_upper=Decimal(1) / range_lower,
     )
 
 
@@ -256,7 +295,13 @@ async def run_uniswap_v3_lp_open_exact_proof(
     compiler_config: IntentCompilerConfig | None = None,
     rpc_url: str | None = None,
     gateway_client: Any | None = None,
+    volatile_symbol: str = "WETH",
     stable_symbol: str = "USDC",
+    volatile_amount: Decimal = WETH_AMOUNT,
+    stable_amount: Decimal = USDC_AMOUNT,
+    range_lower: Decimal = RANGE_LOWER,
+    range_upper: Decimal = RANGE_UPPER,
+    fee_tier: int = FEE_TIER,
 ) -> LPOpenTargetResult:
     """Compile, execute, and independently prove one exact-pool NFT mint.
 
@@ -264,13 +309,27 @@ async def run_uniswap_v3_lp_open_exact_proof(
     everywhere (Robinhood settles in USDG).
     """
     tokens = CHAIN_CONFIGS[chain]["tokens"]
-    weth = tokens["WETH"]
-    usdc = tokens[stable_symbol]
+    volatile = tokens[volatile_symbol]
+    stable = tokens[stable_symbol]
     factory = UNISWAP_V3[chain]["factory"]
     npm = UNISWAP_V3[chain]["position_manager"]
-    pool = compute_pool_address(factory, weth, usdc, FEE_TIER)
-    fail_if_v3_pool_missing(web3, chain, "uniswap_v3", weth, usdc, FEE_TIER)
-    token0, token1, amount0, amount1, range_lower, range_upper = _canonical_weth_usdc_pair(weth, usdc)
+    pool = compute_pool_address(factory, volatile, stable, fee_tier)
+    fail_if_v3_pool_missing(web3, chain, "uniswap_v3", volatile, stable, fee_tier)
+    # Bound by name on both ends, deliberately. The two Decimal pairs are
+    # adjacent and interchangeable by type, so a positional call OR a positional
+    # unpack would let a transposition compile, mint 1000x the intended volatile
+    # leg, and pass every test that inspects only the signature. Both raise now.
+    pair = _canonical_volatile_stable_pair(
+        volatile=volatile,
+        stable=stable,
+        volatile_amount=volatile_amount,
+        stable_amount=stable_amount,
+        range_lower=range_lower,
+        range_upper=range_upper,
+    )
+    token0, token1 = pair.token0, pair.token1
+    amount0, amount1 = pair.amount0, pair.amount1
+    range_lower, range_upper = pair.range_lower, pair.range_upper
     token0_decimals = get_token_decimals(web3, token0)
     token1_decimals = get_token_decimals(web3, token1)
     token0_max = int(amount0 * Decimal(10**token0_decimals))
@@ -284,7 +343,7 @@ async def run_uniswap_v3_lp_open_exact_proof(
         amount1=amount1,
         range_lower=range_lower,
         range_upper=range_upper,
-        fee_tier_units=FEE_TIER,
+        fee_tier_units=fee_tier,
         max_slippage=MAX_SLIPPAGE,
         require_two_sided_minimums=True,
         protocol="uniswap_v3",
@@ -317,8 +376,8 @@ async def run_uniswap_v3_lp_open_exact_proof(
     position_raw, owner_raw = _position_calls(web3, position_manager=npm, position_id=parsed.position_id, block=block)
     state = _position_state(position_raw)
     assert state["liquidity"] > 0
-    assert {state["token0"].lower(), state["token1"].lower()} == {weth.lower(), usdc.lower()}
-    assert state["fee"] == FEE_TIER
+    assert {state["token0"].lower(), state["token1"].lower()} == {volatile.lower(), stable.lower()}
+    assert state["fee"] == fee_tier
     assert owner_raw[-20:].hex() == funded_wallet.lower().removeprefix("0x")
 
     token0_after = get_token_balance(web3, token0, funded_wallet)
@@ -385,7 +444,7 @@ async def run_uniswap_v3_lp_open_exact_proof(
         pool_address=pool,
         token0=state["token0"],
         token1=state["token1"],
-        fee_tier=FEE_TIER,
+        fee_tier=fee_tier,
         position_id=parsed.position_id,
         tick_lower=state["tick_lower"],
         tick_upper=state["tick_upper"],
@@ -502,7 +561,13 @@ async def run_uniswap_v3_lp_collect_fees_exact_proof(
     rpc_url: str | None = None,
     gateway_client: Any | None = None,
     fee_accrual_amount: Decimal = FEE_ACCRUAL_WETH_AMOUNT,
+    volatile_symbol: str = "WETH",
     stable_symbol: str = "USDC",
+    volatile_amount: Decimal = WETH_AMOUNT,
+    stable_amount: Decimal = USDC_AMOUNT,
+    range_lower: Decimal = RANGE_LOWER,
+    range_upper: Decimal = RANGE_UPPER,
+    fee_tier: int = FEE_TIER,
 ) -> LPCollectFeesTargetResult:
     """Create fees, collect them, and prove the NFT remains unchanged."""
     setup = await run_uniswap_v3_lp_open_exact_proof(
@@ -516,7 +581,13 @@ async def run_uniswap_v3_lp_collect_fees_exact_proof(
         compiler_config=compiler_config,
         rpc_url=rpc_url,
         gateway_client=gateway_client,
+        volatile_symbol=volatile_symbol,
         stable_symbol=stable_symbol,
+        volatile_amount=volatile_amount,
+        stable_amount=stable_amount,
+        range_lower=range_lower,
+        range_upper=range_upper,
+        fee_tier=fee_tier,
     )
     fee_accrual = await run_uniswap_v3_swap_exact_proof(
         chain=chain,
@@ -531,8 +602,9 @@ async def run_uniswap_v3_lp_collect_fees_exact_proof(
         rpc_url=rpc_url,
         gateway_client=gateway_client,
         max_slippage=MAX_SLIPPAGE,
-        from_symbol="WETH",
+        from_symbol=volatile_symbol,
         to_symbol=stable_symbol,
+        fee_tier=fee_tier,
     )
 
     npm = UNISWAP_V3[chain]["position_manager"]
@@ -696,7 +768,13 @@ async def run_uniswap_v3_lp_close_exact_proof(
     rpc_url: str | None = None,
     gateway_client: Any | None = None,
     existing_position: LPOpenTargetResult | None = None,
+    volatile_symbol: str = "WETH",
     stable_symbol: str = "USDC",
+    volatile_amount: Decimal = WETH_AMOUNT,
+    stable_amount: Decimal = USDC_AMOUNT,
+    range_lower: Decimal = RANGE_LOWER,
+    range_upper: Decimal = RANGE_UPPER,
+    fee_tier: int = FEE_TIER,
 ) -> LPCloseTargetResult:
     """Prove one exact full-close target, creating isolated setup when needed.
 
@@ -718,7 +796,13 @@ async def run_uniswap_v3_lp_close_exact_proof(
             compiler_config=compiler_config,
             rpc_url=rpc_url,
             gateway_client=gateway_client,
+            volatile_symbol=volatile_symbol,
             stable_symbol=stable_symbol,
+            volatile_amount=volatile_amount,
+            stable_amount=stable_amount,
+            range_lower=range_lower,
+            range_upper=range_upper,
+            fee_tier=fee_tier,
         )
     factory = UNISWAP_V3[chain]["factory"]
     npm = UNISWAP_V3[chain]["position_manager"]

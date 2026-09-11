@@ -16,6 +16,11 @@ from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance, get_token_decimals
 from tests.intents.intent_evidence import decode_explorer_view
 
+# The REPAY target repays a fixed slice of the debt the setup BorrowIntent created.
+# Repaying more than the outstanding debt is clamped on-chain, so the wallet delta
+# would stop matching the request and the exact-proof predicates would fail.
+REPAY_AMOUNT = Decimal("4")
+
 AAVE_POOL_ABI = [
     {
         "inputs": [{"internalType": "address", "name": "user", "type": "address"}],
@@ -123,41 +128,53 @@ async def run_aave_v3_exact_proof(
     execution_context: ExecutionContext,
     price_oracle: dict[str, Decimal],
     intent_evidence: Any,
+    supply_symbol: str = "USDC",
+    collateral_symbol: str = "wstETH",
+    borrow_symbol: str = "USDC",
+    collateral_amount: Decimal = Decimal("0.1"),
+    borrow_amount: Decimal = Decimal("10"),
 ) -> None:
     """Execute setup separately, then emit evidence for exactly one target Intent."""
+    if target is IntentType.REPAY and borrow_amount < REPAY_AMOUNT:
+        raise ValueError(f"REPAY setup needs borrow_amount >= {REPAY_AMOUNT}, got {borrow_amount}")
     tokens = CHAIN_CONFIGS[chain]["tokens"]
-    usdc = tokens["USDC"]
-    wsteth = tokens["wstETH"]
+    supply_asset = tokens[supply_symbol]
+    collateral_asset = tokens[collateral_symbol]
+    borrow_asset = tokens[borrow_symbol]
     compiler = IntentCompiler(chain=chain, wallet_address=funded_wallet, price_oracle=price_oracle)
 
     if target is IntentType.SUPPLY:
         amount = Decimal("10")
-        intent = SupplyIntent(protocol="aave_v3", token=usdc, amount=amount, chain=chain)
+        intent = SupplyIntent(protocol="aave_v3", token=supply_asset, amount=amount, chain=chain)
+        asset = supply_asset
+        asset_symbol = supply_symbol
         position_key = "totalCollateralBase"
     elif target is IntentType.WITHDRAW:
         await _execute(
             compiler,
             orchestrator,
             execution_context,
-            SupplyIntent(protocol="aave_v3", token=usdc, amount=Decimal("20"), chain=chain),
+            SupplyIntent(protocol="aave_v3", token=supply_asset, amount=Decimal("20"), chain=chain),
         )
         amount = Decimal("10")
-        intent = WithdrawIntent(protocol="aave_v3", token=usdc, amount=amount, chain=chain)
+        intent = WithdrawIntent(protocol="aave_v3", token=supply_asset, amount=amount, chain=chain)
+        asset = supply_asset
+        asset_symbol = supply_symbol
         position_key = "totalCollateralBase"
     else:
         await _execute(
             compiler,
             orchestrator,
             execution_context,
-            SupplyIntent(protocol="aave_v3", token=wsteth, amount=Decimal("0.1"), chain=chain),
+            SupplyIntent(protocol="aave_v3", token=collateral_asset, amount=collateral_amount, chain=chain),
         )
         if target is IntentType.BORROW:
-            amount = Decimal("10")
+            amount = borrow_amount
             intent = BorrowIntent(
                 protocol="aave_v3",
-                collateral_token=wsteth,
+                collateral_token=collateral_asset,
                 collateral_amount=Decimal("0"),
-                borrow_token=usdc,
+                borrow_token=borrow_asset,
                 borrow_amount=amount,
                 interest_rate_mode="variable",
                 chain=chain,
@@ -169,21 +186,23 @@ async def run_aave_v3_exact_proof(
                 execution_context,
                 BorrowIntent(
                     protocol="aave_v3",
-                    collateral_token=wsteth,
+                    collateral_token=collateral_asset,
                     collateral_amount=Decimal("0"),
-                    borrow_token=usdc,
-                    borrow_amount=Decimal("10"),
+                    borrow_token=borrow_asset,
+                    borrow_amount=borrow_amount,
                     interest_rate_mode="variable",
                     chain=chain,
                 ),
             )
-            amount = Decimal("4")
-            intent = RepayIntent(protocol="aave_v3", token=usdc, amount=amount, chain=chain)
+            amount = REPAY_AMOUNT
+            intent = RepayIntent(protocol="aave_v3", token=borrow_asset, amount=amount, chain=chain)
+        asset = borrow_asset
+        asset_symbol = borrow_symbol
         position_key = "totalDebtBase"
 
-    decimals = get_token_decimals(web3, usdc)
+    decimals = get_token_decimals(web3, asset)
     requested_raw = int(amount * Decimal(10**decimals))
-    wallet_before = get_token_balance(web3, usdc, funded_wallet)
+    wallet_before = get_token_balance(web3, asset, funded_wallet)
     account_before = _account_data(web3, chain, funded_wallet)
 
     intent_evidence.bind(intent)
@@ -196,9 +215,9 @@ async def run_aave_v3_exact_proof(
         parser=lambda receipt: parser.parse_receipt(receipt),
     )
     assert parse_result.success, f"{target.value} receipt parsing failed: {parse_result.error}"
-    event = _parsed_event(parse_result, target, usdc)
+    event = _parsed_event(parse_result, target, asset)
 
-    wallet_after = get_token_balance(web3, usdc, funded_wallet)
+    wallet_after = get_token_balance(web3, asset, funded_wallet)
     account_after = _account_data(web3, chain, funded_wallet)
     expected_delta = requested_raw if target in {IntentType.WITHDRAW, IntentType.BORROW} else -requested_raw
     wallet_delta = wallet_after - wallet_before
@@ -210,13 +229,13 @@ async def run_aave_v3_exact_proof(
         log
         for log in explorer_logs
         if log.get("name") == "Transfer"
-        and str(log.get("address", "")).lower() == usdc.lower()
+        and str(log.get("address", "")).lower() == asset.lower()
         and str((log.get("args") or {}).get(direction_key, "")).lower() == wallet
         and int((log.get("args") or {}).get("value", -1)) == requested_raw
     ]
     flags = {
         "single_target_protocol_event": True,
-        "asset_matches": event.reserve.lower() == usdc.lower(),
+        "asset_matches": event.reserve.lower() == asset.lower(),
         "account_matches": _account_matches(event, target, funded_wallet),
         "parser_amount_matches_request": int(event.amount) == requested_raw,
         "wallet_delta_matches_request": wallet_delta == expected_delta,
@@ -236,7 +255,7 @@ async def run_aave_v3_exact_proof(
         hard=True,
         flags=flags,
         witnesses=[
-            {"kind": "wallet_balance_delta", "token": usdc, "amount_raw": wallet_delta},
+            {"kind": "wallet_balance_delta", "token": asset, "amount_raw": wallet_delta},
             {"kind": "independent_transfer_logs", "matches": transfers},
         ],
         notes=[],
@@ -244,8 +263,8 @@ async def run_aave_v3_exact_proof(
     intent_evidence.record_balance_deltas(
         checks={"wallet_delta_matches_request": wallet_delta == expected_delta},
         asset={
-            "address": usdc,
-            "symbol": "USDC",
+            "address": asset,
+            "symbol": asset_symbol,
             "before": wallet_before,
             "after": wallet_after,
             "delta": wallet_delta,
@@ -256,7 +275,7 @@ async def run_aave_v3_exact_proof(
         profile="lending.v1",
         intent=target.value,
         account=funded_wallet,
-        asset_address=usdc,
+        asset_address=asset,
         asset_decimals=decimals,
         resource_address=AAVE_V3_POOL_ADDRESSES[chain],
         requested_amount_raw=requested_raw,

@@ -2746,6 +2746,7 @@ def _fetch_prices_from_fork(chain_name: str) -> dict[str, Decimal]:
     """
     from web3 import Web3
 
+    from almanak.gateway.utils.rpc_provider import inject_poa_middleware
     from almanak.integrations.chainlink.catalog import CATALOG
 
     config = CHAIN_CONFIGS.get(chain_name, {})
@@ -2798,6 +2799,12 @@ def _fetch_prices_from_fork(chain_name: str) -> dict[str, Decimal]:
     # 5s timeout: a wedged local RPC must not hang the whole session on a
     # session-scoped fixture.
     w3 = Web3(Web3.HTTPProvider(get_anvil_rpc_url(chain_name), request_kwargs={"timeout": 5}))
+    # On a PoA chain every `eth_getBlock` raises ExtraDataLengthError, so WITHOUT
+    # this each feed read fails and the whole chain silently falls back to LIVE
+    # CoinGecko -- reintroducing the pinned-quoter-vs-live-oracle skew this
+    # function exists to remove. Membership comes from the chain descriptor;
+    # a local chain list here would rot the moment a descriptor changes.
+    inject_poa_middleware(w3, chain_name)
     if not w3.is_connected():
         # Distinct from "no feed". Reporting an RPC failure as a missing feed is
         # exactly the misattribution this change exists to remove.
@@ -2938,6 +2945,8 @@ def _create_price_oracle_fixture(chain_name: str):
         which is the old behaviour and carries the old time-skew hazard — so
         the fallback is NAMED in the output rather than applied silently.
         """
+        from almanak.framework.data.tokens.pegs import peg_for_identity
+
         # Declare the Anvil dependency EXPLICITLY. `get_anvil_rpc_url` reads
         # ANVIL_<CHAIN>_PORT, which the Anvil fixture sets — so without this the
         # correct behaviour depends on consumers happening to list the Anvil/web3
@@ -2982,22 +2991,35 @@ def _create_price_oracle_fixture(chain_name: str):
             # live quote for it against a pinned ETH puts the whole pin age in
             # the ratio. A print is not a control, so drop the CHAIN to all-live
             # rather than hand back a mixed dict that reads as an improvement.
-            from almanak.integrations.chainlink.catalog import TOKEN_TO_ETH_PAIR
+            # Name the VOLATILE leg, not the ETH-family leg. An ETH-symbol set
+            # cannot see WBNB, WAVAX or WMNT, so on a non-ETH chain a run where
+            # the wrapped native failed to pin while the stables succeeded would
+            # fall through and be reported as bounded — the worst mix, described
+            # as the safe one. Ask the token registry which addresses are
+            # USD-pegged and refuse everything else; a token the registry cannot
+            # name counts as volatile, so an unknown drops the chain to all-live
+            # rather than being assumed stable -- the safe direction, but it is a
+            # degradation announced only by the print below, not a hard failure.
+            # Address-keyed, so a symbol collision cannot buy a
+            # volatile token the stable treatment. This refuses a strict
+            # superset of what the ETH set refused: WETH and every LST are
+            # unpegged, so their existing refusal is preserved.
+            chain_tokens = config.get("tokens", {})
 
-            # TOKEN_TO_ETH_PAIR holds only the LSTs (RETH, STETH, WSTETH) — it
-            # maps a token to its <TOKEN>/ETH feed, and ETH has no such feed
-            # because the ratio is 1. So ETH and WETH must be added by hand:
-            # they are the most ETH-correlated symbols there are, and they are
-            # the volatile leg of nearly every pair here. Without them, a run
-            # where WETH failed to pin while the stables succeeded would hand
-            # back the worst possible mix — volatile live, stables pinned —
-            # and the refusal below would not fire.
-            eth_correlated = set(TOKEN_TO_ETH_PAIR) | {"ETH", "WETH", "NATIVE_ETH"}
-            correlated = sorted(s for s in missing if s.strip().upper() in eth_correlated)
-            if correlated:
+            def _is_usd_pegged(symbol: str) -> bool:
+                address = chain_tokens.get(symbol)
+                if not address:
+                    return False
+                try:
+                    return peg_for_identity(chain_name, address) is not None
+                except Exception:  # noqa: BLE001 - an unnameable token is volatile
+                    return False
+
+            unpegged = sorted(s for s in missing if not _is_usd_pegged(s))
+            if unpegged:
                 print(
                     f"  REFUSING mixed price sources on {chain_name}: "
-                    f"{', '.join(correlated)} is ETH-correlated and could not be priced at "
+                    f"{', '.join(unpegged)} is not USD-pegged and could not be priced at "
                     f"the pinned block, while {', '.join(sorted(on_chain))} could. A swap "
                     f"between them would carry the pin age inside its price ratio. Falling "
                     f"back to ALL-LIVE for this chain, which is at least self-consistent "
@@ -3008,9 +3030,10 @@ def _create_price_oracle_fixture(chain_name: str):
             print(
                 f"  Mixed price sources on {chain_name}: "
                 f"{', '.join(sorted(on_chain))} at the pinned block, "
-                f"{', '.join(sorted(missing))} live. None of the live ones is ETH-correlated, "
-                f"so a pair spanning the two groups is stable-vs-stable and the skew is "
-                f"bounded; kept rather than dropping the chain to all-live (VIB-6733)."
+                f"{', '.join(sorted(missing))} live. Every live one is USD-pegged in the "
+                f"token registry, so a pair spanning the two groups is stable-vs-stable "
+                f"and the skew is bounded; kept rather than dropping the chain to all-live "
+                f"(VIB-6733)."
             )
         # On-chain values win; live only fills the gaps.
         return ObservedPrices(live) | on_chain

@@ -2112,6 +2112,33 @@ class TestSupply:
     ]
 
 
+def test_intent_proof_node_canonicalizes_bnb_directory_to_bsc(modules, tmp_path: Path) -> None:
+    qa, _, _ = modules
+    proof = tmp_path / "tests" / "intents" / "bnb" / "test_exact.py"
+    proof.parent.mkdir(parents=True)
+    proof.write_text(
+        """
+import pytest
+from almanak.framework.intents.vocabulary import IntentType
+
+@pytest.mark.qa_proof(protocol="uniswap_v3", contract="swap.v1")
+@pytest.mark.intent(IntentType.SWAP)
+async def test_swap(intent_evidence):
+    pass
+"""
+    )
+    original_root = qa.REPO_ROOT
+    qa.REPO_ROOT = tmp_path
+    try:
+        nodes = qa._intent_file_proof_nodes(proof)
+    finally:
+        qa.REPO_ROOT = original_root
+
+    assert len(nodes) == 1
+    assert nodes[0]["chain"] == "bsc"
+    assert nodes[0]["proof_id"] == "intent.uniswap_v3.bsc.SWAP.safe.positive_runtime.v1"
+
+
 def test_intent_proof_node_rejects_multi_intent_cross_paint(modules, tmp_path: Path) -> None:
     qa, _, _ = modules
     proof = tmp_path / "tests" / "intents" / "arbitrum" / "test_ambiguous.py"

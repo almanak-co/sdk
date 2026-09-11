@@ -64,14 +64,15 @@ async def run_uniswap_v3_swap_exact_proof(
     max_price_impact: Decimal | None = None,
     from_symbol: str = "USDC",
     to_symbol: str = "WETH",
+    fee_tier: int = FEE_TIER,
 ) -> SwapTargetResult:
     """Prove one exact-pool swap through receipt and bilateral state."""
     tokens = CHAIN_CONFIGS[chain]["tokens"]
     token_in = tokens[from_symbol]
     token_out = tokens[to_symbol]
     factory = UNISWAP_V3[chain]["factory"]
-    pool = compute_pool_address(factory, token_in, token_out, FEE_TIER)
-    fail_if_v3_pool_missing(web3, chain, "uniswap_v3", token_in, token_out, FEE_TIER)
+    pool = compute_pool_address(factory, token_in, token_out, fee_tier)
+    fail_if_v3_pool_missing(web3, chain, "uniswap_v3", token_in, token_out, fee_tier)
 
     input_decimals = get_token_decimals(web3, token_in)
     output_decimals = get_token_decimals(web3, token_out)
@@ -187,7 +188,7 @@ async def run_uniswap_v3_swap_exact_proof(
         output_asset_decimals=output_decimals,
         resource_address=pool,
         factory_address=factory,
-        fee_tier=FEE_TIER,
+        fee_tier=fee_tier,
         requested_amount_raw=requested_raw,
         wallet_before_raw=input_before,
         wallet_after_raw=input_after,
@@ -222,6 +223,7 @@ async def execute_uniswap_v3_exact_reverse_cleanup(
     max_price_impact: Decimal | None = None,
     from_symbol: str = "WETH",
     to_symbol: str = "USDC",
+    fee_tier: int = FEE_TIER,
 ) -> SwapTargetResult:
     """Reverse only the measured target-swap output back into the funding asset.
 
@@ -232,7 +234,7 @@ async def execute_uniswap_v3_exact_reverse_cleanup(
     token_in = tokens[from_symbol]
     token_out = tokens[to_symbol]
     factory = UNISWAP_V3[chain]["factory"]
-    pool = compute_pool_address(factory, token_in, token_out, FEE_TIER)
+    pool = compute_pool_address(factory, token_in, token_out, fee_tier)
     input_decimals = get_token_decimals(web3, token_in)
     if amount_in_raw <= 0:
         raise AssertionError(f"Reverse cleanup requires a positive measured {from_symbol} output")
