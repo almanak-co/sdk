@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`market_session()` is now cheap enough for backtests.** The calendar
+  instance is cached per exchange and the four-day session frame per
+  calendar-day, so a call costs ~3 ms instead of ~200 ms (the library expands
+  holiday rules on every fresh instance). A one-year hourly backtest spends
+  ~25 s on session gating instead of ~30 min. Behaviour is unchanged.
+
 ### Added
 - **`MarketSnapshot.market_session("NYSE")`** — strategy-facing regular-session
   status (`OPEN` / `CLOSED` / `UNKNOWN`) of a named exchange, evaluated from the

@@ -5,7 +5,16 @@ from unittest.mock import patch
 
 import pytest
 
+from almanak.core.market_sessions import clear_session_cache
 from almanak.gateway.data.price.market_hours import ReferenceMarketStatus, reference_market_status
+
+
+@pytest.fixture(autouse=True)
+def _fresh_calendar_cache():
+    """The calendar-failure test patches the library; a cached calendar would mask the patch."""
+    clear_session_cache()
+    yield
+    clear_session_cache()
 
 
 def test_xau_market_is_open_during_regular_globex_session():

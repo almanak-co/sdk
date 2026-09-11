@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
+from functools import lru_cache
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,41 @@ def _resolve_calendar_name(requested: str) -> str | None:
         return wanted
     lowered = wanted.lower()
     return next((name for name in names if name.lower() == lowered), None)
+
+
+@lru_cache(maxsize=64)
+def _calendar(calendar_name: str) -> Any:
+    """One calendar instance per name for the process.
+
+    ``mcal.get_calendar`` builds a fresh instance every call and each instance
+    expands its holiday rules lazily on first use (~250 ms for NYSE). A
+    backtest evaluates thousands of ticks, so the instance must be reused.
+    """
+    import pandas_market_calendars as mcal
+
+    return mcal.get_calendar(calendar_name)
+
+
+@lru_cache(maxsize=4096)
+def _schedule(calendar_name: str, day: date) -> Any:
+    """Four-day session frame around ``day`` (two before, one after), built once per calendar-day.
+
+    ``interruptions=True`` is required for declared halts to appear as
+    ``interruption_*`` columns; ``open_at_time`` only honours what the
+    schedule carries, and the default schedule omits them. Callers treat the
+    frame as read-only.
+    """
+    return _calendar(calendar_name).schedule(
+        start_date=day - timedelta(days=2),
+        end_date=day + timedelta(days=1),
+        interruptions=True,
+    )
+
+
+def clear_session_cache() -> None:
+    """Drop cached calendars and schedules (tests that patch the calendar library must call this)."""
+    _schedule.cache_clear()
+    _calendar.cache_clear()
 
 
 def _is_in_session(calendar: object, schedule: object, now: datetime) -> bool:
@@ -98,17 +135,8 @@ def exchange_market_status(exchange: str, *, as_of: datetime | None = None) -> M
 
     source = f"pandas_market_calendars:{calendar_name}"
     try:
-        import pandas_market_calendars as mcal
-
-        calendar = mcal.get_calendar(calendar_name)
-        # ``interruptions=True`` is required for declared halts to appear as
-        # ``interruption_*`` columns; ``open_at_time`` only honours what the
-        # schedule carries, and the default schedule omits them.
-        schedule = calendar.schedule(
-            start_date=(now - timedelta(days=2)).date(),
-            end_date=(now + timedelta(days=1)).date(),
-            interruptions=True,
-        )
+        calendar = _calendar(calendar_name)
+        schedule = _schedule(calendar_name, now.date())
         is_open = _is_in_session(calendar, schedule, now)
     except Exception as exc:  # noqa: BLE001 - UNKNOWN is the fail-closed contract
         logger.warning("Exchange calendar failed for %s (%s): %s", exchange, calendar_name, type(exc).__name__)

@@ -14,9 +14,19 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 from almanak import MarketSessionData as PublicMarketSessionData
+from almanak.core.market_sessions import clear_session_cache
 from almanak.framework import MarketSessionData as FrameworkMarketSessionData
 from almanak.framework.market import MarketSessionData, MarketSnapshotBuilder
 from almanak.framework.market.models import ReferenceMarketStatus
+
+
+@pytest.fixture(autouse=True)
+def _fresh_calendar_cache():
+    """Several tests patch the calendar library; cached calendars/schedules would mask the patch."""
+    clear_session_cache()
+    yield
+    clear_session_cache()
+
 
 NYSE_OPEN_MONDAY = datetime(2026, 8, 10, 18, tzinfo=UTC)  # 14:00 ET, regular session
 NYSE_SATURDAY = datetime(2026, 8, 8, 18, tzinfo=UTC)
@@ -157,6 +167,29 @@ def test_market_session_never_touches_the_gateway():
     assert session.status in (ReferenceMarketStatus.OPEN, ReferenceMarketStatus.CLOSED)
     assert client.market.method_calls == []
     assert not snapshot.has_critical_data_failures()
+
+
+def test_calendar_and_daily_schedule_are_built_once():
+    """Backtests call this per tick; the library rebuilds holiday rules per instance (~250 ms), so reuse is required.
+
+    Two independent caches are asserted: the calendar instance (one per exchange
+    per process) and the four-day schedule frame (one per calendar-day).
+    """
+    import pandas_market_calendars as mcal
+
+    from almanak.core.market_sessions import _calendar
+
+    real_get_calendar = mcal.get_calendar
+    with patch("pandas_market_calendars.get_calendar", wraps=real_get_calendar) as calendar_spy:
+        calendar = _calendar("NYSE")
+        with patch.object(calendar, "schedule", wraps=calendar.schedule) as schedule_spy:
+            for hour in range(13, 21):
+                _snapshot(datetime(2026, 8, 10, hour, tzinfo=UTC)).market_session("NYSE")
+            assert schedule_spy.call_count == 1, "eight same-day lookups must share one schedule frame"
+            _snapshot(datetime(2026, 8, 11, 15, tzinfo=UTC)).market_session("NYSE")
+            assert schedule_spy.call_count == 2, "a new calendar-day builds exactly one more frame"
+
+    assert calendar_spy.call_count == 1
 
 
 def test_calendar_failure_fails_closed():
