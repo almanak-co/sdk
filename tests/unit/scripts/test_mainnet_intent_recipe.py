@@ -479,24 +479,73 @@ def test_recover_seal_refuses_incomplete_money_lifecycle(
         )
 
 
-def test_asset_decimals_refuses_an_unrecorded_symbol() -> None:
+def test_asset_decimals_refuses_an_unrecorded_pair() -> None:
     """An unknown asset must refuse, never default to 18.
 
     The expression this replaced was `6 if symbol == "USDC" else 18`, which
     silently called every non-USDC asset 18 decimals. WBTC is 8 and USDT is 6,
     so adding either to a recipe would have mis-scaled a real mainnet spend cap
     by 10**10 or 10**12 with nothing to notice it. The guard is only worth
-    anything if it actually fires, so pin that it does.
+    anything if it actually fires, so pin that it does -- including for a symbol
+    that is recorded on a different chain than the one asked for.
     """
-    for symbol in ("WBTC", "DAI", "", "usdc"):
+    for chain, symbol in (
+        ("arbitrum", "WBTC"),
+        ("arbitrum", "DAI"),
+        ("arbitrum", ""),
+        ("arbitrum", "usdc"),
+        ("arbitrum", "USDG"),
+        ("robinhood", "USDC"),
+        ("solana", "USDC"),
+    ):
         with pytest.raises(ValueError, match="No decimals recorded for mainnet asset"):
-            asset_decimals(symbol)
+            asset_decimals(chain, symbol)
 
 
-@pytest.mark.parametrize(("symbol", "expected"), [("USDC", 6), ("USDT", 6), ("WETH", 18), ("WAVAX", 18)])
-def test_asset_decimals_returns_the_recorded_value(symbol: str, expected: int) -> None:
+@pytest.mark.parametrize(
+    ("chain", "symbol", "expected"),
+    [
+        ("arbitrum", "USDC", 6),
+        ("arbitrum", "USDT", 6),
+        ("arbitrum", "WETH", 18),
+        ("avalanche", "WAVAX", 18),
+        ("robinhood", "USDG", 6),
+        ("robinhood", "USDe", 18),
+        # The whole reason the table grew a chain dimension: the same two
+        # symbols are 18-decimal here and 6-decimal everywhere else.
+        ("bsc", "USDT", 18),
+        ("bsc", "USDC", 18),
+    ],
+)
+def test_asset_decimals_returns_the_recorded_value(chain: str, symbol: str, expected: int) -> None:
     """Liveness: the refusal above is not simply refusing everything."""
-    assert asset_decimals(symbol) == expected
+    assert asset_decimals(chain, symbol) == expected
+
+
+def test_asset_decimals_agree_with_the_funders_own_token_table() -> None:
+    """Cross-check the recipe table against an independently maintained one.
+
+    ``qa_lab/chains.py`` records (address, decimals) for the tokens the funder
+    moves, written for a different purpose by different changes. Hand-written
+    constants that agree with nothing are how a wrong decimals value survives:
+    the two tables disagreeing is the only cheap signal that one of them is
+    wrong, and BSC's 18-decimal USDT is exactly the case that would hide.
+    """
+    # Imported through the package, not by prepending qa_lab/ to sys.path: that
+    # leaves the entry in place for the rest of the session and gives the process
+    # two module objects for one file, each running chains.py's import-time
+    # context resolution.
+    from qa_lab import chains as funder
+
+    compared = 0
+    for chain, symbols in MAINNET_ASSET_DECIMALS.items():
+        for symbol, decimals in symbols.items():
+            recorded = funder.TOKENS.get(chain, {}).get(symbol.upper())
+            if recorded is None:
+                continue
+            assert recorded[1] == decimals, f"{chain}.{symbol}: funder says {recorded[1]}, recipes say {decimals}"
+            compared += 1
+    assert compared >= 12, f"cross-check covered only {compared} pairs; the funder table lost entries"
 
 
 def test_every_recipe_decimal_agrees_with_the_map() -> None:
@@ -505,16 +554,24 @@ def test_every_recipe_decimal_agrees_with_the_map() -> None:
     Recipes used to hardcode the number next to the symbol. Correct today, but
     a second source that can drift; both sides of the cap check must agree.
     """
-    for recipe in (
-        AAVE_V3_ARBITRUM_SUPPLY_EOA,
-        UNISWAP_V3_ARBITRUM_SWAP_EOA,
-        UNISWAP_V3_BASE_SWAP_EOA,
-        TRADERJOE_V2_AVALANCHE_SWAP_EOA,
-    ):
-        assert recipe.asset_decimals == MAINNET_ASSET_DECIMALS[recipe.asset_symbol]
+    checked = 0
+    for recipe in RECIPES.values():
+        # Async perp recipes recover their claim from a sealed lifecycle run and
+        # name no asset of their own.
+        if not hasattr(recipe, "asset_decimals"):
+            continue
+        assert recipe.asset_decimals == MAINNET_ASSET_DECIMALS[recipe.chain][recipe.asset_symbol]
         output_symbol = getattr(recipe, "output_asset_symbol", None)
         if output_symbol:
-            assert recipe.output_asset_decimals == MAINNET_ASSET_DECIMALS[output_symbol]
+            assert recipe.output_asset_decimals == MAINNET_ASSET_DECIMALS[recipe.chain][output_symbol]
+        # Morpho carries a third scaling value; the envelope uses it to decode a
+        # collateral obligation's expected raw amount, so a wrong one shifts the
+        # comparison rather than failing loudly.
+        collateral_symbol = getattr(recipe, "collateral_symbol", None)
+        if collateral_symbol:
+            assert recipe.collateral_decimals == MAINNET_ASSET_DECIMALS[recipe.chain][collateral_symbol]
+        checked += 1
+    assert checked >= 20, f"only {checked} recipes carried decimals; the sweep is going vacuous"
 
 
 def test_run_diagnostics_carry_the_runners_own_log_into_the_bundle(tmp_path: Path) -> None:

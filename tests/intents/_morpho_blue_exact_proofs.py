@@ -7,6 +7,7 @@ binds the market it settled against in addition to the singleton address.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
@@ -37,6 +38,45 @@ SUPPLY_AMOUNT = Decimal("10")
 WITHDRAW_SETUP_AMOUNT = Decimal("20")
 WITHDRAW_AMOUNT = Decimal("10")
 REPAY_AMOUNT = Decimal("4")
+
+
+@dataclass(frozen=True)
+class MorphoAmounts:
+    """Every size one Morpho scenario spends, as one keyword-only bundle.
+
+    A frozen dataclass rather than a tuple of Decimals: the six values are
+    adjacent and interchangeable by type, so a positional call or a positional
+    unpack would let a transposition compile and spend the collateral size as
+    the borrow size. The defaults are the Anvil sizes, which is what keeps the
+    fork nodes byte-identical while a mainnet recipe supplies its own.
+    """
+
+    collateral: Decimal = COLLATERAL_AMOUNT
+    borrow: Decimal = BORROW_AMOUNT
+    supply: Decimal = SUPPLY_AMOUNT
+    withdraw_setup: Decimal = WITHDRAW_SETUP_AMOUNT
+    withdraw: Decimal = WITHDRAW_AMOUNT
+    repay: Decimal = REPAY_AMOUNT
+
+
+@dataclass(frozen=True)
+class MorphoTargetResult:
+    """The target leg plus the prerequisite legs, kept separate.
+
+    Mainnet admission requires a receipt per declared setup obligation, so the
+    setup executions are returned rather than discarded; on Anvil nothing reads
+    them and the scenario is unchanged.
+    """
+
+    intent: Any
+    execution_result: Any
+    transaction_result: Any
+    setup_results: tuple[Any, ...]
+    market_id: str
+    requested_amount_raw: int
+    position_before: int
+    position_after: int
+
 
 _TARGET_EVENT: dict[IntentType, tuple[str, MorphoBlueEventType]] = {
     IntentType.SUPPLY: ("Supply", MorphoBlueEventType.SUPPLY),
@@ -122,7 +162,10 @@ async def run_morpho_blue_exact_proof(
     intent_evidence: Any,
     rpc_url: str,
     market_name: str,
-) -> None:
+    amounts: MorphoAmounts = MorphoAmounts(),
+    compiler_config: Any | None = None,
+    gateway_client: Any | None = None,
+) -> MorphoTargetResult:
     """Execute setup separately, then emit evidence for exactly one target Intent."""
     market_id = select_market_id(chain, market_name)
     market = MORPHO_MARKETS[chain][market_id]
@@ -130,14 +173,21 @@ async def run_morpho_blue_exact_proof(
     collateral_symbol = market["collateral_token"]
     tokens = CHAIN_CONFIGS[chain]["tokens"]
     loan_token = tokens[loan_symbol]
-    compiler = IntentCompiler(chain=chain, wallet_address=funded_wallet, price_oracle=price_oracle, rpc_url=rpc_url)
+    compiler = IntentCompiler(
+        chain=chain,
+        wallet_address=funded_wallet,
+        price_oracle=price_oracle,
+        rpc_url=rpc_url,
+        config=compiler_config,
+        gateway_client=gateway_client,
+    )
     sdk = MorphoBlueSDK(chain=chain, rpc_url=rpc_url)
 
     def supply_collateral() -> SupplyIntent:
         return SupplyIntent(
             protocol="morpho_blue",
             token=collateral_symbol,
-            amount=COLLATERAL_AMOUNT,
+            amount=amounts.collateral,
             use_as_collateral=True,
             market_id=market_id,
             chain=chain,
@@ -154,8 +204,10 @@ async def run_morpho_blue_exact_proof(
             chain=chain,
         )
 
+    setup_results: list[Any] = []
+
     if target is IntentType.SUPPLY:
-        amount = SUPPLY_AMOUNT
+        amount = amounts.supply
         intent: Any = SupplyIntent(
             protocol="morpho_blue",
             token=loan_symbol,
@@ -165,20 +217,22 @@ async def run_morpho_blue_exact_proof(
             chain=chain,
         )
     elif target is IntentType.WITHDRAW:
-        await _execute(
-            compiler,
-            orchestrator,
-            execution_context,
-            SupplyIntent(
-                protocol="morpho_blue",
-                token=loan_symbol,
-                amount=WITHDRAW_SETUP_AMOUNT,
-                use_as_collateral=False,
-                market_id=market_id,
-                chain=chain,
-            ),
+        setup_results.append(
+            await _execute(
+                compiler,
+                orchestrator,
+                execution_context,
+                SupplyIntent(
+                    protocol="morpho_blue",
+                    token=loan_symbol,
+                    amount=amounts.withdraw_setup,
+                    use_as_collateral=False,
+                    market_id=market_id,
+                    chain=chain,
+                ),
+            )
         )
-        amount = WITHDRAW_AMOUNT
+        amount = amounts.withdraw
         intent = WithdrawIntent(
             protocol="morpho_blue",
             token=loan_symbol,
@@ -193,13 +247,13 @@ async def run_morpho_blue_exact_proof(
             chain=chain,
         )
     elif target is IntentType.BORROW:
-        await _execute(compiler, orchestrator, execution_context, supply_collateral())
-        amount = BORROW_AMOUNT
+        setup_results.append(await _execute(compiler, orchestrator, execution_context, supply_collateral()))
+        amount = amounts.borrow
         intent = borrow(amount)
     else:
-        await _execute(compiler, orchestrator, execution_context, supply_collateral())
-        await _execute(compiler, orchestrator, execution_context, borrow(BORROW_AMOUNT))
-        amount = REPAY_AMOUNT
+        setup_results.append(await _execute(compiler, orchestrator, execution_context, supply_collateral()))
+        setup_results.append(await _execute(compiler, orchestrator, execution_context, borrow(amounts.borrow)))
+        amount = amounts.repay
         intent = RepayIntent(
             protocol="morpho_blue",
             token=loan_symbol,
@@ -296,6 +350,21 @@ async def run_morpho_blue_exact_proof(
         position_after=position_after,
         parser_amount_raw=parser_amount,
     )
+    return MorphoTargetResult(
+        intent=intent,
+        execution_result=execution_result,
+        transaction_result=target_tx,
+        setup_results=tuple(setup_results),
+        market_id=market_id,
+        requested_amount_raw=requested_raw,
+        position_before=position_before,
+        position_after=position_after,
+    )
 
 
-__all__ = ["run_morpho_blue_exact_proof", "select_market_id"]
+__all__ = [
+    "MorphoAmounts",
+    "MorphoTargetResult",
+    "run_morpho_blue_exact_proof",
+    "select_market_id",
+]

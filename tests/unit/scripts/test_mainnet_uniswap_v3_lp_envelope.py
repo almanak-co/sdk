@@ -20,6 +20,7 @@ from qa_lab.mainnet_intent_envelope import (
 )
 from qa_lab.mainnet_intent_recipe import (
     RECIPES,
+    UNISWAP_V3_VENUES,
     UNISWAP_V3_ARBITRUM_LP_CLOSE_EOA,
     UNISWAP_V3_ARBITRUM_LP_COLLECT_FEES_EOA,
     UNISWAP_V3_ARBITRUM_LP_OPEN_EOA,
@@ -50,7 +51,15 @@ def test_lp_recipe_is_one_exact_dynamic_nft_lifecycle(recipe) -> None:
     assert recipe.resource_address
     assert recipe.pool_address
     assert recipe.factory_address
-    assert recipe.fee_tier == 500
+    venue = UNISWAP_V3_VENUES[recipe.chain]
+    # Pinned against the venue table rather than a literal: the pair and fee
+    # tier are chain facts (BNB Chain's liquid V3 venue is WBNB/USDT at 3000),
+    # and a recipe built from another chain's venue is the drift worth catching.
+    assert recipe.fee_tier == venue.lp_fee_tier
+    assert recipe.asset_symbol == venue.volatile_symbol
+    assert recipe.output_asset_symbol == venue.stable_symbol
+    assert (recipe.amount0, recipe.amount1) == (venue.volatile_amount, venue.stable_amount)
+    assert (recipe.range_lower, recipe.range_upper) == (venue.range_lower, venue.range_upper)
     assert recipe.terminal == ("UNISWAP_V3_NFT_BALANCE_ZERO", "NO_RESIDUAL_ALLOWANCES", "POOL_WALLET_RELEASED")
     if recipe.intent == "LP_OPEN":
         assert recipe.setup == ()
@@ -62,7 +71,7 @@ def test_lp_recipe_is_one_exact_dynamic_nft_lifecycle(recipe) -> None:
         assert recipe.cleanup == ("SWEEP_TO_MASTER",)
     else:
         assert recipe.setup[0].startswith("LP_OPEN:")
-        assert recipe.setup[1].startswith(f"SWAP:WETH:{recipe.output_asset_symbol}:")
+        assert recipe.setup[1].startswith(f"SWAP:{venue.volatile_symbol}:{venue.stable_symbol}:")
         assert recipe.target == ("LP_COLLECT_FEES:SETUP_POSITION",)
         assert recipe.cleanup[0] == "LP_CLOSE:SETUP_POSITION:FULL"
 
@@ -215,12 +224,7 @@ def test_lp_collect_fee_accrual_setup_proves_exact_pool_and_bilateral_flow() -> 
                         _address_topic(recipe.resource_address),
                         _address_topic(ACCOUNT),
                     ],
-                    "data": "0x"
-                    + _signed_word(amount_in)
-                    + _signed_word(-amount_out)
-                    + _word(1)
-                    + _word(1)
-                    + _word(0),
+                    "data": "0x" + _signed_word(amount_in) + _signed_word(-amount_out) + _word(1) + _word(1) + _word(0),
                 },
                 {
                     "address": recipe.asset_address,
@@ -493,3 +497,58 @@ def test_lp_close_envelope_cannot_green_with_missing_roles_or_terminal(tmp_path:
 
     with pytest.raises(MainnetEnvelopeError, match=message):
         validate_mainnet_envelope(path)
+
+
+def test_pool_legs_follow_the_address_sort_not_the_recipe_role() -> None:
+    """A V3 pool orders its currencies by address; the recipe orders them by role.
+
+    Every receipt quantity (amount0, actual_amount0_raw) is pool-ordered, so
+    reading amount0 with the volatile leg's decimals and price is correct only
+    where the volatile leg happens to sort first. It does on Arbitrum, Base and
+    Robinhood, which is why the coincidence survived; BNB Chain's USDT sorts
+    below WBNB and is the counter-example. Getting this wrong prices a few
+    dollars of stable at the volatile's price and refuses to seal a healthy run.
+    """
+    from qa_lab.mainnet_intent_envelope import _lp_pool_legs
+
+    seen_inverted = False
+    for recipe in LP_RECIPES:
+        (symbol0, decimals0), (symbol1, decimals1) = _lp_pool_legs(recipe)
+        volatile_first = int(recipe.asset_address, 16) < int(recipe.output_asset_address, 16)
+        expected0 = (
+            (recipe.asset_symbol, recipe.asset_decimals)
+            if volatile_first
+            else (recipe.output_asset_symbol, recipe.output_asset_decimals)
+        )
+        expected1 = (
+            (recipe.output_asset_symbol, recipe.output_asset_decimals)
+            if volatile_first
+            else (recipe.asset_symbol, recipe.asset_decimals)
+        )
+        assert (symbol0, decimals0) == expected0
+        assert (symbol1, decimals1) == expected1
+        seen_inverted |= not volatile_first
+    # Liveness: without a chain whose stable sorts first, this sweep would pass
+    # against the very assumption it exists to refute.
+    assert seen_inverted, "no registered LP venue inverts the pair; the sort is untested"
+
+
+def test_lp_recipes_agree_with_the_anvil_node_each_one_claims() -> None:
+    """The mainnet fee tier must be the tier the claimed proof node executes.
+
+    The swap lane and the LP lane are separate pools on BNB Chain, and a single
+    venue-wide fee tier bound the SWAP cell to the LP cell's 30 bps pool while
+    its node proves 5 bps.
+    """
+    from tests.intents._uniswap_v3_exact_proofs import FEE_TIER as SWAP_NODE_DEFAULT_FEE
+    from tests.intents._uniswap_v3_lp_exact_proofs import FEE_TIER as LP_NODE_DEFAULT_FEE
+
+    for chain, venue in UNISWAP_V3_VENUES.items():
+        if chain == "bsc":
+            # tests/intents/bnb passes its own LP pair explicitly and takes the
+            # helper default for the swap.
+            assert venue.swap_fee_tier == SWAP_NODE_DEFAULT_FEE
+            assert venue.lp_fee_tier == 3000
+            continue
+        assert venue.swap_fee_tier == SWAP_NODE_DEFAULT_FEE, chain
+        assert venue.lp_fee_tier == LP_NODE_DEFAULT_FEE, chain

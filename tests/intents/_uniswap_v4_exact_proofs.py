@@ -45,6 +45,7 @@ class V4SwapTargetResult:
     amount_in_raw: int
     amount_out_raw: int
     pool_id: str
+    compile_metadata: dict[str, Any]
 
 
 def _swap_transaction(execution_result: Any, *, pool_manager: str) -> tuple[Any, list[str]]:
@@ -276,6 +277,96 @@ async def run_uniswap_v4_swap_exact_proof(
         amount_in_raw=input_spent,
         amount_out_raw=output_received,
         pool_id=pool_id,
+        compile_metadata=dict(compiled.action_bundle.metadata),
+    )
+
+
+async def execute_uniswap_v4_exact_reverse_cleanup(
+    *,
+    chain: str,
+    web3: Web3,
+    wallet: str,
+    orchestrator: ExecutionOrchestrator,
+    price_oracle: dict[str, Decimal],
+    execution_context: ExecutionContext | None,
+    compiler_config: IntentCompilerConfig,
+    rpc_url: str,
+    gateway_client: Any,
+    amount_in_raw: int,
+    profile: str,
+    max_slippage: Decimal = SWAP_MAX_SLIPPAGE,
+    fee_tier: int = FEE_TIER,
+    from_symbol: str = "WETH",
+    to_symbol: str = "USDC",
+) -> V4SwapTargetResult:
+    """Reverse only the measured target-swap output back into the funding asset.
+
+    Mainnet cleanup returns the wallet to flat, so it consumes the amount the
+    target swap actually produced rather than a recipe constant: a nominal
+    amount would leave dust behind on a favourable fill and revert on an
+    unfavourable one. The reverse leg settles in the same pool the target used,
+    re-derived from the same declared contract profile, so a routing change
+    between the two legs surfaces as a pool-id mismatch instead of silently
+    unwinding somewhere else.
+    """
+    tokens = CHAIN_CONFIGS[chain]["tokens"]
+    token_in = tokens[from_symbol]
+    token_out = tokens[to_symbol]
+    pool_manager = UNISWAP_V4[chain]["pool_manager"]
+    if amount_in_raw <= 0:
+        raise AssertionError(f"Reverse cleanup requires a positive measured {from_symbol} output")
+    input_before = get_token_balance(web3, token_in, wallet)
+    if input_before < amount_in_raw:
+        raise AssertionError("Reverse cleanup output exceeds the wallet balance")
+    output_before = get_token_balance(web3, token_out, wallet)
+
+    sdk = UniswapV4SDK(chain=chain, rpc_url=rpc_url)
+    pool_key = expected_pool_key(
+        sdk, chain=chain, token_in=token_in, token_out=token_out, fee_tier=fee_tier, profile=profile
+    )
+    pool_id = compute_v4_pool_id(
+        pool_key.currency0, pool_key.currency1, pool_key.fee, pool_key.tick_spacing, pool_key.hooks
+    )
+    input_decimals = get_token_decimals(web3, token_in)
+    intent = SwapIntent(
+        from_token=token_in,
+        to_token=token_out,
+        amount=Decimal(amount_in_raw) / (Decimal(10) ** input_decimals),
+        max_slippage=max_slippage,
+        protocol="uniswap_v4",
+        chain=chain,
+    )
+    compiled = IntentCompiler(
+        chain=chain,
+        wallet_address=wallet,
+        price_oracle=price_oracle,
+        config=compiler_config,
+        rpc_url=rpc_url,
+        gateway_client=gateway_client,
+    ).compile(intent)
+    assert compiled.status.value == "SUCCESS", f"V4 reverse cleanup compilation failed: {compiled.error}"
+    assert compiled.action_bundle is not None
+    executed = await orchestrator.execute(compiled.action_bundle, execution_context)
+    assert executed.success, f"V4 reverse cleanup execution failed: {executed.error}"
+
+    transaction, emitted_pool_ids = _swap_transaction(executed, pool_manager=pool_manager)
+    parsed = UniswapV4ReceiptParser(chain=chain).parse_receipt(transaction.receipt.to_dict())
+    assert parsed.swap_result is not None, f"V4 reverse cleanup produced no swap result: {parsed.error}"
+    result = parsed.swap_result
+    input_after = get_token_balance(web3, token_in, wallet)
+    output_after = get_token_balance(web3, token_out, wallet)
+    assert emitted_pool_ids == [pool_id.lower()], "V4 reverse cleanup settled in another pool than the target"
+    assert input_before - input_after == amount_in_raw
+    assert int(result.amount_in) == amount_in_raw
+    assert int(result.amount_out) == output_after - output_before > 0
+    return V4SwapTargetResult(
+        intent=intent,
+        execution_result=executed,
+        transaction_result=transaction,
+        amount_in_raw=amount_in_raw,
+        amount_out_raw=int(result.amount_out),
+        pool_id=pool_id,
+        compile_metadata=dict(compiled.action_bundle.metadata),
     )
 
 
@@ -283,6 +374,7 @@ __all__ = [
     "V4_SWAP_PROFILE",
     "V4_SWAP_ROUTE_PROFILE",
     "V4SwapTargetResult",
+    "execute_uniswap_v4_exact_reverse_cleanup",
     "expected_pool_key",
     "run_uniswap_v4_swap_exact_proof",
 ]
