@@ -59,15 +59,13 @@ dangerous of the two.
 
 Coverage & honesty (Empty ≠ Zero)
 ---------------------------------
-The token address is resolved in priority order: an address-shaped
-``details['token_address'|'asset_address'|'token']``; then the ``details['asset']``
-SYMBOL through the framework ``TokenResolver`` (the shape real strategies
-actually write — ``uniswap_rsi`` and ``lido_staker`` both store a symbol); then an
-address-shaped ``position_id``. A position with no resolvable token address
-returns ``unmeasured=True`` → the seam keeps it at ``UNVERIFIED`` (honest "this
-default cannot verify that position"), NEVER ``FAILED`` and NEVER a false
-``CHAIN_VERIFIED``. A ``None`` / non-numeric balance read after retry is a read
-fault → ``unmeasured``, never a fabricated residual.
+The verifier resolves the explicit held-token declaration, including the planner's
+``asset_symbol``, ``pt_token`` and ``pt_symbol`` forms, through the runner-bound
+``TokenResolver``. An unresolved declaration remains unmeasured; it never falls
+through to a different asset such as PT sale proceeds in ``base_token``. Legacy
+base-only declarations and address-shaped position IDs remain supported when no
+held-token metadata is supplied. A missing/non-numeric balance read after retry
+is a read fault, never fabricated closure or a measured residual.
 
 Gateway boundary: the on-chain read goes through the supplied
 ``gateway_client.query_erc20_balance``. ``rpc_url`` is accepted to satisfy the
@@ -118,76 +116,57 @@ _TOKEN_DUST_WEI = 10
 # yields the unmeasured sentinel): answer "no opinion" for an unattributable
 # balance, and gate the ratchet on whether an authority exists at all.
 
-# Detail keys that may carry the ERC-20 contract ADDRESS, in priority order.
-# Deliberately narrow: an ambiguous key could hold a pool/market address, and a
-# wrong-but-valid address would measure an unrelated wallet balance as a
-# "residual" → false FAILED. Unresolvable → unmeasured (honest).
-_TOKEN_ADDRESS_DETAIL_KEYS = ("token_address", "asset_address", "token")
-
-# Detail keys that may carry the token SYMBOL, resolved via TokenResolver. This
-# is the shape real strategies write (``details={"asset": "WETH"}``).
+# Explicit held-token metadata precedes a legacy base-only declaration. A PT's
+# base token describes sale proceeds, not the token whose closure must be proved.
 #
-# ``"token"`` appears in BOTH tuples deliberately (Codex P2, PR #3531): it is tried
-# as an address first, then as a symbol. It was address-only, so the very common
-# ``details={"token": "WETH"}`` shape failed the address pass, was never tried as a
-# symbol, and resolved to ``""`` → unmeasured. 12+ TOKEN-typed positions write it,
-# including the accounting reference fixture ``strategies/accounting/ta/strategy.py``.
-# Harmless before VIB-6285 (TOKEN had no authority at all); with the per-protocol
-# rule an unmeasured TOKEN row REFUSES TO CERTIFY a successful unwind, so the gap
-# became a block. Neither change causes that alone.
-_TOKEN_SYMBOL_DETAIL_KEYS = ("asset", "symbol", "base_token", "token")
+# Deliberately narrow: a key generic enough to hold a pool/market identifier
+# instead of the held token would measure an unrelated wallet balance as a
+# residual. A bare ``"address"`` is exactly that shape — TOKEN producers write
+# it for the V4 pool-key currency, which is the zero address on a native pool —
+# so it stays out, and every site that writes it also declares one of the keys
+# below.
+_TOKEN_DETAIL_KEYS = (
+    "token_address",
+    "asset_address",
+    "asset",
+    "asset_symbol",
+    "symbol",
+    "token",
+    "pt_token",
+    "pt_symbol",
+)
 
 
 def _resolve_token_address(details: dict, position_id: str, chain: str) -> str:
-    """Resolve the ERC-20 contract address for a TOKEN position, or ``""``.
+    """Resolve the declared held token without substituting another asset."""
+    token = next(
+        (
+            str(details[key]).strip()
+            for key in _TOKEN_DETAIL_KEYS
+            if details.get(key) is not None and str(details[key]).strip()
+        ),
+        "",
+    )
+    if not token and any(key in details for key in _TOKEN_DETAIL_KEYS):
+        return ""
+    if not token:
+        token = str(details.get("base_token") or "").strip()
+        if not token and _is_evm_address(position_id):
+            return position_id
+    if not token:
+        return ""
+    if _is_evm_address(token):
+        return token
+    try:
+        # The runner-bound singleton retains its gateway channel and token cache.
+        from almanak.framework.data.tokens import get_token_resolver
 
-    Pure and never raises — an unresolvable address is the caller's ``unmeasured``
-    signal, never an exception into the teardown verification lane.
-    """
-    for key in _TOKEN_ADDRESS_DETAIL_KEYS:
-        candidate = str(details.get(key) or "")
-        if _is_evm_address(candidate):
-            return candidate
-
-    # Symbol → address through the framework resolver. Framework → framework is
-    # the allowed import direction (this module is framework, unlike the
-    # connector-layer vault / fungible-LP defaults it otherwise mirrors).
-    for key in _TOKEN_SYMBOL_DETAIL_KEYS:
-        symbol = str(details.get(key) or "").strip()
-        if not symbol:
-            continue
-        if _is_evm_address(symbol):
-            return symbol
-        try:
-            # The SINGLETON, not a fresh ``TokenResolver()`` (CodeRabbit, PR #3531).
-            # Both lanes that reach this hook wire the gateway channel into the
-            # singleton — ``cli/_run_setup.py:_wire_token_resolver`` and
-            # ``cli/teardown_helpers.py`` both do
-            # ``get_token_resolver().set_gateway_channel(gateway_client.channel)``.
-            # A fresh instance carries no channel, so ``_resolve_by_symbol``
-            # never takes the dynamic path and any symbol outside the static
-            # registry resolves to nothing → ``unmeasured``. That would have
-            # silently un-measured the very closures this authority exists to
-            # measure. It also reuses the warm caches instead of rebuilding the
-            # index per candidate symbol, per position, in the teardown loop.
-            # ``resolve`` already defaults ``skip_gateway=False``.
-            from almanak.framework.data.tokens import get_token_resolver
-
-            resolved = get_token_resolver().resolve(symbol, chain)
-            address = str(getattr(resolved, "address", "") or "")
-            if _is_evm_address(address):
-                return address
-        except Exception:  # noqa: BLE001 — unresolvable is unmeasured, never a fault
-            logger.debug(
-                "TOKEN post-condition: could not resolve symbol %r on %s to an address",
-                symbol,
-                chain,
-                exc_info=True,
-            )
-
-    if _is_evm_address(position_id):
-        return position_id
-    return ""
+        resolved = get_token_resolver().resolve(token, chain)
+        address = str(getattr(resolved, "address", "") or "")
+        return address if _is_evm_address(address) else ""
+    except Exception:  # noqa: BLE001 — unresolved identity is never closure proof
+        logger.debug("TOKEN post-condition: cannot resolve held token %r on %s", token, chain, exc_info=True)
+        return ""
 
 
 def token_balance_teardown_post_condition(
@@ -266,10 +245,10 @@ def token_balance_teardown_post_condition(
             protocol=protocol,
             position_id=position_id,
             error=(
-                "TOKEN post-condition needs the ERC-20 address "
-                "(details['token_address'|'asset_address'|'token'], a resolvable "
-                "details['asset'|'symbol'|'base_token'] symbol, or an address-shaped "
-                f"position_id); none resolvable (position_id={position_id!r}, "
+                "TOKEN post-condition needs the ERC-20 address from explicit "
+                "held-token metadata (including asset_symbol/pt_token), a legacy "
+                "base-token-only declaration, or an address-shaped position_id; "
+                f"none resolvable (position_id={position_id!r}, "
                 f"details keys={sorted(details)}) — cannot verify (unmeasured)"
             ),
         )
