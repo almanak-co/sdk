@@ -70,6 +70,24 @@ def test_partial_attempt_exports_exact_contract_and_snapshot_without_claiming_ad
     assert load_json(bundle / "assembly.json") == result
 
 
+def test_completed_subject_snapshot_is_retained_alongside_early_quantity_witness(lane):
+    context, cleanup, _ = lane
+    final = context.root / "subject-final"
+    final.mkdir()
+    shutil.copyfile(cleanup / "quantities/almanak_state.db", final / "almanak_state.db")
+    with sqlite3.connect(final / "almanak_state.db") as db:
+        db.execute("INSERT INTO retained VALUES (8)")
+    (final / "result.json").write_bytes(canonical({"scope": "owned_subject_exit_snapshot", "status": "CAPTURED"}))
+
+    assemble(lane)
+    bundle = context.root / "bundle"
+    assert (bundle / "almanak_state.db").is_file()
+    assert (bundle / "subject-final/almanak_state.db").is_file()
+    assert (bundle / "almanak_state.db").read_bytes() == (cleanup / "quantities/almanak_state.db").read_bytes()
+    assert (bundle / "subject-final/almanak_state.db").read_bytes() == (final / "almanak_state.db").read_bytes()
+    assert (bundle / "subject-final/almanak_state.db").read_bytes() != (bundle / "almanak_state.db").read_bytes()
+
+
 def test_local_subject_log_is_exported_with_source_binding_and_redaction(lane):
     context, _, _ = lane
     source = context.root / "subject-process.log"
