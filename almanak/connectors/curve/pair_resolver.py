@@ -275,6 +275,11 @@ def _confirmed_read(
     the pool-independent health probe AND (b) re-reading the SAME call — a
     genuine revert is deterministic and re-fails; a blip recovers. Raises
     ``_TransientTransport`` when the failure can't be confirmed.
+
+    An unanswered call arrives as ``_TransientTransport`` rather than ``None``
+    and earns the same one re-read: this module has no outer retry, and a
+    dropped packet on any one of an enumeration's reads would otherwise make
+    the whole pair indeterminate.
     """
 
     def read() -> bytes | None:
@@ -287,10 +292,18 @@ def _confirmed_read(
             timeout=timeout,
         )
 
-    raw = read()
+    def healthy() -> bool:
+        return _transport_healthy(chain=chain, gateway_client=gateway_client, rpc_url=rpc_url, timeout=timeout)
+
+    try:
+        raw = read()
+    except _TransientTransport:
+        if not healthy():
+            raise
+        return read()
     if raw is not None:
         return raw
-    if not _transport_healthy(chain=chain, gateway_client=gateway_client, rpc_url=rpc_url, timeout=timeout):
+    if not healthy():
         raise _TransientTransport("read failed and transport health unconfirmed")
     return read()
 

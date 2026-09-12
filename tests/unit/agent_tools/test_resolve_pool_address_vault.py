@@ -17,6 +17,7 @@ from almanak.framework.agent_tools.errors import AgentErrorCode
 from almanak.framework.agent_tools.executor import ToolExecutor
 from almanak.framework.agent_tools.policy import AgentPolicy
 from almanak.framework.agent_tools.schemas import ToolResponseStatus
+from tests.support.erc20_probe import erc20_probe_calls
 
 VAULT = "0xbeef0e0834849acc03f0089f01f4f1eeb06873c9"
 _PROBES = "almanak.connectors._strategy_base.pool_identity_base"
@@ -71,20 +72,22 @@ async def test_vault_probe_answers_before_the_erc20_fallback(executor: ToolExecu
 
 @pytest.mark.asyncio
 async def test_non_vault_falls_through_to_the_erc20_verdict(executor: ToolExecutor) -> None:
-    erc20_payload = {"kind": "erc20", "symbol": "X", "decimals": 18}
+    # The ERC-20 leg runs for real: a mocked ``identify_erc20`` would only
+    # replay the mock's own payload, so the pool-target assertion below could
+    # not fail on a probe regression.
     with (
         _no_pool_probes(),
         patch(f"{_PROBES}.identify_erc4626_vault", return_value=None) as vault_probe,
-        patch(f"{_PROBES}.identify_erc20", return_value=erc20_payload) as erc20_probe,
+        patch(f"{_PROBES}.probe_call", side_effect=erc20_probe_calls(VAULT, symbol="X")),
     ):
         response = await executor.execute("resolve_pool_address", {"address": VAULT, "chain": "base"})
 
     assert response.status == ToolResponseStatus.SUCCESS
     assert response.data["kind"] == "erc20"
     assert response.data["address"] == VAULT
+    assert response.data["symbol"] == "X"
     assert "pool_address" not in response.data
     vault_probe.assert_called_once()
-    erc20_probe.assert_called_once()
 
 
 @pytest.mark.asyncio

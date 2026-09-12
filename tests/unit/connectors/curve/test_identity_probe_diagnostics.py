@@ -156,3 +156,94 @@ def test_one_healthy_miss_does_not_erase_first_transient(client):
         _identify(client)
     assert registry_calls == 2
     assert not pool_resolver.resolution_is_definitive("bsc", TOKEN)
+
+
+def _stableswap_stub(client, gamma_failure):
+    """Answer a stableswap pool's MetaRegistry reads; fail only ``gamma()``.
+
+    ``gamma()`` is Cryptoswap-only, so an answered revert here is the EXPECTED
+    stableswap outcome rather than a fault worth surfacing.
+    """
+    from tests.unit.connectors.curve.test_pool_resolver import DAI, USDC, FakeMetaRegistryGateway
+
+    fake = FakeMetaRegistryGateway(coins=[DAI, USDC], decimals=[18, 6], n_coins=2, gamma=None)
+
+    def call(request, timeout):
+        target = json.loads(request.params)[0]
+        if target["data"].startswith(pool_resolver._GAMMA_SEL):
+            return gamma_failure
+        return gateway_pb2.RpcResponse(
+            success=True,
+            result=json.dumps(fake.eth_call(chain=request.chain, to=target["to"], data=target["data"])),
+        )
+
+    client._rpc_stub.Call.side_effect = call
+
+
+def _read_diagnostics(caplog) -> list[str]:
+    """Warnings from the read path only — the token registry logs its own on first load."""
+    watched = ("almanak.framework.gateway_client", "almanak.connectors.curve.pool_resolver")
+    return [f"{r.name}: {r.getMessage()}" for r in caplog.records if r.name in watched]
+
+
+def test_expected_gamma_revert_is_quiet_on_every_stableswap_pool(client, caplog):
+    _stableswap_stub(
+        client,
+        gateway_pb2.RpcResponse(success=False, error='{"code": 3, "message": "execution reverted: no gamma"}'),
+    )
+    with caplog.at_level(logging.WARNING):
+        payload = _identify(client)
+    assert payload is not None
+    assert payload["pool_type"] == "stableswap"
+    assert _read_diagnostics(caplog) == []
+
+
+def test_an_unanswered_gamma_read_abstains_instead_of_marking_stableswap(client, caplog):
+    """``gamma()`` is the ONLY optional read whose ``None`` becomes an assertion.
+
+    A revert means stableswap, so a provider error that never reaches the
+    contract must not arrive as one: a crypto pool marked stableswap picks the
+    wrong add/remove ABI and valuation family. The probe abstains, stays
+    visible, and caches nothing.
+    """
+    _stableswap_stub(
+        client,
+        gateway_pb2.RpcResponse(success=False, error='{"code": -32603, "message": "provider internal error"}'),
+    )
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError, match="Curve identity probe indeterminate"):
+        _identify(client)
+    assert not pool_resolver.resolution_is_definitive("bsc", TOKEN)
+    diagnostics = _read_diagnostics(caplog)
+    assert diagnostics
+    assert all(
+        d.startswith("almanak.connectors.curve.pool_resolver: Curve optional read inconclusive")
+        for d in diagnostics
+    )
+
+
+@pytest.mark.parametrize(
+    ("dialect", "result"), [("0x", json.dumps("0x")), ("empty-string", ""), ("null", json.dumps(None))]
+)
+def test_an_empty_gamma_answer_is_not_a_revert(client, dialect, result):
+    """``0x`` is a SUCCESSFUL call that returned no data — a call to an address
+    with no code answers exactly this way — while a stableswap pool REVERTS on
+    ``gamma()``. The seam collapses ``0x`` to ``None``, which is the same value a
+    revert produces, so the emptiness has to be rejected here or the discriminator
+    reads "no code" as "stableswap" and caches it.
+    """
+    _stableswap_stub(client, gateway_pb2.RpcResponse(success=True, result=result))
+    with pytest.raises(RuntimeError, match="Curve identity probe indeterminate"):
+        _identify(client)
+    assert not pool_resolver.resolution_is_definitive("bsc", TOKEN)
+
+
+def test_an_answered_gamma_revert_still_marks_stableswap_quietly(client, caplog):
+    """Negative control for the abstain above: the expected revert still answers."""
+    _stableswap_stub(
+        client,
+        gateway_pb2.RpcResponse(success=False, error='{"code": 3, "message": "execution reverted"}'),
+    )
+    with caplog.at_level(logging.WARNING):
+        payload = _identify(client)
+    assert payload["pool_type"] == "stableswap"
+    assert not _read_diagnostics(caplog)

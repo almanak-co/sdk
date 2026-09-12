@@ -104,7 +104,7 @@ class FakePairGateway:
         self._find_blips_remaining = find_blips
         self._healthy = healthy
 
-    def eth_call(self, *, chain: str, to: str, data: str) -> str:
+    def eth_call(self, *, chain: str, to: str, data: str, raise_on_error: bool = False) -> str:
         selector = data[:10]
         if selector == _GET_ADDRESS_SEL:
             arg = int(data[10:], 16)

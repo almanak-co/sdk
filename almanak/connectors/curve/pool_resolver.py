@@ -301,24 +301,36 @@ def _try_read(
     rpc_url: str | None,
     timeout: float,
 ) -> bytes | None:
-    """A best-effort read that returns ``None`` on any revert / empty (never raises).
+    """Optional read: ``None`` iff the node answered with a REVERT.
 
-    Used for the ``gamma()`` discriminator and the ``get_underlying_coins`` gate.
-    A ``None`` here is AMBIGUOUS (genuine revert vs transport blip); the caller
-    disambiguates with ``_transport_healthy`` before inferring any safety-critical
-    negative from it.
+    Both callers read ``None`` as evidence about the contract — no ``gamma()``,
+    no underlying set — and one of them turns it into an affirmative pool_type.
+    Only a revert carries that evidence, so nothing else may arrive as ``None``:
+    a provider / transport / decode failure raises ``_TransientTransport``, and
+    so does an empty ``0x`` answer, which the seam returns as ``None`` (a call
+    to an address with no code succeeds and returns no data — a stableswap pool
+    REVERTS on ``gamma()``, it does not answer empty). The caller propagates and
+    nothing is cached. Only the revert is quiet: it is the expected reply here.
     """
     try:
-        return eth_call(
+        raw = eth_call(
             chain=chain,
             to=to,
             data=data,
             rpc_url=rpc_url,
             gateway_client=gateway_client,
             timeout=timeout,
+            gateway_raise_on_error=True,
         )
-    except Exception:  # noqa: BLE001 — genuine revert (transport already confirmed healthy)
-        return None
+    except Exception as exc:  # noqa: BLE001 — only an answered revert is evidence
+        if looks_like_revert(str(exc), require_explicit_execution=True):
+            return None
+        logger.warning("Curve optional read inconclusive for %s on %s: %s", to, chain, exc)
+        raise _TransientTransport(str(exc)) from exc
+    if raw is None:
+        logger.warning("Curve optional read answered empty for %s on %s; not a revert", to, chain)
+        raise _TransientTransport("empty optional read")
+    return raw
 
 
 def _resolve_symbol(address: str, chain: str) -> str:
@@ -555,13 +567,13 @@ def _discriminate_pool_type(
     is a ~10^10 mis-mark). ``gamma()`` is a Cryptoswap-only invariant.
 
     A returned value ⇒ crypto family (``n_coins == 3 → tricrypto`` else
-    ``cryptoswap``). A ``None`` is AMBIGUOUS — a genuine revert (⇒ stableswap) or a
-    transport blip — so before inferring "stableswap" we both (a) confirm the
-    transport with a pool-independent probe AND (b) RE-READ gamma itself: a genuine
-    revert is DETERMINISTIC (the re-read also reverts), an isolated blip is not (the
-    re-read recovers ⇒ crypto). A crypto→stableswap mis-mark therefore requires TWO
-    consecutive gamma blips bracketed by healthy transport confirms, not one dropped
-    packet. Raises ``_TransientTransport`` when the transport can't be confirmed.
+    ``cryptoswap``). A ``None`` is an ANSWERED revert — an unanswered call raises
+    out of ``_try_read`` rather than arriving here — so the remaining ambiguity is
+    only dialect: a provider whose transport error reads as "execution reverted"
+    would answer for a pool that never replied. Against that, "stableswap" costs
+    (a) a pool-independent transport confirm AND (b) a gamma RE-READ, since a real
+    revert is deterministic and a blip is not. Raises ``_TransientTransport`` when
+    the transport can't be confirmed.
     """
 
     def _probe_gamma() -> bytes | None:

@@ -15,6 +15,7 @@ from almanak.framework.agent_tools.executor import ToolExecutor
 from almanak.framework.agent_tools.policy import AgentPolicy
 from almanak.framework.agent_tools.schemas import ToolResponseStatus
 from almanak.framework.agent_tools.tracing import DecisionTracer
+from tests.support.erc20_probe import erc20_probe_calls
 
 POOL = "0x0b1c2dcbbfa744ebd3fc17ff1a96a1e1eb4b2d69"
 
@@ -83,12 +84,17 @@ def test_probe_fault_with_no_claim_is_recoverable_error_not_unknown():
 
 
 def test_erc20_fallback_when_no_probe_claims():
+    # Driving the real probe (not a mocked ``identify_erc20``) is what lets
+    # this assert the verdict's shape rather than a stand-in payload.
     executor = _make_executor()
-    erc20 = {"kind": "erc20", "symbol": "yvUSDC", "factory_verified": "unverified"}
-    with patch("almanak.connectors._strategy_base.pool_identity_base.identify_erc20", return_value=erc20):
+    with patch(
+        "almanak.connectors._strategy_base.pool_identity_base.probe_call",
+        side_effect=erc20_probe_calls(POOL, symbol="yvUSDC"),
+    ):
         resp = _run(executor, [_probe_spec(lambda *a, **kw: None)])
     assert resp.data["kind"] == "erc20"
     assert resp.data["symbol"] == "yvUSDC"
+    assert "pool_address" not in resp.data
 
 
 def test_unknown_when_nothing_answers():

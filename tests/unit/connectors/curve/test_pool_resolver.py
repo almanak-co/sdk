@@ -246,6 +246,34 @@ class TestGammaOrdering:
         assert meta is not None
         assert meta.pool_type == "tricrypto"
 
+    def test_gamma_provider_errors_never_mark_a_crypto_pool_stableswap(self) -> None:
+        """A tricrypto pool whose ``gamma()`` reads fail with PROVIDER errors.
+
+        The transport-health probe reads the AddressProvider, which any caching
+        provider is far likelier to serve than an uncached pool call, so "health
+        confirms while the pool read fails" is a biased sample, not an
+        independent one. Only an ANSWERED revert may settle ``pool_type``:
+        otherwise the run is indeterminate and nothing is cached, and the pool
+        classifies correctly as soon as the provider recovers — without a
+        cache clear.
+        """
+        blips = FakeMetaRegistryGateway(
+            coins=[USDC, WBTC, WETH],
+            decimals=[6, 8, 18],
+            n_coins=3,
+            gamma=10**11,
+            gamma_blips=2,
+            confirm_healthy=True,
+        )
+
+        assert resolve_pool_metadata("ethereum", POOL, gateway_client=blips) is None
+        assert not pool_resolver.resolution_is_definitive("ethereum", POOL)
+
+        recovered = FakeMetaRegistryGateway(
+            coins=[USDC, WBTC, WETH], decimals=[6, 8, 18], n_coins=3, gamma=10**11
+        )
+        assert resolve_pool_metadata("ethereum", POOL, gateway_client=recovered).pool_type == "tricrypto"
+
     def test_gamma_none_with_unhealthy_transport_returns_none_uncached(self) -> None:
         """gamma()-None AND the transport-health probe fails → ambiguous → None, NOT cached."""
         gw = FakeMetaRegistryGateway(
