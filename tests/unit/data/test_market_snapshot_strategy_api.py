@@ -49,6 +49,7 @@ DOCUMENTED_METHODS: tuple[str, ...] = (
     "balance_usd",
     "collateral_value_usd",
     "total_portfolio_usd",
+    "market_session",
     # ``prices`` and ``balances`` (batch-fetcher methods on the deprecated
     # data-layer class) are deliberately deferred to VIB-4065 / GH#2126 —
     # they collide with legacy ``hasattr(market, "prices")`` /
@@ -1598,3 +1599,55 @@ class TestOhlcvHelpers:
         )
         with pytest.raises(OHLCVUnavailableError, match=r"Unexpected error: legacy-mystery"):
             ms.ohlcv("WETH", timeframe="1h", limit=10)
+
+
+class TestMarketHoursGuidance:
+    """The skill must teach ``market_session`` as the hours gate, not ``reference_price``."""
+
+    @staticmethod
+    def _skill_text() -> str:
+        from pathlib import Path
+
+        import almanak
+
+        skill = Path(almanak.__file__).parent / "skills" / "almanak-strategy-builder" / "SKILL.md"
+        return skill.read_text(encoding="utf-8")
+
+    def test_skill_teaches_market_session(self) -> None:
+        assert 'market.market_session("NYSE")' in self._skill_text(), (
+            "The strategy-builder skill must show market_session() as the way to gate on "
+            "exchange hours; without it an author reaches for reference_price and every "
+            "gated HOLD escalates to DATA_ERROR."
+        )
+
+    def test_skill_steers_session_gating_away_from_reference_price(self) -> None:
+        text = self._skill_text()
+        assert "do not call `reference_price()` just to learn whether the market is open" in text
+
+    def test_market_session_needs_no_gateway_or_chain_read(self) -> None:
+        """A bare snapshot has no gateway client; the calendar must still answer."""
+        from almanak.framework.market.models import ReferenceMarketStatus
+
+        snapshot = MarketSnapshot(
+            chain="bsc",
+            wallet_address="0x0000000000000000000000000000000000000000",
+        )
+        session = snapshot.market_session("NYSE")
+        assert session.exchange == "NYSE"
+        assert session.status in {
+            ReferenceMarketStatus.OPEN,
+            ReferenceMarketStatus.CLOSED,
+        }
+        assert not snapshot.has_critical_data_failures()
+
+    def test_unknown_exchange_fails_closed_without_raising(self) -> None:
+        from almanak.framework.market.models import ReferenceMarketStatus
+
+        snapshot = MarketSnapshot(
+            chain="bsc",
+            wallet_address="0x0000000000000000000000000000000000000000",
+        )
+        session = snapshot.market_session("not-an-exchange")
+        assert session.status is ReferenceMarketStatus.UNKNOWN
+        assert session.is_open is False
+        assert not snapshot.has_critical_data_failures()

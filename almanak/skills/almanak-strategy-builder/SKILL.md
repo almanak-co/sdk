@@ -835,9 +835,50 @@ pd.low_24h           # Decimal
 pd.timestamp         # datetime
 ```
 
-For a non-crypto reference such as XAU/USD, use the dedicated exact-feed API. Never substitute
-`market.price("XAU")`: generic token pricing does not carry the required feed identity or market
-session state.
+### Market hours (tokenized equities and commodities)
+
+Tokenized stocks and commodities trade on-chain around the clock, but their issuer's primary market
+only runs during the exchange session. Outside it the pool has no arbitrage anchor, liquidity thins,
+and the price can gap at the next open. To gate on the session, ask for the session — not for a price.
+
+```python
+session = market.market_session("NYSE")   # regular session, incl. holidays and early closes
+if not session.is_open:
+    return Intent.hold(reason=f"nyse_{session.status.value}")
+
+session.exchange     # str - resolved calendar name, "" when unrecognised
+session.status       # OPEN | CLOSED | UNKNOWN
+session.as_of        # datetime - the snapshot timestamp the calendar was evaluated at
+session.source       # str - calendar provenance
+```
+
+`market_session()` evaluates the published exchange calendar at `market.timestamp`. It makes no
+oracle, gateway, or chain read, so it answers identically on a live chain, an Anvil fork, and a
+historical backtest tick, and it never records a critical data failure.
+
+It takes an **exchange** name, never a token or ticker symbol: session hours belong to the listing
+exchange and there is no reliable symbol-to-exchange catalog. Any calendar published by
+`pandas_market_calendars` works (`NYSE`, `NASDAQ`, `HKEX`, `CMEGlobex_Gold`, … — matched
+case-insensitively), with scheduled lunch breaks and interruptions counted as closed. For any
+US-listed tokenized stock use `"NYSE"` — NYSE and NASDAQ share the same regular session, holidays
+and early closes. An unrecognised exchange returns `UNKNOWN`, the fail-closed answer: treat it as
+closed for any decision that should only run inside the session.
+
+This is the only supported way to gate on market hours. Do not derive session state from oracle
+freshness, and do not call `reference_price()` just to learn whether the market is open — that is a
+curated price feed whose own fail-closed gates (provider availability, issuer adjustment alignment)
+can refuse before the session question is answered, and those refusals escalate to `DATA_ERROR`.
+
+### Non-crypto reference prices
+
+`market.reference_price()` exists for a strategy that needs the **underlying share or commodity
+quote itself** — to compare against a pool price. It is not a session-state API; use
+`market_session()` above for that. Never substitute `market.price("XAU")`: generic token pricing
+does not carry the required feed identity.
+
+It is a curated catalog, not a symbol lookup, and it is currently **paused for hosted strategies**.
+Read the warning on the `MarketSnapshot.reference_price` docstring, which is kept current with the
+catalog and the release gates, before designing a strategy around this call.
 
 ```python
 reference = market.reference_price("XAU", chain="bsc", quote="USD")
@@ -855,7 +896,10 @@ reference.stale                 # provider heartbeat result
 
 The API returns a typed unavailable result rather than an inferred value. `is_tradeable(...)` and
 `trade_block_reason(...)` fail closed for unavailable, malformed, stale, closed/unknown-session,
-future-dated, over-age, or low-confidence observations.
+future-dated, over-age, or low-confidence observations. Only refusals that `reference_price()`
+records as a critical failure (unavailable, malformed, composition-decode) escalate a HOLD to
+`DATA_ERROR`. Later refusals on an available quote — closed session, heartbeat stale, over-age,
+low confidence — stay a healthy HOLD. Hours-only authors never needed this call.
 
 ### Balances
 
