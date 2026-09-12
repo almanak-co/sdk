@@ -738,7 +738,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 ) from e
         if signer is None:
             signer = self._create_signer(wallet_address)
-        submitter = PublicMempoolSubmitter(rpc_url=rpc_url)
+        submitter = PublicMempoolSubmitter(rpc_url=rpc_url, chain=chain)
         from almanak.framework.execution.simulator.config import SimulationConfig
 
         simulation_config = SimulationConfig.from_env()
@@ -1684,21 +1684,17 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
     ) -> gateway_pb2.TxStatus:
         """Return canonical EVM receipt evidence through the gateway boundary."""
         try:
-            from web3 import AsyncHTTPProvider, AsyncWeb3
-
             from almanak.gateway.data.transaction_status import observe_evm_transaction
-            from almanak.gateway.utils import get_rpc_url, inject_poa_middleware
-            from almanak.gateway.utils.ssl_context import build_ssl_context
+            from almanak.gateway.utils import get_rpc_url
+            from almanak.gateway.utils.rpc_provider import create_async_web3
 
             rpc_url = get_rpc_url(chain, network=self.settings.network)
-            provider = AsyncHTTPProvider(rpc_url, request_kwargs={"ssl": build_ssl_context()})
+            descriptor = ChainRegistry.resolve(chain)
+            web3 = await create_async_web3(rpc_url, chain)
             try:
-                descriptor = ChainRegistry.resolve(chain)
-                web3 = AsyncWeb3(provider)
-                inject_poa_middleware(web3, chain)
                 return await observe_evm_transaction(web3, tx_hash, chain_id=descriptor.chain_id)
             finally:
-                await provider.disconnect()
+                await web3.provider.disconnect()
         except Exception as exc:
             logger.error("EVM GetTransactionStatus unavailable tx_hash=%s error_type=%s", tx_hash, type(exc).__name__)
             error = "canonical_receipt_service_unavailable"

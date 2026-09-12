@@ -13,12 +13,13 @@ from hexbytes import HexBytes
 from almanak.gateway.data.transaction_status import observe_evm_transaction
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.execution_service import ExecutionServiceServicer
+from almanak.gateway.utils.async_web3_cleanup import drain_failed_client_cleanup
 
 TX = "0x" + "12" * 32
 BLOCK = "0x" + "34" * 32
 
 
-def client(status=1):
+def client(status=1, provider=None):
     receipt = {
         "transactionHash": HexBytes(TX),
         "blockHash": HexBytes(BLOCK),
@@ -34,7 +35,7 @@ def client(status=1):
     eth.wait_for_transaction_receipt = AsyncMock(return_value=receipt)
     eth.get_transaction_receipt = AsyncMock(return_value=receipt)
     eth.get_block = AsyncMock(return_value={"hash": HexBytes(BLOCK), "transactions": [HexBytes(TX)]})
-    return SimpleNamespace(eth=eth, middleware_onion=MagicMock())
+    return SimpleNamespace(eth=eth, middleware_onion=MagicMock(), provider=provider)
 
 
 @pytest.mark.asyncio
@@ -106,13 +107,14 @@ async def test_gateway_routes_validated_chain_and_disconnects_owned_transport():
     provider = MagicMock(disconnect=AsyncMock())
     with (
         patch("web3.AsyncHTTPProvider", return_value=provider),
-        patch("web3.AsyncWeb3", return_value=client()),
+        patch("web3.AsyncWeb3", return_value=client(provider=provider)),
         patch("almanak.gateway.utils.get_rpc_url", return_value="http://localhost:8545") as resolve,
     ):
         response = await service.GetTransactionStatus(gateway_pb2.TxStatusRequest(tx_hash=TX, chain="bsc"), context)
     assert response.status == "confirmed"
     assert response.canonical_receipt
     resolve.assert_called_once_with("bsc", network="anvil")
+    await drain_failed_client_cleanup()
     provider.disconnect.assert_awaited_once()
     context.set_code.assert_not_called()
 
@@ -135,7 +137,7 @@ async def test_gateway_status_service_failure_is_sanitized_and_unmeasured(failur
     with (
         patch("almanak.gateway.utils.get_rpc_url", return_value="http://localhost:8545") as resolve,
         patch("web3.AsyncHTTPProvider", return_value=provider) as make_provider,
-        patch("web3.AsyncWeb3", return_value=client()) as make_web3,
+        patch("web3.AsyncWeb3", return_value=client(provider=provider)) as make_web3,
     ):
         {
             "rpc_url": resolve,
@@ -152,6 +154,7 @@ async def test_gateway_status_service_failure_is_sanitized_and_unmeasured(failur
     context.set_details.assert_called_once_with(response.error)
     assert "secret" not in caplog.text
     if failure_stage in {"web3", "middleware", "disconnect"}:
+        await drain_failed_client_cleanup()
         provider.disconnect.assert_awaited_once()
     else:
         provider.disconnect.assert_not_awaited()
@@ -165,11 +168,12 @@ async def test_gateway_cancelled_observation_disconnects_and_propagates():
     with (
         patch("almanak.gateway.utils.get_rpc_url", return_value="http://localhost:8545"),
         patch("web3.AsyncHTTPProvider", return_value=provider),
-        patch("web3.AsyncWeb3", return_value=client()),
+        patch("web3.AsyncWeb3", return_value=client(provider=provider)),
         patch("almanak.gateway.data.transaction_status.observe_evm_transaction", side_effect=asyncio.CancelledError),
         pytest.raises(asyncio.CancelledError),
     ):
         await service.GetTransactionStatus(gateway_pb2.TxStatusRequest(tx_hash=TX, chain="bsc"), context)
+    await drain_failed_client_cleanup()
     provider.disconnect.assert_awaited_once()
     context.set_code.assert_not_called()
 
@@ -216,4 +220,5 @@ async def test_status_service_formats_actual_web3_poa_blocks_only_for_declared_c
         assert receipt["block_hash"].removeprefix("0x") == BLOCK[2:]
     else:
         assert not response.canonical_receipt
+    await drain_failed_client_cleanup()
     disconnect.assert_awaited_once()

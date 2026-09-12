@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from hexbytes import HexBytes
-from web3 import AsyncHTTPProvider, AsyncWeb3
+from web3 import AsyncWeb3
 from web3.types import TxParams, Wei
 
 from almanak.core.chains import ChainRegistry
@@ -458,9 +458,9 @@ class ChainExecutor:
             AsyncWeb3 instance connected to the RPC endpoint
         """
         if self._web3 is None:
-            from almanak.gateway.utils.ssl_context import build_ssl_context
+            from almanak.gateway.utils.rpc_provider import create_async_web3
 
-            self._web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url, request_kwargs={"ssl": build_ssl_context()}))
+            self._web3 = await create_async_web3(self._rpc_url, self._chain)
         return self._web3
 
     async def check_connection(self) -> bool:

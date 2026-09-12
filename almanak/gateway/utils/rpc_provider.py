@@ -46,7 +46,7 @@ Environment Variables:
 import logging
 from enum import StrEnum
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from almanak.config.gateway_runtime import (
     anvil_generic_port_string,
@@ -62,6 +62,9 @@ from almanak.config.gateway_runtime import (
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains.solana import SOLANA_CLUSTERS
 from almanak.core.rpc_network import Network, network_profile
+
+if TYPE_CHECKING:
+    from web3 import AsyncWeb3
 
 logger = logging.getLogger(__name__)
 
@@ -557,6 +560,34 @@ def inject_poa_middleware(web3: Any, chain: str) -> None:
     web3.middleware_onion.inject(poa_middleware, layer=0)
 
 
+async def create_async_web3(rpc_url: str, chain: str | None = None) -> "AsyncWeb3":
+    """Create an owned async HTTP client with descriptor-selected block formatting.
+
+    Web3 objects stay scoped to their owner's event loop and endpoint. web3 7
+    providers own their HTTP sessions; web3 6 uses a library-global session
+    cache. Legacy callers resolve the endpoint chain before block reads.
+    """
+    from web3 import AsyncHTTPProvider, AsyncWeb3
+
+    from almanak.gateway.utils.ssl_context import build_ssl_context
+
+    provider = AsyncHTTPProvider(rpc_url, request_kwargs={"ssl": build_ssl_context()})
+    try:
+        client = AsyncWeb3(provider)
+        if chain is None:
+            descriptor = ChainRegistry.try_resolve_id(await client.eth.chain_id)
+            if descriptor is not None:
+                chain = descriptor.name
+        if chain is not None:
+            inject_poa_middleware(client, chain)
+        return client
+    except BaseException:
+        from almanak.gateway.utils.async_web3_cleanup import schedule_failed_client_cleanup
+
+        schedule_failed_client_cleanup(provider)
+        raise
+
+
 def is_local_rpc(rpc_url: str) -> bool:
     """Check if an RPC URL is a local endpoint (Anvil, Hardhat, etc.).
 
@@ -690,6 +721,7 @@ __all__ = [
     "Network",
     "NodeProvider",
     "POA_CHAINS",
+    "create_async_web3",
     "get_rpc_url",
     "get_rpc_url_cached",
     "get_supported_chains",

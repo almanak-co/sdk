@@ -226,7 +226,7 @@ class TestGetOrchestrator:
 
         assert result is orch_cls.return_value
         rpc.assert_called_once_with("arbitrum", network=service.settings.network)
-        sub.assert_called_once_with(rpc_url=_RPC_URL)
+        sub.assert_called_once_with(rpc_url=_RPC_URL, chain="arbitrum")
         from almanak.framework.execution.simulator.config import SimulationConfig
 
         simulation_config = sim.call_args.kwargs["config"]

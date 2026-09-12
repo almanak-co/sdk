@@ -1010,7 +1010,7 @@ def create_execution_orchestrator(
         Configured ExecutionOrchestrator
     """
     signer = LocalKeySigner(private_key=config.private_key)
-    submitter = PublicMempoolSubmitter(rpc_url=config.rpc_url)
+    submitter = PublicMempoolSubmitter(rpc_url=config.rpc_url, chain=config.chain)
 
     # Determine simulation setting: CLI flag > config > env var
     simulation_enabled = simulation_override if simulation_override is not None else config.simulation_enabled

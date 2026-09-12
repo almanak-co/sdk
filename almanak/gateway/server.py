@@ -657,6 +657,9 @@ class GatewayServer:
                     "Error closing servicer %s during shutdown",
                     type(servicer).__qualname__,
                 )
+        from almanak.gateway.utils.async_web3_cleanup import drain_failed_client_cleanup
+
+        await drain_failed_client_cleanup(timeout=grace)
         # Let aiohttp finalize TCP cleanup before the event loop exits.
         await asyncio.sleep(_AIOHTTP_SHUTDOWN_GRACE_SECONDS)
         # All three bind a db_path on first construction only. They are pinned per

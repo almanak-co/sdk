@@ -1551,7 +1551,7 @@ class PaperTrader:
         # Paper mode signs only against the local fork with Anvil's deterministic test key.
         signer = LocalKeySigner(private_key=ANVIL_DEFAULT_PRIVATE_KEY)
 
-        submitter = PublicMempoolSubmitter(rpc_url=fork_rpc)
+        submitter = PublicMempoolSubmitter(rpc_url=fork_rpc, chain=self.config.chain)
 
         simulator = DirectSimulator()
 

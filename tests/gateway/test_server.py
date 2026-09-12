@@ -362,3 +362,20 @@ async def test_announce_initializing_swallows_read_errors(monkeypatch):
     await server._announce_initializing(store)  # must not raise
 
     store.write_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_failed_client_cleanup_with_shutdown_budget():
+    from almanak.gateway.utils.async_web3_cleanup import drain_failed_client_cleanup, schedule_failed_client_cleanup
+
+    settings = GatewaySettings(grpc_port=0, metrics_enabled=False, audit_enabled=False, allow_insecure=True)
+    server = GatewayServer(settings)
+    provider = MagicMock(disconnect=AsyncMock())
+    schedule_failed_client_cleanup(provider)
+    with patch(
+        "almanak.gateway.utils.async_web3_cleanup.drain_failed_client_cleanup",
+        wraps=drain_failed_client_cleanup,
+    ) as drain:
+        await server.stop(grace=0.5)
+    drain.assert_awaited_once_with(timeout=0.5)
+    provider.disconnect.assert_awaited_once()

@@ -45,7 +45,7 @@ from typing import Any
 from eth_abi.abi import decode as abi_decode
 from eth_utils import to_checksum_address
 from hexbytes import HexBytes
-from web3 import AsyncHTTPProvider, AsyncWeb3
+from web3 import AsyncWeb3
 from web3.exceptions import TransactionNotFound
 
 from almanak.framework.execution.interfaces import (
@@ -426,6 +426,8 @@ class PublicMempoolSubmitter(Submitter):
         timeout_seconds: float = 120.0,
         base_delay: float = 1.0,
         max_delay: float = 32.0,
+        *,
+        chain: str | None = None,
     ) -> None:
         """Initialize the public mempool submitter.
 
@@ -435,6 +437,7 @@ class PublicMempoolSubmitter(Submitter):
             timeout_seconds: Receipt polling timeout
             base_delay: Base delay for exponential backoff
             max_delay: Maximum delay cap for backoff
+            chain: Chain name; omitted legacy callers resolve it from the RPC endpoint.
 
         Raises:
             ValueError: If rpc_url is empty or invalid
@@ -443,6 +446,7 @@ class PublicMempoolSubmitter(Submitter):
             raise ValueError("RPC URL cannot be empty")
 
         self._rpc_url = rpc_url
+        self._chain = chain
         self._max_retries = max_retries
         self._timeout_seconds = timeout_seconds
         self._base_delay = base_delay
@@ -450,6 +454,7 @@ class PublicMempoolSubmitter(Submitter):
 
         # Initialize Web3 with async provider
         self._web3: AsyncWeb3 | None = None
+        self._web3_lock = asyncio.Lock()
 
         # Health metrics
         self._metrics = SubmitterHealthMetrics()
@@ -487,11 +492,14 @@ class PublicMempoolSubmitter(Submitter):
         Returns:
             AsyncWeb3 instance connected to the RPC endpoint
         """
-        if self._web3 is None:
-            from almanak.gateway.utils.ssl_context import build_ssl_context
+        if self._web3 is not None:
+            return self._web3
+        async with self._web3_lock:
+            if self._web3 is None:
+                from almanak.gateway.utils.rpc_provider import create_async_web3
 
-            self._web3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url, request_kwargs={"ssl": build_ssl_context()}))
-        return self._web3
+                self._web3 = await create_async_web3(self._rpc_url, self._chain)
+            return self._web3
 
     def _classify_error(self, error_message: str) -> str:
         """Classify an error message into a category.
@@ -1183,13 +1191,14 @@ class PublicMempoolSubmitter(Submitter):
             TransactionRevertedError: If transaction was mined but reverted
             SubmissionError: If receipt cannot be retrieved within timeout
         """
-        web3 = await self._get_web3()
         timeout_to_use = timeout if timeout > 0 else self._timeout_seconds
 
         logger.info(f"Waiting for receipt: tx_hash={tx_hash}, timeout={timeout_to_use}s")
 
         try:
-            tx_receipt = await wait_for_canonical_receipt(web3, tx_hash, timeout_to_use)
+            async with asyncio.timeout(timeout_to_use):
+                web3 = await self._get_web3()
+                tx_receipt = await wait_for_canonical_receipt(web3, tx_hash, timeout_to_use)
             if tx_receipt.status == 0:
                 revert_reason = await self._extract_revert_reason(
                     tx_hash=tx_hash,

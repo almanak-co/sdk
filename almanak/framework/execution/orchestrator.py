@@ -41,7 +41,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, cast
 
-from web3 import AsyncHTTPProvider, AsyncWeb3
+from web3 import AsyncWeb3
 from web3.types import HexStr, TxParams
 
 from almanak.core.chains import ChainRegistry
@@ -1245,22 +1245,9 @@ class ExecutionOrchestrator:
         """Get or create Web3 instance."""
         if self._web3 is None:
             if self.rpc_url:
-                from almanak.gateway.utils.ssl_context import build_ssl_context
+                from almanak.gateway.utils.rpc_provider import create_async_web3
 
-                self._web3 = AsyncWeb3(AsyncHTTPProvider(self.rpc_url, request_kwargs={"ssl": build_ssl_context()}))
-                from almanak.gateway.utils.rpc_provider import is_poa_chain
-
-                if is_poa_chain(self.chain):
-                    try:
-                        from web3.middleware import ExtraDataToPOAMiddleware
-
-                        poa_mw = ExtraDataToPOAMiddleware
-                    except ImportError:
-                        from web3.middleware import geth_poa_middleware  # type: ignore[attr-defined]
-
-                        poa_mw = geth_poa_middleware
-                    self._web3.middleware_onion.inject(poa_mw, layer=0)
-                    logger.debug(f"Injected POA middleware for chain={self.chain}")
+                self._web3 = await create_async_web3(self.rpc_url, self.chain)
             else:
                 raise ExecutionError("RPC URL required for nonce queries")
         return self._web3
