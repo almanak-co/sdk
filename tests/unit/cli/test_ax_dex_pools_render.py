@@ -117,3 +117,76 @@ def test_unmeasured_money_renders_as_question_mark_never_zero(value: str, expect
     """Empty != Zero at the last mile: `""` is unmeasured and must not print as
     `$0`, which would read as a measured-empty venue."""
     assert _format_usd_cell(value) == expected
+
+
+_SUPPORTED = {**_A_POOL, "execution_support": "supported", "protocols": ["uniswap_v3"]}
+_UNSUPPORTED = {**_A_POOL, "dex_id": "someswap", "execution_support": "unsupported", "protocols": []}
+_UNKNOWN = {**_A_POOL, "dex_id": "thena-fusion", "execution_support": "unknown", "protocols": []}
+
+
+def test_each_support_state_renders_a_distinct_mark():
+    """'?' must never read as 'no': an undeclared connector is not an absent one."""
+    out = _render(
+        _response(
+            [_SUPPORTED, _UNSUPPORTED, _UNKNOWN],
+            venue_support_complete=False,
+            supported_pool_protocols=["uniswap_v3"],
+        )
+    )
+    marks = [line.split()[-2] for line in out.splitlines() if "0x2d0ba902" in line]
+    assert marks == ["yes", "no", "?"]
+    assert "venue support is incomplete on this chain" in out
+
+
+def test_a_complete_chain_does_not_warn_about_incompleteness():
+    out = _render(_response([_SUPPORTED], venue_support_complete=True, supported_pool_protocols=["uniswap_v3"]))
+    assert "venue support is incomplete" not in out
+    assert "executable venue (uniswap_v3)" in out
+    # A supported VENUE is not a verified POOL — the next step must stay named.
+    assert "almanak ax -c ethereum pool <pool-address>" in out
+
+
+def test_no_matched_venue_says_the_sdk_cannot_target_any_of_them():
+    out = _render(
+        _response([_UNSUPPORTED], venue_support_complete=True, supported_pool_protocols=["uniswap_v3", "curve"])
+    )
+    assert "the SDK cannot target any of these pools" in out
+    assert "uniswap_v3, curve" in out
+
+
+def test_an_undetermined_row_never_becomes_a_definitive_rejection():
+    """The footer is where a '?' row would be laundered into a 'no'.
+
+    On an incomplete chain nothing was ruled out, so the only honest footer is
+    an inconclusive one — the same distinction the column itself draws.
+    """
+    out = _render(
+        _response(
+            [_UNSUPPORTED, _UNKNOWN],
+            venue_support_complete=False,
+            supported_pool_protocols=["uniswap_v3"],
+        )
+    )
+    assert "the SDK cannot target any of these pools" not in out
+    assert "INCONCLUSIVE" in out
+    assert "undetermined for 1 of 2" in out
+
+
+def test_a_non_product_distinct_response_is_inconclusive_even_when_complete():
+    """Every row unknown with the chain complete: the ids, not the manifests, are the gap."""
+    out = _render(_response([_UNKNOWN], venue_support_complete=True, supported_pool_protocols=["uniswap_v3"]))
+    assert "the SDK cannot target any of these pools" not in out
+    assert "INCONCLUSIVE" in out
+
+
+def test_the_legend_only_claims_the_marks_the_table_actually_shows():
+    """'no = no connector owns it' is false for a '?' row, so it must not appear alone."""
+    out = _render(
+        _response(
+            [_SUPPORTED, _UNKNOWN],
+            venue_support_complete=False,
+            supported_pool_protocols=["uniswap_v3"],
+        )
+    )
+    assert "no = no connector owns it" not in out
+    assert "? = undetermined for 1 venue(s)" in out

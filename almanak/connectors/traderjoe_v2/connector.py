@@ -74,6 +74,14 @@ CONNECTOR = Connector(
         attribute="PRIMITIVE",
     ),
     strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),
+    # Only the v2.1 Liquidity Book: this connector's LBRouter is v2.1, so
+    # v2.0 / v2.2 pairs are deliberately not claimed.
+    venue_dex_ids={
+        "avalanche": {"traderjoe-v2-1-avalanche": "traderjoe_v2"},
+        "arbitrum": {"traderjoe-v2-1-arbitrum": "traderjoe_v2"},
+        "bsc": {"traderjoe-v2-1-bsc": "traderjoe_v2"},
+        "ethereum": {"traderjoe-v2-1-ethereum": "traderjoe_v2"},
+    },
     supported_chains=SupportedChainsSpec(chains=(AVALANCHE, ARBITRUM, BSC, ETHEREUM)),
 )
 

@@ -186,6 +186,12 @@ CONNECTOR = Connector(
         ),
     ),
     strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),
+    venue_dex_ids={
+        "bsc": {"pancakeswap-v3-bsc": "pancakeswap_v3"},
+        "ethereum": {"pancakeswap-v3-ethereum": "pancakeswap_v3"},
+        "arbitrum": {"pancakeswap-v3-arbitrum": "pancakeswap_v3"},
+        "base": {"pancakeswap-v3-base": "pancakeswap_v3"},
+    },
     supported_chains=SupportedChainsSpec(chains=(BSC, ETHEREUM, ARBITRUM, BASE)),
     lifecycle_declarations=_production_lifecycle_declarations(),
 )

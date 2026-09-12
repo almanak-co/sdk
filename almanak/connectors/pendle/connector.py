@@ -84,6 +84,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.pendle.capabilities",
     ),
     strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.WITHDRAW),
+    # Pendle markets are not aggregator-listed DEX pools.
+    venue_dex_ids={"arbitrum": {}, "ethereum": {}},
     supported_chains=SupportedChainsSpec(chains=(ARBITRUM, ETHEREUM)),
     # Backtests as "lp" (what intent-priority detection already resolves for
     # SWAP+LP_OPEN); Pendle AMM LP shares are fungible ERC-20 — no tick range.

@@ -64,6 +64,9 @@ CONNECTOR = Connector(
     # v1 scope — arbitrum only (the sole chain whose SmartLending wrappers were
     # round-tripped on-chain). base/ethereum/polygon need per-chain resolver
     # verification before being added.
+    # Fluid's aggregator id is claimed by the `fluid` connector, which owns the
+    # swap leg on the same venue; this LP connector adds no id of its own.
+    venue_dex_ids={"arbitrum": {}},
     supported_chains=SupportedChainsSpec(chains=(ARBITRUM,)),
     backtest_strategy_type=BacktestStrategyTypeDecl(
         strategy_type="lp",

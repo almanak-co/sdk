@@ -202,6 +202,15 @@ CONNECTOR = Connector(
     # under ``tests/intents/<chain>/`` (the intent-coverage gate enforces the
     # latter). ChainRegistry canonical names are used (``bsc``, not the ``bnb``
     # alias).
+    venue_dex_ids={
+        "ethereum": {"uniswap-v4-ethereum": "uniswap_v4"},
+        "arbitrum": {"uniswap-v4-arbitrum": "uniswap_v4"},
+        "base": {"uniswap-v4-base": "uniswap_v4"},
+        "optimism": {"uniswap-v4-optimism": "uniswap_v4"},
+        "polygon": {"uniswap-v4-polygon": "uniswap_v4"},
+        "avalanche": {"uniswap-v4-avalanche": "uniswap_v4"},
+        "bsc": {"uniswap-v4-bsc": "uniswap_v4"},
+    },
     supported_chains=SupportedChainsSpec(
         chains=(ETHEREUM, ARBITRUM, BASE, OPTIMISM, POLYGON, AVALANCHE, BSC, ROBINHOOD),
     ),

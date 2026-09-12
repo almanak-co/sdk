@@ -50,6 +50,8 @@ CONNECTOR = Connector(
         module="almanak.connectors.raydium.capabilities",
     ),
     strategy_intents=(IntentType.LP_OPEN, IntentType.LP_CLOSE),
+    # Only the CLMM product; Raydium's AMM v4 pools are a different venue.
+    venue_dex_ids={"solana": {"raydium-clmm": "raydium_clmm"}},
     supported_chains=SupportedChainsSpec(chains=(SOLANA,)),
     backtest_strategy_type=BacktestStrategyTypeDecl(
         strategy_type="lp",

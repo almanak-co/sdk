@@ -248,6 +248,20 @@ CONNECTOR = Connector(
     # Aerodrome's SWAP compiler ships amount_in as a human-readable Decimal (VIB-3747).
     metadata_amount_encoding=MetadataAmountEncoding(swap="human"),
     strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE),
+    # Base Slipstream generations are separate aggregator venues and only the
+    # two in `addresses.py` are reviewed: `aerodrome-slipstream-2` is the
+    # "Gauge Caps" factory this connector refuses, so claiming it would promise
+    # an LP_OPEN that cannot compile. Optimism is Velodrome V2 — the same
+    # Solidly fork, under its own id; Velodrome V1 and Velodrome Slipstream run
+    # on factories this connector does not register.
+    venue_dex_ids={
+        "base": {
+            "aerodrome-base": "aerodrome",
+            "aerodrome-slipstream": "aerodrome_slipstream",
+            "aerodrome-slipstream-3": "aerodrome_slipstream",
+        },
+        "optimism": {"velodrome-finance-v2": "aerodrome"},
+    },
     supported_chains=SupportedChainsSpec(
         chains=(BASE, OPTIMISM),
         # Slipstream (concentrated liquidity) is deployed on Base only. Optimism

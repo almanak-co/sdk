@@ -34,6 +34,16 @@ CONNECTOR = Connector(
         attribute="LiFiDeferredRefreshConnector",
     ),
     strategy_intents=(IntentType.SWAP, IntentType.BRIDGE),
+    # A bridge/router, not a pool venue: no aggregator dex id names it.
+    venue_dex_ids={
+        "ethereum": {},
+        "arbitrum": {},
+        "optimism": {},
+        "polygon": {},
+        "base": {},
+        "avalanche": {},
+        "bsc": {},
+    },
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, OPTIMISM, POLYGON, BASE, AVALANCHE, BSC)),
     # Aggregators render as aggregator rows instead of generic swap/bridge rows.
     strategy_matrix_entries=(

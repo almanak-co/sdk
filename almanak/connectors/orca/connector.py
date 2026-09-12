@@ -54,6 +54,7 @@ CONNECTOR = Connector(
         module="almanak.connectors.orca.capabilities",
     ),
     strategy_intents=(IntentType.LP_OPEN, IntentType.LP_CLOSE),
+    venue_dex_ids={"solana": {"orca": "orca_whirlpools"}},
     supported_chains=SupportedChainsSpec(chains=(SOLANA,)),
     backtest_strategy_type=BacktestStrategyTypeDecl(
         strategy_type="lp",

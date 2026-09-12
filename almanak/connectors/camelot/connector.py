@@ -41,6 +41,8 @@ CONNECTOR = Connector(
         attribute="POOL_DATA_SPEC",
     ),
     strategy_intents=(IntentType.SWAP,),
+    # Camelot's Algebra (V3) deployment; the V2 pairs are a different venue.
+    venue_dex_ids={"arbitrum": {"camelot-v3": "camelot"}},
     supported_chains=SupportedChainsSpec(chains=(ARBITRUM,)),
 )
 

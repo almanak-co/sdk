@@ -54,6 +54,16 @@ CONNECTOR = Connector(
         module="almanak.connectors.enso.capabilities",
     ),
     strategy_intents=(IntentType.SWAP,),
+    # A router, not a pool venue: no aggregator dex id names it.
+    venue_dex_ids={
+        "ethereum": {},
+        "arbitrum": {},
+        "optimism": {},
+        "polygon": {},
+        "base": {},
+        "avalanche": {},
+        "bsc": {},
+    },
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, OPTIMISM, POLYGON, BASE, AVALANCHE, BSC)),
     # Aggregators render as aggregator rows instead of generic swap rows.
     strategy_matrix_entries=(

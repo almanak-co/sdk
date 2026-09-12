@@ -302,6 +302,15 @@ CONNECTOR = Connector(
         ),
     ),
     strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),
+    venue_dex_ids={
+        "ethereum": {"uniswap_v3": "uniswap_v3"},
+        "arbitrum": {"uniswap_v3_arbitrum": "uniswap_v3"},
+        "optimism": {"uniswap_v3_optimism": "uniswap_v3"},
+        "polygon": {"uniswap_v3_polygon_pos": "uniswap_v3"},
+        "base": {"uniswap-v3-base": "uniswap_v3"},
+        "avalanche": {"uniswap-v3-avalanche": "uniswap_v3"},
+        "bsc": {"uniswap-bsc": "uniswap_v3"},
+    },
     supported_chains=SupportedChainsSpec(
         # SWAP spans both tuples; the LP lifecycle is restricted to _LP_CHAINS
         # by the overrides below. Composing rather than re-listing keeps the two

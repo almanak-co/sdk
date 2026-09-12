@@ -3966,6 +3966,14 @@ _DEX_POOLS_UNVERIFIED_HINT = (
     "Inconclusive: venues may exist. Report this as 'could not verify', never as 'this token has no tradeable venue'."
 )
 
+# Three-state venue support renders as three distinct marks: "?" must never
+# look like "no", or an undeclared connector reads as an absent one.
+_VENUE_SUPPORT_MARKS = {
+    "supported": ("yes", "green"),
+    "unsupported": ("no", "red"),
+    "unknown": ("?", "yellow"),
+}
+
 
 @ax.command("dex-pools")
 @click.argument("token")
@@ -4149,17 +4157,79 @@ def _render_dex_pools_table(response, *, token: str, chain: str) -> None:
             )
         )
 
-    click.echo(f"\n  {'DEX':<24} {'PAIR':<22} {'LIQUIDITY':>14} {'VOL-24H':>14}  POOL")
-    click.echo(f"  {'-' * 24} {'-' * 22} {'-' * 14} {'-' * 14}  {'-' * 42}")
+    if not data.get("venue_support_complete", False):
+        click.echo(
+            click.style(
+                "  note: venue support is incomplete on this chain — a '?' below means no "
+                "connector was matched AND none can be ruled out, not that the venue is unusable.",
+                fg="cyan",
+            )
+        )
+
+    click.echo(f"\n  {'DEX':<24} {'PAIR':<20} {'LIQUIDITY':>14} {'VOL-24H':>14}  {'SDK':<4} POOL")
+    click.echo(f"  {'-' * 24} {'-' * 20} {'-' * 14} {'-' * 14}  {'-' * 4} {'-' * 42}")
     for pool in pools:
+        mark, colour = _VENUE_SUPPORT_MARKS.get(pool.get("execution_support", ""), ("?", "yellow"))
         click.echo(
             f"  {(pool.get('dex_id') or '?')[:24]:<24} "
-            f"{(pool.get('name') or '?')[:22]:<22} "
+            f"{(pool.get('name') or '?')[:20]:<20} "
             f"{_format_usd_cell(pool.get('reserve_usd', '')):>14} "
             f"{_format_usd_cell(pool.get('volume_24h_usd', '')):>14}  "
+            # Pad before styling: ANSI codes count toward an f-string width.
+            f"{click.style(mark, fg=colour)}{' ' * (4 - len(mark))} "
             f"{pool.get('pool_address') or '?'}"
         )
+    _echo_dex_pools_support_footer(pools, data, chain=chain)
     click.echo("")
+
+
+def _echo_dex_pools_support_footer(pools: list[dict], data: dict, *, chain: str) -> None:
+    """Explain the SDK column without turning an undetermined row into a verdict.
+
+    The definitive "cannot target" sentence is licensed only when every row was
+    actually ruled out. A '?' row means no connector was matched AND none could
+    be ruled out, so a footer that read the two the same way would resurrect the
+    false negative the three-state column exists to prevent.
+    """
+    states = [pool.get("execution_support") or "unknown" for pool in pools]
+    protocols = sorted(
+        name
+        for pool, state in zip(pools, states, strict=True)
+        if state == "supported"
+        for name in pool.get("protocols") or ()
+    )
+    connectors = ", ".join(data.get("supported_pool_protocols") or ()) or "none"
+    undetermined = states.count("unknown")
+
+    if protocols:
+        legend = f"\n  SDK yes = executable venue ({', '.join(dict.fromkeys(protocols))})"
+        if "unsupported" in states:
+            legend += "; no = no connector owns it"
+        if undetermined:
+            legend += f"; ? = undetermined for {undetermined} venue(s)"
+        click.echo(
+            f"{legend}.\n  Confirm the exact pool before execution: uv run almanak ax -c {chain} pool <pool-address>"
+        )
+        return
+
+    if not undetermined and data.get("venue_support_complete", False):
+        click.echo(
+            click.style(
+                "\n  no listed venue matched a connector — the SDK cannot target any of these pools "
+                f"as an exact venue (connectors on this chain: {connectors})",
+                fg="yellow",
+            )
+        )
+        return
+
+    click.echo(
+        click.style(
+            f"\n  INCONCLUSIVE: no listed venue matched a connector, and support is undetermined for "
+            f"{undetermined} of {len(states)} — report this as 'could not verify', never as 'the SDK "
+            f"cannot target these pools' (connectors on this chain: {connectors})",
+            fg="red",
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

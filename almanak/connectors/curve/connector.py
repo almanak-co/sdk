@@ -205,6 +205,13 @@ CONNECTOR = Connector(
     # math is framework-valued, not connector-side.
     position_read=PositionReadDecl(kind=CURVE_LP),
     strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE),
+    venue_dex_ids={
+        "ethereum": {"curve": "curve"},
+        "arbitrum": {"curve_arbitrum": "curve"},
+        "optimism": {"curve_optimism": "curve"},
+        "polygon": {"curve_polygon_pos": "curve"},
+        "base": {"curve-base": "curve"},
+    },
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, OPTIMISM, POLYGON, BASE)),
     lifecycle_declarations=_production_lifecycle_declarations(),
 )

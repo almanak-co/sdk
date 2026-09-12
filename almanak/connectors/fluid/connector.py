@@ -79,6 +79,12 @@ CONNECTOR = Connector(
     metadata_amount_encoding=MetadataAmountEncoding(lending="wei"),
     strategy_intents=(IntentType.SWAP, IntentType.SUPPLY, IntentType.WITHDRAW),
     # Lending is limited to Arbitrum and Base; SWAP is supported on all four chains.
+    venue_dex_ids={
+        "ethereum": {"fluid-ethereum": "fluid"},
+        "base": {"fluid-base": "fluid"},
+        "polygon": {"fluid-polygon": "fluid"},
+        "arbitrum": {"fluid-arbitrum": "fluid"},
+    },
     supported_chains=SupportedChainsSpec(
         chains=(ARBITRUM, BASE),
         intent_overrides={IntentType.SWAP: (ARBITRUM, BASE, ETHEREUM, POLYGON)},

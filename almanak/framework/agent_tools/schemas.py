@@ -549,6 +549,24 @@ class TokenPoolSummary(BaseModel):
     )
     base_token_address: str = ""
     quote_token_address: str = ""
+    execution_support: str = Field(
+        default="unknown",
+        description=(
+            "Whether a connector can target THIS POOL as an execution venue: 'supported', "
+            "'unsupported', or 'unknown'. 'unknown' means the answer is not knowable here — the "
+            "dex ids are not product-distinct, or some pool-capable connector on this chain has "
+            "not declared its venue ids (see venue_support_complete). 'unsupported' never rules "
+            "out trading the PAIR through a router connector."
+        ),
+    )
+    protocols: list[str] = Field(
+        default_factory=list,
+        description="Connectors that declare this venue; empty unless execution_support is a match.",
+    )
+    supported_intents: list[str] = Field(
+        default_factory=list,
+        description="Pool intents those connectors support on this chain (SWAP, LP_OPEN, ...).",
+    )
 
 
 class ListTokenPoolsResponse(BaseModel):
@@ -572,6 +590,18 @@ class ListTokenPoolsResponse(BaseModel):
             "fallback provider reports classic and Slipstream Aerodrome pools identically). Matching "
             "a dex_id against a connector protocol slug is only sound when this is True."
         ),
+    )
+    venue_support_complete: bool = Field(
+        default=False,
+        description=(
+            "False when some pool-capable connector on this chain has not declared its venue ids, "
+            "so an unmatched venue reports 'unknown' rather than 'unsupported'. A 'supported' "
+            "verdict is sound either way."
+        ),
+    )
+    supported_pool_protocols: list[str] = Field(
+        default_factory=list,
+        description="Connectors that can act on a pool on this chain, whether or not any row matched them.",
     )
     pools: list[TokenPoolSummary] = Field(
         default_factory=list,

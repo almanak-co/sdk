@@ -3212,10 +3212,17 @@ class ToolExecutor:
                 ),
             )
 
+        from almanak.connectors._strategy_base.venue_support import VenueSupportIndex
+
         raw_floor = args.get("min_liquidity_usd") or 0
         floor = Decimal(str(raw_floor)) if float(raw_floor) > 0 else None
         result = envelope.value
         pools = rank_token_pools(result.pools, floor)
+        # Which of these venues a connector can actually target. Built once per
+        # response off the connector manifests; the provider's dex ids are only
+        # matchable when it reports them product-distinct.
+        venues = VenueSupportIndex(result.chain)
+        support = [venues.classify(p.dex_id, product_distinct=result.product_distinct_dex_id) for p in pools]
         # Report the count BEFORE the caller's floor as well. Without it, "no
         # venues exist" and "venues exist, none met your floor" are the same
         # empty list — and a caller acting on the second as though it were the
@@ -3235,6 +3242,8 @@ class ToolExecutor:
                 "source": result.source,
                 "complete": result.complete,
                 "product_distinct_dex_id": result.product_distinct_dex_id,
+                "venue_support_complete": venues.complete,
+                "supported_pool_protocols": list(venues.pool_protocols),
                 "pools": [
                     {
                         "pool_address": p.pool_address,
@@ -3246,8 +3255,11 @@ class ToolExecutor:
                         "volume_24h_usd": "" if p.volume_24h_usd is None else str(p.volume_24h_usd),
                         "base_token_address": p.base_token_address,
                         "quote_token_address": p.quote_token_address,
+                        "execution_support": s.status,
+                        "protocols": list(s.protocols),
+                        "supported_intents": list(s.intents),
                     }
-                    for p in pools
+                    for p, s in zip(pools, support, strict=True)
                 ],
             },
         )

@@ -153,6 +153,14 @@ CONNECTOR = Connector(
         attribute="UniswapV3Compiler",
     ),
     strategy_intents=(IntentType.SWAP, IntentType.LP_OPEN, IntentType.LP_CLOSE, IntentType.LP_COLLECT_FEES),
+    venue_dex_ids={
+        "ethereum": {"sushiswap-v3-ethereum": "sushiswap_v3"},
+        "arbitrum": {"sushiswap-v3-arbitrum": "sushiswap_v3"},
+        "base": {"sushiswap-v3-base": "sushiswap_v3"},
+        "optimism": {"sushiswap-v3-optimism": "sushiswap_v3"},
+        "polygon": {"sushiswap-v3-polygon": "sushiswap_v3"},
+        "bsc": {"sushiswap-v3-bsc": "sushiswap_v3"},
+    },
     supported_chains=SupportedChainsSpec(chains=(ETHEREUM, ARBITRUM, BASE, OPTIMISM, POLYGON, BSC)),
     lifecycle_declarations=_production_lifecycle_declarations(),
 )

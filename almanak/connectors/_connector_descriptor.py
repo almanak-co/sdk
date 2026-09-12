@@ -1483,6 +1483,7 @@ class Connector:
     strategy_matrix_entries: tuple[StrategyMatrixEntry, ...] | None = None
     lifecycle_declarations: tuple[LifecycleObligationDecl, ...] = field(default_factory=tuple)
     external_ids: Mapping[str, str] | None = None
+    venue_dex_ids: Mapping[str, Mapping[str, str]] | None = None
 
     def __post_init__(self) -> None:
         """Validate connector-owned manifest metadata."""
@@ -1562,6 +1563,7 @@ class Connector:
         self._validate_flash_loan()
         self._validate_strategy_support()
         self._validate_external_ids()
+        self._validate_venue_dex_ids()
 
     def _validate_address_tables(self) -> None:
         """Validate strategy-side address-table selectors."""
@@ -1870,6 +1872,90 @@ class Connector:
         # Freeze into an immutable proxy so post-construction mutations are
         # harmless (mirrors ChainDescriptor.external_ids behaviour).
         object.__setattr__(self, "external_ids", MappingProxyType(dict(self.external_ids)))
+
+    def _validate_venue_dex_ids(self) -> None:
+        """Validate the optional per-chain aggregator venue-id declaration.
+
+        Shape is ``{chain: {aggregator_dex_id: protocol_key}}``. The protocol is
+        not decoration: one connector routinely owns protocol keys with
+        different execution models (``aerodrome`` is a Solidly-fork fungible LP,
+        its alias ``aerodrome_slipstream`` is NFT concentrated liquidity), and a
+        consumer that answered "which venue is this" with the connector name
+        alone would route a Slipstream pool into the Classic compiler.
+
+        The key must therefore be one this connector's COMPILER resolves
+        (``compiler_keys``), not merely one it owns. The two differ: ``orca``
+        owns both ``orca`` and ``orca_whirlpools`` but compiles only the
+        latter, so a declaration validated against ownership alone can name a
+        protocol that reaches no compiler — marking a venue executable and then
+        failing dispatch on the intent built from that marking.
+
+        ``None`` means UNDECLARED — nothing may be concluded about this
+        connector's venues — which is why it is distinct from a declared empty
+        mapping ("this connector is not an aggregator-listed pool venue on that
+        chain"). Each entry is checked against the protocol's OWN chain
+        coverage rather than the connector union, so a declaration cannot
+        outlive the support it describes on the chain it names.
+        """
+        if self.venue_dex_ids is None:
+            return
+        if not isinstance(self.venue_dex_ids, Mapping):
+            raise ValueError(
+                f"Connector.venue_dex_ids must be None or a Mapping[str, Mapping[str, str]], got {self.venue_dex_ids!r}"
+            )
+        normalized: dict[str, Mapping[str, str]] = {}
+        for chain, entries in self.venue_dex_ids.items():
+            self._validate_venue_chain(chain)
+            normalized[chain] = MappingProxyType(self._validated_venue_entries(chain, entries))
+        object.__setattr__(self, "venue_dex_ids", MappingProxyType(normalized))
+
+    def _validate_venue_chain(self, chain: str) -> None:
+        """Reject a venue declaration for a chain this connector does not support."""
+        supported = set(self.all_supported_chains)
+        if chain not in supported:
+            raise ValueError(
+                f"Connector.venue_dex_ids declares chain {chain!r}, which {self.name!r} does not support; "
+                f"supported: {sorted(supported)}"
+            )
+
+    def _validated_venue_entries(self, chain: str, entries: object) -> dict[str, str]:
+        """Return the validated ``dex_id -> protocol`` pairs declared for ``chain``."""
+        if not isinstance(entries, Mapping):
+            raise ValueError(
+                f"Connector.venue_dex_ids[{chain!r}] must be a Mapping[str, str] of dex id to protocol key, "
+                f"got {entries!r}"
+            )
+        # Dispatch vocabulary, not ownership: see this validator's docstring.
+        dispatchable = {key.strip().lower().replace("-", "_"): key for key in self.compiler_keys}
+        validated: dict[str, str] = {}
+        seen: dict[str, str] = {}
+        for dex_id, protocol in entries.items():
+            if not isinstance(dex_id, str) or not dex_id.strip() or dex_id != dex_id.strip().lower():
+                raise ValueError(
+                    f"Connector.venue_dex_ids[{chain!r}] keys must be non-empty lowercase dex ids, got {dex_id!r}"
+                )
+            if not isinstance(protocol, str) or protocol.strip().lower().replace("-", "_") not in dispatchable:
+                raise ValueError(
+                    f"Connector.venue_dex_ids[{chain!r}][{dex_id!r}] names protocol {protocol!r}, which no "
+                    f"{self.name!r} compiler resolves; a venue is executable only under a key its compiler "
+                    f"dispatches on: {sorted(dispatchable.values())}"
+                )
+            if not self.supports(chain=chain, protocol=protocol):
+                raise ValueError(
+                    f"Connector.venue_dex_ids[{chain!r}][{dex_id!r}] names protocol {protocol!r}, which is not "
+                    f"supported on {chain!r}; supported: {sorted(self.supported_chains_for_protocol(protocol))}"
+                )
+            # Lookups fold separators and case, so two spellings of one id would
+            # collide at match time and only one would ever be reachable.
+            key = dex_id.replace("-", "_")
+            if key in seen:
+                raise ValueError(
+                    f"Connector.venue_dex_ids[{chain!r}] declares {dex_id!r} and {seen[key]!r}, which are the same "
+                    f"id once separators are folded"
+                )
+            seen[key] = dex_id
+            validated[dex_id] = protocol
+        return validated
 
     def _validate_backtest_risk(self) -> None:
         """Validate the optional backtest-risk declaration."""

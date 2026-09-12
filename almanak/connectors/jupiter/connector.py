@@ -38,6 +38,8 @@ CONNECTOR = Connector(
         attribute="JupiterCompiler",
     ),
     strategy_intents=(IntentType.SWAP,),
+    # A router, not a pool venue: no aggregator dex id names it.
+    venue_dex_ids={"solana": {}},
     supported_chains=SupportedChainsSpec(chains=(SOLANA,)),
 )
 
