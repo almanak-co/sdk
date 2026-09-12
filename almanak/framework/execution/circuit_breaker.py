@@ -271,6 +271,14 @@ class CircuitBreaker:
         # loop cadence off on a refusal streak instead of hot-looping the refused
         # action. Reset by any real failure, any success, and on close/reset.
         self._consecutive_guard_refusals = 0
+        # Consecutive unresolved submissions awaiting operator
+        # reconciliation. The transaction WAS broadcast, so unlike a refusal
+        # this is not a safety success — but its outcome is unknown, the
+        # durable barrier already refuses replay, and tripping would only
+        # emergency-stop a deployment whose funds are intact. Tracked
+        # separately for telemetry; it never feeds a trip threshold. Reset by
+        # any real failure, any success, and on close/reset.
+        self._consecutive_reconciliation_holds = 0
         self._failure_history: list[FailureRecord] = []
         self._last_failure_time: datetime | None = None
 
@@ -322,6 +330,18 @@ class CircuitBreaker:
         close/reset."""
         with self._lock:
             return self._consecutive_guard_refusals
+
+    @property
+    def consecutive_reconciliation_holds(self) -> int:
+        """Number of consecutive unresolved submissions awaiting reconciliation.
+
+        ALM-10096. Exposed for operator telemetry only: a hold never trips the
+        breaker, because the transaction is already broadcast and the durable
+        replay barrier is what prevents a duplicate. Reset to 0 by any real
+        failure, any success, or on close/reset.
+        """
+        with self._lock:
+            return self._consecutive_reconciliation_holds
 
     @property
     def tripped_on_data_class_only(self) -> bool:
@@ -419,6 +439,7 @@ class CircuitBreaker:
             self._consecutive_action_failures = 0
             self._consecutive_data_failures = 0
             self._consecutive_guard_refusals = 0  # VIB-5746: success ends any refusal streak
+            self._consecutive_reconciliation_holds = 0  # success ends any hold streak
 
             if self._state == CircuitBreakerState.HALF_OPEN:
                 self._half_open_successes += 1
@@ -484,9 +505,30 @@ class CircuitBreaker:
                 )
                 return
 
-            # Any real failure ends a refusal streak — the strategy stopped
-            # merely being refused and actually failed.
+            # An unresolved submission is NEUTRAL to the trip logic for a
+            # different reason than a refusal. A transaction really was
+            # broadcast and may still mine, so this is not a safety success and
+            # never a breaker success — but its outcome is unknown, not failed.
+            # The durable replay barrier already refuses rebroadcast; tripping
+            # adds no protection and emergency-stops a deployment whose funds
+            # are intact and whose only correct next move is to keep observing.
+            # It is deliberately NOT a reset either: a hold in the middle of a
+            # real action-failure streak must not grant an infinite reprieve.
+            if resolved_kind.is_execution_hold:
+                self._consecutive_reconciliation_holds += 1
+                logger.warning(
+                    "CircuitBreaker %s: unresolved submission awaiting reconciliation "
+                    "(neutral, no trip) streak=%d - %s",
+                    self.deployment_id,
+                    self._consecutive_reconciliation_holds,
+                    error_message,
+                )
+                return
+
+            # Any real failure ends a refusal or hold streak — the strategy
+            # stopped merely being refused/blocked and actually failed.
             self._consecutive_guard_refusals = 0
+            self._consecutive_reconciliation_holds = 0
 
             # Record failure on the legacy total + kinded counter.
             self._consecutive_failures += 1
@@ -661,6 +703,7 @@ class CircuitBreaker:
             self._consecutive_action_failures = 0
             self._consecutive_data_failures = 0
             self._consecutive_guard_refusals = 0
+            self._consecutive_reconciliation_holds = 0
             self._last_known_exposure_open = None
             self._last_exposure_at = None
             self._failure_history = []
@@ -688,6 +731,7 @@ class CircuitBreaker:
                 "consecutive_action_failures": self._consecutive_action_failures,
                 "consecutive_data_failures": self._consecutive_data_failures,
                 "consecutive_guard_refusals": self._consecutive_guard_refusals,
+                "consecutive_reconciliation_holds": self._consecutive_reconciliation_holds,
                 "effective_data_threshold": self._effective_data_threshold(),
                 "last_known_exposure_open": self._last_known_exposure_open,
                 "last_exposure_at": (self._last_exposure_at.isoformat() if self._last_exposure_at else None),
@@ -753,6 +797,7 @@ class CircuitBreaker:
         self._consecutive_action_failures = 0
         self._consecutive_data_failures = 0
         self._consecutive_guard_refusals = 0  # VIB-5746
+        self._consecutive_reconciliation_holds = 0
         self._trip_time = None
         self._trip_reason = None
         self._tripped_on_data_class_only = False

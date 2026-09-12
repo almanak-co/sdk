@@ -58,6 +58,16 @@ class FailureKind(Enum):
     # ``UNKNOWN``/action-class precisely so a correct refusal can never trip an
     # emergency stop the way three real reverts would.
     GUARD_REFUSED = "guard_refused"
+    # An accepted broadcast whose outcome is UNRESOLVED. Submission
+    # crossed the boundary and returned transaction identity, but no complete
+    # receipt set ever became observable, so the durable barrier refuses replay.
+    # The outcome is unknown, not failed: a null receipt is not proof of
+    # nonexecution and the transaction may still mine. Charging it to the
+    # action-class counter emergency-stops a deployment whose funds are intact
+    # and whose only correct next move is to keep observing — the breaker cannot
+    # protect against a transaction that is already out of our hands. Distinct
+    # from ``GUARD_REFUSED``: a refusal sent zero transactions, a hold sent one.
+    RECONCILIATION_HOLD = "reconciliation_hold"
     UNKNOWN = "unknown"
 
     @property
@@ -82,6 +92,15 @@ class FailureKind(Enum):
         instead of hot-looping the refused action.
         """
         return self is FailureKind.GUARD_REFUSED
+
+    @property
+    def is_execution_hold(self) -> bool:
+        """True iff execution is blocked awaiting operator reconciliation.
+
+        The replay barrier, not the breaker, is what keeps the money safe here;
+        this classification never touches that barrier.
+        """
+        return self is FailureKind.RECONCILIATION_HOLD
 
 
 _DATA_KINDS = frozenset(
@@ -254,8 +273,17 @@ def kind_for_status(status: Any, error_message: str | None = None) -> FailureKin
     error rather than idle for the full 30-iteration data-class budget. The
     runner stamps the verdict into the error string as
     ``classification=permanent`` on the HOLD-escalation path, so that token is
-    the signal here. Every non-``DATA_ERROR`` status keeps the ``UNKNOWN``
-    default so action-class semantics are unchanged.
+    the signal here.
+
+    An unresolved submission is recognised here rather than at each producer
+    because the barrier error is the only evidence that survives to this seam:
+    the multi-leg, bridge, and legacy-marker lanes arrive with
+    ``execution_result=None`` and no typed carrier left to read. It needs BOTH
+    halves of :func:`is_unresolved_submission` — the token alone also marks
+    outcomes that did resolve.
+
+    Every other status/error pair keeps the ``UNKNOWN`` default so action-class
+    semantics are unchanged.
     """
     # Late import to avoid a circular dependency at module import time.
     from .runner_models import IterationStatus
@@ -264,7 +292,40 @@ def kind_for_status(status: Any, error_message: str | None = None) -> FailureKin
         if error_message is not None and "classification=permanent" in error_message:
             return FailureKind.UNKNOWN
         return FailureKind.DATA_UNAVAILABLE
+    if is_unresolved_submission(status, error_message):
+        return FailureKind.RECONCILIATION_HOLD
     return FailureKind.UNKNOWN
 
 
-__all__ = ["FailureKind", "classify_failure", "kind_for_status"]
+def is_unresolved_submission(status: Any, error_message: str | None) -> bool:
+    """Whether a failure reports a broadcast whose outcome is still unknown.
+
+    Both halves are load-bearing. ``BROADCAST_RECONCILIATION_REQUIRED`` marks
+    the replay barrier, not the outcome: a single-chain transaction that LANDED
+    with its accounting unsealed carries the same token and resumes as
+    ``ACCOUNTING_FAILED``. That submission resolved — the money moved and the
+    books are wrong — so it is a real accounting failure and must keep
+    action-class semantics. Only an execution status leaves execution itself in
+    flight — no conclusive receipt for this submission, or a bridge it started
+    that has not delivered — and only then does the token say the outcome is
+    unresolved. An accounting status means execution is already over.
+
+    Lanes stamp the token at the start of the message or after a ``[chain]``
+    prefix, so the text half is a containment test on a machine token that no
+    free-text error produces.
+    """
+    # Late import to avoid a circular dependency at module import time.
+    from .runner_models import IterationStatus
+
+    if status not in (IterationStatus.EXECUTION_FAILED, IterationStatus.EXECUTION_PENDING):
+        return False
+    if not isinstance(error_message, str) or not error_message:
+        return False
+    # Late import: the execution package pulls in the connector tree, which
+    # must not be forced onto every runner module that classifies a failure.
+    from almanak.framework.execution.reconciliation import RECONCILIATION_REQUIRED_PREFIX
+
+    return RECONCILIATION_REQUIRED_PREFIX in error_message
+
+
+__all__ = ["FailureKind", "classify_failure", "is_unresolved_submission", "kind_for_status"]
