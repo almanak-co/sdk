@@ -156,3 +156,46 @@ def test_eth_estimate_gas_disconnected_gateway_returns_none_no_egress(monkeypatc
 
     assert result is None
     gateway.estimate_gas.assert_not_called()
+
+
+@pytest.mark.parametrize("result", [False, 0, {}, [], None, "", "1234"])
+@pytest.mark.parametrize("use_gateway", [True, False], ids=["gateway", "direct"])
+def test_strict_eth_call_rejects_malformed_results(monkeypatch, result, use_gateway):
+    gateway = MagicMock()
+    gateway.is_connected = use_gateway
+    gateway.eth_call.return_value = result
+    response = MagicMock()
+    response.json.return_value = {"result": result}
+    monkeypatch.setattr("requests.post", lambda *args, **kwargs: response)
+
+    with pytest.raises(ValueError, match="eth_call result must be a 0x-prefixed hex string"):
+        eth_call(
+            chain="bsc",
+            to="0x1111111111111111111111111111111111111111",
+            data="0x12345678",
+            gateway_client=gateway,
+            rpc_url="https://bsc.example.invalid",
+            gateway_raise_on_error=True,
+        )
+
+
+@pytest.mark.parametrize("use_gateway", [True, False], ids=["gateway", "direct"])
+def test_strict_eth_call_preserves_valid_empty_hex(monkeypatch, use_gateway):
+    gateway = MagicMock()
+    gateway.is_connected = use_gateway
+    gateway.eth_call.return_value = "0x"
+    response = MagicMock()
+    response.json.return_value = {"result": "0x"}
+    monkeypatch.setattr("requests.post", lambda *args, **kwargs: response)
+
+    assert (
+        eth_call(
+            chain="bsc",
+            to="0x1111111111111111111111111111111111111111",
+            data="0x12345678",
+            gateway_client=gateway,
+            rpc_url="https://bsc.example.invalid",
+            gateway_raise_on_error=True,
+        )
+        is None
+    )

@@ -225,7 +225,7 @@ def extract_revert_reason(error_text: str) -> str | None:
     return None
 
 
-def looks_like_revert(error_text: str) -> bool:
+def looks_like_revert(error_text: str, *, require_explicit_execution: bool = False) -> bool:
     """Whether a failed-call error text is an EXECUTED-and-reverted answer.
 
     Public for the same reason as the decoders above: the GMX managed-Anvil
@@ -235,16 +235,21 @@ def looks_like_revert(error_text: str) -> bool:
     Everything that doesn't positively look like a revert is classified as
     transport — the safe default, because a transport outcome is treated as
     inconclusive by consumers while a revert verdict may disqualify a target.
+
+    When ``require_explicit_execution`` is set, data alone cannot prove a revert:
+    provider failures can echo an eth_call request's calldata in a ``data`` key.
+    Only an execution-reverted message or a known EVM error code qualifies.
     """
     lowered = error_text.lower()
-    if "revert" in lowered:
+    marker = "execution reverted" if require_explicit_execution else "revert"
+    if marker in lowered:
         return True
     # JSON-RPC "execution error" codes nodes use for reverts (3 = the standard
     # eth_call revert code; -32015 = legacy Parity/OpenEthereum "VM execution
     # error"). Matched in both repr and json stringifications.
     if re.search(r"['\"]code['\"]\s*:\s*(3|-32015)\b", error_text):
         return True
-    return bool(_REVERT_DATA_FIELD_RE.search(error_text))
+    return not require_explicit_execution and bool(_REVERT_DATA_FIELD_RE.search(error_text))
 
 
 _TRANSPORT_MARKERS = (

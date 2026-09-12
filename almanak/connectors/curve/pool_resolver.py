@@ -42,17 +42,15 @@ failure is ambiguous → ``_TransientTransport`` (do not classify, do not cache)
 
 ## Transient vs definitive (the root-cause invariant, VIB-5628)
 
-The ``eth_call`` seam cannot distinguish a genuine contract revert from a
-transport error (both raise / return ``None``; see ``adapter.py`` "Transport
-error and contract revert are indistinguishable at this seam"). So EVERY
-safety-critical negative this resolver infers from a failed read
-(gamma-``None`` → stableswap; underlying-``None`` → aave gate; required-read
-failure → not-a-pool) is CONFIRMED against ``_transport_healthy`` — a
-pool-independent read (``AddressProvider.get_address(0)``) that must succeed on
-any healthy transport:
+Required MetaRegistry reads request upstream errors explicitly: answered reverts
+are quiet, while provider and response-decoding failures remain inconclusive and
+uncached. A later health check cannot turn a known failed request into a
+confirmed non-membership.
 
-- transport healthy ⇒ the failure is a genuine revert ⇒ DEFINITIVE negative.
-- transport unhealthy ⇒ ambiguous blip ⇒ ``_TransientTransport``.
+Optional reads can still collapse reverts and transport failures into ``None``.
+Their safety-critical negatives (gamma-``None`` → stableswap and underlying-
+``None`` → aave gate), plus empty required reads, are confirmed against
+``_transport_healthy`` — a pool-independent AddressProvider read.
 
 ``resolve_pool_metadata`` caches ONLY definitive outcomes (a resolved shape or a
 transport-confirmed not-a-pool ``None``). A transient blip is NEVER cached, so
@@ -66,7 +64,8 @@ fabricates zeros / partial shapes) on: no read transport; ``get_address(7) ==
 aave-type / wrapped-lending pool — INCLUDING a non-meta pool whose underlying
 read can't be confirmed (out of scope — MetaRegistry can't cleanly signal the
 wrapped-aToken ABI, and a mis-resolve there is a money-path hazard). Cases where
-transport health can't be confirmed return ``None`` too, but are not cached.
+transport health can't be confirmed, or a provider/decoder error is reported,
+return ``None`` too, but are not cached.
 """
 
 from __future__ import annotations
@@ -78,7 +77,7 @@ from typing import TYPE_CHECKING
 from eth_utils import function_signature_to_4byte_selector
 
 from almanak.connectors._strategy_base.pool_validation_base import ZERO_ADDRESS, decode_address
-from almanak.connectors._strategy_base.rpc import eth_call
+from almanak.connectors._strategy_base.rpc import eth_call, looks_like_revert
 
 if TYPE_CHECKING:
     # Type-only: the leaf resolver must not import GatewayClient at runtime
@@ -222,14 +221,9 @@ class _ReadFailed(Exception):
 class _TransientTransport(Exception):
     """Internal sentinel — a read failed but transport health could NOT be confirmed.
 
-    The ``eth_call`` seam cannot distinguish a genuine contract revert from a
-    transport error (both raise / return ``None``; see ``adapter.py`` "Transport
-    error and contract revert are indistinguishable at this seam"). When a
-    safety-critical negative is being inferred from a failed read, we confirm the
-    transport with a pool-independent probe first: if that probe ALSO fails the
-    failure is ambiguous, so we raise this sentinel instead of classifying — the
-    caller returns ``None`` WITHOUT caching, so the pool self-heals on the next
-    call rather than being poisoned by a single blip.
+    Known provider/decoder failures and ambiguous empty reads must never become
+    cached non-membership. Optional reads confirm transport health before they
+    infer a safety-critical negative from an empty response.
     """
 
 
@@ -273,11 +267,10 @@ def _read(
     rpc_url: str | None,
     timeout: float,
 ) -> bytes:
-    """One eth_call that MUST succeed with data, else ``_ReadFailed``.
+    """Required data read: reverts fail closed; unanswered calls stay inconclusive.
 
-    A revert ("no registry" on a non-pool address) surfaces through the seam as
-    an exception; an empty ``0x`` return surfaces as ``None``. Both mean the read
-    did not produce a usable value → fail closed.
+    Expected reverts are quiet. Provider and response-decoding errors remain
+    inconclusive even if a subsequent, unrelated health read succeeds.
     """
     try:
         raw = eth_call(
@@ -287,9 +280,13 @@ def _read(
             rpc_url=rpc_url,
             gateway_client=gateway_client,
             timeout=timeout,
+            gateway_raise_on_error=True,
         )
-    except Exception as exc:  # noqa: BLE001 — revert / transport error → fail closed
-        raise _ReadFailed(str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — only answered reverts permit negative caching
+        if looks_like_revert(str(exc), require_explicit_execution=True):
+            raise _ReadFailed(str(exc)) from exc
+        logger.warning("Curve MetaRegistry read inconclusive for %s on %s: %s", to, chain, exc)
+        raise _TransientTransport(str(exc)) from exc
     if raw is None:
         raise _ReadFailed("empty result")
     return raw
@@ -361,21 +358,10 @@ def resolve_pool_metadata(
     if cache_key in _METADATA_CACHE:
         return _METADATA_CACHE[cache_key]
 
-    try:
-        result = _resolve_uncached(
-            chain=chain,
-            pool_address=pool_address,
-            gateway_client=gateway_client,
-            rpc_url=rpc_url,
-            timeout=timeout,
-        )
-        if result is None:
-            # The health canary is a SEPARATE request: behind a load-balanced
-            # transport the target read can flake (bad backend / rate limit)
-            # while the canary answers, misclassifying the miss as definitive
-            # (observed live: Ethereum 3pool). Re-read once before recording a
-            # permanent non-membership; two independent misses with a healthy
-            # canary is a far stronger signal.
+    had_transient_failure = False
+    result = None
+    for _ in range(2):
+        try:
             result = _resolve_uncached(
                 chain=chain,
                 pool_address=pool_address,
@@ -383,23 +369,24 @@ def resolve_pool_metadata(
                 rpc_url=rpc_url,
                 timeout=timeout,
             )
-    except _TransientTransport as exc:
-        # A read failed AND transport health could not be confirmed — the failure
-        # is ambiguous (blip vs genuine revert). Return None WITHOUT caching so the
-        # pool re-resolves on the next call (self-heals). Caching this would poison
-        # the per-process memo permanently on a single timeout (blocker #2) and, on
-        # the teardown lane, strand an uncurated LP whose ``LP_CLOSE`` must
-        # re-resolve after a blip.
-        logger.debug(
-            "Curve MetaRegistry resolve transient-failed for %s on %s (%s); not cached",
-            pool_address,
-            chain,
-            exc,
-        )
-        return None
+        except _TransientTransport as exc:
+            had_transient_failure = True
+            logger.debug(
+                "Curve MetaRegistry resolve transient-failed for %s on %s (%s); not cached",
+                pool_address,
+                chain,
+                exc,
+            )
+            continue
+        if result is not None:
+            break
+        # The canary is a separate request; confirm non-membership with a second
+        # target read rather than trusting an independently healthy backend.
 
-    # Cache only DEFINITIVE outcomes — a fully-resolved shape, or a
-    # transport-confirmed "not a Curve pool" ``None`` (a cheap, correct miss).
+    if result is None and had_transient_failure:
+        return None
+    # A resolved pool can recover after a transient. Negative caching requires
+    # both attempts to answer definitively; one healthy miss cannot erase a blip.
     _METADATA_CACHE[cache_key] = result
     return result
 

@@ -113,7 +113,7 @@ class FakeMetaRegistryGateway:
         self._confirm_healthy = confirm_healthy
         self.calls = 0
 
-    def eth_call(self, *, chain: str, to: str, data: str) -> str:
+    def eth_call(self, *, chain: str, to: str, data: str, raise_on_error: bool = False) -> str:
         self.calls += 1
         selector = data[:10]
         if selector == _GET_ADDRESS_SEL:

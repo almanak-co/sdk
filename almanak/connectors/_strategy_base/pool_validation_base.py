@@ -83,6 +83,11 @@ class PoolValidationResult:
     factory: str | None = None
 
 
+def _validate_strict_call_result(result: object, *, strict: bool) -> None:
+    if strict and (not isinstance(result, str) or not result.startswith("0x")):
+        raise ValueError("eth_call result must be a 0x-prefixed hex string")
+
+
 def eth_call(
     rpc_url: str,
     to: str,
@@ -112,7 +117,8 @@ def eth_call(
             upstream call error instead of returning an empty result. This is
             opt-in so existing connector reads retain their three-key gateway
             call shape even when their local wrapper raises on transport
-            failures.
+            failures. Also require a hex-string result on either transport;
+            malformed empty values must not become definitive empty reads.
         from_address: Optional caller address for the simulated call
             (VIB-5716). Caller-state-dependent probes (e.g. the Curve LP
             deployability probe) set it; when ``None`` the call object is
@@ -155,6 +161,7 @@ def eth_call(
                 )
             else:
                 result = gateway_client.eth_call(chain=chain, to=to, data=data)
+            _validate_strict_call_result(result, strict=gateway_raise_on_error)
             if not result or result == "0x":
                 return None
             return bytes.fromhex(result.removeprefix("0x"))
@@ -185,6 +192,7 @@ def eth_call(
         if rpc_error is not None:
             raise ValueError(f"RPC eth_call error for {to}: {rpc_error}")
         result = payload.get("result")
+        _validate_strict_call_result(result, strict=gateway_raise_on_error)
         if not result or result == "0x":
             return None
         if not isinstance(result, str) or not result.startswith("0x"):
