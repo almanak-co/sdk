@@ -4368,6 +4368,36 @@ class CompilationResult(_message.Message):
 Global___CompilationResult: _TypeAlias = CompilationResult  # noqa: Y015
 
 @_typing.final
+class GasCostPolicy(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    MAX_GAS_COST_NATIVE_FIELD_NUMBER: _builtins.int
+    MAX_GAS_COST_USD_FIELD_NUMBER: _builtins.int
+    max_gas_cost_native: _builtins.float
+    """Absent preserves the gateway default; explicit zero disables this limit."""
+    max_gas_cost_usd: _builtins.float
+    def __init__(
+        self,
+        *,
+        max_gas_cost_native: _builtins.float | None = ...,
+        max_gas_cost_usd: _builtins.float | None = ...,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_max_gas_cost_native", b"_max_gas_cost_native", "_max_gas_cost_usd", b"_max_gas_cost_usd", "max_gas_cost_native", b"max_gas_cost_native", "max_gas_cost_usd", b"max_gas_cost_usd"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_max_gas_cost_native", b"_max_gas_cost_native", "_max_gas_cost_usd", b"_max_gas_cost_usd", "max_gas_cost_native", b"max_gas_cost_native", "max_gas_cost_usd", b"max_gas_cost_usd"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    _WhichOneofReturnType__max_gas_cost_native: _TypeAlias = _typing.Literal["max_gas_cost_native"]  # noqa: Y015
+    _WhichOneofArgType__max_gas_cost_native: _TypeAlias = _typing.Literal["_max_gas_cost_native", b"_max_gas_cost_native"]  # noqa: Y015
+    _WhichOneofReturnType__max_gas_cost_usd: _TypeAlias = _typing.Literal["max_gas_cost_usd"]  # noqa: Y015
+    _WhichOneofArgType__max_gas_cost_usd: _TypeAlias = _typing.Literal["_max_gas_cost_usd", b"_max_gas_cost_usd"]  # noqa: Y015
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__max_gas_cost_native) -> _WhichOneofReturnType__max_gas_cost_native | None: ...
+    @_typing.overload
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__max_gas_cost_usd) -> _WhichOneofReturnType__max_gas_cost_usd | None: ...
+
+Global___GasCostPolicy: _TypeAlias = GasCostPolicy  # noqa: Y015
+
+@_typing.final
 class ExecuteRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
@@ -4379,6 +4409,7 @@ class ExecuteRequest(_message.Message):
     CHAIN_FIELD_NUMBER: _builtins.int
     WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
     MAX_GAS_PRICE_GWEI_FIELD_NUMBER: _builtins.int
+    GAS_COST_POLICY_FIELD_NUMBER: _builtins.int
     action_bundle: _builtins.bytes
     """JSON-serialized ActionBundle"""
     dry_run: _builtins.bool
@@ -4391,6 +4422,8 @@ class ExecuteRequest(_message.Message):
     wallet_address: _builtins.str
     max_gas_price_gwei: _builtins.int
     """Gas price cap in gwei (0 = use gateway default)"""
+    @_builtins.property
+    def gas_cost_policy(self) -> Global___GasCostPolicy: ...
     def __init__(
         self,
         *,
@@ -4402,8 +4435,11 @@ class ExecuteRequest(_message.Message):
         chain: _builtins.str = ...,
         wallet_address: _builtins.str = ...,
         max_gas_price_gwei: _builtins.int = ...,
+        gas_cost_policy: Global___GasCostPolicy | None = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["action_bundle", b"action_bundle", "chain", b"chain", "deployment_id", b"deployment_id", "dry_run", b"dry_run", "intent_id", b"intent_id", "max_gas_price_gwei", b"max_gas_price_gwei", "simulation_enabled", b"simulation_enabled", "wallet_address", b"wallet_address"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["gas_cost_policy", b"gas_cost_policy"]  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["action_bundle", b"action_bundle", "chain", b"chain", "deployment_id", b"deployment_id", "dry_run", b"dry_run", "gas_cost_policy", b"gas_cost_policy", "intent_id", b"intent_id", "max_gas_price_gwei", b"max_gas_price_gwei", "simulation_enabled", b"simulation_enabled", "wallet_address", b"wallet_address"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___ExecuteRequest: _TypeAlias = ExecuteRequest  # noqa: Y015

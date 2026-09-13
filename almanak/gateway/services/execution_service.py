@@ -8,11 +8,13 @@ the gateway; strategy containers never see private keys.
 import asyncio
 import json
 import logging
+import math
 import time
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import grpc
 import pydantic
@@ -49,10 +51,14 @@ from almanak.gateway.validation import (
     validate_tx_hash,
 )
 
+if TYPE_CHECKING:
+    from almanak.gateway.services.market_service import MarketServiceServicer
+
 logger = logging.getLogger(__name__)
 
 # TTL for cached compilers (5 minutes) - prevents stale price data in long-running services
 COMPILER_CACHE_TTL_SECONDS = 300
+GAS_POLICY_PRICE_MAX_AGE_SECONDS = 60
 
 # Intent types that require real prices on mainnet (VIB-523).
 # Normalized: uppercase, underscores stripped, so both "lp_open" and "lpopen" match.
@@ -282,7 +288,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         self._solana_route_refresher: SolanaRouteRefresher | None = None
         self._initialized = False
         self.wallet_registry: Any = None
-        self.market_servicer: object | None = None  # Set by GatewayServer after creation
+        self.market_servicer: MarketServiceServicer | None = None  # Set by GatewayServer after creation
         self._registered_chains: set[str] | None = None
         self._registered_chain_wallets: dict[str, str] | None = None
         # Chains for which we have already logged a public-RPC-fallback ERROR,
@@ -346,7 +352,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                     expected_identity = (
                         f"{identity[0]}:{identity[1]}" if isinstance(identity, tuple) and len(identity) == 2 else None
                     )
-                    raw_peg_tokens = getattr(result, "peg_tokens", ())
+                    raw_peg_tokens = getattr(result, "peg_tokens", False)
                     reported_peg_tokens = (
                         {str(item) for item in raw_peg_tokens}
                         if isinstance(raw_peg_tokens, list | tuple | set | frozenset)
@@ -772,6 +778,11 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 network=Network.parse(network),
             ),
         )
+
+        for field in ("max_gas_cost_native", "max_gas_cost_usd"):
+            configured_cap = getattr(self.settings, field)
+            if configured_cap is not None:
+                setattr(orchestrator.tx_risk_config, field, configured_cap)
 
         self._orchestrator_cache[cache_key] = orchestrator
         self._orchestrator_locks[cache_key] = asyncio.Lock()
@@ -1288,6 +1299,66 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         """
         return intent_type.strip().lower().replace("-", "").replace("_", "")
 
+    @staticmethod
+    def _gas_policy_refusal(error: str) -> gateway_pb2.ExecutionResult:
+        return gateway_pb2.ExecutionResult(
+            success=False,
+            error=error,
+            error_code="GAS_POLICY_REFUSED",
+            submission_provenance=gateway_pb2.SUBMISSION_PROVENANCE_NOT_ATTEMPTED,
+        )
+
+    async def ExecuteWithGasPolicy(
+        self,
+        request: gateway_pb2.ExecuteRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> gateway_pb2.ExecutionResult:
+        """Require explicit cost policy before entering the execution pipeline."""
+        if not request.HasField("gas_cost_policy"):
+            return self._gas_policy_refusal("Cost-policy execution requires gas_cost_policy")
+        return await self.Execute(request, context)
+
+    @staticmethod
+    def _gas_policy_observation_timestamp(result: Any) -> datetime:
+        details = getattr(result, "source_details", None)
+        observations = details.get("contributing_observations") if isinstance(details, dict) else None
+        if not isinstance(observations, list) or not observations or getattr(result, "peg_tokens", False):
+            raise ValueError("USD gas cap requires measured contributing price observations")
+        timestamps = []
+        now = datetime.now(UTC)
+        for observation in observations:
+            if (
+                not isinstance(observation, dict)
+                or not isinstance(observation.get("source"), str)
+                or not observation["source"]
+                or observation.get("stale") is not False
+                or observation.get("peg_tokens")
+                or not isinstance(observation.get("timestamp"), str)
+            ):
+                raise ValueError("USD gas cap requires complete measured price observation evidence")
+            timestamp = datetime.fromisoformat(observation["timestamp"])
+            if (
+                timestamp.tzinfo is None
+                or not 0 <= (now - timestamp).total_seconds() <= GAS_POLICY_PRICE_MAX_AGE_SECONDS
+            ):
+                raise ValueError("USD gas cap requires fresh contributing price observations")
+            timestamps.append(timestamp)
+        return min(timestamps)
+
+    async def _gas_policy_native_price(self, chain: str) -> tuple[float, datetime]:
+        """Fetch execution-grade native pricing from the gateway's chain oracle."""
+        if self.market_servicer is None:
+            raise ValueError("USD gas cap requires a gateway native-token price provider")
+        result = await self.market_servicer.native_price_for_execution(chain, GAS_POLICY_PRICE_MAX_AGE_SECONDS)
+        price = Decimal(str(result.price))
+        timestamp = self._gas_policy_observation_timestamp(result)
+        if not price.is_finite() or price <= 0 or result.stale:
+            raise ValueError("USD gas cap requires a fresh, finite, positive native-token price")
+        native_price = float(price)
+        if not math.isfinite(native_price) or native_price <= 0:
+            raise ValueError("USD gas price cannot be represented as a finite positive number")
+        return native_price, timestamp
+
     async def Execute(
         self,
         request: gateway_pb2.ExecuteRequest,
@@ -1302,6 +1373,18 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         Returns:
             ExecutionResult with tx hashes, gas used, receipts
         """
+        effective_cost_caps = {
+            field: getattr(self.settings, field) or 0.0 for field in ("max_gas_cost_native", "max_gas_cost_usd")
+        }
+        if request.HasField("gas_cost_policy"):
+            policy = request.gas_cost_policy
+            for field in ("max_gas_cost_native", "max_gas_cost_usd"):
+                if policy.HasField(field):
+                    value = getattr(policy, field)
+                    if not math.isfinite(value) or value < 0:
+                        return self._gas_policy_refusal(f"{field} must be finite and nonnegative")
+                    effective_cost_caps[field] = value
+
         # Validate inputs BEFORE initialization
         try:
             chain = validate_chain(request.chain or "arbitrum")
@@ -1326,6 +1409,12 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
                 error=str(e),
                 submission_provenance=gateway_pb2.SUBMISSION_PROVENANCE_NOT_ATTEMPTED,
             )
+
+        descriptor = ChainRegistry.try_resolve(chain)
+        if any(cap > 0 for cap in effective_cost_caps.values()) and (
+            descriptor is None or descriptor.family is not ChainFamily.EVM
+        ):
+            return self._gas_policy_refusal("Enabled gas cost policy is not supported for this chain family")
 
         await self._ensure_initialized()
 
@@ -1476,13 +1565,43 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             # Execute with per-orchestrator serialization so request-specific gas caps
             # do not race or leak across concurrent requests.
             async with orchestrator_lock:
-                orchestrator.tx_risk_config.max_gas_price_gwei = (
-                    request.max_gas_price_gwei if request.max_gas_price_gwei > 0 else default_gas_cap
-                )
+                risk_config = orchestrator.tx_risk_config
+                overrides: dict[str, Any] = {
+                    "max_gas_price_gwei": request.max_gas_price_gwei
+                    if request.max_gas_price_gwei > 0
+                    else default_gas_cap,
+                }
+                if request.HasField("gas_cost_policy"):
+                    for field in ("max_gas_cost_native", "max_gas_cost_usd"):
+                        if request.gas_cost_policy.HasField(field):
+                            overrides[field] = getattr(request.gas_cost_policy, field)
+                needs_price = overrides.get("max_gas_cost_usd", getattr(risk_config, "max_gas_cost_usd", 0)) > 0
+            if needs_price:
                 try:
+                    price, timestamp = await self._gas_policy_native_price(chain)
+                except Exception as exc:
+                    logger.warning("USD gas policy price unavailable on %s: %s", chain, type(exc).__name__)
+                    return self._gas_policy_refusal("USD gas cap requires a fresh native-token price")
+                overrides.update(
+                    native_token_price_usd=price,
+                    native_token_price_timestamp=timestamp,
+                    native_token_price_max_age_seconds=GAS_POLICY_PRICE_MAX_AGE_SECONDS,
+                )
+            async with orchestrator_lock:
+                missing = object()
+                original_values = {field: getattr(risk_config, field, missing) for field in overrides}
+                try:
+                    for field, value in overrides.items():
+                        setattr(risk_config, field, value)
                     result = await orchestrator.execute(action_bundle, exec_context)
                 finally:
-                    orchestrator.tx_risk_config.max_gas_price_gwei = default_gas_cap
+                    # Risk counters belong to the cached instance; restore only request policy.
+                    for field, value in original_values.items():
+                        if value is missing:
+                            if hasattr(risk_config, field):
+                                delattr(risk_config, field)
+                        else:
+                            setattr(risk_config, field, value)
 
             atomic_safe_batch = bool(safe_address) and len(action_bundle.transactions) > 1
 

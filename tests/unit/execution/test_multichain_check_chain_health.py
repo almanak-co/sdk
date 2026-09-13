@@ -66,7 +66,7 @@ class TestGatewayMode:
 class TestConfigMode:
     @pytest.fixture
     def orchestrator(self):
-        config = MagicMock()
+        config = MagicMock(max_gas_cost_native=0.0, max_gas_cost_usd=0.0)
         config.chains = ["base", "arbitrum", "ethereum"]
         return MultiChainOrchestrator(config=config)
 

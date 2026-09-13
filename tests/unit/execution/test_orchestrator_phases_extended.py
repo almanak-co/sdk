@@ -661,7 +661,7 @@ class TestPhaseGasExtended:
     @pytest.mark.asyncio
     async def test_gas_pass_does_not_short_circuit_and_keeps_state(self, orchestrator):
         state = _make_state(orchestrator, transactions=[{"to": "0x0", "data": "0x", "value": 0}])
-        state.unsigned_txs = [MagicMock()]
+        state.unsigned_txs = [MagicMock(max_fee_per_gas=1, gas_limit=21_000)]
 
         orchestrator._update_gas_prices = AsyncMock(return_value=[MagicMock(), MagicMock()])
         orchestrator._validate_gas_prices = MagicMock(return_value=RiskGuardResult(passed=True, violations=[]))
@@ -697,7 +697,7 @@ class TestPhaseSignExtended:
     async def test_non_dry_run_populates_signed_txs_and_returns_none(self, orchestrator):
         state = _make_state(orchestrator, transactions=[{"to": "0x0", "data": "0x", "value": 0}])
         state.context.dry_run = False
-        state.unsigned_txs = [MagicMock(nonce=1), MagicMock(nonce=2)]
+        state.unsigned_txs = [MagicMock(nonce=1, max_fee_per_gas=1, gas_limit=21_000), MagicMock(nonce=2, max_fee_per_gas=1, gas_limit=21_000)]
 
         orchestrator._assign_nonces = AsyncMock(return_value=state.unsigned_txs)
         signed_list = [MagicMock(), MagicMock()]
@@ -722,7 +722,7 @@ class TestPhaseSignExtended:
             phases_observed.append(state.result.phase)
             return state.unsigned_txs or []
 
-        state.unsigned_txs = [MagicMock(nonce=1)]
+        state.unsigned_txs = [MagicMock(nonce=1, max_fee_per_gas=1, gas_limit=21_000)]
         orchestrator._assign_nonces = capture_phase_during_assign
         orchestrator.signer.sign_batch = AsyncMock(return_value=[MagicMock()])
 
@@ -734,7 +734,7 @@ class TestPhaseSignExtended:
     async def test_dry_run_does_not_submit(self, orchestrator):
         state = _make_state(orchestrator, transactions=[{"to": "0x0", "data": "0x", "value": 0}])
         state.context.dry_run = True
-        state.unsigned_txs = [MagicMock()]
+        state.unsigned_txs = [MagicMock(max_fee_per_gas=1, gas_limit=21_000)]
         orchestrator._assign_nonces = AsyncMock(return_value=state.unsigned_txs)
         orchestrator.signer.sign_batch = AsyncMock(return_value=[MagicMock()])
         orchestrator.submitter.submit = AsyncMock()
@@ -748,7 +748,7 @@ class TestPhaseSignExtended:
     async def test_opted_in_dry_run_continues_to_native_funding(self, orchestrator):
         state = _make_state(orchestrator, metadata={"native_funding_preflight": {}})
         state.context.dry_run = True
-        state.unsigned_txs = [MagicMock()]
+        state.unsigned_txs = [MagicMock(max_fee_per_gas=1, gas_limit=21_000)]
         orchestrator._assign_nonces = AsyncMock(return_value=state.unsigned_txs)
         orchestrator.signer.sign_batch = AsyncMock(return_value=[MagicMock()])
 
@@ -1590,7 +1590,7 @@ class TestPipelineStateInvariants:
     async def test_phase_sign_does_not_set_receipts_or_submission_results(self, orchestrator):
         state = _make_state(orchestrator, transactions=[{"to": "0x0", "data": "0x", "value": 0}])
         state.context.dry_run = False
-        state.unsigned_txs = [MagicMock(nonce=1)]
+        state.unsigned_txs = [MagicMock(nonce=1, max_fee_per_gas=1, gas_limit=21_000)]
         orchestrator._assign_nonces = AsyncMock(return_value=state.unsigned_txs)
         orchestrator.signer.sign_batch = AsyncMock(return_value=[MagicMock()])
 
@@ -1636,7 +1636,7 @@ async def test_dry_run_eoa_refuses_requires_atomic_forced_exit(orchestrator):
         metadata={"requires_atomic": True, "force_deallocate": {"legs": [{}]}},
     )
     state.context.dry_run = True
-    state.unsigned_txs = [MagicMock(nonce=1), MagicMock(nonce=2)]
+    state.unsigned_txs = [MagicMock(nonce=1, max_fee_per_gas=1, gas_limit=21_000), MagicMock(nonce=2, max_fee_per_gas=1, gas_limit=21_000)]
     orchestrator._validate_connector_operation = AsyncMock(return_value=None)
     orchestrator._assign_nonces = AsyncMock(return_value=state.unsigned_txs)
     orchestrator.signer.sign_batch = AsyncMock(return_value=[MagicMock(), MagicMock()])

@@ -23,7 +23,7 @@ from almanak.framework.intents.vocabulary import InvalidAmountError
 
 @pytest.fixture
 def orchestrator():
-    return MultiChainOrchestrator(config=MagicMock())
+    return MultiChainOrchestrator(config=MagicMock(max_gas_cost_native=0.0, max_gas_cost_usd=0.0))
 
 
 def _swap(amount, chain="base"):

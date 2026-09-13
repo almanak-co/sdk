@@ -455,6 +455,8 @@ class TransactionRiskConfig:
     max_gas_cost_native: float = 0.0
     max_gas_cost_usd: float = 0.0
     native_token_price_usd: float = 0.0
+    native_token_price_timestamp: datetime | None = None
+    native_token_price_max_age_seconds: float = 60.0
     max_slippage_bps: int = 0
     max_daily_volume_eth: Decimal = Decimal("0")
 
@@ -1875,14 +1877,15 @@ class ExecutionOrchestrator:
 
     async def _phase_gas(self, state: ExecutionPipelineState) -> ExecutionResult | None:
         """Step 3.5 and 3.6: fetch network gas prices, then validate against cap."""
-        context = state.context
-        result = state.result
-        session = state.session
         assert state.unsigned_txs is not None
 
         state.unsigned_txs = await self._update_gas_prices(state.unsigned_txs)
 
-        # Caps must be checked after network prices replace the placeholders.
+        return self._check_gas_caps(state)
+
+    def _check_gas_caps(self, state: ExecutionPipelineState) -> ExecutionResult | None:
+        context, result, session = state.context, state.result, state.session
+        assert state.unsigned_txs is not None
         gas_price_result = self._validate_gas_prices(state.unsigned_txs)
         if not gas_price_result.passed:
             result.error = f"Gas price cap exceeded: {'; '.join(gas_price_result.violations)}"
@@ -1907,6 +1910,10 @@ class ExecutionOrchestrator:
         result.phase = ExecutionPhase.NONCE_ASSIGNMENT
 
         state.unsigned_txs = await self._assign_nonces(state.unsigned_txs, context)
+
+        refusal = self._check_gas_caps(state)
+        if refusal is not None:
+            return refusal
 
         result.phase = ExecutionPhase.SIGNING
 
@@ -2806,61 +2813,28 @@ class ExecutionOrchestrator:
         Returns:
             RiskGuardResult indicating validation status
         """
+        from .gas.cost import gas_cap_violations
+
         config = self.tx_risk_config
-        check_gas_price = config.max_gas_price_gwei > 0
-        check_gas_cost = config.max_gas_cost_native > 0
-        check_gas_cost_usd = config.max_gas_cost_usd > 0 and config.native_token_price_usd > 0
-
-        if config.max_gas_cost_usd > 0 and config.native_token_price_usd <= 0:
-            logger.warning(
-                "max_gas_cost_usd is set but native_token_price_usd is not available; "
-                "USD gas guard is disabled for this execution"
-            )
-
-        if not check_gas_price and not check_gas_cost and not check_gas_cost_usd:
-            return RiskGuardResult(passed=True, violations=[])
-
-        violations: list[str] = []
-        max_gas_wei = config.max_gas_price_gwei * 10**9 if check_gas_price else 0
-        max_cost_wei = int(config.max_gas_cost_native * 10**18) if check_gas_cost else 0
-
-        for i, tx in enumerate(unsigned_txs):
-            tx_gas_price = tx.max_fee_per_gas or tx.gas_price or 0
-
-            if check_gas_price and tx_gas_price > max_gas_wei:
-                tx_gas_gwei = tx_gas_price / 10**9
-                violations.append(
-                    f"Transaction {i}: gas price {tx_gas_gwei:.1f} gwei exceeds limit {config.max_gas_price_gwei} gwei"
-                )
-
-            if tx_gas_price > 0:
-                gas_limit = tx.gas_limit or 0
-                estimated_cost_wei = gas_limit * tx_gas_price
-                cost_native = estimated_cost_wei / 10**18
-
-                if check_gas_cost and estimated_cost_wei > max_cost_wei:
-                    violations.append(
-                        f"Transaction {i}: estimated gas cost {cost_native:.6f} native "
-                        f"exceeds limit {config.max_gas_cost_native} native "
-                        f"(gas_limit={gas_limit:,} * gas_price={tx_gas_price / 10**9:.2f} gwei)"
-                    )
-
-                if check_gas_cost_usd:
-                    cost_usd = cost_native * config.native_token_price_usd
-                    if cost_usd > config.max_gas_cost_usd:
-                        violations.append(
-                            f"Transaction {i}: estimated gas cost ${cost_usd:.2f} USD "
-                            f"exceeds limit ${config.max_gas_cost_usd:.2f} USD "
-                            f"(native_cost={cost_native:.6f} * price=${config.native_token_price_usd:.2f})"
-                        )
-
-        if violations:
-            logger.warning(f"Gas guard BLOCKED: {violations}")
-
-        return RiskGuardResult(
-            passed=len(violations) == 0,
-            violations=violations,
+        violations = gas_cap_violations(
+            unsigned_txs,
+            max_gas_price_gwei=config.max_gas_price_gwei,
+            max_gas_cost_native=config.max_gas_cost_native,
+            max_gas_cost_usd=config.max_gas_cost_usd,
+            native_token_price_usd=config.native_token_price_usd,
+            native_token_price_timestamp=config.native_token_price_timestamp,
+            native_token_price_max_age_seconds=config.native_token_price_max_age_seconds,
         )
+        if violations:
+            logger.warning("Gas guard BLOCKED: %s", violations)
+        return RiskGuardResult(passed=not violations, violations=violations)
+
+    def _validate_safe_wrapper_gas(self, wrapper: UnsignedTransaction) -> None:
+        from .interfaces import SigningError
+
+        result = self._validate_gas_prices([wrapper])
+        if not result.passed:
+            raise SigningError(reason="Safe wrapper gas cap exceeded: " + "; ".join(result.violations))
 
     async def _preflight_balance_check(
         self,
@@ -2988,10 +2962,15 @@ class ExecutionOrchestrator:
         local_nonce = self._local_nonce.get(eoa_address.lower(), 0)
         eoa_nonce = max(chain_nonce, local_nonce)
 
+        gas_validator = None
+        if self.tx_risk_config.max_gas_cost_native or self.tx_risk_config.max_gas_cost_usd:
+            gas_validator = self._validate_safe_wrapper_gas
         if len(unsigned_txs) == 1:
-            signed = await self.signer.sign_with_web3(unsigned_txs[0], web3, eoa_nonce)
+            signed = await self.signer.sign_with_web3(unsigned_txs[0], web3, eoa_nonce, gas_validator=gas_validator)
         else:
-            signed = await self.signer.sign_bundle_with_web3(unsigned_txs, web3, eoa_nonce, context.chain)
+            signed = await self.signer.sign_bundle_with_web3(
+                unsigned_txs, web3, eoa_nonce, context.chain, gas_validator=gas_validator
+            )
 
         # The nonce cache advances only after confirmed on-chain success.
         return [signed]

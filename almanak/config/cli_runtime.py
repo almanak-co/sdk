@@ -66,6 +66,7 @@ service depend on the CLI surface it is meant to feed.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from typing import Any
 
@@ -749,6 +750,37 @@ def gas_risk_override_presence() -> dict[str, bool]:
     return presence
 
 
+def gas_cost_overrides(runtime_config: Any | None = None, *, exclude: set[str] | None = None) -> dict[str, float]:
+    """Resolve explicit per-transaction cost limits for CLI execution lanes.
+
+    Omitted limits preserve gateway defaults; an explicit zero disables that
+    limit. Legacy runtime models use zero for absence, so positive programmatic
+    values are retained while disabling a limit requires an environment override.
+    """
+    from almanak.config.runtime import ConfigurationError
+
+    overrides: dict[str, float] = {}
+    for field in ("max_gas_cost_native", "max_gas_cost_usd"):
+        if exclude and field in exclude:
+            continue
+        prefixed, legacy = _GAS_RISK_OVERRIDE_VARS[field]
+        raw = os.environ.get(prefixed)
+        if raw is None:
+            raw = os.environ.get(legacy)
+        value = getattr(runtime_config, field, None)
+        candidate = raw if raw is not None else value
+        if candidate is None or (raw is None and candidate == 0):
+            continue
+        try:
+            parsed = float(candidate)
+        except (TypeError, ValueError, OverflowError):
+            raise ConfigurationError(field=field, reason="Must be a finite nonnegative number") from None
+        if not math.isfinite(parsed) or parsed < 0:
+            raise ConfigurationError(field=field, reason="Must be a finite nonnegative number")
+        overrides[field] = parsed
+    return overrides
+
+
 def max_value_usd_override() -> str | None:
     """Return the raw ``ALMANAK_MAX_VALUE_USD`` / ``MAX_VALUE_USD`` value, or ``None``.
 
@@ -853,6 +885,7 @@ __all__ = [
     "chain_scoped_gwei_override",
     "cli_runtime_config_from_env",
     "gas_risk_override_presence",
+    "gas_cost_overrides",
     "max_value_usd_override",
     "subprocess_env_with_overrides",
 ]

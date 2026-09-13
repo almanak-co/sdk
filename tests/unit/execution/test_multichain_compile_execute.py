@@ -19,7 +19,7 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 
 
 def _make_mco():
-    mock_config = MagicMock()
+    mock_config = MagicMock(max_gas_cost_native=0.0, max_gas_cost_usd=0.0)
     mock_config.execution_address = "0x" + "ee" * 20
     mco = MultiChainOrchestrator(config=mock_config)
     mock_compiler = MagicMock()

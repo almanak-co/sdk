@@ -1,36 +1,12 @@
-"""VIB-4879: multi-chain USD-cost gas cap correctness.
+"""Cross-chain USD gas liability with measured native prices and timestamps.
 
-Pre-VIB-4879 the global ``ALMANAK_MAX_GAS_PRICE_GWEI`` was the only
-operator-facing gas-cap knob. Post-VIB-4879 ``ALMANAK_MAX_GAS_COST_USD``
-is the recommended chain-agnostic primary cap: one number works across
-every chain because USD is a chain-invariant unit and the in-memory
-price oracle (already maintained for accounting / portfolio valuation)
-supplies the per-chain native price at zero new I/O cost.
-
-This file is the multi-chain correctness contract (acceptance criterion 2
-of VIB-4879):
-
-1. With ``max_gas_cost_usd=25`` set, the gas guard correctly converts
-   per-tx gas (gas_limit * gas_price_wei) to USD via the in-memory
-   native price and rejects txs whose USD cost exceeds the cap.
-2. Across all 17 documented chains, the **implicit effective gwei cap**
-   ``max_gas_cost_usd / (gas_estimate * native_price / 1e9)`` lands in
-   a sensible band — ETH-anchored chains ($1992) at ~84 gwei, cheap
-   natives (POL $0.087) at multi-million gwei (clamped to
-   :data:`SANE_GWEI_CEILING` = 10_000 for diagnostic display purposes).
-3. When the price oracle has no native price (yet-to-be-fetched, fetch
-   failed, circuit open), the USD path is disabled by the guard (log
-   line) and the gwei cap (chain descriptor default) acts as the
-   backstop — worst case is identical to pre-VIB-4879 behaviour.
-
-The guard implementation lives in
-``ExecutionOrchestrator._validate_gas_prices``; we exercise it via a
-minimal ``SimpleNamespace`` shim with just the ``tx_risk_config``
-attribute (the guard reads nothing else from ``self``).
+Fixtures use representative prices to exercise USD conversion independently of
+provider acquisition; enabled caps must still enforce quote freshness.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -126,6 +102,7 @@ class TestUsdCapPerChain:
         risk = TransactionRiskConfig.permissive()
         risk.max_gas_cost_usd = USD_CAP
         risk.native_token_price_usd = native_price
+        risk.native_token_price_timestamp = datetime.now(UTC)
 
         result = _invoke_guard(tx_risk_config=risk, txs=[tx])
         assert result.passed, (
@@ -160,6 +137,7 @@ class TestUsdCapPerChain:
         risk = TransactionRiskConfig.permissive()
         risk.max_gas_cost_usd = USD_CAP
         risk.native_token_price_usd = native_price
+        risk.native_token_price_timestamp = datetime.now(UTC)
 
         result = _invoke_guard(tx_risk_config=risk, txs=[tx])
         assert not result.passed, (
@@ -167,7 +145,7 @@ class TestUsdCapPerChain:
             f"(implicit cap ~{raw_implicit:.2f}) should be REJECTED for USD-cap "
             f"violation, but passed."
         )
-        assert any("USD" in v for v in result.violations), (
+        assert any("estimated gas cost" in v and "USD" in v for v in result.violations), (
             f"Chain {chain!r}: expected USD-cap violation, got: {result.violations}"
         )
 
@@ -208,45 +186,13 @@ class TestUsdCapAtSaneCeilingDocumented:
         )
 
 
-class TestUsdCapFallbackWhenOracleMissing:
-    """When the in-memory oracle has no native price, the USD path is disabled.
-
-    The gwei cap (chain descriptor default) is still enforced — so the
-    worst-case behaviour is identical to pre-VIB-4879. This is the
-    "fail-open the USD intent, keep the chain default" semantics from
-    the ticket's failure-modes section.
-    """
-
-    def test_usd_check_disabled_when_native_price_is_zero(self, caplog) -> None:
-        risk = TransactionRiskConfig.permissive()
-        risk.max_gas_cost_usd = USD_CAP
-        risk.native_token_price_usd = 0.0  # oracle has no value
-        risk.max_gas_price_gwei = 0  # disable the gwei cap to isolate the USD path
-
-        tx = _make_tx(chain_id=1, gas_price_gwei=1000)
-        with caplog.at_level("WARNING"):
-            result = _invoke_guard(tx_risk_config=risk, txs=[tx])
-
-        assert result.passed, (
-            "With native_token_price_usd=0, the USD cap should be disabled "
-            "(not fail-closed). The gwei cap (also 0 here) is the only other "
-            f"guard. Violations: {result.violations}"
-        )
-        assert any("USD gas guard is disabled" in rec.message for rec in caplog.records), (
-            f"Expected 'USD gas guard is disabled' log; got: {[r.message for r in caplog.records]}"
-        )
-
-    def test_gwei_descriptor_cap_still_enforces_when_usd_disabled(self) -> None:
-        """When USD is disabled (no native price), the chain descriptor's
-        gwei cap is the backstop — it must still fire."""
+class TestUsdCapRequiresNativePrice:
+    @pytest.mark.parametrize("gwei_cap", [0, 100])
+    def test_missing_price_refuses_even_when_another_cap_exists(self, gwei_cap) -> None:
         risk = TransactionRiskConfig.permissive()
         risk.max_gas_cost_usd = USD_CAP
         risk.native_token_price_usd = 0.0
-        risk.max_gas_price_gwei = 100  # chain descriptor default surrogate
-
-        tx = _make_tx(chain_id=1, gas_price_gwei=500)  # exceeds gwei cap
-        result = _invoke_guard(tx_risk_config=risk, txs=[tx])
+        risk.max_gas_price_gwei = gwei_cap
+        result = _invoke_guard(tx_risk_config=risk, txs=[_make_tx(chain_id=1, gas_price_gwei=50)])
         assert not result.passed
-        assert any("gwei" in v for v in result.violations), (
-            f"Expected gwei-cap violation as USD-disabled backstop, got: {result.violations}"
-        )
+        assert any("positive native token price" in v for v in result.violations)

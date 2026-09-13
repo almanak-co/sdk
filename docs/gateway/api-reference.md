@@ -9,7 +9,7 @@ This document describes the gRPC API exposed by the Almanak Gateway.
 | Health | 3 | Standard gRPC health checks and chain registration |
 | MarketService | 10 | Price data, provider-exact reference prices, Pendle PT/YT-USD price, balances, batch balances, technical indicators, Uniswap V4 pool key lookup, and verified lending/perpetual-market resolution |
 | StateService | 31 | Strategy state persistence, portfolio snapshots/metrics, transaction ledger, accounting events, position events, accounting outbox, atomic ledger+registry writes, and cutover migration state |
-| ExecutionService | 3 | Intent compilation and transaction execution |
+| ExecutionService | 4 | Intent compilation and transaction execution |
 | ObserveService | 4 | Logging, alerts, metrics, and timeline events |
 | RpcService | 7 | JSON-RPC proxy to blockchains with typed queries |
 | IntegrationService | 14 | Third-party data (Binance, CoinGecko, TheGraph, CoinGecko Onchain, Zerion) |
@@ -867,6 +867,37 @@ Execute an action bundle (sign, submit, confirm).
 ```protobuf
 rpc Execute(ExecuteRequest) returns (ExecutionResult)
 ```
+
+### ExecuteWithGasPolicy
+
+Execute an action bundle with per-transaction native-token and/or USD gas-cost
+limits. Limits apply to each physical transaction, including Safe/Zodiac outer
+wrappers; they are not a bundle or strategy spending budget.
+
+```protobuf
+rpc ExecuteWithGasPolicy(ExecuteRequest) returns (ExecutionResult)
+```
+
+The request is the same `ExecuteRequest` used by `Execute`, with field 9 carrying
+this presence-aware policy:
+
+```protobuf
+message GasCostPolicy {
+  optional double max_gas_cost_native = 1;
+  optional double max_gas_cost_usd = 2;
+}
+```
+
+An absent limit preserves the gateway default. An explicit zero disables that
+limit. Negative or non-finite limits are invalid. The separate
+`max_gas_price_gwei` request field retains its existing meaning: zero uses the
+gateway default.
+
+The gateway validates gas liability after fee estimation and again before
+signing. An enabled USD limit requires a fresh, measured native-token price
+obtained by the gateway; a missing or expired quote refuses execution. This
+also applies to teardown. Clients must not fall back to `Execute` if an older
+gateway returns `UNIMPLEMENTED` for this RPC.
 
 ### GetTransactionStatus
 

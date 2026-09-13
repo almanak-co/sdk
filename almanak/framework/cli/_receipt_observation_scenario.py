@@ -61,6 +61,13 @@ class _ExecutionObservations:
         self._marker, self._digest = marker, digest
 
     def Execute(self, request: Any, **kwargs: Any) -> Any:  # noqa: N802 - protobuf API
+        return self._observe_execution("Execute", request, **kwargs)
+
+    def ExecuteWithGasPolicy(self, request: Any, **kwargs: Any) -> Any:  # noqa: N802 - protobuf API
+        return self._observe_execution("ExecuteWithGasPolicy", request, **kwargs)
+
+    def _observe_execution(self, method: str, request: Any, **kwargs: Any) -> Any:
+        execute = getattr(self._client.execution, method)
         require_reference_test_runtime(network=self._network, managed=self._managed)
         if request.chain != self._chain:
             raise ValueError("Receipt observation scenario chain mismatch")
@@ -74,14 +81,14 @@ class _ExecutionObservations:
                 or consumed.get("intent_type", "SWAP") != self._intent_type
             ):
                 raise ValueError("Receipt observation scenario differs from its consumed marker")
-            return self._client.execution.Execute(request, **kwargs)
+            return execute(request, **kwargs)
         version = self._client.rpc.Call(
             gateway_pb2.RpcRequest(chain=self._chain, method="web3_clientVersion", params="[]"),
             timeout=10,
         )
         if not version.success or not str(json.loads(version.result)).lower().startswith("anvil"):
             raise ValueError("Receipt observation scenario gateway is not connected to Anvil")
-        response = self._client.execution.Execute(request, **kwargs)
+        response = execute(request, **kwargs)
         if not response.success or not response.tx_hashes:
             return response
         try:

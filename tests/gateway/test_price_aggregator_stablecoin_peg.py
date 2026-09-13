@@ -683,3 +683,33 @@ class TestCoinGeckoCooldownFailover:
         assert result.price == Decimal("2500")
         # No multi-second retry/sleep on the rate-limited source.
         assert elapsed < 0.5
+
+
+@pytest.mark.asyncio
+async def test_execution_freshness_constraint_never_returns_synthetic_peg() -> None:
+    source = _Source("unavailable", raises=RuntimeError("upstream unavailable"))
+    aggregator = PriceAggregator([source])
+    with pytest.raises(AllDataSourcesFailed):
+        await aggregator.get_aggregated_price(
+            "USDC",
+            "USD",
+            resolved_token=USDC_RESOLVED,
+            max_observation_age_seconds=60,
+        )
+    assert source.calls
+
+
+@pytest.mark.asyncio
+async def test_execution_freshness_constraint_prices_measured_stablecoin() -> None:
+    source = _Source("measured", price=Decimal("0.999"))
+    aggregator = PriceAggregator([source])
+    result = await aggregator.get_aggregated_price(
+        "USDC",
+        "USD",
+        resolved_token=USDC_RESOLVED,
+        max_observation_age_seconds=60,
+    )
+    assert result.source == "aggregated"
+    assert result.price == Decimal("0.999")
+    assert not result.peg_tokens
+    assert source.calls

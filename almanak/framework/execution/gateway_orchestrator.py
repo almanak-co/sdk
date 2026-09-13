@@ -23,6 +23,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import grpc
+
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.core.enums import ChainFamily
 from almanak.framework.execution.gas.constants import (
@@ -556,6 +558,8 @@ class GatewayExecutionOrchestrator:
         timeout: float | None = None,
         execute_timeout: float | None = None,
         max_gas_price_gwei: int = 0,
+        max_gas_cost_native: float | None = None,
+        max_gas_cost_usd: float | None = None,
     ):
         """Initialize gateway-backed execution orchestrator.
 
@@ -574,6 +578,10 @@ class GatewayExecutionOrchestrator:
                 gas estimation + TX confirmation combined.
             max_gas_price_gwei: Gas price cap in gwei (0 = use gateway default).
                 Passed to the gateway so the ExecutionOrchestrator enforces the cap.
+            max_gas_cost_native: Per-transaction native gas liability cap. None
+                preserves the gateway default; zero explicitly disables the cap.
+            max_gas_cost_usd: Per-transaction USD gas liability cap, using a fresh
+                gateway-owned native-token quote. None preserves the default.
         """
         self._client = client
         self._chain = chain
@@ -592,6 +600,8 @@ class GatewayExecutionOrchestrator:
         self._timeout = timeout if timeout is not None else chain_tx_timeout
         self._execute_timeout = execute_timeout if execute_timeout is not None else chain_grpc_timeout
         self._max_gas_price_gwei = max_gas_price_gwei
+        self._max_gas_cost_native = max_gas_cost_native
+        self._max_gas_cost_usd = max_gas_cost_usd
 
     @property
     def chain(self) -> str:
@@ -710,7 +720,7 @@ class GatewayExecutionOrchestrator:
         action_bundle: bytes,
         options: _ExecutionRequestOptions,
     ) -> gateway_pb2.ExecuteRequest:
-        return gateway_pb2.ExecuteRequest(
+        request = gateway_pb2.ExecuteRequest(
             action_bundle=action_bundle,
             dry_run=options.dry_run,
             simulation_enabled=options.simulation_enabled,
@@ -721,7 +731,25 @@ class GatewayExecutionOrchestrator:
             max_gas_price_gwei=self._max_gas_price_gwei,
         )
 
+        if self._max_gas_cost_native is not None:
+            request.gas_cost_policy.max_gas_cost_native = self._max_gas_cost_native
+        if self._max_gas_cost_usd is not None:
+            request.gas_cost_policy.max_gas_cost_usd = self._max_gas_cost_usd
+        return request
+
     def _dispatch_execute(self, request: gateway_pb2.ExecuteRequest) -> Any:
+        if request.HasField("gas_cost_policy"):
+            try:
+                return self._client.execution.ExecuteWithGasPolicy(request, timeout=self._execute_timeout)
+            except grpc.RpcError as exc:
+                if exc.code() != grpc.StatusCode.UNIMPLEMENTED:
+                    raise
+                return gateway_pb2.ExecutionResult(
+                    success=False,
+                    error="Gateway does not support gas cost policy; upgrade the gateway before executing",
+                    error_code="GAS_POLICY_UNSUPPORTED",
+                    submission_provenance=gateway_pb2.SUBMISSION_PROVENANCE_NOT_ATTEMPTED,
+                )
         return self._client.execution.Execute(request, timeout=self._execute_timeout)
 
     async def get_transaction_status(self, tx_hash: str, chain: str | None = None) -> dict[str, Any]:

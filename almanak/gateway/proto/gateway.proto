@@ -1494,6 +1494,9 @@ service ExecutionService {
   // Execute an action bundle (sign, submit, confirm).
   rpc Execute(ExecuteRequest) returns (ExecutionResult);
 
+  // Cost-policy execution is a distinct method so older servers refuse before signing.
+  rpc ExecuteWithGasPolicy(ExecuteRequest) returns (ExecutionResult);
+
   // Get status of a submitted transaction.
   rpc GetTransactionStatus(TxStatusRequest) returns (TxStatus);
 }
@@ -1515,6 +1518,12 @@ message CompilationResult {
   bool is_safety_refusal = 6;
 }
 
+message GasCostPolicy {
+  // Absent preserves the gateway default; explicit zero disables this limit.
+  optional double max_gas_cost_native = 1;
+  optional double max_gas_cost_usd = 2;
+}
+
 message ExecuteRequest {
   bytes action_bundle = 1;  // JSON-serialized ActionBundle
   bool dry_run = 2;  // Simulate only, don't submit
@@ -1524,6 +1533,7 @@ message ExecuteRequest {
   string chain = 6;
   string wallet_address = 7;
   int32 max_gas_price_gwei = 8;  // Gas price cap in gwei (0 = use gateway default)
+  GasCostPolicy gas_cost_policy = 9;
 }
 
 enum SubmissionProvenance {

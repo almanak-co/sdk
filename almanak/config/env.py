@@ -221,6 +221,10 @@ def _apply_gateway_env_fallbacks(gateway: GatewayConfig) -> None:
     _apply_dexscreener_threshold_fallbacks(gateway)
     _apply_polymarket_runtime_fallbacks(gateway)
     _apply_anvil_watchdog_fallback(gateway)
+    from almanak.config.cli_runtime import gas_cost_overrides
+
+    for field, value in gas_cost_overrides(exclude=gateway.model_fields_set).items():
+        setattr(gateway, field, value)
 
 
 def _apply_secret_string_fallbacks(gateway: GatewayConfig) -> None:

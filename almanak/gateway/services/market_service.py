@@ -38,7 +38,7 @@ from almanak.connectors._base.gateway_capabilities import (
 from almanak.connectors._gateway_registry import GATEWAY_REGISTRY
 from almanak.core.chains import ChainRegistry
 from almanak.core.chains._helpers import native_price_alias_map, native_symbols_for
-from almanak.framework.data.interfaces import ReferenceInstrumentNotSupported
+from almanak.framework.data.interfaces import PriceResult, ReferenceInstrumentNotSupported
 from almanak.framework.data.timeframes import (
     COINGECKO_OHLCV_TIMEFRAMES,
     OHLCVTimeframe,
@@ -696,6 +696,20 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
         if chain and chain in self._price_aggregators:
             return self._price_aggregators[chain]
         return self._price_aggregators[self._primary_chain]
+
+    async def native_price_for_execution(self, chain: str, max_age_seconds: float) -> PriceResult:
+        """Return measured native pricing from the admitted execution chain only."""
+        descriptor = ChainRegistry.get(chain)
+        await self._ensure_initialized()
+        await self._auto_reinitialize_unconfigured_chains([chain])
+        if error := self._chain_configuration_error(chain):
+            raise ValueError(error)
+        aggregator = self._price_aggregators.get(chain)
+        if aggregator is None:
+            raise ValueError("USD gas cap requires a price provider configured for the execution chain")
+        return await aggregator.get_aggregated_price(
+            descriptor.native.symbol, "USD", max_observation_age_seconds=max_age_seconds
+        )
 
     def _configured_chains(self) -> set[str]:
         """Return the gateway's canonical, case-normalized chain boundary."""

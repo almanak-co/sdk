@@ -243,7 +243,7 @@ class TestCompileAndExecuteNoOp:
         from almanak.framework.execution.multichain import MultiChainOrchestrator
 
         # Use a MagicMock config so _compile_and_execute_intent's `self._config is not None` passes
-        mock_config = MagicMock()
+        mock_config = MagicMock(max_gas_cost_native=0.0, max_gas_cost_usd=0.0)
         mco = MultiChainOrchestrator(config=mock_config)
         # Inject mock compiler + lock so compilation doesn't touch the network
         mock_compiler = MagicMock()

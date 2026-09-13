@@ -19,6 +19,7 @@ def client():
         execution_plan_hash="a" * 64,
         submission_provenance=gateway_pb2.SUBMISSION_PROVENANCE_ATTEMPTED,
     )
+    result.execution.ExecuteWithGasPolicy.return_value = result.execution.Execute.return_value
     return result
 
 
@@ -110,3 +111,48 @@ def test_lp_open_target_preserves_funding_swap_and_binds_consumption(tmp_path):
     with pytest.raises(ValueError, match="differs from its consumed marker"):
         wrapper(delegate, marker).Execute(request())
     assert delegate.execution.Execute.call_count == before
+
+
+@pytest.mark.parametrize("rpc_name", ["Execute", "ExecuteWithGasPolicy"])
+def test_policy_rpc_preserves_observation_and_never_changes_execution_method(tmp_path, rpc_name):
+    delegate = client()
+    marker = tmp_path / "consumed.json"
+    req = request()
+    if rpc_name == "ExecuteWithGasPolicy":
+        req.gas_cost_policy.max_gas_cost_native = 0.001
+    response = getattr(wrapper(delegate, marker), rpc_name)(req, timeout=45)
+    assert not response.success
+    assert response.error_code == "RECEIPT_SET_INCOMPLETE"
+    assert response.tx_hashes == delegate.execution.Execute.return_value.tx_hashes
+    assert marker.exists()
+    assert getattr(wrapper(delegate, marker), rpc_name)(req, timeout=45).success
+    selected = getattr(delegate.execution, rpc_name)
+    assert selected.call_count == 2
+    selected.assert_called_with(req, timeout=45)
+    alternate = "Execute" if rpc_name == "ExecuteWithGasPolicy" else "ExecuteWithGasPolicy"
+    getattr(delegate.execution, alternate).assert_not_called()
+
+
+def test_policy_refusal_does_not_consume_observation_scenario(tmp_path):
+    delegate = client()
+    delegate.execution.ExecuteWithGasPolicy.return_value = gateway_pb2.ExecutionResult(
+        success=False,
+        error_code="RISK_GUARD_TRIGGERED",
+        submission_provenance=gateway_pb2.SUBMISSION_PROVENANCE_NOT_ATTEMPTED,
+    )
+    marker = tmp_path / "consumed.json"
+    req = request()
+    req.gas_cost_policy.max_gas_cost_native = 1e-18
+    result = wrapper(delegate, marker).ExecuteWithGasPolicy(req)
+    assert result is delegate.execution.ExecuteWithGasPolicy.return_value
+    assert not marker.exists()
+    delegate.execution.Execute.assert_not_called()
+
+
+def test_policy_rpc_preserves_fork_only_guard(tmp_path):
+    delegate = client()
+    with patch("almanak.framework.cli._reference_scenario.is_hosted", return_value=True):
+        with pytest.raises(ValueError):
+            wrapper(delegate, tmp_path / "c").ExecuteWithGasPolicy(request())
+    delegate.execution.ExecuteWithGasPolicy.assert_not_called()
+    delegate.execution.Execute.assert_not_called()

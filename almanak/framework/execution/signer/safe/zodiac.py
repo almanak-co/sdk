@@ -40,7 +40,7 @@ from almanak.framework.execution.interfaces import (
     TransactionType,
     UnsignedTransaction,
 )
-from almanak.framework.execution.signer.safe.base import SafeSigner
+from almanak.framework.execution.signer.safe.base import GasValidator, SafeSigner
 from almanak.framework.execution.signer.safe.config import SafeSignerConfig
 from almanak.framework.execution.signer.safe.constants import (
     ZODIAC_EXEC_TRANSACTION_WITH_ROLE_ABI,
@@ -200,6 +200,8 @@ class ZodiacSigner(SafeSigner):
         web3: AsyncWeb3,
         eoa_nonce: int,
         pos_in_bundle: int = 0,
+        *,
+        gas_validator: GasValidator | None = None,
     ) -> SignedTransaction:
         """Sign a transaction via Zodiac execTransactionWithRole().
 
@@ -285,6 +287,8 @@ class ZodiacSigner(SafeSigner):
 
         logger.debug(f"Wrapper tx: nonce={wrapper_tx_dict['nonce']}, gasLimit={estimated_gas}")
 
+        self._validate_wrapper_gas(tx, wrapper_tx_dict, gas_validator)
+
         # Sign via hook (local or plugin override)
         signed_tx_hex = await self._sign_wrapper_tx(wrapper_tx_dict, web3)
 
@@ -314,6 +318,8 @@ class ZodiacSigner(SafeSigner):
         web3: AsyncWeb3,
         eoa_nonce: int,
         chain: str,
+        *,
+        gas_validator: GasValidator | None = None,
     ) -> SignedTransaction:
         """Sign multiple transactions as an atomic MultiSend bundle.
 
@@ -372,6 +378,7 @@ class ZodiacSigner(SafeSigner):
             web3,
             eoa_nonce,
             payload.operation,
+            **({"gas_validator": gas_validator} if gas_validator is not None else {}),
         )
 
     async def _sign_multisend_with_zodiac(
@@ -380,6 +387,8 @@ class ZodiacSigner(SafeSigner):
         web3: AsyncWeb3,
         eoa_nonce: int,
         operation: SafeOperation,
+        *,
+        gas_validator: GasValidator | None = None,
     ) -> SignedTransaction:
         """Sign a MultiSend transaction via Zodiac.
 
@@ -446,6 +455,8 @@ class ZodiacSigner(SafeSigner):
         wrapper_tx_dict = cast(dict[str, Any], wrapper_tx)
         del wrapper_tx_dict["gas"]
         wrapper_tx_dict["gasLimit"] = estimated_gas
+
+        self._validate_wrapper_gas(tx, wrapper_tx_dict, gas_validator)
 
         # Sign via hook (local or plugin override)
         signed_tx_hex = await self._sign_wrapper_tx(wrapper_tx_dict, web3)

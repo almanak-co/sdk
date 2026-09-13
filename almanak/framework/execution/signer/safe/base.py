@@ -23,6 +23,9 @@ Example:
 
 import logging
 from abc import abstractmethod
+from collections.abc import Callable
+from dataclasses import replace
+from typing import Any
 
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
@@ -41,6 +44,8 @@ from almanak.framework.execution.signer.safe.constants import (
     SafeOperation,
     get_operation_type,
 )
+
+GasValidator = Callable[[UnsignedTransaction], None]
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +150,22 @@ class SafeSigner(Signer):
             fee_per_gas=fee_per_gas,
         )
 
+    @staticmethod
+    def _validate_wrapper_gas(tx: UnsignedTransaction, wrapper: dict[str, Any], validator: GasValidator | None) -> None:
+        if validator is not None:
+            gas_limit = wrapper.get("gasLimit", wrapper.get("gas"))
+            if not isinstance(gas_limit, int) or isinstance(gas_limit, bool) or gas_limit <= 0:
+                raise SigningError(reason="Safe wrapper requires a positive integer gas limit")
+            validator(
+                replace(
+                    tx,
+                    gas_limit=gas_limit,
+                    gas_price=wrapper.get("gasPrice"),
+                    max_fee_per_gas=wrapper.get("maxFeePerGas"),
+                    max_priority_fee_per_gas=wrapper.get("maxPriorityFeePerGas"),
+                )
+            )
+
     @property
     def address(self) -> str:
         """Return the Safe wallet address.
@@ -201,6 +222,8 @@ class SafeSigner(Signer):
         self,
         tx: UnsignedTransaction,
         chain: str,
+        *,
+        gas_validator: GasValidator | None = None,
     ) -> SignedTransaction:
         """Sign a transaction for Safe execution.
 
@@ -232,6 +255,8 @@ class SafeSigner(Signer):
         web3: AsyncWeb3,
         eoa_nonce: int,
         pos_in_bundle: int = 0,
+        *,
+        gas_validator: GasValidator | None = None,
     ) -> SignedTransaction:
         """Sign a single transaction with Web3 instance.
 
@@ -259,6 +284,8 @@ class SafeSigner(Signer):
         web3: AsyncWeb3,
         eoa_nonce: int,
         chain: str,
+        *,
+        gas_validator: GasValidator | None = None,
     ) -> SignedTransaction:
         """Sign multiple transactions as an atomic bundle.
 

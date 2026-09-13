@@ -2231,6 +2231,11 @@ class ExecutionServiceStub(object):
                 request_serializer=gateway__pb2.ExecuteRequest.SerializeToString,
                 response_deserializer=gateway__pb2.ExecutionResult.FromString,
                 _registered_method=True)
+        self.ExecuteWithGasPolicy = channel.unary_unary(
+                '/almanak.gateway.proto.ExecutionService/ExecuteWithGasPolicy',
+                request_serializer=gateway__pb2.ExecuteRequest.SerializeToString,
+                response_deserializer=gateway__pb2.ExecutionResult.FromString,
+                _registered_method=True)
         self.GetTransactionStatus = channel.unary_unary(
                 '/almanak.gateway.proto.ExecutionService/GetTransactionStatus',
                 request_serializer=gateway__pb2.TxStatusRequest.SerializeToString,
@@ -2259,6 +2264,13 @@ class ExecutionServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ExecuteWithGasPolicy(self, request, context):
+        """Cost-policy execution is a distinct method so older servers refuse before signing.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def GetTransactionStatus(self, request, context):
         """Get status of a submitted transaction.
         """
@@ -2276,6 +2288,11 @@ def add_ExecutionServiceServicer_to_server(servicer, server):
             ),
             'Execute': grpc.unary_unary_rpc_method_handler(
                     servicer.Execute,
+                    request_deserializer=gateway__pb2.ExecuteRequest.FromString,
+                    response_serializer=gateway__pb2.ExecutionResult.SerializeToString,
+            ),
+            'ExecuteWithGasPolicy': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExecuteWithGasPolicy,
                     request_deserializer=gateway__pb2.ExecuteRequest.FromString,
                     response_serializer=gateway__pb2.ExecutionResult.SerializeToString,
             ),
@@ -2341,6 +2358,33 @@ class ExecutionService(object):
             request,
             target,
             '/almanak.gateway.proto.ExecutionService/Execute',
+            gateway__pb2.ExecuteRequest.SerializeToString,
+            gateway__pb2.ExecutionResult.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExecuteWithGasPolicy(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.ExecutionService/ExecuteWithGasPolicy',
             gateway__pb2.ExecuteRequest.SerializeToString,
             gateway__pb2.ExecutionResult.FromString,
             options,

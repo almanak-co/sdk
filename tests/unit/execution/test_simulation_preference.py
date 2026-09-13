@@ -183,7 +183,7 @@ async def test_cached_gateway_backend_remains_capable_when_environment_default_i
     from almanak.gateway.services.execution_service import ExecutionServiceServicer
 
     service = object.__new__(ExecutionServiceServicer)
-    service.settings = SimpleNamespace(network="mainnet")
+    service.settings = SimpleNamespace(network="mainnet", max_gas_cost_native=None, max_gas_cost_usd=None)
     service.wallet_registry = None
     service._orchestrator_cache = {}
     service._orchestrator_locks = {}

@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 import click
 
 from almanak.config import cli_runtime_config_from_env
+from almanak.config.cli_runtime import gas_cost_overrides
 
 if TYPE_CHECKING:
     from almanak.gateway.managed import ManagedGateway
@@ -1204,11 +1205,14 @@ def build_teardown_machinery(
     from ..execution.gateway_orchestrator import GatewayExecutionOrchestrator
     from ..intents.compiler import IntentCompiler, IntentCompilerConfig
 
+    cost_overrides = gas_cost_overrides()
     # Preserve the established downstream failure path for optional values.
     orchestrator = GatewayExecutionOrchestrator(
         client=gateway_client,
         chain=chain,  # type: ignore[arg-type]
         wallet_address=wallet_address,
+        max_gas_cost_native=cost_overrides.get("max_gas_cost_native"),
+        max_gas_cost_usd=cost_overrides.get("max_gas_cost_usd"),
     )
 
     # gateway_client is mandatory: LP_CLOSE compilation queries on-chain state

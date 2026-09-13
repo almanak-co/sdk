@@ -87,6 +87,16 @@ class GatewaySettings(_GatewaySettingsBase):  # type: ignore[valid-type,misc]
     first.
     """
 
+    max_gas_cost_native: float | None = None
+    max_gas_cost_usd: float | None = None
+
+    @field_validator("max_gas_cost_native", "max_gas_cost_usd")
+    @classmethod
+    def _validate_gas_cost_cap(cls, value: float | None) -> float | None:
+        if value is not None and (not math.isfinite(value) or value < 0):
+            raise ValueError("Gas cost caps must be finite and nonnegative")
+        return value
+
     # Bind HTTP externally only when the deployment boundary provides equivalent protection.
     host: str = "127.0.0.1"
     port: int = 8000

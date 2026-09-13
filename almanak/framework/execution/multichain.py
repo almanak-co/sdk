@@ -29,6 +29,7 @@ Example:
 
 import asyncio
 import logging
+import math
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -295,6 +296,8 @@ class MultiChainOrchestrator:
         _wallet_address: str | None = None,
         _primary_chain: str | None = None,
         _max_gas_price_gwei: int = 0,
+        _max_gas_cost_native: float | None = None,
+        _max_gas_cost_usd: float | None = None,
         chain_wallets: dict[str, str] | None = None,
         simulation_enabled: bool = True,
     ) -> None:
@@ -332,6 +335,8 @@ class MultiChainOrchestrator:
             self._gw_wallet_address = _wallet_address or ""
             self._gw_primary_chain = (_primary_chain or self._gw_chains[0]).lower() if self._gw_chains else ""
             self._gw_max_gas_price_gwei = _max_gas_price_gwei
+            self._gw_max_gas_cost_native = _max_gas_cost_native
+            self._gw_max_gas_cost_usd = _max_gas_cost_usd
             wallet_display = self._gw_wallet_address[:10] if self._gw_wallet_address else "unknown"
             logger.info(
                 f"MultiChainOrchestrator created (gateway mode): chains={self._gw_chains}, wallet={wallet_display}..."
@@ -339,6 +344,20 @@ class MultiChainOrchestrator:
         else:
             if config is None:
                 raise ConfigurationError(field="config", reason="Either config or gateway_client must be provided")
+            for field in ("max_gas_cost_native", "max_gas_cost_usd"):
+                cap = getattr(config, field)
+                try:
+                    valid = math.isfinite(cap) and cap >= 0
+                except (TypeError, ValueError):
+                    valid = False
+                if not valid:
+                    raise ConfigurationError(field=field, reason="Gas cost caps must be finite and nonnegative")
+                if cap > 0:
+                    raise ConfigurationError(
+                        field=field,
+                        reason="Gas cost caps require MultiChainOrchestrator.from_gateway(); "
+                        "legacy config execution cannot enforce them",
+                    )
             logger.info(
                 f"MultiChainOrchestrator created: chains={config.chains}, wallet={config.wallet_address[:10]}..."
             )
@@ -365,6 +384,8 @@ class MultiChainOrchestrator:
         max_gas_price_gwei: int = 0,
         chain_wallets: dict[str, str] | None = None,
         simulation_enabled: bool = True,
+        max_gas_cost_native: float | None = None,
+        max_gas_cost_usd: float | None = None,
     ) -> "MultiChainOrchestrator":
         """Create orchestrator backed by the gateway.
 
@@ -378,6 +399,8 @@ class MultiChainOrchestrator:
             wallet_address: Wallet address (derived from gateway private key)
             primary_chain: Default chain (first chain if not specified)
             max_gas_price_gwei: Gas price cap (0 = use gateway default)
+            max_gas_cost_native: Per-transaction native cost cap (None = gateway default; 0 = disabled)
+            max_gas_cost_usd: Per-transaction USD cost cap (None = gateway default; 0 = disabled)
             chain_wallets: Per-chain wallet addresses from wallet registry
 
         Returns:
@@ -390,6 +413,8 @@ class MultiChainOrchestrator:
             _wallet_address=wallet_address,
             _primary_chain=primary_chain,
             _max_gas_price_gwei=max_gas_price_gwei,
+            _max_gas_cost_native=max_gas_cost_native,
+            _max_gas_cost_usd=max_gas_cost_usd,
             chain_wallets=chain_wallets,
             simulation_enabled=simulation_enabled,
         )
@@ -549,6 +574,8 @@ class MultiChainOrchestrator:
                 chain=chain_lower,
                 wallet_address=effective_wallet,
                 max_gas_price_gwei=self._gw_max_gas_price_gwei,
+                max_gas_cost_native=self._gw_max_gas_cost_native,
+                max_gas_cost_usd=self._gw_max_gas_cost_usd,
             )
             logger.debug(f"Created GatewayExecutionOrchestrator for {chain_lower}")
 

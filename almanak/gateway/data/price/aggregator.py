@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 import statistics
 import time
 from collections.abc import Sequence
@@ -162,6 +163,19 @@ def _peg_identity(resolved_token: ResolvedToken | None) -> tuple[str, str] | Non
 # These tokens (PT, YT, LP, etc.) don't have Chainlink/Binance/CoinGecko listings,
 # so "all sources failed" is expected -- log at WARNING, not ERROR.
 KNOWN_UNPRICEABLE_PREFIXES = ("PT-", "YT-", "LP-", "SY-", "aToken-", "vToken-", "sToken-")
+
+
+def _is_execution_observation(result: PriceResult, now: datetime, max_age_seconds: float) -> bool:
+    timestamp = result.timestamp
+    return (
+        result.price.is_finite()
+        and result.price > 0
+        and not result.stale
+        and not result.peg_tokens
+        and isinstance(timestamp, datetime)
+        and timestamp.tzinfo is not None
+        and 0 <= (now - timestamp).total_seconds() <= max_age_seconds
+    )
 
 
 def _is_known_unpriceable(token: str) -> bool:
@@ -463,6 +477,7 @@ class PriceAggregator:
         quote: str = "USD",
         *,
         resolved_token: ResolvedToken | None = None,
+        max_observation_age_seconds: float | None = None,
     ) -> PriceResult:
         """Get aggregated price from multiple sources.
 
@@ -474,6 +489,9 @@ class PriceAggregator:
             quote: Quote currency (default "USD")
             resolved_token: Pre-resolved token with contract address for
                 address-based lookup instead of symbol matching.
+            max_observation_age_seconds: Optional execution freshness requirement.
+                Only measured, finite positive observations within this age may
+                enter aggregation; None preserves ordinary market pricing.
 
         Returns:
             PriceResult with aggregated price and confidence score
@@ -486,9 +504,13 @@ class PriceAggregator:
         # what the aggregate returns anyway after outlier-discarding). Disabled
         # when stablecoin_verify is set. A low-frequency Chainlink sanity check
         # still runs to surface a de-peg.
-        peg_result = await self._maybe_stablecoin_peg(token, quote, resolved_token)
-        if peg_result is not None:
-            return peg_result
+        if max_observation_age_seconds is not None:
+            if not math.isfinite(max_observation_age_seconds) or max_observation_age_seconds <= 0:
+                raise ValueError("max_observation_age_seconds must be finite and positive")
+        else:
+            peg_result = await self._maybe_stablecoin_peg(token, quote, resolved_token)
+            if peg_result is not None:
+                return peg_result
 
         logger.debug(
             "Getting aggregated price for %s/%s from %d sources",
@@ -498,38 +520,12 @@ class PriceAggregator:
         )
 
         # Fetch from all sources concurrently
-        results = await self._fetch_all_sources(token, quote, resolved_token=resolved_token)
+        results = await self._fetch_all_sources(
+            token, quote, resolved_token=resolved_token, max_observation_age_seconds=max_observation_age_seconds
+        )
 
-        # Store per-call diagnostics BEFORE the failure check so that
-        # get_last_details() is populated even when all sources fail.
-        # ``observations`` and ``aggregate_price`` are evidence-only additions
-        # (VIB-6820 QA data-check): consumers that map details into
-        # PriceResponse read the three original keys explicitly, so these
-        # extra keys never cross the gRPC boundary or change serving behavior.
-        # Evidence capture must also never FAIL serving: a provider result
-        # with a malformed timestamp still prices, so stringify defensively
-        # instead of assuming a datetime.
-        detail_key = f"{token.upper()}/{quote.upper()}"
-        self._last_details[detail_key] = {
-            "sources_ok": [r.source for r in results.valid_results],
-            "sources_failed": results.errors,
-            "outliers": [r.source for r in results.outliers],
-            "observations": {
-                r.source: {
-                    "price": str(r.price),
-                    "timestamp": (
-                        r.timestamp.isoformat()
-                        if hasattr(r.timestamp, "isoformat")
-                        # Absent stays absent (JSON null), never the string "None".
-                        else (str(r.timestamp) if r.timestamp is not None else None)
-                    ),
-                    "confidence": r.confidence,
-                    "stale": r.stale,
-                }
-                for r in (*results.valid_results, *results.outliers)
-            },
-            "aggregate_price": str(results.price) if results.valid_results else None,
-        }
+        if max_observation_age_seconds is None:
+            self._record_aggregation_details(token, quote, results)
 
         # Check if all sources failed
         if not results.valid_results:
@@ -537,7 +533,8 @@ class PriceAggregator:
             peg_identity = _peg_identity(resolved_token)
             peg_value = is_pegged(resolved_token.token_ref) if resolved_token is not None else None
             if (
-                quote.upper() == "USD"
+                max_observation_age_seconds is None
+                and quote.upper() == "USD"
                 and peg_value is not None
                 and not self._stablecoin_verify
                 and peg_identity not in self._depegged_tokens
@@ -611,8 +608,43 @@ class PriceAggregator:
             timestamp=datetime.now(UTC),
             confidence=confidence,
             stale=stale,
+            source_details={
+                "contributing_observations": [
+                    {
+                        "source": result.source,
+                        "timestamp": result.timestamp.isoformat() if isinstance(result.timestamp, datetime) else None,
+                        "stale": result.stale,
+                        "peg_tokens": list(result.peg_tokens),
+                    }
+                    for result in results.valid_results
+                ],
+            },
             peg_tokens=peg_tokens,
         )
+
+    def _record_aggregation_details(self, token: str, quote: str, results: AggregationResult) -> None:
+        """Publish legacy diagnostics even when an ordinary price request fails."""
+        detail_key = f"{token.upper()}/{quote.upper()}"
+        self._last_details[detail_key] = {
+            "sources_ok": [r.source for r in results.valid_results],
+            "sources_failed": results.errors,
+            "outliers": [r.source for r in results.outliers],
+            "observations": {
+                r.source: {
+                    "price": str(r.price),
+                    "timestamp": (
+                        r.timestamp.isoformat()
+                        if hasattr(r.timestamp, "isoformat")
+                        # Absent stays absent (JSON null), never the string "None".
+                        else (str(r.timestamp) if r.timestamp is not None else None)
+                    ),
+                    "confidence": r.confidence,
+                    "stale": r.stale,
+                }
+                for r in (*results.valid_results, *results.outliers)
+            },
+            "aggregate_price": str(results.price) if results.valid_results else None,
+        }
 
     async def _maybe_stablecoin_peg(
         self,
@@ -927,6 +959,7 @@ class PriceAggregator:
         quote: str,
         *,
         resolved_token: ResolvedToken | None = None,
+        max_observation_age_seconds: float | None = None,
     ) -> AggregationResult:
         """Fetch prices from all sources concurrently.
 
@@ -960,6 +993,16 @@ class PriceAggregator:
                 valid_results.append(result)
             else:
                 errors[source.source_name] = f"Unexpected result type: {type(result)}"
+
+        if max_observation_age_seconds is not None:
+            now = datetime.now(UTC)
+            eligible_results = []
+            for result in valid_results:
+                if _is_execution_observation(result, now, max_observation_age_seconds):
+                    eligible_results.append(result)
+                else:
+                    errors[result.source] = "Observation does not satisfy measured execution freshness"
+            valid_results = eligible_results
 
         # A provider may manufacture the exact registry peg itself (Binance,
         # HyperCore, Chainlink, CoinGecko). During explicit verification, or

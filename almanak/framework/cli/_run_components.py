@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 
 import click
 
+from almanak.config.cli_runtime import gas_cost_overrides
+
 from ..models.run_mode import RunMode
 from ..strategies.metadata import LEGACY_COMPAT_DATA_REQUIREMENTS, StrategyDataRequirements
 from ._run_context import ComponentBundle
@@ -777,6 +779,7 @@ def _build_multi_chain_providers(
         chains=strategy_chains,
         wallet_address=effective_wallet,
         max_gas_price_gwei=runtime_config.max_gas_price_gwei,
+        **gas_cost_overrides(runtime_config),
         chain_wallets=chain_wallets or None,
         simulation_enabled=runtime_config.simulation_enabled,
     )
@@ -855,6 +858,7 @@ def _build_single_chain_providers(
         chain=runtime_config.chain,
         wallet_address=effective_wallet,
         max_gas_price_gwei=runtime_config.max_gas_price_gwei,
+        **gas_cost_overrides(runtime_config),
     )
     click.echo("  Gateway-backed providers created")
 

@@ -43,7 +43,7 @@ from almanak.framework.execution.interfaces import (
     TransactionType,
     UnsignedTransaction,
 )
-from almanak.framework.execution.signer.safe.base import SafeSigner
+from almanak.framework.execution.signer.safe.base import GasValidator, SafeSigner
 from almanak.framework.execution.signer.safe.config import SafeSignerConfig
 from almanak.framework.execution.signer.safe.constants import (
     SAFE_EXEC_TRANSACTION_ABI,
@@ -254,6 +254,8 @@ class DirectSafeSigner(SafeSigner):
         web3: AsyncWeb3,
         eoa_nonce: int,
         pos_in_bundle: int = 0,
+        *,
+        gas_validator: GasValidator | None = None,
     ) -> SignedTransaction:
         """Sign a single transaction via Safe.execTransaction().
 
@@ -372,6 +374,8 @@ class DirectSafeSigner(SafeSigner):
         # Estimate gas for the complete Safe wrapper transaction
         wrapper_tx["gas"] = await self._estimate_wrapper_gas(web3, wrapper_tx, tx.gas_limit)
 
+        self._validate_wrapper_gas(tx, cast(dict[str, Any], wrapper_tx), gas_validator)
+
         # Sign the wrapper transaction
         assert self._account is not None  # guaranteed for direct mode
         try:
@@ -408,6 +412,8 @@ class DirectSafeSigner(SafeSigner):
         web3: AsyncWeb3,
         eoa_nonce: int,
         chain: str,
+        *,
+        gas_validator: GasValidator | None = None,
     ) -> SignedTransaction:
         """Sign multiple transactions as an atomic MultiSend bundle.
 
@@ -475,6 +481,7 @@ class DirectSafeSigner(SafeSigner):
             web3,
             eoa_nonce,
             payload.operation,
+            **({"gas_validator": gas_validator} if gas_validator is not None else {}),
         )
 
     async def _sign_multisend_with_web3(
@@ -483,6 +490,8 @@ class DirectSafeSigner(SafeSigner):
         web3: AsyncWeb3,
         eoa_nonce: int,
         operation: SafeOperation,
+        *,
+        gas_validator: GasValidator | None = None,
     ) -> SignedTransaction:
         """Sign a MultiSend transaction with explicit operation type.
 
@@ -578,6 +587,8 @@ class DirectSafeSigner(SafeSigner):
         # Estimate gas for the complete Safe+MultiSend wrapper transaction
         buffered_gas = await self._estimate_wrapper_gas(web3, wrapper_tx, tx.gas_limit)
         wrapper_tx["gas"] = buffered_gas
+
+        self._validate_wrapper_gas(tx, cast(dict[str, Any], wrapper_tx), gas_validator)
 
         # Sign
         assert self._account is not None  # guaranteed for direct mode
