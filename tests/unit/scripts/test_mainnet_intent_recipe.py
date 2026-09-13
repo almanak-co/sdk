@@ -643,6 +643,9 @@ def test_runner_call_sites_bind_every_required_proof_helper_argument() -> None:
             "run_uniswap_v3_lp_close_exact_proof",
             "run_uniswap_v3_lp_collect_fees_exact_proof",
             "execute_aave_lending_target",
+            "run_morpho_blue_exact_proof",
+            "run_uniswap_v4_swap_exact_proof",
+            "execute_uniswap_v4_exact_reverse_cleanup",
         )
     }
     source = (REPO / "qa_lab" / "run_mainnet_intent.py").read_text(encoding="utf-8")
@@ -671,6 +674,19 @@ def test_runner_call_sites_bind_every_required_proof_helper_argument() -> None:
         }
         missing = sorted(required - keywords)
         assert not missing, f"{node.func.id} call at line {node.lineno} omits required arguments: {missing}"
+        # The mirror direction. Asserting only that required arguments are
+        # present leaves the opposite drift open: a call site may pass a keyword
+        # the helper never declared, which raises the same TypeError at the same
+        # point -- after the funding leg has already moved live funds.
+        accepts_var_keyword = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+        )
+        if not accepts_var_keyword:
+            unknown = sorted(keywords - {parameter.name for parameter in parameters})
+            assert not unknown, (
+                f"{node.func.id} call at line {node.lineno} passes arguments the helper "
+                f"does not accept: {unknown}"
+            )
     assert seen == set(helpers), f"enumeration lost call sites: {sorted(set(helpers) - seen)}"
 
 
