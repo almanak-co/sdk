@@ -20,11 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from almanak.framework.execution.circuit_breaker import (
-    CircuitBreaker,
-    CircuitBreakerConfig,
-    CircuitBreakerState,
-)
+from almanak.framework.execution.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from almanak.framework.intents.vocabulary import HoldIntent, SwapIntent
 from almanak.framework.runner.strategy_runner import (
     IterationStatus,
@@ -88,22 +84,6 @@ def _make_state(strategy: MagicMock) -> RunIterationState:
     )
 
 
-def _tripped_breaker() -> CircuitBreaker:
-    breaker = CircuitBreaker(
-        deployment_id="test-strategy",
-        config=CircuitBreakerConfig(
-            max_consecutive_failures=3,
-            max_cumulative_loss_usd=Decimal("1000"),
-            cooldown_seconds=2,
-        ),
-    )
-    breaker.record_failure("fail 1")
-    breaker.record_failure("fail 2")
-    breaker.record_failure("fail 3")
-    assert breaker.state == CircuitBreakerState.OPEN
-    return breaker
-
-
 # =============================================================================
 # _step_pause_gate
 # =============================================================================
@@ -124,9 +104,7 @@ class TestStepPauseGate:
     async def test_returns_hold_when_paused(self) -> None:
         state_manager = MagicMock()
         state_manager.load_state = AsyncMock(
-            return_value=SimpleNamespace(
-                state={"is_paused": True, "pause_reason": "Operator holiday"}
-            )
+            return_value=SimpleNamespace(state={"is_paused": True, "pause_reason": "Operator holiday"})
         )
         runner = _make_runner(state_manager=state_manager)
         strategy = _make_strategy()
@@ -155,8 +133,8 @@ class TestStepTeardownAndCbGate:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_open_breaker_returns_circuit_breaker_open(self) -> None:
-        breaker = _tripped_breaker()
+    async def test_open_breaker_returns_circuit_breaker_open(self, make_tripped_breaker) -> None:
+        breaker = make_tripped_breaker(3)
         runner = _make_runner(circuit_breaker=breaker)
         strategy = _make_strategy()
 
@@ -168,9 +146,9 @@ class TestStepTeardownAndCbGate:
         assert not result.success
 
     @pytest.mark.asyncio
-    async def test_teardown_mode_skips_breaker_check(self) -> None:
+    async def test_teardown_mode_skips_breaker_check(self, make_tripped_breaker) -> None:
         """When teardown is requested, the early CB gate must NOT block."""
-        breaker = _tripped_breaker()
+        breaker = make_tripped_breaker(3)
         runner = _make_runner(circuit_breaker=breaker)
         strategy = _make_strategy()
 
@@ -384,8 +362,8 @@ class TestStepCircuitBreakerPreExecute:
 
         assert runner._step_circuit_breaker_pre_execute(state) is None
 
-    def test_open_breaker_returns_circuit_breaker_open(self) -> None:
-        breaker = _tripped_breaker()
+    def test_open_breaker_returns_circuit_breaker_open(self, make_tripped_breaker) -> None:
+        breaker = make_tripped_breaker(3)
         runner = _make_runner(circuit_breaker=breaker)
         strategy = _make_strategy()
         state = _make_state(strategy)
@@ -638,9 +616,7 @@ class TestRunIterationDriverSmoke:
     @pytest.mark.asyncio
     @patch(_TEARDOWN_PATCH, return_value=None)
     @patch(_PAUSE_PATCH, new_callable=AsyncMock, return_value=(False, None))
-    async def test_hold_intent_short_circuits_to_hold(
-        self, mock_pause: AsyncMock, mock_teardown: MagicMock
-    ) -> None:
+    async def test_hold_intent_short_circuits_to_hold(self, mock_pause: AsyncMock, mock_teardown: MagicMock) -> None:
         runner = _make_runner()
         strategy = _make_strategy()
         strategy.decide.return_value = HoldIntent(reason="Market quiet")

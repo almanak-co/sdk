@@ -11,7 +11,7 @@ and ``_run_single_chain_intents``.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,7 +20,6 @@ import pytest
 
 from almanak.framework.execution.circuit_breaker import (
     CircuitBreaker,
-    CircuitBreakerConfig,
     CircuitBreakerState,
 )
 from almanak.framework.intents.vocabulary import (
@@ -113,21 +112,6 @@ def _make_state(strategy: MagicMock) -> RunIterationState:
     )
 
 
-def _tripped_breaker() -> CircuitBreaker:
-    breaker = CircuitBreaker(
-        deployment_id="test-strategy",
-        config=CircuitBreakerConfig(
-            max_consecutive_failures=2,
-            max_cumulative_loss_usd=Decimal("1000"),
-            cooldown_seconds=2,
-        ),
-    )
-    breaker.record_failure("fail 1")
-    breaker.record_failure("fail 2")
-    assert breaker.state == CircuitBreakerState.OPEN
-    return breaker
-
-
 # =============================================================================
 # _step_pause_gate - extended
 # =============================================================================
@@ -179,13 +163,10 @@ class TestStepPauseGateExtended:
         paused_records = [
             r
             for r in caplog.records
-            if r.levelname == "INFO"
-            and strategy.deployment_id in r.message
-            and "paused by operator" in r.message
+            if r.levelname == "INFO" and strategy.deployment_id in r.message and "paused by operator" in r.message
         ]
         assert len(paused_records) == 1, (
-            f"expected exactly 1 paused INFO log, got {len(paused_records)}: "
-            f"{[r.message for r in paused_records]}"
+            f"expected exactly 1 paused INFO log, got {len(paused_records)}: {[r.message for r in paused_records]}"
         )
 
     @pytest.mark.asyncio
@@ -569,9 +550,9 @@ class TestStepLogIntents:
 
 
 class TestStepCircuitBreakerPreExecuteExtended:
-    def test_open_breaker_without_any_intents_returns_none_intent_in_result(self) -> None:
+    def test_open_breaker_without_any_intents_returns_none_intent_in_result(self, make_tripped_breaker) -> None:
         """When state.intents is empty, IterationResult.intent is None."""
-        breaker = _tripped_breaker()
+        breaker = make_tripped_breaker(2)
         runner = _make_runner(circuit_breaker=breaker)
         strategy = _make_strategy()
         state = _make_state(strategy)
@@ -582,8 +563,8 @@ class TestStepCircuitBreakerPreExecuteExtended:
         assert result.status == IterationStatus.CIRCUIT_BREAKER_OPEN
         assert result.intent is None
 
-    def test_open_breaker_picks_first_intent_for_result(self) -> None:
-        breaker = _tripped_breaker()
+    def test_open_breaker_picks_first_intent_for_result(self, make_tripped_breaker) -> None:
+        breaker = make_tripped_breaker(2)
         runner = _make_runner(circuit_breaker=breaker)
         strategy = _make_strategy()
         state = _make_state(strategy)
@@ -595,8 +576,27 @@ class TestStepCircuitBreakerPreExecuteExtended:
         assert result is not None
         assert result.intent is first
 
-    def test_error_message_contains_reason_from_breaker(self) -> None:
-        breaker = _tripped_breaker()
+    def test_cooldown_transition_uses_elapsed_breaker_time(
+        self, make_tripped_breaker, breaker_clock: MagicMock
+    ) -> None:
+        tripped_breaker = make_tripped_breaker(2)
+        runner = _make_runner(circuit_breaker=tripped_breaker)
+        state = _make_state(_make_strategy())
+        state.intents = [HoldIntent(reason="observe breaker gate")]
+        breaker_clock.now.return_value += timedelta(seconds=1)
+
+        result = runner._step_circuit_breaker_pre_execute(state)
+
+        assert result is not None
+        assert result.status is IterationStatus.CIRCUIT_BREAKER_OPEN
+        assert tripped_breaker.state is CircuitBreakerState.OPEN
+        breaker_clock.now.return_value += timedelta(seconds=1)
+
+        assert runner._step_circuit_breaker_pre_execute(state) is None
+        assert tripped_breaker.state is CircuitBreakerState.HALF_OPEN
+
+    def test_error_message_contains_reason_from_breaker(self, make_tripped_breaker) -> None:
+        breaker = make_tripped_breaker(2)
         runner = _make_runner(circuit_breaker=breaker)
         strategy = _make_strategy()
         state = _make_state(strategy)

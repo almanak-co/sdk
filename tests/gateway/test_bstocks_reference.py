@@ -150,16 +150,21 @@ def test_source_staleness_and_observation_time_are_not_refreshed():
 
 
 @pytest.mark.parametrize(
-    "changes",
+    ("field", "is_absolute", "value"),
     [
-        {"read_at": 0},
-        {"read_at": int(time.time()) - 31},
-        {"block_timestamp": int(time.time()) - 31},
-        {"read_at": int(time.time()) + 60},
+        ("read_at", True, 0),
+        ("read_at", False, -31),
+        ("block_timestamp", False, -31),
+        ("read_at", False, 60),
     ],
 )
-def test_invalid_contract_clock_is_unmeasured(changes):
-    result = compose_reference(underlying(), GOOGLB, state(**changes), AdjustmentCoherence())
+def test_invalid_contract_clock_is_unmeasured(field, is_absolute, value):
+    now = int(time.time())
+    timestamp = value if is_absolute else now + value
+    observation = replace(state(block_timestamp=now - 1, read_at=now), **{field: timestamp})
+    with patch("almanak.gateway.data.price.scaled_token_reference.datetime", wraps=datetime) as clock:
+        clock.now.return_value = datetime.fromtimestamp(now, UTC)
+        result = compose_reference(underlying(timestamp=now), GOOGLB, observation, AdjustmentCoherence())
     assert result.availability == pb.REFERENCE_PRICE_AVAILABILITY_UNMEASURED
     assert result.price == ""
 

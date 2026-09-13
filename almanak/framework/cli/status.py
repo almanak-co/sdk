@@ -16,6 +16,7 @@ Usage:
 import json
 import sys
 from datetime import UTC, datetime
+from time import monotonic, sleep
 
 import click
 
@@ -495,8 +496,6 @@ def strategy_pause(deployment_id, reason, wait, timeout, gateway_host, gateway_p
         almanak strat pause -s my_strategy --reason "manual review"
         almanak strat pause -s my_strategy --reason "market volatile" --wait
     """
-    import time
-
     from almanak.gateway.proto import gateway_pb2
 
     client = _make_client(gateway_host, gateway_port)
@@ -531,8 +530,8 @@ def strategy_pause(deployment_id, reason, wait, timeout, gateway_host, gateway_p
         click.echo(f"Pause command issued for {deployment_id} (action_id: {response.action_id})")
 
         if wait:
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
+            deadline = monotonic() + timeout
+            while monotonic() < deadline:
                 try:
                     det_req = gateway_pb2.GetStrategyDetailsRequest(deployment_id=deployment_id)
                     details = client.dashboard.GetStrategyDetails(det_req)
@@ -541,7 +540,7 @@ def strategy_pause(deployment_id, reason, wait, timeout, gateway_host, gateway_p
                         return
                 except Exception as exc:
                     click.secho(f"Poll error: {exc}", fg="red", err=True)
-                time.sleep(2)
+                sleep(2)
             click.secho(f"Timed out waiting for {deployment_id} to reach PAUSED status.", fg="red", err=True)
             sys.exit(1)
     finally:

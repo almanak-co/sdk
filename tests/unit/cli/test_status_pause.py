@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -81,7 +82,7 @@ def test_strategy_pause_waits_for_transition() -> None:
     client = _client(action_response=_action_response(action_id="pause-42"))
     client.dashboard.GetStrategyDetails.side_effect = [_details("RUNNING"), _details("PAUSED")]
 
-    with patch("time.monotonic", return_value=100.0), patch("time.sleep") as sleep:
+    with patch.object(status_mod, "monotonic", return_value=100.0), patch.object(status_mod, "sleep") as sleep:
         result = _invoke(client, "--wait", "--timeout", "5")
 
     assert result.exit_code == 0, result.output
@@ -101,7 +102,7 @@ def test_strategy_pause_pre_status_error_is_best_effort() -> None:
     client = _client()
     client.dashboard.GetStrategyDetails.side_effect = [RuntimeError("sample failed"), _details("PAUSED")]
 
-    with patch("time.monotonic", return_value=100.0), patch("time.sleep") as sleep:
+    with patch.object(status_mod, "monotonic", return_value=100.0), patch.object(status_mod, "sleep") as sleep:
         result = _invoke(client, "--wait", "--timeout", "5")
 
     assert result.exit_code == 0, result.output
@@ -115,7 +116,10 @@ def test_strategy_pause_poll_error_then_timeout() -> None:
     client = _client()
     client.dashboard.GetStrategyDetails.side_effect = [_details("RUNNING"), RuntimeError("poll failed")]
 
-    with patch("time.monotonic", side_effect=[100.0, 100.0, 102.0]), patch("time.sleep") as sleep:
+    with (
+        patch.object(status_mod, "monotonic", side_effect=[100.0, 100.0, 102.0]),
+        patch.object(status_mod, "sleep") as sleep,
+    ):
         result = _invoke(client, "--wait", "--timeout", "1")
 
     assert result.exit_code == 1
@@ -132,7 +136,10 @@ def test_strategy_pause_non_paused_status_times_out() -> None:
     client = _client()
     client.dashboard.GetStrategyDetails.side_effect = [_details("RUNNING"), _details("RUNNING")]
 
-    with patch("time.monotonic", side_effect=[100.0, 100.0, 102.0]), patch("time.sleep") as sleep:
+    with (
+        patch.object(status_mod, "monotonic", side_effect=[100.0, 100.0, 102.0]),
+        patch.object(status_mod, "sleep") as sleep,
+    ):
         result = _invoke(client, "--wait", "--timeout", "1")
 
     assert result.exit_code == 1
@@ -145,11 +152,36 @@ def test_strategy_pause_preexisting_paused_status_does_not_false_positive() -> N
     client = _client()
     client.dashboard.GetStrategyDetails.side_effect = [_details("PAUSED"), _details("PAUSED")]
 
-    with patch("time.monotonic", side_effect=[100.0, 100.0, 102.0]), patch("time.sleep") as sleep:
+    with (
+        patch.object(status_mod, "monotonic", side_effect=[100.0, 100.0, 102.0]),
+        patch.object(status_mod, "sleep") as sleep,
+    ):
         result = _invoke(client, "--wait", "--timeout", "1")
 
     assert result.exit_code == 1
     assert "is now PAUSED" not in result.output
     assert result.output.endswith("Timed out waiting for deployment:abc123 to reach PAUSED status.\n")
     sleep.assert_called_once_with(2)
+    client.disconnect.assert_called_once_with()
+
+
+def test_pause_wait_allows_an_unrelated_event_loop_to_read_its_clock() -> None:
+    client = _client()
+    statuses = iter(["RUNNING", "PAUSED"])
+    loop = asyncio.new_event_loop()
+
+    def details_after_event_loop_reads(_request):
+        for _ in range(4):
+            assert loop.time() != 100.0
+        return _details(next(statuses))
+
+    client.dashboard.GetStrategyDetails.side_effect = details_after_event_loop_reads
+    try:
+        with patch.object(status_mod, "monotonic", side_effect=[100.0, 100.0]), patch.object(status_mod, "sleep"):
+            result = _invoke(client, "--wait", "--timeout", "5")
+    finally:
+        loop.close()
+
+    assert result.exit_code == 0, result.output
+    assert "is now PAUSED" in result.output
     client.disconnect.assert_called_once_with()
