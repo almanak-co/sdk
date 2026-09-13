@@ -990,7 +990,7 @@ class StrategyRunner:
         self._stuck_detector = stuck_detector
         self._operator_card_generator = operator_card_generator
         self._emergency_manager = emergency_manager
-        self._emergency_triggered_for_open = False  # Track once-per-OPEN-episode firing
+        self._last_emergency_open_episode: int | None = None
         self._decide_in_progress = False  # Guard against overlapping decide() calls after timeout
         self._decide_timed_out_at: float | None = None  # Monotonic timestamp of last timeout
 
@@ -9464,7 +9464,9 @@ class StrategyRunner:
         try:
             await save_pre_broadcast_checkpoint(self, state.strategy, marker)
         except Exception as exc:
-            raise RuntimeError(f"{pending_error}; marker write failed: {exc}") from exc
+            raise RuntimeError(
+                f"Pre-broadcast checkpoint persistence failed ({type(exc).__name__}); execution was not submitted"
+            ) from exc
         try:
             result = await self._single_chain_execute_onchain(state, step_result, execution_context, orchestrator)
         except Exception as exc:
@@ -10797,9 +10799,13 @@ class StrategyRunner:
                 error=error,
                 execution_pending_since=saved_progress.started_at,
                 execution_pending_reason=(
-                    "Original recovery context is unavailable; operator reconciliation required"
-                    if saved_progress.recovery_context is None
-                    else None
+                    "This execution lane has no automatic receipt recovery; operator reconciliation required"
+                    if saved_progress.execution_lane is not ExecutionLane.SINGLE_CHAIN
+                    else (
+                        "Original recovery context is unavailable; operator reconciliation required"
+                        if saved_progress.recovery_context is None
+                        else None
+                    )
                 ),
                 deployment_id=deployment_id,
                 duration_ms=self._calculate_duration_ms(start_time),

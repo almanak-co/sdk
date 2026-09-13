@@ -539,8 +539,11 @@ async def test_pre_broadcast_marker_write_failure_prevents_submission() -> None:
     orchestrator.execute.assert_not_awaited()
     failed_receipt = state.state_machine.set_receipt.call_args.args[0]
     assert failed_receipt.success is False
-    assert "BROADCAST_RECONCILIATION_REQUIRED" in failed_receipt.error
-    assert "marker write failed" in failed_receipt.error
+    from almanak.framework.runner.failure_kind import FailureKind, kind_for_status
+
+    assert "Pre-broadcast checkpoint persistence failed" in failed_receipt.error
+    assert "execution was not submitted" in failed_receipt.error
+    assert kind_for_status(IterationStatus.EXECUTION_FAILED, failed_receipt.error) is FailureKind.UNKNOWN
 
 
 @pytest.mark.asyncio
@@ -925,3 +928,50 @@ async def test_unserializable_recovery_metadata_keeps_prebroadcast_barrier():
     assert marker.barrier_phase is ExecutionBarrierPhase.PRE_BROADCAST
     runner._save_execution_progress.assert_awaited_once()
     runner._single_chain_execute_onchain.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_stage,save_committed", [("checkpoint", False), ("checkpoint", True), ("execution", True)]
+)
+async def test_checkpoint_failure_is_not_an_unresolved_submission(failure_stage, save_committed):
+    from almanak.framework.execution.orchestrator import ExecutionContext
+    from almanak.framework.models.reproduction_bundle import ActionBundle
+    from almanak.framework.runner.failure_kind import FailureKind, kind_for_status
+
+    runner = _make_runner()
+    persisted = []
+
+    async def save_progress(deployment_id, progress):
+        if save_committed:
+            persisted.append(progress)
+        if failure_stage == "checkpoint":
+            raise RuntimeError("BROADCAST_RECONCILIATION_REQUIRED: injected failed write response")
+
+    runner._save_execution_progress = AsyncMock(side_effect=save_progress)
+    runner._clear_execution_progress = AsyncMock()
+    runner._flush_strategy_pending_save_strict = AsyncMock()
+    runner._single_chain_execute_onchain = AsyncMock(side_effect=RuntimeError("submission response unavailable"))
+    state = _make_state(_make_strategy())
+    step = SimpleNamespace(action_bundle=ActionBundle(intent_type="SWAP", transactions=[]))
+    context = ExecutionContext(
+        deployment_id=state.deployment_id,
+        intent_id=state.intent.intent_id,
+        chain="bsc",
+        wallet_address="0x" + "11" * 20,
+    )
+    with pytest.raises(RuntimeError) as caught:
+        await runner._single_chain_execute_onchain_guarded(state, step, context, MagicMock())
+
+    kind = kind_for_status(IterationStatus.EXECUTION_FAILED, str(caught.value))
+    if failure_stage == "checkpoint":
+        assert kind is FailureKind.UNKNOWN
+        assert "execution was not submitted" in str(caught.value)
+        runner._single_chain_execute_onchain.assert_not_awaited()
+    else:
+        assert kind is FailureKind.RECONCILIATION_HOLD
+        runner._single_chain_execute_onchain.assert_awaited_once()
+    assert bool(persisted) is save_committed
+    if persisted:
+        assert persisted[0].barrier_phase is ExecutionBarrierPhase.PRE_BROADCAST
+    runner._clear_execution_progress.assert_not_awaited()

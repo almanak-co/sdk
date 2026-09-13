@@ -451,3 +451,16 @@ class TestGlobalRegistry:
         breaker = registry.get_or_create("global_test_strategy")
         assert breaker is not None
         assert breaker.state == CircuitBreakerState.CLOSED
+
+
+def test_open_episode_is_stable_while_open_and_survives_reset():
+    breaker = CircuitBreaker("deployment:episodes", CircuitBreakerConfig(max_consecutive_failures=1))
+    assert breaker.open_episode == 0
+    breaker.record_failure("action failed")
+    assert breaker.open_episode == 1
+    breaker.record_failure("action failed again")
+    assert breaker.open_episode == 1
+    breaker.reset()
+    assert breaker.open_episode == 1
+    breaker.record_failure("new action failed")
+    assert breaker.open_episode == 2

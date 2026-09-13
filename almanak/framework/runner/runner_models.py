@@ -327,6 +327,15 @@ class IterationResult:
     async_settlement: dict[str, Any] | None = None
 
     @property
+    def execution_pending_escalation_reason(self) -> str:
+        """Diagnostic shared by lifecycle persistence and operator alerts after escalation."""
+        return self.execution_pending_reason or (
+            "Receipt recovery exceeded five minutes; operator reconciliation required"
+            if self.execution_pending_since is not None
+            else "Execution outcome is unresolved without recovery timing; operator reconciliation required"
+        )
+
+    @property
     def success(self) -> bool:
         """Check if iteration was successful (including DRY_RUN, HOLD, and TEARDOWN)."""
         return self.status in (

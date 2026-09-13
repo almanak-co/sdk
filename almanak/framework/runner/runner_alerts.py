@@ -251,7 +251,7 @@ class RunnerAlerter:
                     "pending_since": result.execution_pending_since.isoformat()
                     if result.execution_pending_since
                     else None,
-                    "reason": result.execution_pending_reason or "Receipt recovery exceeded five minutes",
+                    "reason": result.execution_pending_escalation_reason,
                     "error": result.error,
                     "action": "Inspect execution-recovery status; replay remains blocked",
                 },
@@ -376,26 +376,22 @@ class RunnerAlerter:
     ) -> None:
         """Trigger emergency stop if the circuit breaker just tripped to OPEN.
 
-        Called after every failure recording. Only fires once per OPEN transition
-        by tracking whether we've already triggered for this OPEN state via
-        the _emergency_triggered_for_open flag.
+        Deduplicate against the breaker's OPEN episode, so a new trip remains
+        actionable even when no successful iteration occurred between trips.
         """
         if self._runner._emergency_manager is None or self._runner._circuit_breaker is None:
             return
 
-        # Only trigger when breaker is OPEN
         from ..execution.circuit_breaker import CircuitBreakerState
 
-        if self._runner._circuit_breaker.state != CircuitBreakerState.OPEN:
-            self._runner._emergency_triggered_for_open = False
+        cb_check = self._runner._circuit_breaker.check()
+        if cb_check.state is not CircuitBreakerState.OPEN:
             return
-
-        # Don't trigger more than once per OPEN episode
-        if self._runner._emergency_triggered_for_open:
+        episode = self._runner._circuit_breaker.open_episode
+        if getattr(self._runner, "_last_emergency_open_episode", None) == episode:
             return
 
         try:
-            cb_check = self._runner._circuit_breaker.check()
             reason = (
                 f"Circuit breaker tripped after {cb_check.consecutive_failures} "
                 f"consecutive failures: {last_result.error or 'unknown error'}"
@@ -417,7 +413,7 @@ class RunnerAlerter:
                 },
             )
             # Only mark as triggered after successful emergency stop
-            self._runner._emergency_triggered_for_open = True
+            self._runner._last_emergency_open_episode = episode
 
             # In managed deployments, write ERROR state and exit so the pod
             # terminates and K8s resources are freed.  Local development keeps

@@ -290,6 +290,7 @@ class CircuitBreaker:
         self._last_exposure_at: datetime | None = None
 
         # Trip tracking
+        self._open_episode = 0
         self._trip_time: datetime | None = None
         self._trip_reason: TripReason | None = None
         # Whether the most recent trip was driven *solely* by data-class
@@ -317,6 +318,12 @@ class CircuitBreaker:
         """Get current circuit breaker state."""
         with self._lock:
             return self._state
+
+    @property
+    def open_episode(self) -> int:
+        """Process-local identity of the last transition into OPEN; never reset."""
+        with self._lock:
+            return self._open_episode
 
     @property
     def consecutive_guard_refusals(self) -> int:
@@ -754,6 +761,8 @@ class CircuitBreaker:
     def _trip(self, reason: TripReason) -> None:
         """Trip the circuit breaker (transition to OPEN state)."""
         previous_state = self._state
+        if previous_state is not CircuitBreakerState.OPEN:
+            self._open_episode += 1
         self._state = CircuitBreakerState.OPEN
         self._trip_time = datetime.now(UTC)
         self._trip_reason = reason

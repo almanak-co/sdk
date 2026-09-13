@@ -1825,9 +1825,7 @@ async def _alert_pending_execution(
     last_alert = getattr(runner, "_execution_pending_alert_at", None)
     if isinstance(last_alert, datetime) and (now - last_alert).total_seconds() < 300:
         return
-    reason = (
-        result.execution_pending_reason or "Receipt recovery exceeded five minutes; operator reconciliation required"
-    )
+    reason = result.execution_pending_escalation_reason
     logger.error("Execution stalled for %s: %s; %s", deployment_id, reason, result.error)
     runner._lifecycle_write_state(deployment_id, LifecycleState.ERROR, error_message=reason)
     await runner._alert_execution_pending(strategy, result)
@@ -1860,9 +1858,18 @@ async def handle_iteration_failure(
     that never reaches ``run_iteration``'s result path and therefore
     never touches this helper.
     """
+    from .failure_kind import FailureKind, kind_for_status
     from .runner_models import IterationStatus
 
-    if result.status is IterationStatus.EXECUTION_PENDING:
+    inferred_kind = kind_for_status(result.status, result.error)
+    recorded_kind = result.failure_kind or inferred_kind
+    # A typed hold cannot neutralize a landed accounting failure or an
+    # execution result that carries no durable replay-barrier evidence.
+    if recorded_kind is FailureKind.RECONCILIATION_HOLD and recorded_kind is not inferred_kind:
+        recorded_kind = inferred_kind
+    if result.status is IterationStatus.EXECUTION_PENDING or recorded_kind.is_execution_hold:
+        if result.status is not IterationStatus.EXECUTION_PENDING and runner._circuit_breaker is not None:
+            runner._circuit_breaker.record_failure(error_message=result.error or "", kind=recorded_kind)
         await _alert_pending_execution(runner, strategy, deployment_id, result)
         return
 
@@ -1877,9 +1884,6 @@ async def handle_iteration_failure(
         IterationStatus.STRATEGY_ERROR,
     ):
         # Prefer the pipeline's typed classification so guard refusals stay neutral.
-        from .failure_kind import kind_for_status
-
-        recorded_kind = result.failure_kind or kind_for_status(result.status, result.error)
         runner._circuit_breaker.record_failure(
             error_message=result.error or f"Iteration failed: {result.status.value}",
             kind=recorded_kind,
@@ -1917,8 +1921,8 @@ def handle_iteration_success(
     Recovers lifecycle state if the runner was previously in an error
     streak and is not about to shut down / transition to a terminal
     state. Then resets the consecutive-error counter, clears the
-    first-error timestamp, and resets the emergency trigger guard when
-    the circuit breaker is not OPEN.
+    first-error timestamp. Emergency deduplication follows breaker OPEN
+    episodes independently of iteration success.
     """
     pending_alerted = isinstance(getattr(runner, "_execution_pending_alert_at", None), datetime)
     was_in_error_streak = was_in_error_streak or pending_alerted
@@ -1938,12 +1942,6 @@ def handle_iteration_success(
         )
     runner._consecutive_errors = 0
     runner._first_error_at = None
-    # Reset only after leaving OPEN so a later relapse can trigger another emergency action.
-    if runner._circuit_breaker is not None:
-        from ..execution.circuit_breaker import CircuitBreakerState
-
-        if runner._circuit_breaker.state != CircuitBreakerState.OPEN:
-            runner._emergency_triggered_for_open = False
 
 
 async def handle_lifecycle_command(

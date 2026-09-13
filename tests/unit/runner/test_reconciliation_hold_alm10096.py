@@ -1,22 +1,14 @@
-"""ALM-10096: an unresolved submission must never emergency-stop a deployment.
+"""Unresolved submissions retain replay protection without emergency teardown.
 
-An accepted broadcast whose receipt never becomes observable is an *unresolved*
-outcome, not a failed one. The durable replay barrier correctly refuses
-automatic replay — a null receipt is not proof of nonexecution, and the
-transaction may still mine. What must not follow is the breaker treating that
-fail-closed hold as an execution fault and tripping into an emergency stop,
-because the deployment then needs a manual redeploy while its funds are
-untouched.
-
-``ExecutionLane.SINGLE_CHAIN`` already returns ``EXECUTION_PENDING`` and is
-breaker-neutral. The classification seam under test here is lane-independent:
-the same evidence reached through the multi-leg, bridge, or legacy/unknown-lane
-markers is charged to the breaker instead.
+Classification, lifecycle writes and process actions are independent assertions.
+Method-level doubles cannot establish actual process liveness or whether an
+operator must redeploy. Characterization of ERROR writes is not acceptance of
+an unresolved-state/resume contract.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -31,7 +23,7 @@ from almanak.framework.execution.circuit_breaker import (
 from almanak.framework.execution.reconciliation import reconciliation_required_error
 from almanak.framework.runner._run_loop_helpers import handle_iteration_failure
 from almanak.framework.runner.failure_kind import FailureKind, kind_for_status
-from almanak.framework.runner.runner_models import IterationResult, IterationStatus
+from almanak.framework.runner.runner_models import IterationResult, IterationStatus, RunnerConfig
 
 # The verbatim production error shape: a real hash was returned by
 # ``eth_sendRawTransaction`` and no receipt ever became observable.
@@ -74,17 +66,28 @@ def _breaker(max_consecutive_failures: int = 3) -> CircuitBreaker:
     )
 
 
-def _runner(breaker: CircuitBreaker) -> SimpleNamespace:
+def _runner(
+    breaker: CircuitBreaker, *, max_consecutive_errors: int = RunnerConfig.max_consecutive_errors
+) -> SimpleNamespace:
+    """Runner double using the production error budget."""
     return SimpleNamespace(
         _consecutive_errors=0,
         _first_error_at=None,
         _circuit_breaker=breaker,
-        config=SimpleNamespace(max_consecutive_errors=99),
+        config=SimpleNamespace(max_consecutive_errors=max_consecutive_errors),
         _maybe_trigger_emergency=AsyncMock(),
         _alert_consecutive_errors=AsyncMock(),
         _alert_execution_pending=AsyncMock(),
+        _execution_pending_alert_at=None,
         _lifecycle_write_state=MagicMock(),
+        request_shutdown=MagicMock(),
     )
+
+
+def _error_lifecycle_writes(runner: SimpleNamespace) -> int:
+    from almanak.core.lifecycle import LifecycleState
+
+    return sum(1 for call in runner._lifecycle_write_state.call_args_list if LifecycleState.ERROR in call.args)
 
 
 class TestHoldClassification:
@@ -190,10 +193,10 @@ class TestRunnerSeam:
             await handle_iteration_failure(runner, SimpleNamespace(), "deployment:alm-10096", result)
         assert breaker.state is CircuitBreakerState.CLOSED
         assert breaker.check().can_execute
-        # The iteration still failed, so the error streak — the operator-facing
-        # loud signal — keeps running. Only the emergency stop is withheld.
-        assert runner._consecutive_errors == 5
-        assert isinstance(runner._first_error_at, datetime)
+        assert runner._consecutive_errors == 0
+        assert runner._first_error_at is None
+        runner._alert_consecutive_errors.assert_not_awaited()
+        runner._maybe_trigger_emergency.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_ordinary_execution_failure_still_trips_and_escalates(self) -> None:
@@ -241,7 +244,7 @@ class TestRunnerSeam:
         emergency_manager = SimpleNamespace(emergency_stop_async=AsyncMock())
         runner = _runner(breaker)
         runner._emergency_manager = emergency_manager
-        runner._emergency_triggered_for_open = False
+        runner._last_emergency_open_episode = None
         runner._is_managed_deployment = MagicMock(return_value=True)
         runner._terminal_lifecycle_state = None
         runner._terminal_lifecycle_error_message = None
@@ -322,6 +325,20 @@ class TestReplayBarrierHolds:
         assert INCIDENT_HASH in (result.error or "")
         # No replay: the gate returns before any compile or broadcast.
         orchestrator.execute.assert_not_awaited()
+        assert result.execution_pending_since == progress.started_at
+        assert result.execution_pending_reason is not None
+        if lane != "single_chain":
+            assert result.execution_pending_reason == (
+                "This execution lane has no automatic receipt recovery; operator reconciliation required"
+            )
+        bookkeeping = _runner(_breaker())
+        bookkeeping._consecutive_errors = 2
+        for _ in range(RunnerConfig.max_consecutive_errors + 2):
+            await handle_iteration_failure(bookkeeping, strategy, strategy.deployment_id, result)
+        assert bookkeeping._consecutive_errors == 2
+        assert _error_lifecycle_writes(bookkeeping) == 1
+        bookkeeping._alert_consecutive_errors.assert_not_awaited()
+        bookkeeping._maybe_trigger_emergency.assert_not_awaited()
         # And whatever the lane, the breaker must read it as a hold.
         assert kind_for_status(result.status, result.error).is_execution_hold or (
             result.status is IterationStatus.EXECUTION_PENDING
@@ -396,3 +413,225 @@ class TestLandedRepairIsNotAHold:
         for _ in range(3):
             await handle_iteration_failure(runner, strategy, "deployment:alm-10096", result)
         assert breaker.state is CircuitBreakerState.OPEN
+
+
+class TestDeploymentLifecycleEscalation:
+    """Diagnostic ERROR remains independent of error budgets and shutdown."""
+
+    @pytest.mark.asyncio
+    async def test_a_hold_streak_preserves_the_production_error_budget(self) -> None:
+        from almanak.framework.runner.runner_models import RunnerConfig
+
+        budget = RunnerConfig.max_consecutive_errors
+        breaker = _breaker()
+        runner = _runner(breaker, max_consecutive_errors=budget)
+        result = IterationResult(status=IterationStatus.EXECUTION_FAILED, error=INCIDENT_ERROR)
+        for _ in range(budget):
+            await handle_iteration_failure(runner, SimpleNamespace(), "deployment:alm-10096", result)
+
+        assert breaker.state is CircuitBreakerState.CLOSED
+        assert breaker.check().can_execute
+        assert runner._consecutive_errors == 0
+        assert _error_lifecycle_writes(runner) == 1
+        assert runner._alert_execution_pending.await_count == 1
+        assert "without recovery timing" in runner._lifecycle_write_state.call_args.kwargs["error_message"]
+        runner._alert_consecutive_errors.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_lost_recovery_context_reports_error_on_the_first_pending_iteration(self) -> None:
+        # What the single-chain barrier returns once the original execution
+        # context is gone: the reason is set, so no grace period applies.
+        breaker = _breaker()
+        runner = _runner(breaker, max_consecutive_errors=3)
+        result = IterationResult(
+            status=IterationStatus.EXECUTION_PENDING,
+            error=INCIDENT_ERROR,
+            execution_pending_since=datetime.now(UTC),
+            execution_pending_reason="Original recovery context is unavailable; operator reconciliation required",
+        )
+        await handle_iteration_failure(runner, SimpleNamespace(), "deployment:alm-10096", result)
+
+        assert _error_lifecycle_writes(runner) == 1
+        assert runner._alert_execution_pending.await_count == 1
+        # The pending lane returns before the streak and the breaker are touched.
+        assert runner._consecutive_errors == 0
+        assert breaker.state is CircuitBreakerState.CLOSED
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "pending_age_seconds,expected_error_writes",
+        [(30, 0), (400, 1)],
+    )
+    async def test_an_unresolved_submission_escalates_only_after_the_grace_window(
+        self, pending_age_seconds: int, expected_error_writes: int
+    ) -> None:
+        # With a recovery context still held there is a five-minute window in
+        # which a receipt may yet arrive; only past it is an operator told.
+        breaker = _breaker()
+        runner = _runner(breaker, max_consecutive_errors=3)
+        result = IterationResult(
+            status=IterationStatus.EXECUTION_PENDING,
+            error=INCIDENT_ERROR,
+            execution_pending_since=datetime.now(UTC) - timedelta(seconds=pending_age_seconds),
+            execution_pending_reason=None,
+        )
+        for _ in range(4):
+            await handle_iteration_failure(runner, SimpleNamespace(), "deployment:alm-10096", result)
+
+        assert _error_lifecycle_writes(runner) == expected_error_writes
+        assert runner._alert_execution_pending.await_count == expected_error_writes
+        assert runner._consecutive_errors == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [IterationStatus.EXECUTION_FAILED, IterationStatus.EXECUTION_PENDING])
+@pytest.mark.parametrize("pending_age_seconds", [30, 400])
+@pytest.mark.parametrize("operator_reason", [None, "Original recovery context unavailable; reconcile before replay"])
+@pytest.mark.parametrize("existing_failures", [0, 2])
+@pytest.mark.parametrize("breaker_state", [CircuitBreakerState.CLOSED, CircuitBreakerState.HALF_OPEN])
+async def test_pending_lifecycle_and_safety_are_independent(
+    status: IterationStatus,
+    pending_age_seconds: int,
+    operator_reason: str | None,
+    existing_failures: int,
+    breaker_state: CircuitBreakerState,
+) -> None:
+    breaker = _breaker()
+    for _ in range(existing_failures):
+        breaker.record_failure(ORDINARY_FAILURE, kind=FailureKind.UNKNOWN)
+    breaker._state = breaker_state
+    runner = _runner(breaker)
+    runner._consecutive_errors = existing_failures
+    first_error = datetime.now(UTC) - timedelta(seconds=600) if existing_failures else None
+    runner._first_error_at = first_error
+    before = breaker.get_status()
+    result = IterationResult(
+        status=status,
+        error=INCIDENT_ERROR,
+        execution_pending_since=datetime.now(UTC) - timedelta(seconds=pending_age_seconds),
+        execution_pending_reason=operator_reason,
+    )
+    strategy = SimpleNamespace()
+    for _ in range(RunnerConfig.max_consecutive_errors + 2):
+        await handle_iteration_failure(runner, strategy, "deployment:alm-10096", result)
+
+    expected_writes = int(operator_reason is not None or pending_age_seconds >= 300)
+    assert _error_lifecycle_writes(runner) == expected_writes
+    assert runner._alert_execution_pending.await_count == expected_writes
+    if expected_writes:
+        assert runner._lifecycle_write_state.call_args.kwargs["error_message"] == (
+            operator_reason or "Receipt recovery exceeded five minutes; operator reconciliation required"
+        )
+        runner._alert_execution_pending.assert_awaited_once_with(strategy, result)
+    assert runner._consecutive_errors == existing_failures
+    assert runner._first_error_at == first_error
+    assert breaker.state is breaker_state
+    after = breaker.get_status()
+    for key in ("consecutive_failures", "cumulative_loss_usd", "failure_history_count"):
+        assert after[key] == before[key]
+    runner._maybe_trigger_emergency.assert_not_awaited()
+    runner._alert_consecutive_errors.assert_not_awaited()
+    runner.request_shutdown.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [IterationStatus.ACCOUNTING_FAILED, IterationStatus.RECONCILIATION_FAILED, IterationStatus.EXECUTION_FAILED],
+)
+async def test_typed_hold_requires_unresolved_execution_evidence(status: IterationStatus) -> None:
+    runner = _runner(_breaker())
+    result = IterationResult(status=status, error=ORDINARY_FAILURE, failure_kind=FailureKind.RECONCILIATION_HOLD)
+    for _ in range(RunnerConfig.max_consecutive_errors):
+        await handle_iteration_failure(runner, SimpleNamespace(), "deployment:alm-10096", result)
+    assert runner._consecutive_errors == RunnerConfig.max_consecutive_errors
+    assert runner._circuit_breaker.state is CircuitBreakerState.OPEN
+    runner._alert_execution_pending.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_authoritative_failure_kind_prevents_marker_from_neutralizing_failure() -> None:
+    runner = _runner(_breaker())
+    result = IterationResult(
+        status=IterationStatus.EXECUTION_FAILED, error=INCIDENT_ERROR, failure_kind=FailureKind.UNKNOWN
+    )
+    await handle_iteration_failure(runner, SimpleNamespace(), "deployment:alm-10096", result)
+    assert runner._consecutive_errors == 1
+    assert runner._circuit_breaker.get_status()["consecutive_failures"] == 1
+    runner._alert_execution_pending.assert_not_awaited()
+
+
+def test_recovery_does_not_overwrite_terminal_lifecycle() -> None:
+    from almanak.core.lifecycle import LifecycleState
+    from almanak.framework.runner._run_loop_helpers import handle_iteration_success
+
+    runner = _runner(_breaker())
+    runner._execution_pending_alert_at = datetime.now(UTC)
+    runner._shutdown_requested = True
+    runner._terminal_lifecycle_state = LifecycleState.TERMINATED
+    handle_iteration_success(runner, "deployment:alm-10096", False)
+    runner._lifecycle_write_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("since", [None, datetime(2026, 1, 1, tzinfo=UTC)])
+async def test_pending_operator_card_matches_lifecycle_diagnostic(since: datetime | None) -> None:
+    from almanak.framework.runner.runner_alerts import RunnerAlerter
+
+    runner = _runner(_breaker())
+    runner.config.enable_alerting = True
+    runner.alert_manager = SimpleNamespace(send_alert=AsyncMock())
+    runner._alert_execution_pending = lambda strategy, result: RunnerAlerter(runner).alert_execution_pending(
+        strategy, result
+    )
+    strategy = SimpleNamespace(deployment_id="deployment:alm-10096")
+    result = IterationResult(
+        status=IterationStatus.EXECUTION_FAILED, error=INCIDENT_ERROR, execution_pending_since=since
+    )
+    await handle_iteration_failure(runner, strategy, strategy.deployment_id, result)
+    card = runner.alert_manager.send_alert.call_args.args[0]
+    assert card.context["reason"] == runner._lifecycle_write_state.call_args.kwargs["error_message"]
+    assert card.context["pending_since"] == (since.isoformat() if since else None)
+    if since is None:
+        assert "without recovery timing" in card.context["reason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "intervening_status", [None, IterationStatus.EXECUTION_PENDING, IterationStatus.EXECUTION_FAILED]
+)
+async def test_emergency_runs_once_for_each_open_episode_across_neutral_holds(intervening_status) -> None:
+    from almanak.framework.runner.runner_alerts import RunnerAlerter
+
+    breaker = _breaker(max_consecutive_failures=1)
+    runner = _runner(breaker)
+    runner._emergency_manager = SimpleNamespace(emergency_stop_async=AsyncMock())
+    runner._is_managed_deployment = MagicMock(return_value=False)
+    runner._maybe_trigger_emergency = lambda strategy, result: RunnerAlerter(runner).maybe_trigger_emergency(
+        strategy, result
+    )
+    strategy = SimpleNamespace(deployment_id="deployment:alm-10096", chain="bsc")
+    failed = IterationResult(status=IterationStatus.EXECUTION_FAILED, error=ORDINARY_FAILURE)
+    hold = IterationResult(
+        status=intervening_status or IterationStatus.EXECUTION_PENDING,
+        error=INCIDENT_ERROR,
+        execution_pending_since=datetime.now(UTC),
+    )
+    await handle_iteration_failure(runner, strategy, strategy.deployment_id, failed)
+    first_episode = breaker.open_episode
+    await handle_iteration_failure(runner, strategy, strategy.deployment_id, failed)
+    assert breaker.open_episode == first_episode
+    assert runner._emergency_manager.emergency_stop_async.await_count == 1
+
+    breaker._trip_time = datetime.now(UTC) - timedelta(seconds=breaker.config.cooldown_seconds + 1)
+    assert breaker.check().state is CircuitBreakerState.HALF_OPEN
+    for _ in range(3 if intervening_status else 0):
+        await handle_iteration_failure(runner, strategy, strategy.deployment_id, hold)
+    assert breaker.state is CircuitBreakerState.HALF_OPEN
+    assert runner._emergency_manager.emergency_stop_async.await_count == 1
+
+    await handle_iteration_failure(runner, strategy, strategy.deployment_id, failed)
+    assert breaker.open_episode == first_episode + 1
+    assert runner._emergency_manager.emergency_stop_async.await_count == 2
+    await handle_iteration_failure(runner, strategy, strategy.deployment_id, failed)
+    assert runner._emergency_manager.emergency_stop_async.await_count == 2
