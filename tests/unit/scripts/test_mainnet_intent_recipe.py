@@ -922,6 +922,16 @@ def test_every_recipe_symbol_resolves_on_its_own_chain(cell_id: str) -> None:
     assert not missing, f"{cell_id} names {missing} which {recipe.chain} cannot resolve"
 
 
+class _UnusedGatewayClient:
+    """Stands in where a test builds the orchestrator but observes no venue.
+
+    ``_orchestrator`` probes ``is_connected`` while constructing the venue
+    observer, so this must read as a connected client; nothing else is called.
+    """
+
+    is_connected = True
+
+
 @pytest.mark.parametrize("rpc_url", ["https://rpc.invalid", "http://127.0.0.1:8545"])
 def test_mainnet_runner_builds_capable_simulator_even_when_env_disables_it(monkeypatch, rpc_url):
     from almanak.framework.execution.simulator import LocalSimulator, SimulationConfig
@@ -929,7 +939,9 @@ def test_mainnet_runner_builds_capable_simulator_even_when_env_disables_it(monke
     runner = _runner_module()
     config = SimulationConfig(enabled=False)
     monkeypatch.setattr(runner.SimulationConfig, "from_env", lambda: config)
-    orchestrator = runner._orchestrator(private_key="0x" + "11" * 32, rpc_url=rpc_url, chain="arbitrum")
+    orchestrator = runner._orchestrator(
+        private_key="0x" + "11" * 32, rpc_url=rpc_url, chain="arbitrum", gateway_client=_UnusedGatewayClient()
+    )
     assert isinstance(orchestrator.simulator, LocalSimulator)
     assert orchestrator.simulator._rpc_url == rpc_url
     assert config.enabled is True
@@ -946,7 +958,12 @@ async def test_mainnet_runner_simulation_revert_stops_before_signing(monkeypatch
 
     runner = _runner_module()
     monkeypatch.setattr(runner.SimulationConfig, "from_env", lambda: SimulationConfig(enabled=False))
-    orchestrator = runner._orchestrator(private_key="0x" + "11" * 32, rpc_url="https://rpc.invalid", chain="arbitrum")
+    orchestrator = runner._orchestrator(
+        private_key="0x" + "11" * 32,
+        rpc_url="https://rpc.invalid",
+        chain="arbitrum",
+        gateway_client=_UnusedGatewayClient(),
+    )
     simulator = orchestrator.simulator
     monkeypatch.setattr(simulator, "_get_web3", AsyncMock(return_value=Mock()))
     estimate = AsyncMock(return_value=(0, "execution reverted: minimum not met"))
