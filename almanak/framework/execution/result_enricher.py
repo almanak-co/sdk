@@ -1987,9 +1987,8 @@ class ResultEnricher:
         ]
         if unresolved_sides:
             result.extraction_warnings.append(
-                f"swap_amounts decimals unresolved for {', '.join(unresolved_sides)}; "
-                "decimal amounts use the legacy 18-decimal fallback and are "
-                "excluded from ledger/sidecar amounts (VIB-3164)"
+                f"swap_amounts effect missing or decimals unresolved for {', '.join(unresolved_sides)}; "
+                "missing effect or unresolved decimals exclude this leg from measured ledger/sidecar amounts"
             )
 
     def _has_extracted(self, result: ExecutionResult, field: str) -> bool:

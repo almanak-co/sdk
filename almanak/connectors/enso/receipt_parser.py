@@ -342,13 +342,13 @@ class EnsoReceiptParser:
             return None
 
         # Input: first transfer from wallet; Output: last transfer to wallet
-        token_in_addr, amount_in_raw = transfers_from_wallet[0] if transfers_from_wallet else ("", 0)
+        token_in_addr, amount_in_raw = transfers_from_wallet[0] if transfers_from_wallet else ("", None)
         token_out_addr, amount_out_raw = transfers_to_wallet[-1]
 
         if amount_out_raw == 0:
             return None
 
-        decimals_in = self._resolve_decimals(token_in_addr)
+        decimals_in = self._resolve_decimals(token_in_addr) if token_in_addr else None
         decimals_out = self._resolve_decimals(token_out_addr)
 
         # If we can't resolve decimals for the output token, bail out rather than
@@ -359,12 +359,12 @@ class EnsoReceiptParser:
 
         amount_in_decimal = (
             Decimal(amount_in_raw) / Decimal(10**decimals_in)
-            if (amount_in_raw and decimals_in is not None)
-            else Decimal(0)
+            if (amount_in_raw is not None and decimals_in is not None)
+            else None
         )
         amount_out_decimal = Decimal(amount_out_raw) / Decimal(10**decimals_out)
 
-        effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal else Decimal(0)
+        effective_price = amount_out_decimal / amount_in_decimal if amount_in_decimal else None
 
         return SwapAmounts(
             amount_in=amount_in_raw,
@@ -374,6 +374,7 @@ class EnsoReceiptParser:
             effective_price=effective_price,
             token_in=token_in_addr or None,
             token_out=token_out_addr or None,
+            amount_in_decimal_resolved=amount_in_decimal is not None,
         )
 
     def _resolve_decimals(self, token_address: str) -> int | None:

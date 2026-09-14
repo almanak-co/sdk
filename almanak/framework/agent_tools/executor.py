@@ -1999,15 +1999,29 @@ class ToolExecutor:
     def _swap_response_from_enriched(self, base: dict, enriched: Any, args: dict) -> dict:
         """swap_tokens response from enriched swap amounts."""
         swap = enriched.swap_amounts
+        input_resolved = swap is not None and getattr(swap, "amount_in_decimal_resolved", False)
+        output_resolved = swap is not None and getattr(swap, "amount_out_decimal_resolved", False)
+        input_amount = getattr(swap, "amount_in_decimal", None)
+        output_amount = getattr(swap, "amount_out_decimal", None)
+        price_measured = (
+            input_resolved
+            and output_resolved
+            and isinstance(input_amount, Decimal)
+            and input_amount.is_finite()
+            and input_amount > 0
+            and isinstance(output_amount, Decimal)
+            and output_amount.is_finite()
+            and output_amount >= 0
+        )
         return {
             **base,
-            "amount_in": _str_field(swap, "amount_in_decimal", args.get("amount", "")),
-            "amount_out": _str_field(swap, "amount_out_decimal"),
-            "effective_price": _str_field(swap, "effective_price"),
+            "amount_in": _str_field(swap, "amount_in_decimal") if input_resolved else "",
+            "amount_out": _str_field(swap, "amount_out_decimal") if output_resolved else "",
+            "effective_price": _str_field(swap, "effective_price") if price_measured else "",
             "price_impact": "",
             "slippage_bps": _raw_field(swap, "slippage_bps"),
-            "token_in": _raw_field(swap, "token_in", args.get("token_in", "")),
-            "token_out": _raw_field(swap, "token_out", args.get("token_out", "")),
+            "token_in": _raw_field(swap, "token_in"),
+            "token_out": _raw_field(swap, "token_out"),
         }
 
     def _open_lp_response_from_enriched(self, base: dict, enriched: Any, args: dict) -> dict:

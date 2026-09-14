@@ -399,7 +399,7 @@ class TestExtractSwapAmountsDecimalResolutionFailure:
         assert result is None
 
     def test_returns_valid_when_input_decimals_unknown(self):
-        """Unknown input decimals -> amount_in_decimal is 0, but result still returned."""
+        """Unknown input scale preserves raw input and measured output, without a price."""
         parser = EnsoReceiptParser(chain="arbitrum")
         receipt = _make_receipt(
             logs=[
@@ -410,7 +410,10 @@ class TestExtractSwapAmountsDecimalResolutionFailure:
         with patch.object(parser, "_resolve_decimals", side_effect=[None, 18]):
             result = parser.extract_swap_amounts(receipt)
         assert result is not None
-        assert result.amount_in_decimal == Decimal(0)
+        assert result.amount_in == 1_000_000
+        assert result.amount_in_decimal is None
+        assert result.amount_in_decimal_resolved is False
+        assert result.effective_price is None
         assert result.amount_out_decimal > 0
 
 

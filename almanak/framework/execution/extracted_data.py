@@ -50,10 +50,11 @@ class SwapAmounts:
     All fields are immutable (frozen=True) for safety.
 
     Attributes:
-        amount_in: Raw input amount (in token's smallest unit)
+        amount_in: Raw input amount (in token's smallest unit), or ``None``
+            when the receipt supplies no measured input effect.
         amount_out: Raw output amount (in token's smallest unit)
         amount_in_decimal: Human-readable input amount, or ``None`` when
-            the parser could not resolve ``token_in`` decimals. Per the
+            the parser could not measure the input effect or resolve ``token_in`` decimals. Per the
             "Empty != zero" invariant in ``docs/internal/blueprints/27-accounting.md``:
             ``Decimal(0)`` is a measured zero, ``None`` is unmeasured.
             Never substitute one for the other.
@@ -75,9 +76,9 @@ class SwapAmounts:
         token_in: Input token address or symbol
         token_out: Output token address or symbol
         amount_in_decimal_resolved: ``True`` when ``amount_in_decimal`` was
-            computed from a resolved ``decimals`` value on the token
-            resolver. ``False`` means the parser could not resolve
-            decimals for ``token_in``; ``amount_in_decimal`` is then
+            computed from a measured raw amount and resolved ``decimals``.
+            ``False`` means the input effect is absent or the parser could not
+            resolve decimals for ``token_in``; ``amount_in_decimal`` is then
             either ``None`` OR a legacy 18-decimal estimate (uniswap_v3
             fallback, VIB-3164) — downstream consumers MUST gate on this
             flag rather than the value itself (issue #1778, "Empty != zero"
@@ -93,7 +94,7 @@ class SwapAmounts:
             slippage = result.swap_amounts.slippage_bps
     """
 
-    amount_in: int
+    amount_in: int | None
     amount_out: int
     amount_in_decimal: Decimal | None
     amount_out_decimal: Decimal | None
@@ -127,7 +128,7 @@ class SwapAmounts:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
-            "amount_in": str(self.amount_in),
+            "amount_in": str(self.amount_in) if self.amount_in is not None else None,
             "amount_out": str(self.amount_out),
             "amount_in_decimal": str(self.amount_in_decimal) if self.amount_in_decimal is not None else None,
             "amount_out_decimal": str(self.amount_out_decimal) if self.amount_out_decimal is not None else None,

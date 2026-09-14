@@ -4,6 +4,7 @@ Covers ``_build_action_response_from_enriched`` (EnrichedExecutionResult
 shape) and ``_infer_check_name``. Pure dispatch logic — no gateway, no policy.
 """
 
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -33,13 +34,15 @@ def _enriched(**overrides):
 class TestBuildActionResponseFromEnriched:
     def test_swap_with_enrichment(self, executor):
         swap = SimpleNamespace(
-            amount_in_decimal="1.5",
-            amount_out_decimal="2900.1",
-            effective_price="1933.4",
-            slippage_bps=12,
-            token_in="WETH",
-            token_out="USDC",
-        )
+            amount_in_decimal=Decimal("1.5"),
+            amount_out_decimal=Decimal("2900.1"),
+        effective_price="1933.4",
+        slippage_bps=12,
+        token_in="WETH",
+        token_out="USDC",
+        amount_in_decimal_resolved=True,
+        amount_out_decimal_resolved=True,
+    )
         resp = executor._build_action_response_from_enriched(
             "swap_tokens", _enriched(swap_amounts=swap), {}
         )
@@ -49,16 +52,18 @@ class TestBuildActionResponseFromEnriched:
         assert resp["slippage_bps"] == 12
         assert resp["token_in"] == "WETH"
 
-    def test_swap_without_enrichment_falls_back_to_args(self, executor):
+    def test_swap_without_enrichment_preserves_unmeasured_fields(self, executor):
         resp = executor._build_action_response_from_enriched(
             "swap_tokens",
             _enriched(),
             {"amount": "10", "token_in": "USDC", "token_out": "WETH"},
         )
-        assert resp["amount_in"] == "10"
+        assert resp["amount_in"] == ""
         assert resp["amount_out"] == ""
+        assert resp["effective_price"] == ""
         assert resp["slippage_bps"] is None
-        assert resp["token_out"] == "WETH"
+        assert resp["token_in"] is None
+        assert resp["token_out"] is None
 
     def test_open_lp_position_uses_enriched_fields(self, executor):
         enriched = _enriched(
