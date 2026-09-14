@@ -9,7 +9,6 @@ from almanak.framework.execution.events import ExecutionEventType
 from almanak.framework.execution.orchestrator import ExecutionContext
 from almanak.framework.gateway_client import GatewayClient, GatewayClientConfig
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.services.execution_service import ExecutionServiceServicer
 from tests.conftest_gateway import GatewayServerThread
 
 
@@ -39,7 +38,9 @@ def test_gateway_execution_event_is_durable_on_its_own_server_loop(tmp_path, mon
         set_event_gateway_client(client)
         rpc = MagicMock(side_effect=AssertionError("Execution must not call its own gateway"))
         monkeypatch.setattr(client.observe, "RecordTimelineEvent", rpc)
-        service = ExecutionServiceServicer(settings)
+        assert server._server is not None
+        service = server._server._execution_servicer
+        assert service is not None
         monkeypatch.setattr(service, "_create_signer", lambda wallet: MagicMock())
 
         async def emit_on_server_loop():

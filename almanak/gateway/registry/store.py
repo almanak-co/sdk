@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from almanak.gateway.store_lifetime import StoreLifetime, store_operation
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,12 +75,14 @@ class InstanceRegistry:
         self._lock = threading.RLock()
         self._cache: dict[str, StrategyInstance] = {}
         self._initialized = False
+        self._lifetime = StoreLifetime()
 
     @property
     def db_path(self) -> Path:
         """Get the database path."""
         return self._db_path
 
+    @store_operation
     def initialize(self) -> None:
         """Initialize the store and create database tables if needed."""
         if self._initialized:
@@ -172,6 +176,7 @@ class InstanceRegistry:
             if self._cache:
                 logger.info(f"Loaded {len(self._cache)} strategy instances from database")
 
+    @store_operation
     def register(self, instance: StrategyInstance) -> bool:
         """Register or re-register a strategy instance.
 
@@ -254,6 +259,7 @@ class InstanceRegistry:
             )
             conn.commit()
 
+    @store_operation
     def update_status(self, deployment_id: str, status: str, reason: str = "") -> bool:
         """Update the status of a strategy instance.
 
@@ -282,6 +288,7 @@ class InstanceRegistry:
         logger.info(f"Updated status for {deployment_id}: {status}" + (f" ({reason})" if reason else ""))
         return True
 
+    @store_operation
     def heartbeat(self, deployment_id: str) -> bool:
         """Update the heartbeat timestamp for a strategy instance.
 
@@ -326,6 +333,7 @@ class InstanceRegistry:
             logger.info("Heartbeat received from STALE instance %s — recovered to RUNNING", deployment_id)
         return True
 
+    @store_operation
     def reconcile_stale_on_startup(self) -> int:
         """Mark all RUNNING entries as STALE on gateway startup.
 
@@ -369,6 +377,7 @@ class InstanceRegistry:
         )
         return len(stale_ids)
 
+    @store_operation
     def enforce_heartbeat_ttl(self, stale_threshold_seconds: int = 300) -> int:
         """Mark RUNNING entries with expired heartbeats as STALE persistently.
 
@@ -424,6 +433,7 @@ class InstanceRegistry:
         )
         return len(stale_ids)
 
+    @store_operation
     def archive(self, deployment_id: str) -> bool:
         """Archive a strategy instance (hidden from dashboard, data retained).
 
@@ -448,6 +458,7 @@ class InstanceRegistry:
         logger.info(f"Archived strategy instance: {deployment_id}")
         return True
 
+    @store_operation
     def unarchive(self, deployment_id: str) -> bool:
         """Unarchive a strategy instance.
 
@@ -472,6 +483,7 @@ class InstanceRegistry:
         logger.info(f"Unarchived strategy instance: {deployment_id}")
         return True
 
+    @store_operation
     def purge(self, deployment_id: str) -> bool:
         """Delete a strategy instance from the registry.
 
@@ -502,6 +514,7 @@ class InstanceRegistry:
         logger.info(f"Purged strategy instance: {deployment_id}")
         return True
 
+    @store_operation
     def purge_with_events(self, deployment_id: str) -> bool:
         """Atomically delete a strategy instance and all its timeline events.
 
@@ -542,6 +555,7 @@ class InstanceRegistry:
         logger.info(f"Purged strategy instance and events: {deployment_id}")
         return True
 
+    @store_operation
     def get(self, deployment_id: str) -> StrategyInstance | None:
         """Get a strategy instance by ID.
 
@@ -557,6 +571,7 @@ class InstanceRegistry:
         with self._lock:
             return self._cache.get(deployment_id)
 
+    @store_operation
     def list_all(self, include_archived: bool = False) -> list[StrategyInstance]:
         """List all strategy instances.
 
@@ -576,6 +591,10 @@ class InstanceRegistry:
             return instances
 
     def close(self) -> None:
+        """Permanently close this store after admitted operations finish."""
+        self._lifetime.close(self._close_resources)
+
+    def _close_resources(self) -> None:
         """Close the store and release resources."""
         with self._lock:
             self._cache.clear()
@@ -602,16 +621,16 @@ def get_instance_registry(db_path: str | Path | None = None) -> InstanceRegistry
         Shared InstanceRegistry instance.
     """
     global _instance_registry
-    if _instance_registry is None:
-        with _instance_registry_lock:
-            if _instance_registry is None:
-                if db_path is None:
-                    from almanak.gateway.core.settings import DEFAULT_GATEWAY_DB_PATH
-
-                    db_path = DEFAULT_GATEWAY_DB_PATH
-                _instance_registry = InstanceRegistry(db_path=db_path)
-                _instance_registry.initialize()
-    return _instance_registry
+    with _instance_registry_lock:
+        if _instance_registry is None:
+            if db_path is None:
+                raise RuntimeError("Instance registry is not initialized; explicit storage configuration is required")
+            store = InstanceRegistry(db_path=db_path)
+            store.initialize()
+            _instance_registry = store
+        elif db_path is not None and Path(db_path).resolve() != _instance_registry.db_path.resolve():
+            raise RuntimeError("Instance registry is already initialized for different storage")
+        return _instance_registry
 
 
 def reset_instance_registry() -> None:
@@ -620,6 +639,7 @@ def reset_instance_registry() -> None:
     Useful for testing.
     """
     global _instance_registry
-    if _instance_registry is not None:
-        _instance_registry.close()
-        _instance_registry = None
+    with _instance_registry_lock:
+        store, _instance_registry = _instance_registry, None
+        if store is not None:
+            store.close()

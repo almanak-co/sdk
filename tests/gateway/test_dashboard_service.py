@@ -28,7 +28,7 @@ from almanak.framework.portfolio.models import PortfolioSnapshot, TokenBalance, 
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.dashboard_service import DashboardServiceServicer
-from almanak.gateway.timeline.store import TimelineEvent, reset_timeline_store
+from almanak.gateway.timeline.store import TimelineEvent, get_timeline_store, reset_timeline_store
 
 
 @pytest.fixture
@@ -45,10 +45,16 @@ def mock_context():
 
 
 @pytest.fixture
-def dashboard_service(settings):
+def dashboard_service(settings, tmp_path, monkeypatch):
     """Create DashboardService instance."""
+    from almanak.gateway.registry import store as registry_module
+
+    registry = registry_module.InstanceRegistry(tmp_path / "registry.db")
+    registry.initialize()
+    monkeypatch.setattr(registry_module, "_instance_registry", registry)
     service = DashboardServiceServicer(settings)
-    return service
+    yield service
+    registry.close()
 
 
 @pytest.fixture
@@ -604,9 +610,10 @@ class TestGetTimeline:
     """Tests for GetTimeline RPC."""
 
     @pytest.fixture(autouse=True)
-    def setup_timeline_store(self):
+    def setup_timeline_store(self, tmp_path):
         """Reset timeline store before each test."""
         reset_timeline_store()
+        get_timeline_store(db_path=tmp_path / "timeline.db")
         yield
         reset_timeline_store()
 

@@ -52,6 +52,7 @@ from almanak.gateway.validation import (
 )
 
 if TYPE_CHECKING:
+    from almanak.gateway.operational_stores import OperationalStores
     from almanak.gateway.services.market_service import MarketServiceServicer
 
 logger = logging.getLogger(__name__)
@@ -270,13 +271,14 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
     - GetTransactionStatus: Check transaction status
     """
 
-    def __init__(self, settings: GatewaySettings):
+    def __init__(self, settings: GatewaySettings, *, stores: "OperationalStores | None" = None):
         """Initialize ExecutionService.
 
         Args:
             settings: Gateway settings with private keys and RPC config.
         """
         self.settings = settings
+        self._operational_stores = stores
         self._orchestrator_cache: dict[str, object] = {}
         self._orchestrator_locks: dict[str, asyncio.Lock] = {}
         self._orchestrator_default_gas_caps: dict[str, int] = {}
@@ -680,8 +682,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         else:
             raise ValueError(f"Unknown wallet kind: {kind}")
 
-    @staticmethod
-    def _persist_execution_timeline_event(event: Any) -> None:
+    def _persist_execution_timeline_event(self, event: Any) -> None:
         from almanak.gateway.services.observe_service import persist_timeline_event
 
         request = gateway_pb2.RecordTimelineEventRequest(
@@ -695,7 +696,13 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             related_ledger_entry_id=event.related_ledger_entry_id or "",
         )
         # Synchronous store waits still occupy this gateway loop; the budget is per event.
-        persist_timeline_event(request, event.timestamp, json.loads(json.dumps(event.details or {})), timeout=2.0)
+        persist_timeline_event(
+            request,
+            event.timestamp,
+            json.loads(json.dumps(event.details or {})),
+            timeout=2.0,
+            store=self._operational_stores.timeline if self._operational_stores else None,
+        )
 
     async def _get_orchestrator(self, chain: str, wallet_address: str):
         """Get or create execution orchestrator for a chain.

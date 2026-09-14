@@ -27,13 +27,16 @@ if TYPE_CHECKING:
     from almanak.framework.observability.ledger import LedgerQuantStats
     from almanak.framework.portfolio.models import PortfolioSnapshot
     from almanak.framework.state.state_manager import StateManager
+    from almanak.gateway.operational_stores import OperationalStores
 
 from almanak.core.chains import LEGACY_SERIALIZED_CHAIN
 from almanak.core.lifecycle import LifecycleValueError, parse_lifecycle_command, require_enqueueable_command
 from almanak.framework.portfolio.models import serialize_value_confidence
 from almanak.gateway.core.settings import GatewaySettings
+from almanak.gateway.lifecycle.store import LifecycleStore
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
 from almanak.gateway.registry import get_instance_registry
+from almanak.gateway.registry.store import InstanceRegistry
 from almanak.gateway.services._dashboard_helpers import (
     build_chain_health,
     build_position_proto,
@@ -43,7 +46,7 @@ from almanak.gateway.services._dashboard_helpers import (
     enrich_strategy_info,
     lookup_strategy_source,
 )
-from almanak.gateway.timeline.store import get_timeline_store
+from almanak.gateway.timeline.store import TimelineStore, get_timeline_store
 from almanak.gateway.validation import ValidationError, validate_deployment_id
 from almanak.integrations._base.gateway.portfolio_chain import PortfolioProviderChain, build_portfolio_chain
 
@@ -814,13 +817,14 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     - ExecuteAction: Enqueue the current lifecycle STOP command
     """
 
-    def __init__(self, settings: GatewaySettings):
+    def __init__(self, settings: GatewaySettings, *, stores: OperationalStores | None = None):
         """Initialize DashboardService.
 
         Args:
             settings: Gateway settings with configuration.
         """
         self.settings = settings
+        self._operational_stores = stores
         self._state_manager: StateManager | None = None
         self._initialized = False
         self._strategies_root: Path | None = None
@@ -838,6 +842,20 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         self._preview_token_store: Any = None
         # PositionService.Reconcile has no concurrency guard of its own.
         self._registry_refresh_locks: dict[str, Any] = {}
+
+    @property
+    def _registry_store(self) -> InstanceRegistry:
+        return self._operational_stores.registry if self._operational_stores else get_instance_registry()
+
+    @property
+    def _timeline_store(self) -> TimelineStore:
+        return self._operational_stores.timeline if self._operational_stores else get_timeline_store()
+
+    @property
+    def _lifecycle_store(self) -> LifecycleStore:
+        from almanak.gateway.lifecycle import get_lifecycle_store
+
+        return self._operational_stores.lifecycle if self._operational_stores else get_lifecycle_store()
 
     async def _ensure_initialized(self) -> None:
         """Lazy initialization of dependencies."""
@@ -1510,7 +1528,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
 
         if include_registry or status_filter in ("AVAILABLE", "ALL"):
             try:
-                registry = get_instance_registry()
+                registry = self._registry_store
                 registered = registry.list_all(
                     include_archived=(status_filter == "ARCHIVED"),
                 )
@@ -1597,7 +1615,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         # The validated deployment ID is the storage and registry identity; never translate it here.
         strategy_info = lookup_strategy_source(
             deployment_id=deployment_id,
-            registry_getter=get_instance_registry,
+            registry_getter=lambda: self._registry_store,
             compute_effective_status=self._compute_effective_status,
             discover_filesystem=self._discover_strategies_from_filesystem,
             discover_paper_sessions=self._discover_paper_sessions,
@@ -1698,7 +1716,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     def _load_timeline_store_events(self, query: _TimelineQuery) -> list[gateway_pb2.TimelineEventInfo]:
         """Read the deployment-scoped primary timeline source."""
         try:
-            records = get_timeline_store().get_events(
+            records = self._timeline_store.get_events(
                 deployment_id=query.deployment_id,
                 limit=query.limit,
                 event_type=query.event_type,
@@ -1814,7 +1832,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                         return gateway_pb2.StrategyConfigResponse()
 
         try:
-            registry = get_instance_registry()
+            registry = self._registry_store
             inst = registry.get(deployment_id)
         except Exception as e:
             logger.error(f"Failed to get config from registry for {deployment_id}: {e}")
@@ -1941,9 +1959,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             )
 
         try:
-            from almanak.gateway.lifecycle import get_lifecycle_store
-
-            store = get_lifecycle_store()
+            store = self._lifecycle_store
             store.write_command(
                 deployment_id=deployment_id,
                 command=command,
@@ -1976,7 +1992,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         try:
             from almanak.gateway.registry.store import StrategyInstance
 
-            registry = get_instance_registry()
+            registry = self._registry_store
             now = datetime.now(UTC)
 
             existing = registry.get(deployment_id)
@@ -2039,7 +2055,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return gateway_pb2.UpdateInstanceStatusResponse(success=False, error=str(e))
 
         try:
-            registry = get_instance_registry()
+            registry = self._registry_store
 
             if request.heartbeat_only:
                 success = registry.heartbeat(deployment_id)
@@ -2074,7 +2090,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             return gateway_pb2.ArchiveInstanceResponse(success=False, error=str(e))
 
         try:
-            registry = get_instance_registry()
+            registry = self._registry_store
             success = registry.archive(deployment_id)
             if not success:
                 return gateway_pb2.ArchiveInstanceResponse(
@@ -2107,7 +2123,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
             )
 
         try:
-            registry = get_instance_registry()
+            registry = self._registry_store
 
             success = registry.purge_with_events(deployment_id)
             if not success:
@@ -2117,7 +2133,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
                 )
 
             try:
-                store = get_timeline_store()
+                store = self._timeline_store
                 store.clear_events(deployment_id)
             except Exception as e:
                 logger.debug(f"Failed to clear timeline cache for {deployment_id} (non-fatal): {e}")
@@ -3181,8 +3197,8 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
         except (OverflowError, OSError, ValueError):
             return before_dt
 
-    @staticmethod
     def _load_timeline_for_feed(
+        self,
         resolved_id: str,
         limit_plus_one: int,
         event_type_filter: str | None,
@@ -3190,7 +3206,7 @@ class DashboardServiceServicer(gateway_pb2_grpc.DashboardServiceServicer):
     ) -> list[Any]:
         try:
             return list(
-                get_timeline_store().get_events(
+                self._timeline_store.get_events(
                     deployment_id=resolved_id,
                     limit=limit_plus_one,
                     event_type=event_type_filter,

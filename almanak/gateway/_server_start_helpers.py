@@ -220,36 +220,15 @@ def build_interceptors(settings: GatewaySettings) -> list[Any]:
 # Phase 3: storage bootstrap
 # ---------------------------------------------------------------------------
 def initialize_timeline_store(settings: GatewaySettings, timeline_factory: Any) -> None:
-    """Initialize the shared :class:`TimelineStore` singleton.
+    """Resolve timeline options for an injected compatibility factory.
 
-    PostgreSQL when ``settings.database_url`` is set; otherwise SQLite at the
-    effective timeline path (``timeline_db_path`` override wins over
-    ``gateway_db_path``).
-
-    Takes ``timeline_factory`` explicitly so callers can inject
-    ``get_timeline_store`` without helper code importing it at module scope
-    (which would bypass the ``almanak.gateway.server.get_timeline_store`` alias
-    that tests patch).
+    The running gateway uses the server-owned :class:`OperationalStores`
+    instance instead of this helper or a process-global accessor. The explicit
+    factory remains for isolated compatibility tests and legacy callers.
     """
-    if settings.database_url:
-        from almanak.framework.deployment.mode import deployment_id, is_hosted
+    from almanak.gateway.operational_stores import timeline_store_options
 
-        # Hosted gateways serve exactly one deployment but share the
-        # platform-wide metrics DB; scope the startup load so boot memory
-        # and network transfer track THIS deployment's history, not the
-        # whole platform's (August 2026 Cloud NAT incident).
-        scope = deployment_id() if is_hosted() else None
-        timeline_factory(
-            database_url=settings.database_url,
-            scope_deployment_id=scope,
-            startup_load_limit=settings.timeline_startup_load_limit,
-        )
-        logger.debug("TimelineStore initialized with PostgreSQL backend (scope=%s)", scope or "unscoped")
-    else:
-        timeline_path = settings.timeline_db_path
-        effective_timeline_db = timeline_path if _present(timeline_path) else settings.gateway_db_path
-        timeline_factory(db_path=effective_timeline_db)
-        logger.debug(f"TimelineStore initialized with SQLite: {effective_timeline_db}")
+    timeline_factory(**timeline_store_options(settings))
 
 
 def initialize_instance_registry(settings: GatewaySettings) -> Any:

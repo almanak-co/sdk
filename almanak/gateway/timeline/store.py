@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from almanak.gateway.store_lifetime import StoreLifetime, store_operation
+
 if TYPE_CHECKING:
     import asyncpg
 
@@ -202,6 +204,7 @@ class TimelineStore:
         self._lock = threading.RLock()
         self._cache: dict[str, list[TimelineEvent]] = defaultdict(list)
         self._initialized = False
+        self._lifetime = StoreLifetime()
 
         # PostgreSQL asyncpg pool + background event loop (only when database_url is set)
         self._pg_pool: asyncpg.Pool | None = None
@@ -219,6 +222,7 @@ class TimelineStore:
     def _uses_postgres(self) -> bool:
         return self._database_url is not None
 
+    @store_operation
     def initialize(self) -> None:
         """Initialize the store and create database tables if needed."""
         if self._initialized:
@@ -264,14 +268,14 @@ class TimelineStore:
         try:
             self._pg_submit(self._async_init_pool())
         except Exception:
-            # Clean up loop/thread so retries don't leak resources
             if self._pg_loop:
                 self._pg_loop.call_soon_threadsafe(self._pg_loop.stop)
             if self._pg_thread:
                 self._pg_thread.join(timeout=5)
-            self._pg_pool = None
-            self._pg_loop = None
-            self._pg_thread = None
+            if self._pg_thread is None or not self._pg_thread.is_alive():
+                self._pg_pool = None
+                self._pg_loop = None
+                self._pg_thread = None
             raise
 
     async def _async_init_pool(self) -> None:
@@ -771,6 +775,7 @@ class TimelineStore:
     # Public API (backend-agnostic, reads from in-memory cache)
     # =========================================================================
 
+    @store_operation
     def add_event(self, event: TimelineEvent, *, timeout: float | None = None) -> None:
         """Add a new timeline event.
 
@@ -819,6 +824,7 @@ class TimelineStore:
 
         logger.debug(f"Added timeline event: {event.event_type} for {event.deployment_id}")
 
+    @store_operation
     def get_events(
         self,
         deployment_id: str,
@@ -885,6 +891,7 @@ class TimelineStore:
 
         return page
 
+    @store_operation
     def get_recent_events(
         self,
         limit: int = 100,
@@ -911,6 +918,7 @@ class TimelineStore:
 
             return all_events[:limit]
 
+    @store_operation
     def get_deployment_ids(self) -> list[str]:
         """Get all deployment IDs that have timeline events.
 
@@ -923,6 +931,7 @@ class TimelineStore:
         with self._lock:
             return list(self._cache.keys())
 
+    @store_operation
     def clear_events(self, deployment_id: str | None = None) -> None:
         """Clear events from the store.
 
@@ -950,21 +959,29 @@ class TimelineStore:
                     conn.commit()
 
     def close(self) -> None:
+        """Permanently close this store after admitted operations finish."""
+        self._lifetime.close(self._close_resources)
+
+    def _close_resources(self) -> None:
         """Close the store and release resources."""
         with self._lock:
             self._cache.clear()
             self._initialized = False
 
-            # Close PostgreSQL pool and background thread
+            close_error: Exception | None = None
             if self._pg_pool and self._pg_loop:
                 try:
                     self._pg_submit(self._pg_pool.close())
-                except Exception:
-                    logger.warning("Failed to close TimelineStore PostgreSQL pool", exc_info=True)
+                except Exception as exc:
+                    close_error = exc
             if self._pg_loop:
                 self._pg_loop.call_soon_threadsafe(self._pg_loop.stop)
             if self._pg_thread:
                 self._pg_thread.join(timeout=5)
+                if self._pg_thread.is_alive():
+                    close_error = RuntimeError("Timeline PostgreSQL worker did not stop")
+            if close_error is not None:
+                raise RuntimeError("Timeline PostgreSQL close failed") from close_error
             self._pg_pool = None
             self._pg_loop = None
             self._pg_thread = None
@@ -985,10 +1002,11 @@ def _remaining_wait(deadline: float | None, default: float) -> float:
 
 
 _timeline_store: TimelineStore | None = None
+_timeline_store_lock = threading.Lock()
 
 
 def get_initialized_timeline_store() -> TimelineStore:
-    """Return the server-owned store without starting database work during execution."""
+    """Return the initialized compatibility store without starting database work."""
     if _timeline_store is None or not _timeline_store._initialized:
         raise RuntimeError("Timeline store is not initialized")
     return _timeline_store
@@ -1016,15 +1034,28 @@ def get_timeline_store(
         Shared TimelineStore instance.
     """
     global _timeline_store
-    if _timeline_store is None:
-        _timeline_store = TimelineStore(
-            db_path=db_path,
-            database_url=database_url,
-            scope_deployment_id=scope_deployment_id,
-            startup_load_limit=startup_load_limit,
-        )
-        _timeline_store.initialize()
-    return _timeline_store
+    with _timeline_store_lock:
+        if _timeline_store is None:
+            if db_path is None and not database_url:
+                raise RuntimeError("Timeline store is not initialized; explicit storage configuration is required")
+            store = TimelineStore(
+                db_path=db_path,
+                database_url=database_url,
+                scope_deployment_id=scope_deployment_id,
+                startup_load_limit=startup_load_limit,
+            )
+            store.initialize()
+            _timeline_store = store
+        elif (
+            (
+                db_path is not None
+                and (_timeline_store._db_path is None or Path(db_path).resolve() != _timeline_store._db_path.resolve())
+            )
+            or (database_url is not None and database_url != _timeline_store._database_url)
+            or (scope_deployment_id is not None and scope_deployment_id != _timeline_store._scope_deployment_id)
+        ):
+            raise RuntimeError("Timeline store is already initialized for different storage")
+        return _timeline_store
 
 
 def reset_timeline_store() -> None:
@@ -1033,6 +1064,7 @@ def reset_timeline_store() -> None:
     Useful for testing.
     """
     global _timeline_store
-    if _timeline_store is not None:
-        _timeline_store.close()
-        _timeline_store = None
+    with _timeline_store_lock:
+        store, _timeline_store = _timeline_store, None
+        if store is not None:
+            store.close()

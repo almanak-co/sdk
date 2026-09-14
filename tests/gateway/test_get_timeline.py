@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import grpc
 import pytest
 
+from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.dashboard_service import DashboardServiceServicer
 from almanak.gateway.timeline.store import TimelineEvent
@@ -21,7 +22,7 @@ _STORE_PATCH = "almanak.gateway.services.dashboard_service.get_timeline_store"
 
 @pytest.fixture
 def service(tmp_path) -> DashboardServiceServicer:
-    servicer = DashboardServiceServicer.__new__(DashboardServiceServicer)
+    servicer = DashboardServiceServicer(GatewaySettings())
     servicer._initialized = True
     servicer._strategies_root = tmp_path / "strategies"
     servicer._state_manager = None

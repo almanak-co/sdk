@@ -146,6 +146,7 @@ def test_sink_cancellation_is_preserved():
 
 
 def test_native_empty_identity_refuses_write_but_preserves_callback(monkeypatch):
+    from almanak.gateway.core.settings import GatewaySettings
     from almanak.gateway.services.execution_service import ExecutionServiceServicer
 
     accessor = MagicMock()
@@ -156,7 +157,7 @@ def test_native_empty_identity_refuses_write_but_preserves_callback(monkeypatch)
         submitter=MagicMock(),
         simulator=None,
         chain="bsc",
-        timeline_sink=ExecutionServiceServicer._persist_execution_timeline_event,
+        timeline_sink=ExecutionServiceServicer(GatewaySettings())._persist_execution_timeline_event,
         event_callback=callback,
     )
     runner._emit_event(ExecutionEventType.SIMULATING, ExecutionContext(deployment_id="", chain="bsc"))
@@ -166,6 +167,7 @@ def test_native_empty_identity_refuses_write_but_preserves_callback(monkeypatch)
 
 def test_native_ingestion_preserves_fields_and_precision_and_detaches_details(tmp_path, monkeypatch):
     from almanak.framework.api.timeline import TimelineEvent, TimelineEventType
+    from almanak.gateway.core.settings import GatewaySettings
     from almanak.gateway.services.execution_service import ExecutionServiceServicer
 
     store = timeline.TimelineStore(tmp_path / "events.db")
@@ -183,7 +185,7 @@ def test_native_ingestion_preserves_fields_and_precision_and_detaches_details(tm
         phase="execute",
         related_ledger_entry_id="ledger",
     )
-    ExecutionServiceServicer._persist_execution_timeline_event(observed)
+    ExecutionServiceServicer(GatewaySettings())._persist_execution_timeline_event(observed)
     observed.details["nested"]["status"] = "changed"
     saved = store._cache["authorized-deployment"][0]
     assert saved.timestamp == observed.timestamp

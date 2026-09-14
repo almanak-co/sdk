@@ -590,7 +590,7 @@ class TestValidateDeploymentInvariants:
 
         from almanak.gateway import server as server_mod
 
-        src = inspect.getsource(server_mod.GatewayServer.start)
+        src = inspect.getsource(server_mod.GatewayServer._start)
         invariant_pos = src.find("validate_deployment_invariants(")
         interceptors_pos = src.find("build_interceptors(")
         assert invariant_pos != -1, "start() no longer calls validate_deployment_invariants"
@@ -829,75 +829,44 @@ class TestAcquireLocalDbFlock:
             reset_timeline_store()
 
     @pytest.mark.asyncio
-    async def test_stop_releases_the_pinned_store_singletons(self, monkeypatch):
-        """``stop()`` is the only place those singletons can be released."""
-        from almanak.gateway import server as server_module
+    async def test_stop_closes_only_owned_stores(self, tmp_path):
+        from almanak.gateway.operational_stores import OperationalStores
+        from almanak.gateway.server import GatewayServer
 
-        called = []
-        for name in ("reset_lifecycle_store", "reset_instance_registry", "reset_timeline_store"):
-            monkeypatch.setattr(server_module, name, lambda n=name: called.append(n))
-
-        gateway = server_module.GatewayServer(_settings())
-
-        await gateway.stop()
-
-        assert called == ["reset_lifecycle_store", "reset_instance_registry", "reset_timeline_store"]
-
-    @pytest.mark.asyncio
-    async def test_stop_actually_clears_the_pinned_store_singletons(self, tmp_path):
-        """Run the real resets, not stand-ins.
-
-        Asserting only that ``stop()`` calls three names would still pass if a
-        reset were a broken no-op, and it is the cleared singleton -- not the
-        call -- that stops the next gateway inheriting this strategy's stores.
-        """
-        from almanak.gateway import registry as registry_module
-        from almanak.gateway import server as server_module
-        from almanak.gateway.registry import store as registry_store
-        from almanak.gateway.timeline import store as timeline_store
-
-        registry_module.reset_instance_registry()
-        timeline_store.reset_timeline_store()
+        settings_a = _settings(gateway_db_path=str(tmp_path / "a.db"))
+        settings_b = _settings(gateway_db_path=str(tmp_path / "b.db"))
+        first = OperationalStores.create(settings_a)
+        second = OperationalStores.create(settings_b)
+        gateway = GatewayServer(settings_a)
+        gateway._operational_stores = first
         try:
-            registry_module.get_instance_registry(db_path=tmp_path / "a.db")
-            timeline_store.get_timeline_store(db_path=tmp_path / "a.db")
-            assert registry_store._instance_registry is not None
-            assert timeline_store._timeline_store is not None
-
-            await server_module.GatewayServer(_settings()).stop()
-
-            assert registry_store._instance_registry is None
-            assert timeline_store._timeline_store is None
-
-            # And the next gateway's initializer binds its own file.
-            second = _settings()
-            second.__dict__["gateway_db_path"] = str(tmp_path / "b.db")
-            assert initialize_instance_registry(second).db_path == tmp_path / "b.db"
+            await gateway.stop()
+            with pytest.raises(RuntimeError, match="closed"):
+                first.registry.list_all()
+            assert second.registry.list_all() == []
         finally:
-            registry_module.reset_instance_registry()
-            timeline_store.reset_timeline_store()
+            first.close()
+            second.close()
 
     @pytest.mark.asyncio
-    async def test_stop_releases_the_flock_even_when_a_reset_raises(self, monkeypatch):
-        """A stranded flock locks the next gateway out for the life of the process."""
-        from almanak.gateway import server as server_module
+    async def test_stop_releases_flock_and_reports_owned_close_failure(self, monkeypatch):
+        from almanak.gateway.operational_stores import OperationalStores
+        from almanak.gateway.server import GatewayServer
 
-        called = []
-        failing = MagicMock(side_effect=RuntimeError("store close failed"))
-        monkeypatch.setattr(server_module, "reset_lifecycle_store", failing)
-        monkeypatch.setattr(server_module, "reset_instance_registry", lambda: called.append("registry"))
-        monkeypatch.setattr(server_module, "reset_timeline_store", lambda: called.append("timeline"))
+        lifecycle = MagicMock()
+        lifecycle.close.side_effect = RuntimeError("store close failed")
+        registry, timeline = MagicMock(), MagicMock()
         released = MagicMock()
         monkeypatch.setattr("almanak.framework.local_paths.release_local_db_lock", released)
-
-        gateway = server_module.GatewayServer(_settings())
+        gateway = GatewayServer(_settings())
+        gateway._operational_stores = OperationalStores(registry, timeline, lifecycle)
         gateway._local_db_lock = 4242
-
-        await gateway.stop()
-
-        # The raising reset was attempted, not skipped over.
-        failing.assert_called_once_with()
-        assert called == ["registry", "timeline"]
+        with pytest.raises(ExceptionGroup, match="operational-store close failed") as raised:
+            await gateway.stop()
+        assert raised.value.exceptions == (lifecycle.close.side_effect,)
+        lifecycle.close.assert_called_once_with()
+        registry.close.assert_called_once_with()
+        timeline.close.assert_called_once_with()
         released.assert_called_once_with(4242)
         assert gateway._local_db_lock is None
 

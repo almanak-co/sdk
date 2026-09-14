@@ -24,9 +24,6 @@ from almanak.gateway._server_start_helpers import (
     acquire_local_db_flock,
     build_interceptors,
     build_reflection_service_names,
-    initialize_instance_registry,
-    initialize_lifecycle_store,
-    initialize_timeline_store,
     load_wallet_registry,
     log_pricing_source_configuration,
     validate_deployment_invariants,
@@ -34,10 +31,9 @@ from almanak.gateway._server_start_helpers import (
 )
 from almanak.gateway.audit import configure_structlog
 from almanak.gateway.core.settings import GatewaySettings
-from almanak.gateway.lifecycle import reset_lifecycle_store
 from almanak.gateway.metrics import MetricsServer
+from almanak.gateway.operational_stores import OperationalStores
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
-from almanak.gateway.registry import reset_instance_registry
 from almanak.gateway.services import (
     DashboardServiceServicer,
     ExecutionServiceServicer,
@@ -57,8 +53,6 @@ from almanak.gateway.services import (
     TeardownServiceServicer,
     TokenServiceServicer,
 )
-from almanak.gateway.timeline import get_timeline_store
-from almanak.gateway.timeline.store import reset_timeline_store
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +204,7 @@ class GatewayServer:
         self._health_servicer = health_aio.HealthServicer()
         self._metrics_server: MetricsServer | None = None
         self._instance_registry: Any | None = None
+        self._operational_stores: OperationalStores | None = None
 
         self._execution_servicer: ExecutionServiceServicer | None = None
 
@@ -245,9 +240,9 @@ class GatewayServer:
         SQLite.  This catches mid-session crashes that startup reconciliation
         cannot see (VIB-1280).
         """
-        from almanak.gateway.registry import get_instance_registry
-
-        registry = get_instance_registry()
+        registry = self._instance_registry
+        if registry is None:
+            raise RuntimeError("Gateway operational stores are not initialized")
         while True:
             try:
                 await asyncio.sleep(interval_seconds)
@@ -262,13 +257,17 @@ class GatewayServer:
                 return
 
     async def start(self) -> None:
-        """Start the gRPC server.
+        """Start this gateway, releasing its resources if bootstrap fails."""
+        try:
+            await self._start()
+        except BaseException:
+            try:
+                await self.stop(grace=0)
+            except Exception:
+                logger.exception("Gateway cleanup failed after startup failure")
+            raise
 
-        Bootstrap is decomposed into phases; each phase below is a helper
-        (either a method on this class or a pure function in
-        ``_server_start_helpers``) so every branch can be unit-tested without
-        binding a real port.
-        """
+    async def _start(self) -> None:
         # Fail fast on deployment-shape mismatches before touching storage or ports.
         validate_deployment_invariants(self.settings)
 
@@ -279,9 +278,9 @@ class GatewayServer:
         # Enforce one strategy, one DB, and one gateway in local mode.
         self._local_db_lock = acquire_local_db_flock(self.settings)
 
-        initialize_timeline_store(self.settings, get_timeline_store)
-        self._instance_registry = initialize_instance_registry(self.settings)
-        lifecycle_store = initialize_lifecycle_store(self.settings)
+        self._operational_stores = OperationalStores.create(self.settings)
+        self._instance_registry = self._operational_stores.registry
+        lifecycle_store = self._operational_stores.lifecycle
 
         # Refuse to boot when the live schema lacks accounting-writer columns.
         await validate_state_schema_at_boot(self.settings)
@@ -371,7 +370,7 @@ class GatewayServer:
         RegisterChains needs execution + market. Every other registration
         is order-independent.
         """
-        self._execution_servicer = ExecutionServiceServicer(self.settings)
+        self._execution_servicer = ExecutionServiceServicer(self.settings, stores=self._operational_stores)
         gateway_pb2_grpc.add_ExecutionServiceServicer_to_server(self._execution_servicer, self.server)
         self._execution_servicer.wallet_registry = wallet_registry
 
@@ -394,7 +393,7 @@ class GatewayServer:
         gateway_pb2_grpc.add_StateServiceServicer_to_server(state_servicer, self.server)
         self._state_servicer = state_servicer
 
-        self._observe_servicer = ObserveServiceServicer(self.settings)
+        self._observe_servicer = ObserveServiceServicer(self.settings, stores=self._operational_stores)
         gateway_pb2_grpc.add_ObserveServiceServicer_to_server(self._observe_servicer, self.server)
 
         self._rpc_servicer = RpcServiceServicer(self.settings)
@@ -403,7 +402,7 @@ class GatewayServer:
         self._integration_servicer = IntegrationServiceServicer(self.settings)
         gateway_pb2_grpc.add_IntegrationServiceServicer_to_server(self._integration_servicer, self.server)
 
-        self._dashboard_servicer = DashboardServiceServicer(self.settings)
+        self._dashboard_servicer = DashboardServiceServicer(self.settings, stores=self._operational_stores)
         gateway_pb2_grpc.add_DashboardServiceServicer_to_server(self._dashboard_servicer, self.server)
 
         self._funding_rate_servicer = FundingRateServiceServicer(self.settings)
@@ -624,9 +623,7 @@ class GatewayServer:
             logger.info("Gateway gRPC server stopped")
         if self._executor:
             self._executor.shutdown(wait=True)
-        # _lifecycle_servicer is excluded because it delegates to the
-        # LifecycleStore singleton whose lifecycle is managed via
-        # reset_lifecycle_store() and owns no HTTP sessions.
+        # Lifecycle resources close with the operational-store owner after RPC drain.
         gateway_owned_servicers: tuple[Any, ...] = (
             self._market_servicer,
             self._rpc_servicer,
@@ -662,28 +659,36 @@ class GatewayServer:
         await drain_failed_client_cleanup(timeout=grace)
         # Let aiohttp finalize TCP cleanup before the event loop exits.
         await asyncio.sleep(_AIOHTTP_SHUTDOWN_GRACE_SECONDS)
-        # All three bind a db_path on first construction only. They are pinned per
-        # strategy now, so leaving them behind would let the next gateway in this
-        # process keep writing into the previous strategy's database. Each store
-        # closes its own handles, so one failure must not skip its siblings --
-        # and must never strand the flock, which would lock the next gateway out
-        # of this strategy's database for the life of the process.
         try:
-            for label, reset in (
-                ("lifecycle", reset_lifecycle_store),
-                ("instance registry", reset_instance_registry),
-                ("timeline", reset_timeline_store),
-            ):
-                try:
-                    reset()
-                except Exception:
-                    logger.exception("Error resetting %s store during shutdown", label)
+            if self._operational_stores is not None:
+                await self._close_operational_stores()
         finally:
             if self._local_db_lock is not None:
                 from almanak.framework.local_paths import release_local_db_lock
 
                 release_local_db_lock(self._local_db_lock)
                 self._local_db_lock = None
+
+    async def _close_operational_stores(self) -> None:
+        if self._operational_stores is None:
+            return
+        closing = asyncio.create_task(asyncio.to_thread(self._operational_stores.close))
+        cancelled = False
+        while not closing.done():
+            try:
+                await asyncio.shield(closing)
+            except asyncio.CancelledError:
+                # Cancelling the await does not stop the SQLite worker. Keep its
+                # database lock until that worker and its admitted calls finish.
+                cancelled = True
+            except BaseException:
+                # Surface the close failure after cancellation has been recorded.
+                pass
+        try:
+            closing.result()
+        finally:
+            if cancelled:
+                raise asyncio.CancelledError
 
     async def wait_for_termination(self) -> None:
         """Wait until server is terminated."""

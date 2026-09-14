@@ -13,7 +13,7 @@ import json
 import logging
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import aiohttp
@@ -22,8 +22,11 @@ import grpc
 from almanak.core.redaction import redact
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
-from almanak.gateway.timeline.store import TimelineEvent, get_timeline_store
+from almanak.gateway.timeline.store import TimelineEvent, TimelineStore, get_timeline_store
 from almanak.gateway.utils.ssl_context import build_ssl_context
+
+if TYPE_CHECKING:
+    from almanak.gateway.operational_stores import OperationalStores
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +76,7 @@ def persist_timeline_event(
     details: dict[str, Any],
     *,
     timeout: float | None = None,
+    store: TimelineStore | None = None,
 ) -> str:
     """Persist an event through the gateway's canonical timeline store."""
     if not request.deployment_id:
@@ -92,9 +96,10 @@ def persist_timeline_event(
         phase=request.phase if request.phase else "",
         related_ledger_entry_id=(request.related_ledger_entry_id if request.related_ledger_entry_id else ""),
     )
-    if timeout is None:
-        store = get_timeline_store()
-        store.add_event(event)
+    if store is not None:
+        store.add_event(event, timeout=timeout)
+    elif timeout is None:
+        get_timeline_store().add_event(event)
     else:
         from almanak.gateway.timeline.store import get_initialized_timeline_store
 
@@ -115,13 +120,14 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
     from this service using credentials from gateway settings.
     """
 
-    def __init__(self, settings: GatewaySettings):
+    def __init__(self, settings: GatewaySettings, *, stores: "OperationalStores | None" = None):
         """Initialize ObserveService.
 
         Args:
             settings: Gateway settings with alerting configuration.
         """
         self.settings = settings
+        self._operational_stores = stores
         self._http_session: aiohttp.ClientSession | None = None
         self._metrics_buffer: list[dict] = []
 
@@ -544,7 +550,12 @@ class ObserveServiceServicer(gateway_pb2_grpc.ObserveServiceServicer):
             timestamp = datetime.now(UTC)
 
         try:
-            event_id = persist_timeline_event(request, timestamp, details)
+            event_id = persist_timeline_event(
+                request,
+                timestamp,
+                details,
+                store=self._operational_stores.timeline if self._operational_stores else None,
+            )
 
             logger.info(f"Recorded timeline event: {event_type} for {deployment_id}")
 

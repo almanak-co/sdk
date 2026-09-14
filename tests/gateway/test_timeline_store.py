@@ -841,20 +841,20 @@ class TestTimelineStoreIdentityKeying:
 class TestTimelineStoreSingleton:
     """Tests for singleton accessor functions."""
 
-    def test_get_timeline_store_singleton(self):
+    def test_get_timeline_store_singleton(self, tmp_path):
         """Test that get_timeline_store returns singleton."""
         reset_timeline_store()
 
-        store1 = get_timeline_store()
+        store1 = get_timeline_store(db_path=tmp_path / "first.db")
         store2 = get_timeline_store()
 
         assert store1 is store2
 
-    def test_reset_timeline_store(self):
+    def test_reset_timeline_store(self, tmp_path):
         """Test resetting the singleton."""
         reset_timeline_store()
 
-        store1 = get_timeline_store()
+        store1 = get_timeline_store(db_path=tmp_path / "first.db")
         store1.add_event(
             TimelineEvent(
                 event_id="test",
@@ -867,8 +867,7 @@ class TestTimelineStoreSingleton:
 
         reset_timeline_store()
 
-        store2 = get_timeline_store()
-        # New store should be empty (in-memory)
+        store2 = get_timeline_store(db_path=tmp_path / "second.db")
         assert store2.get_events("test") == []
 
     def teardown_method(self):

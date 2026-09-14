@@ -90,25 +90,19 @@ def _install_bootstrap_patches(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any
     reflection_enable = MagicMock()
     monkeypatch.setattr("almanak.gateway.server.reflection.enable_server_reflection", reflection_enable)
 
-    # Storage / state singletons — instantiating these in-process is fine, but
-    # they touch SQLite. Swap for explicit mocks so tests never hit the disk.
-    # Registry factory is patched both on its source module (used by the
-    # helper) and at the server path (used by ``_heartbeat_ttl_loop`` lazy
-    # import).
+    # Explicit owner factories keep bootstrap policy tests independent of disk I/O.
     fake_registry = MagicMock()
     fake_registry.reconcile_stale_on_startup = MagicMock(return_value=0)
     fake_registry.enforce_heartbeat_ttl = MagicMock(return_value=0)
     registry_factory = MagicMock(return_value=fake_registry)
-    monkeypatch.setattr("almanak.gateway.registry.get_instance_registry", registry_factory)
+    monkeypatch.setattr("almanak.gateway.operational_stores.InstanceRegistry", registry_factory)
 
-    # Timeline store: consumed by server.py (fed to helper as callable).
     timeline_factory = MagicMock()
-    monkeypatch.setattr("almanak.gateway.server.get_timeline_store", timeline_factory)
+    monkeypatch.setattr("almanak.gateway.operational_stores.TimelineStore", timeline_factory)
 
-    # Lifecycle store: consumed by the helper module.
     fake_lifecycle_store = MagicMock()
     lifecycle_factory = MagicMock(return_value=fake_lifecycle_store)
-    monkeypatch.setattr("almanak.gateway._server_start_helpers.get_lifecycle_store", lifecycle_factory)
+    monkeypatch.setattr("almanak.gateway.operational_stores.create_lifecycle_store", lifecycle_factory)
 
     # Schema-contract validator (VIB-3763): touches SQLite/Postgres in
     # production. Replace with an AsyncMock so boot tests never hit storage.
@@ -184,15 +178,15 @@ def _install_bootstrap_patches(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any
 
 def _make_settings(**overrides) -> GatewaySettings:
     """Build a lean GatewaySettings with auth + metrics + audit disabled."""
-    defaults = dict(
-        grpc_port=50099,
-        grpc_host="127.0.0.1",
-        metrics_enabled=False,
-        audit_enabled=False,
-        allow_insecure=True,
-        network="anvil",
-        chains=[],
-    )
+    defaults = {
+        "grpc_port": 50099,
+        "grpc_host": "127.0.0.1",
+        "metrics_enabled": False,
+        "audit_enabled": False,
+        "allow_insecure": True,
+        "network": "anvil",
+        "chains": [],
+    }
     defaults.update(overrides)
     return GatewaySettings(**defaults)
 

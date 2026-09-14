@@ -62,8 +62,9 @@ class _LedgerRow:
 
 
 @pytest.fixture(autouse=True)
-def _reset_timeline_store():
+def _reset_timeline_store(tmp_path):
     reset_timeline_store()
+    get_timeline_store(db_path=tmp_path / "timeline.db")
     yield
     reset_timeline_store()
 
