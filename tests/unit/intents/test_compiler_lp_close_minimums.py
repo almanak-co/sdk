@@ -235,3 +235,32 @@ class TestPathsThatNeedNoFloor:
         decoded, _, _ = _decoded_decrease(result)
         assert (decoded["amount0_min"], decoded["amount1_min"]) == (0, 0)
         assert "amount0_min" not in result.action_bundle.metadata
+
+
+@pytest.mark.parametrize("protocol", V3_FORKS)
+@pytest.mark.parametrize("execution_sqrt", [SQRT_ABOVE, SQRT_BELOW], ids=["above-range", "below-range"])
+@pytest.mark.parametrize("tolerance", [None, Decimal("0.005")], ids=["default", "declared-tight"])
+def test_recompiling_after_range_crossing_restores_executable_floors(
+    protocol: str, execution_sqrt: int, tolerance: Decimal | None
+) -> None:
+    """An obsolete two-leg floor rejects; a fresh single-leg floor preserves the withdrawal bound."""
+    stale_result, _, _ = _compile_close(protocol, max_slippage=tolerance)
+    fresh_result, _, read_slot0 = _compile_close(protocol, sqrt_price_x96=execution_sqrt, max_slippage=tolerance)
+    assert stale_result.status is CompilationStatus.SUCCESS, stale_result.error
+    assert fresh_result.status is CompilationStatus.SUCCESS, fresh_result.error
+    stale, _, _ = _decoded_decrease(stale_result)
+    fresh, _, _ = _decoded_decrease(fresh_result)
+    actual = amounts_for_liquidity(execution_sqrt, TICK_LOWER, TICK_UPPER, LIQUIDITY)
+    assert any(actual[index] < stale[f"amount{index}_min"] for index in (0, 1))
+    assert all(actual[index] >= fresh[f"amount{index}_min"] for index in (0, 1))
+    for index in (0, 1):
+        if actual[index] == 0:
+            assert fresh[f"amount{index}_min"] == 0
+        else:
+            assert (
+                fresh[f"amount{index}_min"]
+                == compute_min_amount_out(actual[index], LP_CLOSE_SLIPPAGE_DEFAULT if tolerance is None else tolerance)
+                > 0
+            )
+    assert fresh["liquidity"] == stale["liquidity"] == LIQUIDITY
+    read_slot0.assert_called_once()

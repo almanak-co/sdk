@@ -158,14 +158,26 @@ def test_new_compile_exception_does_not_reuse_a_prior_refusal():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("earlier_execution", [False, True])
-async def test_runner_writes_refused_compile_separately_from_previous_execution(earlier_execution):
+@pytest.mark.parametrize("compile_exception", [False, True])
+@pytest.mark.parametrize(
+    "prior_evidence",
+    ["none", "result", "falsey_result", "context", "barrier", "sealed", "ledger", "receipts"],
+)
+async def test_runner_writes_refused_compile_separately_from_previous_execution(prior_evidence, compile_exception):
+    from almanak.framework.execution.orchestrator import ExecutionResult
+    from almanak.framework.execution.reconciliation import failed_submission_requires_reconciliation
+    from almanak.framework.execution.submission import SubmissionProvenance
     from almanak.framework.runner.strategy_runner import SingleChainExecutionState, StrategyRunner
 
     intent, compiled, _ = compile_refusal()
+    compiler = (
+        Mock(compile=Mock(side_effect=RuntimeError("compiler unavailable")))
+        if compile_exception
+        else Mock(compile=Mock(return_value=compiled))
+    )
     machine = IntentStateMachine(
         intent,
-        Mock(compile=Mock(return_value=compiled)),
+        compiler,
         config=StateMachineConfig(retry_config=RetryConfig(max_retries=0)),
     )
     machine.step()
@@ -180,11 +192,27 @@ async def test_runner_writes_refused_compile_separately_from_previous_execution(
         record_metrics=False,
     )
     state.state_machine = machine
-    if earlier_execution:
-        state.last_execution_result = SimpleNamespace(
+
+    class FalseyResult(SimpleNamespace):
+        def __bool__(self):
+            return False
+
+    if prior_evidence in {"result", "falsey_result"}:
+        result_type = FalseyResult if prior_evidence == "falsey_result" else SimpleNamespace
+        state.last_execution_result = result_type(
             error="earlier revert", transaction_results=[SimpleNamespace(tx_hash="0xearlier")]
         )
         state.failed_attempt_ledger_id = "immutable-earlier-attempt"
+    elif prior_evidence == "context":
+        state.last_execution_context = object()
+    elif prior_evidence == "barrier":
+        state.replay_barrier = SimpleNamespace(is_reconciliation_required=False)
+    elif prior_evidence == "sealed":
+        state.reconciliation_sealed = True
+    elif prior_evidence == "ledger":
+        state.failed_attempt_ledger_id = "immutable-earlier-attempt"
+    elif prior_evidence == "receipts":
+        state.failed_attempt_receipts = {"prior": ({"transactionHash": "0xearlier"},)}
     runner = StrategyRunner.__new__(StrategyRunner)
     runner._write_ledger_entry = AsyncMock(return_value="compile-refusal")
     runner._single_chain_persist_failed_attempt = AsyncMock()
@@ -197,17 +225,37 @@ async def test_runner_writes_refused_compile_separately_from_previous_execution(
     runner.balance_provider = None
     with patch("almanak.framework.runner.strategy_runner.diagnose_revert", new=AsyncMock()):
         await runner._single_chain_handle_failure(state)
-    call = runner._write_ledger_entry.call_args.kwargs
-    assert call["result"] is None and call["success"] is False
-    assert call["compilation_evidence"] == compiled.compilation_evidence
+    if compile_exception and state.failed_attempt_ledger_id is not None:
+        runner._write_ledger_entry.assert_not_called()
+        expected_ledger_id = state.failed_attempt_ledger_id
+    else:
+        call = runner._write_ledger_entry.call_args.kwargs
+        assert call["result"] is (state.last_execution_result if compile_exception else None)
+        assert call["success"] is False
+        assert call["compilation_evidence"] == (None if compile_exception else compiled.compilation_evidence)
+        expected_ledger_id = "compile-refusal"
     runner._single_chain_persist_failed_attempt.assert_not_called()
     timeline = runner._emit_execution_timeline_event.call_args.kwargs
-    assert timeline["related_ledger_entry_id"] == "compile-refusal"
-    assert timeline["result"].error == machine.error
-    assert not getattr(timeline["result"], "transaction_results", None)
-    if earlier_execution:
-        assert state.last_execution_result.error == "earlier revert"
-        assert state.last_execution_result.transaction_results[0].tx_hash == "0xearlier"
+    assert timeline["related_ledger_entry_id"] == expected_ledger_id
+    if not compile_exception or state.last_execution_result is None:
+        assert timeline["result"].error == machine.error
+        assert not getattr(timeline["result"], "transaction_results", None)
+    callback = runner._notify_intent_executed.call_args.args[3]
+    assert runner._invoke_optional_hook.call_args.args[4] is callback
+    if prior_evidence in {"result", "falsey_result"}:
+        assert callback is state.last_execution_result
+        assert callback.error == "earlier revert"
+        assert callback.transaction_results[0].tx_hash == "0xearlier"
+    elif prior_evidence == "none":
+        assert isinstance(callback, ExecutionResult)
+        assert callback.success is False
+        assert callback.submission_provenance is SubmissionProvenance.NOT_ATTEMPTED
+        assert callback.transaction_results == []
+        assert not failed_submission_requires_reconciliation(callback)
+        assert state.last_execution_result is None
+    else:
+        assert not hasattr(callback, "submission_provenance")
+        assert failed_submission_requires_reconciliation(callback)
 
 
 def test_gateway_client_error_preserves_guard_binding_and_accepts_old_gateway():

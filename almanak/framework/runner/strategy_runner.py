@@ -10560,6 +10560,30 @@ class StrategyRunner:
             balance_reconciliation=recon,
         )
 
+    @staticmethod
+    def _single_chain_failure_callback_result(state: SingleChainExecutionState, error: str) -> Any:
+        """Attest no submission only when this runner never entered execution."""
+        from almanak.framework.execution.submission import SubmissionProvenance
+
+        if state.last_execution_result is not None:
+            return state.last_execution_result
+        # Context is assigned before dispatch, including attempts that raise
+        # without returning. Recovery evidence also forbids a new attestation.
+        if (
+            state.last_execution_context is None
+            and state.replay_barrier is None
+            and not state.reconciliation_sealed
+            and state.failed_attempt_ledger_id is None
+            and not state.failed_attempt_receipts
+        ):
+            return ExecutionResult(
+                success=False,
+                phase=ExecutionPhase.VALIDATION,
+                error=error,
+                submission_provenance=SubmissionProvenance.NOT_ATTEMPTED,
+            )
+        return SimpleNamespace(error=error)
+
     async def _single_chain_handle_failure(self, state: SingleChainExecutionState) -> IterationResult:
         """Finalize the state-machine-FAILED path: diagnostics, alert, result.
 
@@ -10685,7 +10709,7 @@ class StrategyRunner:
             await self._handle_execution_error(strategy, last_execution_result)
 
         # Preserve prior execution receipts for strategy recovery callbacks.
-        callback_result = last_execution_result or SimpleNamespace(error=error_msg)
+        callback_result = self._single_chain_failure_callback_result(state, error_msg)
         self._notify_intent_executed(strategy, intent, False, callback_result)
         self._invoke_optional_hook(
             strategy,
