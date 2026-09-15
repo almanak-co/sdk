@@ -50,6 +50,11 @@ FROZEN_ARCHIVE_RPC_REQUIRED_CHAINS = frozenset({"polygon", "ethereum", "avalanch
 # honest. The widening is one-directional: every legacy entry is retained.
 VIB_5869_ARCHIVE_WIDENING = frozenset({"arbitrum", "bsc", "base", "optimism", "sonic", "linea"})
 
+# Kept as its own constant rather than folded into the widening above: these
+# are separate measurements of separate endpoints, and merging them would let
+# one being re-measured silently change what the other is asserted to be.
+ROBINHOOD_ARCHIVE_REQUIRED = frozenset({"robinhood"})
+
 FROZEN_ANVIL_CHAINS = frozenset(
     {
         "ethereum",
@@ -129,7 +134,9 @@ class TestRegistryDerivedEnumerations:
         """No longer byte-equivalent to the legacy literal — VIB-5869 widened it
         on measured evidence. Both halves are asserted so an *undocumented*
         drift still fails."""
-        assert fork_archive_required_chains() == (FROZEN_ARCHIVE_RPC_REQUIRED_CHAINS | VIB_5869_ARCHIVE_WIDENING)
+        assert fork_archive_required_chains() == (
+            FROZEN_ARCHIVE_RPC_REQUIRED_CHAINS | VIB_5869_ARCHIVE_WIDENING | ROBINHOOD_ARCHIVE_REQUIRED
+        )
 
     def test_archive_widening_never_drops_a_legacy_entry(self) -> None:
         """Each legacy entry was added after a real production stall; the

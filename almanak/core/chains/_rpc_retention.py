@@ -111,6 +111,10 @@ class RetentionMeasurement:
             declares no block time or no boundary was found.
         evidence: The upstream error observed at the boundary — the receipt
             for the ``archive=False`` verdict.
+        measured_on: ISO date of *this row's* probe. ``None`` falls back to
+            the module-level ``MEASURED_ON``. Endpoints change tiers; a
+            later re-measure of one chain must not silently wear the date
+            on which the opposite was recorded.
     """
 
     endpoint: str
@@ -118,6 +122,7 @@ class RetentionMeasurement:
     retention_blocks: int | None
     window_seconds: float | None
     evidence: str
+    measured_on: str | None = None
 
     def threatens_fork(self) -> bool:
         """Whether a managed-Anvil fork on this endpoint would wedge in
@@ -220,6 +225,21 @@ PUBLIC_RPC_RETENTION: Mapping[str, RetentionMeasurement] = MappingProxyType(
             # only one anyone thought to flag before VIB-5869
             evidence="HTTP 403 at historical depth while latest still served",
         ),
+        # The 2026-07-16 row recorded archive=True on "served state at
+        # head-6,000,000"; re-measuring falsified it. retention_blocks is the
+        # deepest DEPTH_LADDER rung the script confirmed, as for every other
+        # row here — a hand bisect puts the true boundary near head-6,200, but
+        # recording that would be a number no re-run of the script reproduces.
+        # window_seconds stays None: the chain declares no block_time_seconds
+        # (see robinhood.py), so threatens_fork() takes its fail-safe branch.
+        "robinhood": RetentionMeasurement(
+            endpoint="https://rpc.mainnet.chain.robinhood.com",
+            archive=False,
+            retention_blocks=1024,
+            window_seconds=None,
+            evidence="serves head-1024, fails head-8192: metadata is not found",
+            measured_on="2026-09-15",
+        ),
         # ── Archive-capable: no flag needed ────────────────────────────────
         "mantle": RetentionMeasurement(
             endpoint="https://rpc.mantle.xyz",
@@ -230,13 +250,6 @@ PUBLIC_RPC_RETENTION: Mapping[str, RetentionMeasurement] = MappingProxyType(
         ),
         "plasma": RetentionMeasurement(
             endpoint="https://rpc.plasma.to",
-            archive=True,
-            retention_blocks=None,
-            window_seconds=None,
-            evidence="served state at head-6,000,000",
-        ),
-        "robinhood": RetentionMeasurement(
-            endpoint="https://rpc.mainnet.chain.robinhood.com",
             archive=True,
             retention_blocks=None,
             window_seconds=None,

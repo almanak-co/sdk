@@ -53,6 +53,25 @@ class TestMeasurementDrivesMembership:
             f"fork wedges on the first cold read past that window (ALM-2695)."
         )
 
+    def test_robinhood_public_rpc_is_flagged(self) -> None:
+        """The only negative control on the corrected row.
+
+        ``test_measured_fork_threatening_chains_are_all_flagged`` cannot catch a
+        revert here: it asserts measured <= flagged, and restoring
+        ``archive=True`` only shrinks the left side, so it still passes while
+        the table once again claims an endpoint serves state it does not.
+
+        window_seconds is None because the descriptor declares no block time, so
+        ``threatens_fork()`` must reach its fail-safe branch to return True.
+        """
+        assert "robinhood" in fork_archive_required_chains()
+        m = PUBLIC_RPC_RETENTION["robinhood"]
+        assert m.archive is False
+        assert m.retention_blocks == 1024
+        assert m.window_seconds is None
+        assert m.threatens_fork() is True
+        assert m.measured_on == "2026-09-15"
+
     def test_flag_set_is_not_looser_than_before_vib_5869(self) -> None:
         """Ratchet: VIB-646 / VIB-3971 / VIB-3973 flagged these after real
         production stalls. Measurement may TIGHTEN the guard, never loosen it."""

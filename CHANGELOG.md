@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **A managed Robinhood Anvil fork no longer starts against a state-pruned
+  RPC.** The measured-retention table recorded Robinhood's public endpoint as
+  archive-capable, which left the chain out of the `fork_requires_archive` set
+  and let a fork start and then die minutes later on an uncached read
+  (`metadata is not found`) — surfacing as an unrelated-looking fixture error.
+  Re-measuring shows the endpoint serves head-1024 and fails head-8192, so the
+  fork now refuses at start, naming the endpoint and the measured window.
+  Configure an archive RPC (`ALCHEMY_API_KEY`, or `ROBINHOOD_RPC_URL`) to fork
+  this chain; `ALMANAK_ALLOW_PRUNED_FORK_RPC=1` remains the escape hatch for
+  deliberately short-lived forks. No other chain's gating changes.
 - **`market_session()` is now cheap enough for backtests.** The calendar
   instance is cached per exchange and the four-day session frame per
   calendar-day, so a call costs ~3 ms instead of ~200 ms (the library expands

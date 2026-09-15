@@ -75,7 +75,8 @@ def _format_pruned_chain(chain: str) -> str:
         window = f"~{m.retention_blocks} blocks of state"
     else:
         window = "no archive state"
-    return f"{chain}: {m.endpoint} serves {window} ({m.evidence}; measured {MEASURED_ON})"
+    measured = m.measured_on or MEASURED_ON
+    return f"{chain}: {m.endpoint} serves {window} ({m.evidence}; measured {measured})"
 
 
 def find_free_port() -> int:

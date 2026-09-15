@@ -48,11 +48,32 @@ class TestGateFailsFast:
         "chain",
         # ALM-2695 chains (newly flagged) + the legacy set, which must keep
         # gating after VIB-5869 turned the warning into a failure.
-        ["bsc", "arbitrum", "base", "optimism", "ethereum", "polygon", "avalanche", "zerog", "xlayer"],
+        [
+            "bsc",
+            "arbitrum",
+            "base",
+            "optimism",
+            "ethereum",
+            "polygon",
+            "avalanche",
+            "zerog",
+            "xlayer",
+            "robinhood",
+        ],
     )
     def test_unconfigured_archive_chain_raises(self, chain: str, no_rpc_env: None) -> None:
         with pytest.raises(RuntimeError, match="Refusing to start Anvil fork"):
             _gateway([chain])._check_archive_rpc_availability()
+
+    def test_robinhood_refusal_cites_the_remeasurement(self, no_rpc_env: None) -> None:
+        with pytest.raises(RuntimeError) as exc:
+            _gateway(["robinhood"])._check_archive_rpc_availability()
+        msg = str(exc.value)
+        assert "robinhood" in msg
+        assert "rpc.mainnet.chain.robinhood.com" in msg
+        assert "1024" in msg
+        assert "measured 2026-09-15" in msg
+        assert "2026-07-16" not in msg
 
     def test_error_names_the_chain_and_the_remedy(self, no_rpc_env: None) -> None:
         """The old warning left users with 'missing trie node' and no lead.
@@ -84,7 +105,7 @@ class TestGateFailsFast:
 class TestGatePasses:
     def test_alchemy_key_satisfies_the_gate(self, no_rpc_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ALCHEMY_API_KEY", "test-key")
-        _gateway(["bsc", "arbitrum"])._check_archive_rpc_availability()  # must not raise
+        _gateway(["bsc", "arbitrum", "robinhood"])._check_archive_rpc_availability()  # must not raise
 
     @pytest.mark.parametrize("var", ["POLYGON_RPC_URL", "ALMANAK_POLYGON_RPC_URL"])
     def test_chain_specific_rpc_satisfies_the_gate(

@@ -120,6 +120,10 @@ DESCRIPTOR = register_chain(
             # Verified live: robinhood-mainnet.g.alchemy.com (https + wss).
             alchemy_prefix="robinhood",
             anvil_port=8560,  # next free port after hyperevm (8559)
+            # The public_rpc above prunes within a few thousand blocks (~10
+            # min of chain time), so a managed fork pinned outside that window
+            # dies on its first uncached read. Measured in _rpc_retention.py.
+            fork_requires_archive=True,
             # block_time_seconds is deliberately NOT set (VIB-5811). Do not add
             # it without reading this: the value is known, and wiring it is the
             # bug.
