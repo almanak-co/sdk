@@ -23,5 +23,7 @@ class DexScreenerPriceSourceFactory:
         return DexScreenerPriceSource(
             default_chain_id=chain.lower(),
             cache_ttl=30,
+            min_liquidity_usd=settings.dexscreener_min_liquidity_usd,
+            min_volume_usd=settings.dexscreener_min_volume_usd,
             token_resolver=get_token_resolver(),
         )

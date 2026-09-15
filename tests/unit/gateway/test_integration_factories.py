@@ -51,6 +51,32 @@ def test_hypercore_factory_name_and_exclusivity_policy_are_manifest_owned() -> N
     assert INTEGRATION_REGISTRY.price_source_policy("hypercore") == ("venue_oracle", frozenset())
 
 
+def test_dexscreener_price_source_factory_wires_pair_gates_from_settings() -> None:
+    from almanak.integrations.dexscreener.gateway.price_source import DexScreenerPriceSource
+
+    settings = SimpleNamespace(dexscreener_min_liquidity_usd=25_000.0, dexscreener_min_volume_usd=2_500.0)
+
+    source = DexScreenerPriceSourceFactory().build(chain="robinhood", settings=settings)
+
+    assert isinstance(source, DexScreenerPriceSource)
+    assert source._min_liquidity_usd == 25_000.0
+    assert source._min_volume_usd == 2_500.0
+
+
+def test_dexscreener_price_source_factory_takes_pair_gates_from_gateway_defaults() -> None:
+    from almanak.gateway.core.settings import GatewaySettings
+
+    source = DexScreenerPriceSourceFactory().build(chain="robinhood", settings=GatewaySettings())
+
+    assert source._min_liquidity_usd == 10_000.0
+    assert source._min_volume_usd == 1_000.0
+
+
+def test_dexscreener_price_source_factory_fails_loud_without_pair_gate_settings() -> None:
+    with pytest.raises(AttributeError):
+        DexScreenerPriceSourceFactory().build(chain="robinhood", settings=SimpleNamespace())
+
+
 def test_coingecko_price_source_factory_contract() -> None:
     settings = SimpleNamespace(coingecko_api_key="cg-key")
     factory = CoinGeckoPriceSourceFactory()

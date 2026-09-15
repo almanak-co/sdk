@@ -24,6 +24,7 @@ def _pair(
     price_usd: str,
     *,
     liquidity: float = 28_000_000,
+    volume: float = 1_000_000,
     base: str = AERO,
     base_symbol: str = "AERO",
     quote: str = USDC,
@@ -33,7 +34,7 @@ def _pair(
     p = {
         "priceUsd": price_usd,
         "liquidity": {"usd": liquidity},
-        "volume": {"h24": 1_000_000},
+        "volume": {"h24": volume},
         "baseToken": {"address": base, "symbol": base_symbol},
         "quoteToken": {"address": quote, "symbol": quote_symbol},
     }
@@ -136,6 +137,141 @@ class TestPickBestPairMalformedValues:
         )
         assert picked is not None
         assert picked[1] == Decimal("1.0001")
+
+
+USDE_RH = "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34"
+USDG_RH = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+USDB_RH = "0x0000000000000000000000000000000000000B0B"
+
+
+class TestPickBestPairVolumeFloor:
+    """A deep pool nobody trades in is not a price observation.
+
+    Shape observed on Robinhood on 2026-09-14: the deepest USDe pair was a
+    USDe/USDB pool with $191M liquidity, $0 24h volume and ``priceUsd`` 0.9604
+    (USDB's stale valuation applied to a 1.002 pool ratio), while every
+    USDe/USDG pool with real volume quoted 0.9997 and the Morpho market oracle
+    priced 1.0. Liquidity-only selection returned 0.9604.
+    """
+
+    @staticmethod
+    def _robinhood_usde_pairs() -> list[dict]:
+        pairs = [
+            _pair(
+                "0.9604",
+                liquidity=191_714_165,
+                volume=0,
+                base=USDE_RH,
+                base_symbol="USDe",
+                quote=USDB_RH,
+                quote_symbol="USDB",
+                price_native="1.002002",
+            ),
+            _pair(
+                "0.9997",
+                liquidity=1_013_146,
+                volume=64_778,
+                base=USDE_RH,
+                base_symbol="USDe",
+                quote=USDG_RH,
+                quote_symbol="USDG",
+                price_native="0.9997",
+            ),
+        ]
+        for p in pairs:
+            p["chainId"] = "robinhood"
+        return pairs
+
+    def test_dead_pool_loses_to_traded_pool(self, source):
+        picked = source._pick_best_pair(self._robinhood_usde_pairs(), address=USDE_RH, token=USDE_RH)
+        assert picked is not None
+        assert picked[1] == Decimal("0.9997")
+
+    def test_dead_pool_is_not_a_fallback_either(self, source):
+        only_dead = self._robinhood_usde_pairs()[:1]
+        assert source._pick_best_pair(only_dead, address=USDE_RH, token=USDE_RH) is None
+
+    def test_missing_volume_is_rejected_as_unmeasured(self, source):
+        pair = _pair("0.9604", liquidity=191_714_165, base=USDE_RH, base_symbol="USDe")
+        del pair["volume"]
+        assert source._pick_best_pair([pair], address=USDE_RH, token=USDE_RH) is None
+
+    def test_non_finite_volume_cannot_win_selection(self, source):
+        picked = source._pick_best_pair(
+            [
+                _pair("9.99", volume=float("inf"), base=USDE_RH, base_symbol="USDe"),
+                _pair("7.77", volume=float("nan"), base=USDE_RH, base_symbol="USDe"),
+                _pair("0.9997", liquidity=50_000, volume=5_000, base=USDE_RH, base_symbol="USDe"),
+            ],
+            address=USDE_RH,
+            token=USDE_RH,
+        )
+        assert picked is not None
+        assert picked[1] == Decimal("0.9997")
+
+    def test_zero_floor_still_rejects_unmeasured_volume(self):
+        zero_floor = DexScreenerPriceSource(cache_ttl=30, min_liquidity_usd=10_000, min_volume_usd=0)
+        missing = _pair("0.9604", liquidity=191_714_165, base=USDE_RH, base_symbol="USDe")
+        del missing["volume"]
+        unparseable = _pair("0.9604", liquidity=191_714_165, volume="lots", base=USDE_RH, base_symbol="USDe")
+        explicit_zero = _pair("0.9604", liquidity=191_714_165, volume=0, base=USDE_RH, base_symbol="USDe")
+        assert zero_floor._pick_best_pair([missing], address=USDE_RH, token=USDE_RH) is None
+        assert zero_floor._pick_best_pair([unparseable], address=USDE_RH, token=USDE_RH) is None
+        picked = zero_floor._pick_best_pair([explicit_zero], address=USDE_RH, token=USDE_RH)
+        assert picked is not None and picked[1] == Decimal("0.9604")
+
+    def test_positional_constructor_slots_are_unchanged(self):
+        resolver = MagicMock()
+        source = DexScreenerPriceSource("base", 30, 10.0, 10_000, 0.6, resolver)
+        assert source._token_resolver is resolver
+        assert source._min_volume_usd == 1_000
+
+    def test_survivors_still_rank_by_liquidity(self, source):
+        busy_shallow = _pair("1.01", liquidity=50_000, volume=900_000, base=USDE_RH, base_symbol="USDe")
+        quiet_deep = _pair("1.02", liquidity=5_000_000, volume=50_000, base=USDE_RH, base_symbol="USDe")
+        picked = source._pick_best_pair([busy_shallow, quiet_deep], address=USDE_RH, token=USDE_RH)
+        assert picked is not None
+        assert picked[1] == Decimal("1.02")
+
+    @pytest.mark.asyncio
+    async def test_public_price_raises_when_every_pool_is_untraded(self, source):
+        from unittest.mock import AsyncMock, patch
+
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+        from almanak.framework.data.tokens.models import ResolvedToken
+
+        usde = ResolvedToken(symbol="USDe", address=USDE_RH, decimals=18, chain="robinhood", chain_id=4663)
+        dead = [self._robinhood_usde_pairs()[0]]
+        with (
+            patch.object(source, "_get_session", new_callable=AsyncMock, return_value=object()),
+            patch.object(source, "_fetch_token_pairs", new_callable=AsyncMock, return_value=dead),
+        ):
+            with pytest.raises(DataSourceUnavailable, match="volume"):
+                await source.get_price("USDE", "USD", resolved_token=usde)
+
+    @pytest.mark.asyncio
+    async def test_public_price_comes_from_the_traded_pool(self, source):
+        from unittest.mock import AsyncMock, patch
+
+        from almanak.framework.data.tokens.models import ResolvedToken
+
+        usde = ResolvedToken(symbol="USDe", address=USDE_RH, decimals=18, chain="robinhood", chain_id=4663)
+        with (
+            patch.object(source, "_get_session", new_callable=AsyncMock, return_value=object()),
+            patch.object(
+                source, "_fetch_token_pairs", new_callable=AsyncMock, return_value=self._robinhood_usde_pairs()
+            ),
+        ):
+            result = await source.get_price("USDE", "USD", resolved_token=usde)
+        assert result.price == Decimal("0.9997")
+        assert result.source == "dexscreener"
+
+    def test_volume_floor_is_configurable(self):
+        lenient = DexScreenerPriceSource(cache_ttl=30, min_liquidity_usd=10_000, min_volume_usd=0)
+        only_dead = self._robinhood_usde_pairs()[:1]
+        picked = lenient._pick_best_pair(only_dead, address=USDE_RH, token=USDE_RH)
+        assert picked is not None
+        assert picked[1] == Decimal("0.9604")
 
 
 class TestIdentityGateOnDemand:

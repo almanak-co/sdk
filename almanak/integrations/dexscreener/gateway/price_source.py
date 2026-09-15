@@ -248,6 +248,10 @@ class DexScreenerPriceSource(BasePriceSource):
         cache_ttl: Cache TTL in seconds.
         request_timeout: HTTP request timeout in seconds.
         min_liquidity_usd: Minimum pool liquidity to trust the price.
+        min_volume_usd: Minimum 24h traded volume to trust the price. Liquidity
+            alone admits a pool nobody trades in, and DexScreener's ``priceUsd``
+            for such a pool is whatever stale valuation it holds for the quote
+            token rather than a market observation.
         token_resolver: Optional TokenResolver for dynamic address lookup.
         skip_gateway_resolution: Keep resolver lookups local inside the gateway.
             Out-of-gateway consumers can retain channel-based discovery with False.
@@ -266,6 +270,7 @@ class DexScreenerPriceSource(BasePriceSource):
         # ``default_chain_id`` for new code.
         chain_id: str | None = None,
         *,
+        min_volume_usd: float = 1_000,
         skip_gateway_resolution: bool = True,
     ) -> None:
         # Caller misuse — both kwargs set — should fail loud. Silently
@@ -297,6 +302,7 @@ class DexScreenerPriceSource(BasePriceSource):
         self._cache_ttl = cache_ttl
         self._request_timeout = request_timeout
         self._min_liquidity_usd = min_liquidity_usd
+        self._min_volume_usd = min_volume_usd
         self._stale_confidence = stale_confidence
         # Cache is keyed per (chain, address|symbol) so the same token address
         # on two chains never collides. See ``_cache_key_for``.
@@ -548,7 +554,7 @@ class DexScreenerPriceSource(BasePriceSource):
                 reason=f"No pairs found for '{token}' on {platform}",
             )
 
-        # Filter to the requested chain and pick highest-liquidity pair.
+        # Filter to the requested chain and pick the deepest pair that trades.
         # Do NOT fall back to other chains when the requested chain has no
         # match — that is the exact wrong-chain pricing bug this PR is
         # eliminating. Symbol-search in particular can return pairs for any
@@ -566,7 +572,8 @@ class DexScreenerPriceSource(BasePriceSource):
             raise DataSourceUnavailable(
                 source="dexscreener",
                 reason=(
-                    f"No liquid pair with '{token}' on a matched side on {platform} (min ${self._min_liquidity_usd})"
+                    f"No liquid pair with '{token}' on a matched side on {platform} "
+                    f"(min ${self._min_liquidity_usd} liquidity, min ${self._min_volume_usd} 24h volume)"
                 ),
             )
         best, price = picked
@@ -617,6 +624,12 @@ class DexScreenerPriceSource(BasePriceSource):
         directly. A token appearing only on the quote side is priced by
         inverting ``priceUsd / priceNative``. Pairs matching neither side are
         discarded (the guard the symbol-search path was missing).
+
+        A pair must clear both the liquidity floor and the 24h volume floor;
+        survivors keep ranking by liquidity. ``priceUsd`` is DexScreener's
+        valuation of the pair's quote token applied to the pool ratio, so a
+        deep pool with no trades reports the quote token's stale valuation,
+        not a price anyone transacts at.
         """
         addr_lower = address.lower() if address else None
         token_upper = token.upper() if token else None
@@ -631,6 +644,18 @@ class DexScreenerPriceSource(BasePriceSource):
             except (ValueError, TypeError):
                 liq = 0
             if not math.isfinite(liq) or liq < self._min_liquidity_usd:
+                continue
+            # An absent or unparseable 24h volume is unmeasured, not zero: it
+            # is skipped before the floor is consulted, so a zero floor admits
+            # an explicit zero-volume pool but never an unmeasured one.
+            volume_raw = (p.get("volume") or {}).get("h24")
+            if volume_raw is None or isinstance(volume_raw, bool):
+                continue
+            try:
+                volume = float(volume_raw)
+            except (ValueError, TypeError):
+                continue
+            if not math.isfinite(volume) or volume < self._min_volume_usd:
                 continue
             try:
                 price_usd = Decimal(str(p.get("priceUsd")))
