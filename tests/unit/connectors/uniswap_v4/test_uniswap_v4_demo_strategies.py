@@ -7,19 +7,25 @@ design documents that will run once V4 Phases 0-3 merge.
 
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import pytest
+
+from almanak.connectors.uniswap_v4.adapter import UniswapV4Adapter, UniswapV4Config
 from almanak.connectors.uniswap_v4.hooks import (
     BEFORE_SWAP_FLAG,
     DynamicFeeHookEncoder,
     EmptyHookDataEncoder,
     HookFlags,
     discover_pool,
+    hook_data_to_wire,
     warn_empty_hook_data,
 )
 from almanak.demo_strategies.uniswap_v4_hooks.strategy import UniswapV4HooksStrategy
 from almanak.framework.intents import Intent
 from almanak.framework.intents.vocabulary import IntentType
+from almanak.framework.teardown import TeardownMode
+from tests.unit.connectors.uniswap_v4.test_position_observation import KEY, WALLET, PositionGateway
 
 # =============================================================================
 # V4 LP Strategy — Intent Creation Tests
@@ -70,8 +76,8 @@ class TestV4LPIntentCreation:
     def test_lp_open_with_protocol_params(self):
         """LP_OPEN should accept protocol_params for hook data."""
         protocol_params = {
-            "hook_address": "0x" + "ab" * 19 + "80",
-            "hook_data": "00" * 32,
+            "hooks": "0x" + "ab" * 19 + "80",
+            "hook_data": "0x" + "00" * 32,
             "hook_capabilities": ["before_swap"],
         }
         intent = Intent.lp_open(
@@ -84,7 +90,7 @@ class TestV4LPIntentCreation:
             protocol_params=protocol_params,
         )
         assert intent.protocol_params == protocol_params
-        assert intent.protocol_params["hook_address"] == "0x" + "ab" * 19 + "80"
+        assert intent.protocol_params["hooks"] == "0x" + "ab" * 19 + "80"
 
 
 # =============================================================================
@@ -122,8 +128,8 @@ class TestV4HooksIntegration:
         assert len(hook_data) == 32
 
         protocol_params = {
-            "hook_address": "0x" + "0" * 36 + "0080",
-            "hook_data": hook_data.hex(),
+            "hooks": "0x" + "0" * 36 + "0080",
+            "hook_data": hook_data_to_wire(hook_data),
             "hook_capabilities": ["before_swap"],
         }
 
@@ -137,7 +143,7 @@ class TestV4HooksIntegration:
             protocol_params=protocol_params,
         )
 
-        assert intent.protocol_params["hook_data"] == hook_data.hex()
+        assert intent.protocol_params["hook_data"] == "0x" + hook_data.hex()
 
     def test_empty_hook_data_warning_on_hooked_pool(self):
         """Empty hookData on a hooked pool should produce a warning."""
@@ -250,3 +256,98 @@ class TestV4StrategyConfigs:
 
 # The uniswap_v4_swap demo was internalized by PR #2954; its decide()/teardown
 # tests live at strategies/internal/tests/unit/connectors/uniswap_v4/.
+
+
+def _bare_hooks_strategy(encoder, *, pool: str = "WETH/USDC/3000") -> UniswapV4HooksStrategy:
+    """Demo instance carrying only the attributes its intent builders read."""
+    strategy = UniswapV4HooksStrategy.__new__(UniswapV4HooksStrategy)
+    strategy.pool = pool
+    strategy.hook_address = "0x" + "0" * 40
+    strategy.hook_flags = HookFlags.from_address(strategy.hook_address)
+    strategy._encoder = encoder
+    strategy.fee_hint = None
+    strategy.range_width_pct = Decimal("0.30")
+    strategy.amount0 = Decimal("0.01")
+    strategy.amount1 = Decimal("30")
+    strategy.max_slippage = Decimal("0.005")
+    strategy.token0_symbol = "WETH"
+    strategy.token1_symbol = "USDC"
+    strategy._current_position_id = "42"
+    return strategy
+
+
+def _offline_base_adapter() -> UniswapV4Adapter:
+    """Adapter with no RPC and no gateway: LP_OPEN compiles from the oracle estimate."""
+    tokens = {
+        "WETH": MagicMock(address="0x4200000000000000000000000000000000000006", decimals=18, is_native=False),
+        "USDC": MagicMock(address="0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", decimals=6, is_native=False),
+    }
+    resolver = MagicMock()
+    resolver.resolve_for_swap = lambda symbol, chain: tokens[symbol.upper()]
+    return UniswapV4Adapter(
+        config=UniswapV4Config(chain="base", wallet_address=WALLET),
+        token_resolver=resolver,
+    )
+
+
+def _observing_base_adapter(gateway: PositionGateway) -> UniswapV4Adapter:
+    """Adapter that observes the owned NFT through a fake gateway: LP_CLOSE compiles."""
+    return UniswapV4Adapter(
+        config=UniswapV4Config(chain="base", wallet_address=WALLET),
+        venue_verification_gateway_factory=lambda: gateway,
+    )
+
+
+_ORACLE = {"WETH": Decimal("2500"), "USDC": Decimal("1")}
+
+
+class TestV4HooksDemoHookDataWireFormat:
+    """Every LP intent the demo emits carries hook_data as 0x-prefixed hex, "0x" when empty."""
+
+    def test_open_intent_empty_hook_data_is_0x(self):
+        intent = _bare_hooks_strategy(EmptyHookDataEncoder())._create_open_intent(Decimal("2500"))
+        assert intent.protocol_params["hook_data"] == "0x"
+
+    def test_open_intent_dynamic_fee_hook_data_is_prefixed_hex(self):
+        strategy = _bare_hooks_strategy(DynamicFeeHookEncoder())
+        strategy.fee_hint = 500
+        wire = strategy._create_open_intent(Decimal("2500")).protocol_params["hook_data"]
+        assert wire.startswith("0x") and bytes.fromhex(wire[2:]) == DynamicFeeHookEncoder().encode(fee_hint=500)
+
+    def test_adapter_compiles_the_demo_open_intent(self):
+        adapter = _offline_base_adapter()
+        strategy = _bare_hooks_strategy(EmptyHookDataEncoder())
+        intent = strategy._create_open_intent(Decimal("2500"), amount0=Decimal("0.05"), amount1=Decimal("125"))
+        bundle = adapter.compile_lp_open_intent(intent, _ORACLE)
+        assert bundle.transactions, bundle.metadata
+        assert bundle.metadata["price_source"] == "oracle_estimate"
+
+    def test_adapter_compiles_the_demo_close_and_teardown_intents(self):
+        gateway = PositionGateway()
+        adapter = _observing_base_adapter(gateway)
+        strategy = _bare_hooks_strategy(EmptyHookDataEncoder(), pool=KEY.pool_id)
+        close = strategy._create_close_intent("42")
+        (teardown,) = strategy.generate_teardown_intents(TeardownMode.HARD)
+        assert close.max_slippage == strategy.max_slippage and teardown.max_slippage == Decimal("0.03")
+        for intent in (close, teardown):
+            bundle = adapter.compile_lp_close_intent(intent, gateway.liquidity, KEY.currency0, KEY.currency1)
+            assert bundle.transactions, bundle.metadata
+
+    def test_adapter_refuses_untyped_hook_data(self):
+        """An empty string or raw bytes is not the wire format: the adapter refuses both lanes."""
+        open_intent = _bare_hooks_strategy(EmptyHookDataEncoder())._create_open_intent(
+            Decimal("2500"), amount0=Decimal("0.05"), amount1=Decimal("125")
+        )
+        refused = _offline_base_adapter().compile_lp_open_intent(
+            open_intent.model_copy(update={"protocol_params": {**open_intent.protocol_params, "hook_data": ""}}),
+            _ORACLE,
+        )
+        assert not refused.transactions and "0x-prefixed hex bytes" in refused.metadata["error"]
+
+        gateway = PositionGateway()
+        strategy = _bare_hooks_strategy(EmptyHookDataEncoder(), pool=KEY.pool_id)
+        close_intent = strategy._create_close_intent("42").model_copy(update={"protocol_params": {"hook_data": b""}})
+        with pytest.raises(ValueError, match="0x-prefixed hex bytes"):
+            _observing_base_adapter(gateway).compile_lp_close_intent(
+                close_intent, gateway.liquidity, KEY.currency0, KEY.currency1
+            )

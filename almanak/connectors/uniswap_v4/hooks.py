@@ -614,6 +614,11 @@ def discover_pool(
     )
 
 
+def hook_data_to_wire(hook_data: bytes) -> str:
+    """Encode hookData for ``protocol_params["hook_data"]``: 0x-prefixed hex, ``"0x"`` when empty."""
+    return "0x" + bytes(hook_data).hex()
+
+
 def warn_empty_hook_data(hook_flags: HookFlags, hook_data: bytes) -> str | None:
     """Check if empty hookData on a hooked pool might cause a revert.
 
@@ -669,5 +674,6 @@ __all__ = [
     "compute_position_hash",
     "decode_slot0_response",
     "discover_pool",
+    "hook_data_to_wire",
     "warn_empty_hook_data",
 ]

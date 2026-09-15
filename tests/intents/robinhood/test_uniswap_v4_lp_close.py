@@ -21,6 +21,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
+from almanak.connectors.uniswap_v4.hooks import hook_data_to_wire
 from almanak.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
@@ -381,6 +382,7 @@ class TestUniswapV4LPCloseIntent:
                 "liquidity": liquidity,
                 "currency0": currency0,
                 "currency1": currency1,
+                "hook_data": hook_data_to_wire(b""),
             },
         )
 

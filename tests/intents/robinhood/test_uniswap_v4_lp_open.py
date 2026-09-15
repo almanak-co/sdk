@@ -20,6 +20,7 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
+from almanak.connectors.uniswap_v4.hooks import hook_data_to_wire
 from almanak.connectors.uniswap_v4.receipt_parser import UniswapV4ReceiptParser
 from almanak.framework.execution.orchestrator import (
     ExecutionContext,
@@ -219,7 +220,7 @@ class TestUniswapV4LPOpenIntent:
             protocol="uniswap_v4",
             chain=CHAIN_NAME,
             # StateView.getSlot0 is unreadable on the Anvil fork, so opt in to the estimated price.
-            protocol_params={"allow_estimated_price": True},
+            protocol_params={"allow_estimated_price": True, "hook_data": hook_data_to_wire(b"")},
         )
 
         print(f"\nCreated LPOpenIntent: pool={intent.pool}, protocol={intent.protocol}")

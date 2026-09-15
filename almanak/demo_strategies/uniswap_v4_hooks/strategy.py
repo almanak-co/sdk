@@ -16,6 +16,7 @@ KEY V4 HOOK CONCEPTS:
 - HookFlags decodes which callbacks are active (beforeSwap, afterSwap, etc.)
 - HookDataEncoder provides typed encoding for hook-specific parameters
 - Empty hookData on hooked pools causes on-chain revert — must encode properly
+- hookData travels as protocol_params["hook_data"]: 0x-prefixed hex, "0x" when empty
 - Pools are identified by PoolKey = (currency0, currency1, fee, tickSpacing, hooks)
 
 SCOPE: Hooks support is reference-only. The V4 hooks ecosystem is still
@@ -36,6 +37,7 @@ from almanak.connectors.uniswap_v4.hooks import (
     EmptyHookDataEncoder,
     HookFlags,
     discover_pool,
+    hook_data_to_wire,
     warn_empty_hook_data,
 )
 from almanak.demo_strategies._address_config import require_evm_address
@@ -132,7 +134,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
     Hooks API demonstrated:
     - Discover hook capabilities via HookFlags.from_address()
     - Select appropriate HookDataEncoder based on capabilities
-    - Pass encoded hookData via protocol_params={"hook_data": ...}
+    - Pass encoded hookData via protocol_params={"hook_data": "0x..."} (0x-prefixed hex; "0x" when empty)
     - Use wider ranges for hooked pools (hooks can modify swap behavior)
     - Warn when empty hookData might revert
     """
@@ -320,7 +322,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
         # Key "hooks" matches what UniswapV4Adapter.compile_lp_open_intent() reads
         protocol_params = {
             "hooks": self.hook_address,
-            "hook_data": hook_data.hex() if hook_data else "",
+            "hook_data": hook_data_to_wire(hook_data),
             "hook_capabilities": self.hook_flags.active_flags,
             # VIB-2180/VIB-2701: V4 StateView.getSlot0 reverts on the Anvil fork ->
             # estimated price; opt in so the money-safety guard doesn't block the open.
@@ -372,7 +374,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             )
         return None
 
-    def _create_close_intent(self, position_id: str) -> Intent:
+    def _create_close_intent(self, position_id: str, max_slippage: Decimal | None = None) -> Intent:
         """Create LP_CLOSE intent with hookData for hooked pools."""
         hook_data = self._encoder.encode(fee_hint=self.fee_hint)
 
@@ -382,8 +384,8 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             pool=self.pool,
             collect_fees=True,
             protocol="uniswap_v4",
-            protocol_params={"hook_data": hook_data},
-            max_slippage=self.max_slippage,
+            protocol_params={"hook_data": hook_data_to_wire(hook_data)},
+            max_slippage=self.max_slippage if max_slippage is None else max_slippage,
         )
 
     # =========================================================================
@@ -551,23 +553,12 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             return []
 
         logger.info(f"V4 hooked teardown: closing position {self._current_position_id} (mode={mode.value})")
-        hook_data = self._encoder.encode(fee_hint=self.fee_hint)
 
         from almanak.framework.teardown import TeardownMode
 
         # Widen the floor on a HARD unwind: exiting matters more than the price.
         teardown_slippage = Decimal("0.03") if mode == TeardownMode.HARD else self.max_slippage
-
-        return [
-            Intent.lp_close(
-                position_id=self._current_position_id,
-                pool=self.pool,
-                collect_fees=True,
-                protocol="uniswap_v4",
-                protocol_params={"hook_data": hook_data},
-                max_slippage=teardown_slippage,
-            )
-        ]
+        return [self._create_close_intent(self._current_position_id, max_slippage=teardown_slippage)]
 
     def on_teardown_completed(self, success: bool, recovered_usd: Decimal) -> None:
         if success:
