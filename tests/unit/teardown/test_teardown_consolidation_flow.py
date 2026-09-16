@@ -183,7 +183,7 @@ def _make_commit_helpers(*, commit_outcomes: list[TeardownCommitOutcome] | None 
     # full-sweep execution behaviour these tests assert. (The
     # untracked/skip/auto-mode-not-swept cases are covered in
     # test_teardown_swap_clamp.py.)
-    def _tracked_swap_inventory(_strategy):
+    def _tracked_swap_inventory(_strategy, *, chain, wallet_address):
         return {sym: Decimal("1e9") for sym in ("WETH", "WBTC", "USDC", "USDT", "DAI")}
 
     return TeardownRunnerHelpers(commit=_commit, get_tracked_swap_inventory=_tracked_swap_inventory), commit_calls
@@ -594,7 +594,7 @@ class TestRunTokenConsolidationExecution:
         if tracked_map is not None:
             helpers = TeardownRunnerHelpers(
                 commit=helpers.commit,
-                get_tracked_swap_inventory=lambda _strategy: tracked_map,
+                get_tracked_swap_inventory=lambda _strategy, **_scope: tracked_map,
             )
         sm = MagicMock(name="state_adapter")
         sm.save_teardown_state = AsyncMock()

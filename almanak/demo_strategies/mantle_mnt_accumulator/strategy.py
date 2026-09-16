@@ -404,6 +404,7 @@ class MantleMntAccumulator(IntentStrategy):
         # pinned pool's health.
         return [
             Intent.swap(
+                    chain=self.chain,
                 from_token=self.target_token,
                 to_token=self.stable_token,
                 amount="all",

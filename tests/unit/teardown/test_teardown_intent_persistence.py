@@ -64,8 +64,9 @@ def _make_intent(intent_type="SWAP"):
     """Create a minimal mock intent."""
     intent = MagicMock()
     intent.intent_type = intent_type
+    intent.chain = "base"
     # Return a JSON-serializable dict for _persist_state
-    intent.to_dict.return_value = {"intent_type": intent_type}
+    intent.to_dict.return_value = {"intent_type": intent_type, "chain": "base"}
     # No max_slippage so cloning is skipped
     del intent.max_slippage
     return intent

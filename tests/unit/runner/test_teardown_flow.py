@@ -2010,13 +2010,21 @@ class TestInlineLanePositionCounts:
         )
         strategy = MagicMock()
         strategy.deployment_id = "dep"
+        strategy.chain = "arbitrum"
+        strategy.chains = ["arbitrum"]
         strategy.get_open_positions.return_value = positions
 
         intents = [_make_intent(), _make_intent(), _make_intent()]
         state_manager = MagicMock()
         request = MagicMock()
 
-        with patch.object(rt.Intent, "has_chained_amount", return_value=False):
+        with (
+            patch.object(rt.Intent, "has_chained_amount", return_value=False),
+            patch(
+                "almanak.framework.teardown.registry_enumeration.resolve_open_positions_with_registry",
+                AsyncMock(return_value=positions),
+            ),
+        ):
             result, _degraded = await rt._execute_teardown_inline_body(
                 runner,
                 strategy,

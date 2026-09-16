@@ -102,7 +102,7 @@ async def _run(block_sequence: list[int]) -> int | None:
     results = [_exec_result_with_block(b) for b in block_sequence]
     mgr.slippage_manager.execute_with_escalation = AsyncMock(side_effect=results)
 
-    intents = [SimpleNamespace(max_slippage=None, intent_type="SWAP") for _ in block_sequence]
+    intents = [SimpleNamespace(max_slippage=None, intent_type="SWAP", chain="arbitrum") for _ in block_sequence]
     result = await mgr._execute_intents(
         teardown_id="teardown-test",
         strategy=_make_strategy(),

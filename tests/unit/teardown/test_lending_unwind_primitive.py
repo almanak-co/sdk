@@ -276,3 +276,18 @@ def test_invalid_consolidate_to_rejected() -> None:
             borrow_token="USDC",
             consolidate_to="DAI",
         )
+
+
+def test_builder_stamps_the_position_chain_on_synthesized_swaps():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    market = MagicMock()
+    market.chain = "arbitrum"
+    market.price.return_value = Decimal("1")
+    market.balance.return_value = SimpleNamespace(balance=Decimal("0"))
+    market.position_health.return_value = _FakeHealth(Decimal("100"), Decimal("0"), Decimal("0.8"))
+    intents = generate_lending_unwind(market=market, protocol="aave_v3", collateral_token="WETH", borrow_token="USDC", chain=None)
+    swaps = [intent for intent in intents if intent.intent_type.value == "SWAP"]
+    assert swaps
+    assert all(intent.chain == "arbitrum" for intent in swaps)

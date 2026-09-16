@@ -397,8 +397,20 @@ class MyStrategy(IntentStrategy):
         """Return ordered intents to unwind all positions."""
         from almanak.framework.teardown import TeardownMode
         max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
-        return [Intent.swap(from_token="WETH", to_token="USDC", amount="all", max_slippage=max_slippage)]
+        return [Intent.swap(
+            from_token="WETH", to_token="USDC", amount="all",
+            max_slippage=max_slippage, chain=self.chain,
+        )]
 ```
+
+When upgrading an existing strategy, update every teardown `Intent.swap(...)`
+to pass its configured execution chain explicitly. For a single-chain strategy,
+use `chain=self.chain`; for a multi-chain position, use the chain of that
+position. Apply the same change to custom teardown helper methods. Regenerating
+a template does not update previously created strategy files. Persisted pending
+swaps without a chain are rejected with a diagnostic; rebuild the teardown plan
+from the strategy's positions after updating the producer. The runner does not
+infer or backfill a missing chain.
 
 If your strategy holds multiple position types, close them in order: **perps -> borrows -> supplies -> LPs -> tokens**. See the [Teardown CLI](cli/strat-teardown.md) for how operators trigger teardown.
 
@@ -520,6 +532,24 @@ OpenAI-compatible provider).
 Both paths share the same gateway, connectors, and execution pipeline.
 
 **Get started:** [Agentic Trading Guide](agentic/index.md)
+
+### Explicit chains on teardown swaps
+
+Every swap returned by `generate_teardown_intents()` must specify `chain`.
+Single-chain strategies use `chain=self.chain`; multi-chain strategies use the
+chain of the position or inventory they are closing. Teardown validates this
+before reading balances and never infers a missing chain. Invalid chains fail the
+affected intent while independent valid exits continue.
+
+```python
+Intent.swap(from_token=self.base_token, to_token=self.quote_token,
+            amount="all", chain=self.chain, max_slippage=self.max_slippage)
+```
+
+The swap remains limited to the lesser of strategy-tracked inventory and live
+balance on that chain. Supplying a chain does not authorize sweeping unrelated
+wallet holdings. Unmeasured inventory is refused, including historical rows that
+lack the chain identity needed to prove ownership.
 
 ### Basis-trade collateral and leverage
 

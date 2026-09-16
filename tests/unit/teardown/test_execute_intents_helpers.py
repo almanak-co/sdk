@@ -445,7 +445,7 @@ async def test_execute_zero_balance_skip_counts_succeeded():
         result = await mgr._execute_intents(
             teardown_id="teardown-test",
             strategy=_bare_strategy(),
-            intents=[SimpleNamespace(max_slippage=None, intent_type="SWAP")],
+            intents=[SimpleNamespace(max_slippage=None, intent_type="SWAP", chain="arbitrum")],
             positions=_positions(),
             mode=TeardownMode.SOFT,
             teardown_state=_state(1),
@@ -486,7 +486,7 @@ async def test_execute_paused_returns_partial():
     result = await mgr._execute_intents(
         teardown_id="teardown-test",
         strategy=_bare_strategy(),
-        intents=[SimpleNamespace(max_slippage=None, intent_type="SWAP")],
+        intents=[SimpleNamespace(max_slippage=None, intent_type="SWAP", chain="arbitrum")],
         positions=_positions(),
         mode=TeardownMode.SOFT,
         teardown_state=_state(1),
@@ -508,7 +508,7 @@ async def test_execute_terminal_failure_counts_failed():
         result = await mgr._execute_intents(
             teardown_id="teardown-test",
             strategy=_bare_strategy(),
-            intents=[SimpleNamespace(max_slippage=None, intent_type="SWAP")],
+            intents=[SimpleNamespace(max_slippage=None, intent_type="SWAP", chain="arbitrum")],
             positions=_positions(),
             mode=TeardownMode.SOFT,
             teardown_state=state,

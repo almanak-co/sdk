@@ -549,7 +549,13 @@ async def _run_clamp(*, tracked_map, live=Decimal("100"), consent=False, intent=
     mgr.runner_helpers = TeardownRunnerHelpers(get_tracked_swap_inventory=inventory)
 
     if intent is None:
-        intent = {"intent_type": "SWAP", "amount": "all", "from_token": "USDC", "max_slippage": None}
+        intent = {
+            "intent_type": "SWAP",
+            "amount": "all",
+            "from_token": "USDC",
+            "max_slippage": None,
+            "chain": "arbitrum",
+        }
 
     result = await mgr._execute_intents(
         teardown_id="teardown-test",
@@ -739,7 +745,7 @@ class TestWarmOracleRiskFirst:
         withdraw = {"intent_type": "WITHDRAW", "amount": "all", "token": "aUSDC", "chain": "arbitrum"}
         swap_back = {"intent_type": "SWAP", "amount": "all", "from_token": "WETH", "chain": "arbitrum"}
 
-        oracle = tm._warm_oracle_risk_first(self._market(), [withdraw, swap_back], fail_loud=True)
+        oracle = tm._warm_oracle_risk_first(self._market(), [withdraw, swap_back], fail_loud=True, strategy=_strategy())
 
         # The risk-reducing WITHDRAW is warmed FAIL-LOUD; the clampable swap-back
         # is warmed BEST-EFFORT only — so an unpriceable swap-back can never raise

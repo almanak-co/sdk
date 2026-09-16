@@ -226,6 +226,7 @@ def generate_lending_unwind(
         loan_token=borrow_token,
         market_id=market_id,
     )
+    chain = position_ref.chain
     health = market.position_health(
         protocol=protocol,
         market_id=market_id or "",

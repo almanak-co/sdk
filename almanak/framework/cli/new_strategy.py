@@ -1766,6 +1766,7 @@ def _get_template_teardown(
             max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
             intents.append(
                 Intent.swap(
+                    chain=self.chain,
                     from_token=self.base_token,
                     to_token=self.quote_token,
                     amount="all",
@@ -1892,6 +1893,7 @@ def _get_template_teardown(
             # Swap remaining base tokens back to quote
             intents.append(
                 Intent.swap(
+                    chain=self.chain,
                     from_token=self.base_token,
                     to_token=self.quote_token,
                     amount="all",
@@ -2194,6 +2196,7 @@ def _get_template_teardown(
         ):
             intents.append(
                 Intent.swap(
+                    chain=self.chain,
                     from_token=self.base_token,
                     to_token=self.quote_token,
                     amount="all",
@@ -2395,6 +2398,7 @@ def _get_template_teardown(
                 if trade.get("to_token"):
                     intents.append(
                         Intent.swap(
+                            chain=self.chain,
                             from_token=trade["to_token"],
                             to_token=trade.get("from_token", "USDC"),
                             amount="all",
@@ -2738,6 +2742,7 @@ def _get_template_teardown(
             # Swap remaining base tokens back to quote
             intents.append(
                 Intent.swap(
+                    chain=self.chain,
                     from_token=self.base_token,
                     to_token=self.quote_token,
                     amount="all",
@@ -2848,6 +2853,7 @@ def _get_template_teardown(
                 max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
                 intents.append(
                     Intent.swap(
+                        chain=self.chain,
                         from_token=self.stake_token,
                         to_token=self.quote_token,
                         amount="all",

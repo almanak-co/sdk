@@ -153,14 +153,14 @@ async def test_unmeasured_accounting_clamp_skips_swap_and_continues(
 
 
 @pytest.mark.asyncio
-async def test_single_chain_balance_retry_failure_is_a_loud_compilation_failure(
+async def test_explicit_chain_balance_failure_is_a_loud_compilation_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     swap = _intent("SWAP", token="WETH")
     later = _intent("WITHDRAW")
     runner = _runner()
     market = MagicMock()
-    market.balance.side_effect = [TypeError("single-chain signature"), RuntimeError("RPC unavailable")]
+    market.balance.side_effect = RuntimeError("RPC unavailable")
     monkeypatch.setattr(rt.Intent, "has_chained_amount", MagicMock(side_effect=lambda intent: intent is swap))
     monkeypatch.setattr(rt, "_count_open_positions", AsyncMock(return_value=1))
     state_manager = MagicMock()
@@ -176,19 +176,18 @@ async def test_single_chain_balance_retry_failure_is_a_loud_compilation_failure(
     assert result.status is IterationStatus.COMPILATION_FAILED
     assert result.error == "Cannot resolve amount='all' for WETH: RPC unavailable"
     assert degraded == 0
-    assert market.balance.call_args_list == [call("WETH", "arbitrum"), call("WETH")]
+    assert market.balance.call_args_list == [call("WETH", chain="arbitrum")]
     runner._execute_single_chain.assert_not_awaited()
     state_manager.mark_failed.assert_called_once_with("deployment:test", error=result.error)
     runner._request_teardown_failure_shutdown.assert_called_once_with(result.error)
 
 
 @pytest.mark.parametrize("invalidation", ["unavailable", "raises"])
-def test_prepare_uses_single_chain_balance_when_invalidation_cannot_run(
+def test_prepare_uses_explicit_chain_when_invalidation_cannot_run(
     monkeypatch: pytest.MonkeyPatch,
     invalidation: str,
 ) -> None:
     intent = _intent("SWAP", token="WETH")
-    intent.chain = None
     resolved_intent = _intent("SWAP", token="WETH")
     market = SimpleNamespace(balance=MagicMock(return_value=Decimal("2")))
     if invalidation == "raises":
@@ -208,7 +207,7 @@ def test_prepare_uses_single_chain_balance_when_invalidation_cannot_run(
     )
 
     assert prepared == rt._InlinePreparedIntent(resolved_intent)
-    market.balance.assert_called_once_with("WETH")
+    market.balance.assert_called_once_with("WETH", chain="arbitrum")
     rt.Intent.set_resolved_amount.assert_called_once_with(intent, Decimal("2"))
 
 

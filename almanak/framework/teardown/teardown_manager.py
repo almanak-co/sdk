@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from almanak.framework.teardown.runner_helpers import TeardownRunnerHelpers
 
 from almanak.framework.teardown.cancel_window import CancelWindowManager
+from almanak.framework.teardown.chain_validation import teardown_intent_type, teardown_swap_chain_error
 from almanak.framework.teardown.completeness import (
     CompletenessReport,
     check_intent_coverage,
@@ -96,6 +97,8 @@ def _intent_field(intent: Any, name: str) -> str | None:
     ``"IntentType.VAULT_REDEEM"``) — the transience classifier matches the bare
     verb / protocol slug.
     """
+    if name == "intent_type":
+        return teardown_intent_type(intent) or None
     value = intent.get(name) if isinstance(intent, dict) else getattr(intent, name, None)
     if value is None:
         return None
@@ -211,7 +214,7 @@ def _zero_balance_swap_skip_reason(intent: Any, market: Any) -> str | None:
     amount = intent.get("amount") if is_dict else getattr(intent, "amount", None)
     if amount != "all":
         return None
-    intent_type_val = intent.get("intent_type") if is_dict else getattr(intent, "intent_type", None)
+    intent_type_val = teardown_intent_type(intent)
     intent_type_str = str(intent_type_val).upper() if intent_type_val is not None else ""
     if "SWAP" not in intent_type_str:
         return None
@@ -233,7 +236,7 @@ def _zero_balance_swap_skip_reason(intent: Any, market: Any) -> str | None:
         except Exception:  # noqa: BLE001 — fall back to the cached value
             logger.debug("invalidate_balance(%s) failed in skip-check; using cached balance", from_token, exc_info=True)
     try:
-        bal = market.balance(from_token)
+        bal = market.balance(from_token, chain=_intent_field(intent, "chain"))
     except Exception:  # noqa: BLE001 — market may not have this token registered yet
         return None
     balance_value = bal.balance if hasattr(bal, "balance") else bal
@@ -260,7 +263,7 @@ def _clampable_swap_from_token(intent: Any, market: Any) -> str | None:
     amount = intent.get("amount") if is_dict else getattr(intent, "amount", None)
     if amount != "all":
         return None
-    intent_type_val = intent.get("intent_type") if is_dict else getattr(intent, "intent_type", None)
+    intent_type_val = teardown_intent_type(intent)
     intent_type_str = str(intent_type_val).upper() if intent_type_val is not None else ""
     if "SWAP" not in intent_type_str:
         return None
@@ -275,7 +278,7 @@ def _clampable_swap_from_token(intent: Any, market: Any) -> str | None:
     return from_token or None
 
 
-def _read_live_wallet_balance(market: Any, token: str) -> Decimal | None:
+def _read_live_wallet_balance(market: Any, token: str, *, chain: str | None = None) -> Decimal | None:
     """Fresh live wallet balance for ``token`` as a ``Decimal``, or ``None``.
 
     Evicts the memoized balance first (VIB-5074): an earlier teardown intent
@@ -291,7 +294,7 @@ def _read_live_wallet_balance(market: Any, token: str) -> Decimal | None:
         except Exception:  # noqa: BLE001 — fall back to the cached value.
             logger.debug("invalidate_balance(%s) failed in clamp read; using cached balance", token, exc_info=True)
     try:
-        bal = market.balance(token)
+        bal = market.balance(token, chain=chain)
     except Exception:  # noqa: BLE001 — token may not be registered yet.
         return None
     balance_value = bal.balance if hasattr(bal, "balance") else bal
@@ -479,7 +482,9 @@ def _warm_oracle_best_effort(market: Any, executable: list[Any], chain: str | No
     return warm_and_validate_oracle(market, executable, chain, raise_on_missing=False)
 
 
-def _warm_oracle_risk_first(market: Any, intents: list[Any], *, fail_loud: bool) -> dict[str, Any] | None:
+def _warm_oracle_risk_first(
+    market: Any, intents: list[Any], *, fail_loud: bool, strategy: Any = None
+) -> dict[str, Any] | None:
     """Warm the price oracle, failing loud ONLY for risk-reducing intents.
 
     ALM-2766 (CodeRabbit CR#3): the VIB-4842 fail-loud pre-flight warm runs on
@@ -497,7 +502,8 @@ def _warm_oracle_risk_first(market: Any, intents: list[Any], *, fail_loud: bool)
     Builds on ``_intents_requiring_pricing`` (zero-balance no-op swaps already
     excluded) and ``_clampable_swap_from_token``.
     """
-    executable = _intents_requiring_pricing(intents, market)
+    valid_intents = [i for i in intents if teardown_swap_chain_error(i, strategy, market) is None]
+    executable = _intents_requiring_pricing(valid_intents, market)
     swap_backs = [i for i in executable if _clampable_swap_from_token(i, market)]
     risk_intents = [i for i in executable if _clampable_swap_from_token(i, market) is None]
 
@@ -1072,7 +1078,7 @@ class TeardownManager:
         market: Any,
     ) -> _ExecuteDispatch:
         """Run Blueprint 14a Stage 3 after all pre-flight gates pass."""
-        price_oracle = _warm_oracle_risk_first(market, plan.intents, fail_loud=True)
+        price_oracle = _warm_oracle_risk_first(market, plan.intents, fail_loud=True, strategy=strategy)
         pre_reconciliation = await self._pre_teardown_reconciliation(strategy, plan.positions, market)
         result = await self._execute_intents(
             teardown_id=teardown_id,
@@ -1448,9 +1454,9 @@ class TeardownManager:
                 state.completed_intents,
                 state.current_intent_index,
             )
-            price_oracle = _warm_oracle_risk_first(market, intents_data, fail_loud=False)
+            price_oracle = _warm_oracle_risk_first(market, intents_data, fail_loud=False, strategy=strategy)
         else:
-            price_oracle = _warm_oracle_risk_first(market, intents_data, fail_loud=True)
+            price_oracle = _warm_oracle_risk_first(market, intents_data, fail_loud=True, strategy=strategy)
 
         positions = strategy.get_open_positions()
 
@@ -2005,7 +2011,11 @@ class TeardownManager:
         if live_balance is None:
             return SwapClampDecision(None, True, True, "live_balance_unmeasured")
         tracked_map = (
-            self.runner_helpers.get_tracked_swap_inventory(strategy)  # type: ignore[misc]
+            self.runner_helpers.get_tracked_swap_inventory(
+                strategy,
+                chain=_intent_field(intent, "chain"),
+                wallet_address=_teardown_wallet_for_chain(strategy, _intent_field(intent, "chain") or ""),
+            )  # type: ignore[misc]
             if self.runner_helpers.has_tracked_inventory
             else None
         )
@@ -2151,17 +2161,16 @@ class TeardownManager:
         resolve against on-chain figures at execution time, never stale cache.
         """
         is_dict = isinstance(intent, dict)
+        intent_type_val = teardown_intent_type(intent)
         if is_dict:
             amount_value = intent.get("amount")
             from_token = intent.get("from_token") or intent.get("token")
             withdraw_all = intent.get("withdraw_all")
-            intent_type_val = intent.get("intent_type")
             to_token = intent.get("to_token")
         else:
             amount_value = getattr(intent, "amount", None)
             from_token = getattr(intent, "from_token", None) or getattr(intent, "token", None)
             withdraw_all = getattr(intent, "withdraw_all", False)
-            intent_type_val = getattr(intent, "intent_type", None)
             to_token = getattr(intent, "to_token", None)
         upper = str(intent_type_val).upper() if intent_type_val else ""
         return {
@@ -2210,7 +2219,7 @@ class TeardownManager:
                     exc_info=True,
                 )
         try:
-            bal = market.balance(from_token)
+            bal = market.balance(from_token, chain=_intent_field(intent, "chain"))
         except Exception as e:
             return intent, f"Cannot resolve amount='all' for {from_token}: {e}"
         if bal.balance <= 0:
@@ -2429,7 +2438,10 @@ class TeardownManager:
         """Build a context scoped to the intent's persisted chain and wallet."""
         from almanak.framework.execution.orchestrator import ExecutionContext
 
-        intent_chain = _intent_field(intent, "chain") or strategy.chain
+        intent_chain = _intent_field(intent, "chain")
+        if _intent_field(intent, "intent_type") == "SWAP" and not intent_chain:
+            raise ValueError("Teardown SWAP requires an explicit chain")
+        intent_chain = intent_chain or strategy.chain
         return ExecutionContext(
             deployment_id=strategy.deployment_id,
             simulation_enabled=self.simulation_enabled,
@@ -3047,6 +3059,8 @@ class TeardownManager:
         teardown_cycle_id: str,
         accepted_async_recovery_intents: list[Any] | None,
         resume_floor: Callable[[], int],
+        *,
+        market: Any = None,
     ) -> tuple[bool, Any, int, int, bool] | None:
         """Async-settlement branch for a persisted accepted submission (VIB-6254).
 
@@ -3060,6 +3074,12 @@ class TeardownManager:
         """
         if not _is_persisted_async_submission_accepted(intent):
             return None
+        chain_error = teardown_swap_chain_error(intent, strategy, market)
+        if chain_error:
+            logger.error("Accepted async teardown intent %d/%d rejected: %s", i + 1, n_intents, chain_error)
+            # Keep the accepted order pending: missing chain identity cannot prove settlement.
+            await self._save_execute_floor(teardown_state, resume_floor())
+            return True, intent, 0, 1, True
         ledger_entry_id, order_keys = _accepted_async_submission_metadata(intent)
         settlement_status = await self._check_async_settlement(
             strategy, intent, teardown_cycle_id, ledger_entry_id, order_keys
@@ -3144,7 +3164,7 @@ class TeardownManager:
         clamp_token = _clampable_swap_from_token(intent, market)
         if not clamp_token:
             return intent, False, 0, 0
-        live_balance = _read_live_wallet_balance(market, clamp_token)
+        live_balance = _read_live_wallet_balance(market, clamp_token, chain=_intent_field(intent, "chain"))
         decision = self._decide_swap_clamp(strategy, intent, market, clamp_token, live_balance)
         if decision.degraded:
             accounting_degraded_records.append(
@@ -3356,6 +3376,7 @@ class TeardownManager:
                 teardown_cycle_id,
                 accepted_async_recovery_intents,
                 _resume_floor,
+                market=market,
             )
             if async_outcome is not None:
                 should_continue, intent = self._apply_async_queue_outcome(
@@ -3375,6 +3396,16 @@ class TeardownManager:
                 _resume_floor,
                 on_progress,
             )
+
+            chain_error = teardown_swap_chain_error(intent, strategy, market)
+            if chain_error:
+                logger.error("Teardown intent %d/%d rejected: %s", i + 1, len(intents), chain_error)
+                totals.failed += 1
+                _pending_indices.discard(i)
+                await self._save_execute_floor(teardown_state, _resume_floor())
+                if on_progress:
+                    await on_progress(progress_pct, chain_error)
+                continue
 
             # A zero-balance sweep is complete without execution.
             skip_reason = await self._process_zero_balance_skip(

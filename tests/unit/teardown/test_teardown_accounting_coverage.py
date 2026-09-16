@@ -142,6 +142,7 @@ def fake_orchestrator() -> MagicMock:
 @pytest.fixture
 def fake_compiler() -> MagicMock:
     comp = MagicMock(name="IntentCompiler")
+    comp.assert_prices_available = MagicMock(return_value=None)
     bundle = SimpleNamespace(
         metadata={"expected_output_human": "1.5"},
     )
@@ -278,6 +279,7 @@ async def test_t9_manager_invokes_commit_with_correct_args(fake_orchestrator, fa
     assert len(commit_calls) == 1
     call = commit_calls[0]
     assert call["intent_type"] == "SWAP"
+    fake_compiler.assert_prices_available.assert_called_once()
     assert call["tx_hash"] == "0xabc"
     assert call["bundle_metadata"] == {"expected_output_human": "1.5"}
     assert call["teardown_cycle_id"] == "teardown-td-uuid-7"

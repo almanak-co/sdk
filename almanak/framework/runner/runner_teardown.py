@@ -2154,7 +2154,9 @@ def _apply_inline_swap_clamp(
         live = None
 
     # The intent chain must key both the live balance and tracked inventory.
-    effective_chain = getattr(intent, "chain", None) or chain
+    effective_chain = getattr(intent, "chain", None)
+    if not effective_chain:
+        return True, True, None
 
     if live is None:
         decision = SwapClampDecision(None, True, True, "live_balance_unmeasured")
@@ -2165,6 +2167,7 @@ def _apply_inline_swap_clamp(
                 state_manager=getattr(runner, "state_manager", None),
                 deployment_id=deployment_id,
                 chain=effective_chain,
+                scope_chain=effective_chain,
                 wallet_address=wallet_address,
             ),
             from_token=balance_token,
@@ -2197,6 +2200,7 @@ class _InlinePreparedIntent:
     skipped: bool = False
     failure_result: Any = None
     accounting_degraded: bool = False
+    continue_after_failure: bool = False
 
 
 @dataclass(frozen=True)
@@ -2211,17 +2215,9 @@ def _read_inline_teardown_balance(
     balance_token: str,
     intent_chain: str | None,
 ) -> tuple[Any, Exception | None]:
-    """Read the live Stage 2 amount while retaining single-chain fallback semantics."""
+    """Read the explicitly selected chain without retrying on another chain."""
     try:
-        if intent_chain:
-            return teardown_market.balance(balance_token, intent_chain), None
-        return teardown_market.balance(balance_token), None
-    except TypeError:
-        # A single-chain MarketSnapshot does not accept the chain argument.
-        try:
-            return teardown_market.balance(balance_token), None
-        except Exception as exc:  # noqa: BLE001
-            return None, exc
+        return teardown_market.balance(balance_token, chain=intent_chain), None
     except Exception as exc:  # noqa: BLE001
         return None, exc
 
@@ -2235,7 +2231,22 @@ def _prepare_inline_teardown_intent(
     intent_index: int,
 ) -> _InlinePreparedIntent:
     """Resolve one Stage 2 live amount and apply the tracked-inventory clamp."""
+    from ..teardown.chain_validation import teardown_swap_chain_error
     from .runner_models import IterationResult, IterationStatus
+
+    chain_error = teardown_swap_chain_error(intent, strategy, teardown_market)
+    if chain_error:
+        return _InlinePreparedIntent(
+            intent,
+            continue_after_failure=True,
+            failure_result=IterationResult(
+                status=IterationStatus.COMPILATION_FAILED,
+                intent=intent,
+                error=chain_error,
+                deployment_id=strategy.deployment_id,
+                duration_ms=runner._calculate_duration_ms(start_time),
+            ),
+        )
 
     if not Intent.has_chained_amount(intent):
         return _InlinePreparedIntent(intent)
@@ -2389,6 +2400,7 @@ async def _dispatch_inline_teardown_intents(
     """Run Blueprint 14a Stage 3 sequentially, stopping only on chain-side failure."""
     accounting_degraded_count = 0
     last_result = None
+    validation_failure = None
     for intent_index, intent in enumerate(teardown_intents):
         logger.info(
             f"🛑 Executing teardown intent {intent_index + 1}/{len(teardown_intents)}: {intent.intent_type.value}"
@@ -2403,6 +2415,10 @@ async def _dispatch_inline_teardown_intents(
         )
         accounting_degraded_count += int(prepared.accounting_degraded)
         if prepared.failure_result is not None:
+            if prepared.continue_after_failure:
+                validation_failure = validation_failure or prepared.failure_result
+                logger.error("Teardown intent %d rejected: %s", intent_index + 1, prepared.failure_result.error)
+                continue
             return _InlineDispatchOutcome(prepared.failure_result, False, accounting_degraded_count)
         if prepared.skipped:
             continue
@@ -2424,6 +2440,8 @@ async def _dispatch_inline_teardown_intents(
             logger.error(f"🛑 Teardown intent {intent_index + 1} failed: {result.error}")
             return _InlineDispatchOutcome(last_result, False, accounting_degraded_count)
 
+    if validation_failure is not None:
+        return _InlineDispatchOutcome(validation_failure, False, accounting_degraded_count)
     return _InlineDispatchOutcome(last_result, True, accounting_degraded_count)
 
 

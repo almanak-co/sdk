@@ -40,7 +40,8 @@ def _market_with_balance(token: str, balance: Decimal | int | float):
 
     bal = SimpleNamespace(balance=Decimal(str(balance)))
 
-    def _lookup(arg_token: str):
+    def _lookup(arg_token: str, *, chain: str | None = None):
+        assert chain in (None, "arbitrum")
         if arg_token != token:
             raise AssertionError(f"market.balance() called with {arg_token!r}; expected {token!r}")
         return bal

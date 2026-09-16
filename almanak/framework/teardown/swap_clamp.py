@@ -215,14 +215,41 @@ def read_no_accounting_ledger_rows(state_manager: Any, deployment_id: str) -> li
     return rows
 
 
+def _sum_scoped_inventory(
+    events: list[dict[str, Any]],
+    ledger_rows: list[dict[str, Any]] | None,
+    deployment_id: str,
+    chain: str,
+    wallet_address: str,
+    scope_chain: str | None,
+) -> dict[str, Decimal | None] | None:
+    """Never attribute another chain's same-symbol inventory to this exit."""
+    if scope_chain is not None:
+        if any(not isinstance(row, dict) or not row.get("chain") for row in events):
+            return None
+        events = [row for row in events if str(row["chain"]).lower() == scope_chain]
+        if ledger_rows is not None:
+            if any(not isinstance(row, dict) or not row.get("chain") for row in ledger_rows):
+                ledger_rows = None
+            else:
+                ledger_rows = [row for row in ledger_rows if str(row["chain"]).lower() == scope_chain]
+    return sum_open_wallet_basis_by_token(
+        events, deployment_id, ledger_rows=ledger_rows, chain=chain, wallet_address=wallet_address
+    )
+
+
 def read_tracked_swap_inventory(
     *,
     state_manager: Any,
     deployment_id: str,
     chain: str = "",
     wallet_address: str = "",
+    scope_chain: str | None = None,
 ) -> dict[str, Decimal | None] | None:
     """Deployment-scoped tracked wallet inventory, or the UNMEASURED sentinel.
+
+    ``scope_chain`` limits replay to one explicitly selected chain; rows without
+    chain identity make the scoped read unmeasured rather than guessing ownership.
 
     Returns ``None`` (unmeasured) when the deployment id is empty, the state
     manager cannot supply accounting events (no accounting backend wired), or
@@ -292,9 +319,7 @@ def read_tracked_swap_inventory(
         # (STAKE/WRAP/MINT) into the tracked map so their wallet inventory is
         # clamp-visible. A None ledger read drops ONLY that lane (strand, safe).
         ledger_rows = read_no_accounting_ledger_rows(state_manager, deployment_id)
-        return sum_open_wallet_basis_by_token(
-            events, deployment_id, ledger_rows=ledger_rows, chain=chain, wallet_address=wallet_address
-        )
+        return _sum_scoped_inventory(events, ledger_rows, deployment_id, chain, wallet_address, scope_chain)
     # VIB-5173 fallback (local ``StateManager``): no per-read measured signal,
     # but a cheap structural probe distinguishes a structurally-absent backend
     # (UNMEASURED) from a genuinely-empty event set (measured zero). Require the
@@ -322,9 +347,7 @@ def read_tracked_swap_inventory(
         events = state_manager.get_accounting_events_sync(deployment_id)
         # VIB-5416: same additive NO_ACCOUNTING ledger fold as the measured path.
         ledger_rows = read_no_accounting_ledger_rows(state_manager, deployment_id)
-        return sum_open_wallet_basis_by_token(
-            events, deployment_id, ledger_rows=ledger_rows, chain=chain, wallet_address=wallet_address
-        )
+        return _sum_scoped_inventory(events, ledger_rows, deployment_id, chain, wallet_address, scope_chain)
     except Exception:  # noqa: BLE001 — read-only DX guard; never block the unwind.
         logger.warning(
             "ALM-2766 tracked-inventory read failed for %s — swap-back clamp will fail closed",

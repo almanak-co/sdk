@@ -902,6 +902,7 @@ class UniswapRSIStrategy(IntentStrategy):
         # Swap all base token back to quote token
         intents.append(
             Intent.swap(
+                    chain=self.chain,
                 from_token=self.base_token,
                 to_token=self.quote_token,
                 amount="all",  # Swap entire balance
