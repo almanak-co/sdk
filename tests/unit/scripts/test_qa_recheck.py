@@ -179,3 +179,16 @@ def test_read_only_and_anvil_routes_do_not_request_money_approval(recheck_module
     assert any("--i-authorize-live-mainnet-funds" in item for item in aave_mainnet["prerequisites"])
     assert not any("ALMANAK_QA_MAINNET_LANE" in item for item in anvil["prerequisites"])
     assert any("single-use" in item for item in aave_mainnet["prerequisites"])
+
+
+@pytest.mark.parametrize("scenario_count", [1, 2])
+def test_parent_recheck_cannot_choose_an_asset_scenario(recheck_module: ModuleType, scenario_count: int) -> None:
+    _, catalog, _ = _catalogs()
+    cell = catalog["cells"][0]
+    cell["asset_scenarios"] = [
+        {"scenario_id": f"market-{index}", "parent_bindings": [{"parent_cell_id": f"{cell['id']}.anvil.eoa"}]}
+        for index in range(scenario_count)
+    ]
+    route = recheck_module._intent_route(cell, "anvil", "eoa", {})
+    assert "--scenario-id" in route["reason"]
+    assert not route.get("command")

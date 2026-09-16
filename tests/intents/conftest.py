@@ -2038,7 +2038,12 @@ def intent_evidence(  # type: ignore[no-untyped-def]
         web3_instance = request.node.funcargs.get("web3")
         if web3_instance is None:
             return {"status": "UNMEASURED", "reason": "node did not expose its Web3 fixture"}
-        return capture_provenance(web3_instance, receipt, network=network)
+        provenance = capture_provenance(web3_instance, receipt, network=network)
+        if plan_path := os.environ.get("ALMANAK_QA_ASSET_SCOPE_PLAN"):
+            from tests.intents._asset_scope_observations import capture_asset_identity
+
+            provenance["asset_identity"] = capture_asset_identity(web3_instance, receipt, plan_path, request.node.nodeid)
+        return provenance
 
     recorder = IntentEvidenceRecorder(
         output_dir=output_dir,

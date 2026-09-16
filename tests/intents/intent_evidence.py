@@ -570,6 +570,7 @@ class IntentEvidenceRecorder:
             "chain": self._intents[cell_id].payload["chain"],
             "chain_id": self.chain_id or external_provenance.get("chain_id"),
             "external_provenance": external_provenance,
+            "asset_identity": external_provenance.get("asset_identity"),
             "intent": self._intents[cell_id].payload["intent"],
             "outcome_class": outcome_class,
             "source_request": self._intents[cell_id].payload["source_request"],

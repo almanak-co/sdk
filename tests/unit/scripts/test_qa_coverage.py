@@ -4415,7 +4415,7 @@ def test_layout_migration_moves_evidence_and_leaves_the_chain_verifiable(
         for artifact in record.get("artifacts") or []:
             assert (store / artifact["relpath"]).exists(), f"migrated artifact is missing: {artifact['relpath']}"
 
-    preserved = store / "index" / f"{Path(history.HISTORY_LEDGER_NAME).stem}.pre-schema2.jsonl"
+    preserved = store / "index" / f"{Path(history.HISTORY_LEDGER_NAME).stem}.pre-schema{qa.STORE_SCHEMA_VERSION}.jsonl"
     assert '"runs/' in preserved.read_text(), "the pre-migration ledger must be preserved verbatim"
     manifest = json.loads((store / "store.json").read_text())
     assert manifest["schema_version"] == qa.STORE_SCHEMA_VERSION
