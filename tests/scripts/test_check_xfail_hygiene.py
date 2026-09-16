@@ -75,11 +75,7 @@ def test_missing_ticket_ref_is_flagged(hygiene, tmp_path):
 
 def test_missing_date_is_flagged(hygiene, tmp_path):
     source = (
-        "import pytest\n"
-        "\n"
-        "@pytest.mark.xfail(reason='VIB-9000: bug', strict=True)\n"
-        "def test_foo():\n"
-        "    assert False\n"
+        "import pytest\n\n@pytest.mark.xfail(reason='VIB-9000: bug', strict=True)\ndef test_foo():\n    assert False\n"
     )
     [violation] = _evaluate_source(hygiene, source, tmp_path)
     assert violation is not None
@@ -390,9 +386,7 @@ def test_resolve_linear_ref_without_key_is_unknown(hygiene):
 def _linear_response(state_type, state_name):
     import json
 
-    return json.dumps(
-        {"data": {"issue": {"identifier": "VIB-1", "state": {"name": state_name, "type": state_type}}}}
-    )
+    return json.dumps({"data": {"issue": {"identifier": "VIB-1", "state": {"name": state_name, "type": state_type}}}})
 
 
 @pytest.mark.parametrize(
@@ -422,9 +416,7 @@ def test_resolve_linear_ref_degrades_to_unknown(hygiene):
     assert "API error" in status.detail
 
     # Issue not found / no access -> data.issue is null.
-    status = hygiene.resolve_linear_ref(
-        "VIB-1", api_key="key", post=lambda key, payload: '{"data": {"issue": null}}'
-    )
+    status = hygiene.resolve_linear_ref("VIB-1", api_key="key", post=lambda key, payload: '{"data": {"issue": null}}')
     assert status.status == hygiene.STATUS_UNKNOWN
 
     # Malformed body -> UNKNOWN, never a crash.
@@ -488,9 +480,7 @@ def test_format_liveness_report_markdown_escapes_pipes(hygiene, tmp_path):
     target = tmp_path / "test_md.py"
     target.write_text(source, encoding="utf-8")
     sites = hygiene._collect_sites(target)
-    rows, cache = hygiene.build_liveness_rows(
-        sites, lambda ref: _ref_status(hygiene, ref, hygiene.STATUS_CLOSED)
-    )
+    rows, cache = hygiene.build_liveness_rows(sites, lambda ref: _ref_status(hygiene, ref, hygiene.STATUS_CLOSED))
     report = hygiene.format_liveness_report(rows, cache, markdown=True)
     assert "| Site | Ref | Status | Detail | Reason (excerpt) |" in report
     assert "a \\| b pipe" in report
@@ -523,11 +513,31 @@ def test_real_repo_passes_check(hygiene):
     for f in files:
         sites.extend(hygiene._collect_sites(f))
     violations = [v for s in sites if (v := hygiene._evaluate(s))]
-    assert not violations, (
-        "xfail hygiene violations in tests/intents/:\n"
-        + hygiene.format_report(
-            violations,
-            total_sites=len(sites),
-            grandfathered=sum(1 for s in sites if s.grandfathered),
-        )
+    assert not violations, "xfail hygiene violations in tests/intents/:\n" + hygiene.format_report(
+        violations,
+        total_sites=len(sites),
+        grandfathered=sum(1 for s in sites if s.grandfathered),
     )
+
+
+@pytest.mark.parametrize("prefix", ["ALM", "VIB"])
+def test_linear_prefix_is_accepted_and_uses_linear_liveness(hygiene, tmp_path, monkeypatch, prefix):
+    ticket = f"{prefix}-1234"
+    source = (
+        "import pytest\n"
+        f"@pytest.mark.xfail(reason='{ticket}: defect (as of 2026-09-10)', strict=True)\n"
+        "def test_example():\n    assert False\n"
+    )
+    site = _collect_single_site(hygiene, source, tmp_path)
+    assert site.refs == (ticket,)
+    assert hygiene._evaluate(site) is None
+    calls = []
+    sentinel = object()
+
+    def resolve(ref, api_key):
+        calls.append(ref)
+        return sentinel
+
+    monkeypatch.setattr(hygiene, "resolve_linear_ref", resolve)
+    assert hygiene.default_resolver(ticket) is sentinel
+    assert calls == [ticket]

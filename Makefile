@@ -90,7 +90,7 @@ check-comment-quality: ## Reject new historical or decorative Python comments
 check-xfail-hygiene:
 	uv run python scripts/ci/check_xfail_hygiene.py --check --verbose
 
-# Out-of-band ticket-liveness report (VIB-5965): resolve every VIB-XXXX /
+# Out-of-band ticket-liveness report (VIB-5965): resolve every ALM-XXXX / VIB-XXXX /
 # #NNNN referenced by xfail sites under tests/intents/ and list sites whose
 # every tracker is closed. Needs the gh CLI for GitHub refs and LINEAR_API_KEY
 # for Linear refs; unresolvable refs report UNKNOWN. Never part of the PR gate

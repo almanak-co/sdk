@@ -123,6 +123,28 @@ class TestLinearAdapterDryRun:
         assert results == []
 
 
+class TestLinearRoutingConstants:
+    """Pin the routing constants to live Linear destinations.
+
+    The commit-mode tests below compare each field to the constant it came from,
+    so they hold for any value including a retired one. These name the
+    destinations instead.
+    """
+
+    def test_team_is_not_the_retired_vibecoders_team(self):
+        """VibeCoders was retired 2026-09-04; tickets filed there go nowhere."""
+        assert LINEAR_TEAM == "Almanak"
+
+    def test_project_keeps_the_parent_tickets_project(self):
+        """ALM-3906 lives in AGI - Strategist; SDK would orphan every child."""
+        assert LINEAR_PROJECT == "AGI - Strategist"
+
+    def test_parent_ticket_uses_the_almanak_identifier(self):
+        """VIB-266 migrated to the Almanak team and is now ALM-3906."""
+        assert LINEAR_PARENT_TICKET == "ALM-3906"
+        assert not LINEAR_PARENT_TICKET.startswith("VIB-")
+
+
 class TestLinearAdapterCommitMode:
     """Test commit mode (prepares args for Linear MCP tools)."""
 

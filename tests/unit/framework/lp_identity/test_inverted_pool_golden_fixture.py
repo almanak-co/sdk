@@ -977,7 +977,7 @@ class TestLaneAgreement:
             # how a "temporary" exemption becomes permanent. A REPRESENTATIONAL
             # row WITH one points a reader at a bug that does not exist.
             if kind == DEFECT:
-                assert ticket.startswith("VIB-"), (
+                assert ticket.startswith(("ALM-", "VIB-")), (
                     f"LANE_DEVIATIONS[{name!r}, {lane!r}] is a DEFECT but names no "
                     f"tracking ticket (got {ticket!r}); it would go untracked."
                 )
