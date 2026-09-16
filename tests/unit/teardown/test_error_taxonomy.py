@@ -128,13 +128,13 @@ class TestSlippageStillEscalates:
         assert rc is RevertClass.SLIPPAGE_MINIMUM_VIOLATED
 
 
-class TestUnknownPreservesEscalation:
-    """Unknown / bare reverts preserve the historical escalate behaviour."""
+class TestUnknownStopsEscalation:
+    """Unknown failures provide no evidence for changing price tolerance."""
 
     @pytest.mark.parametrize("msg", ["", None, "some totally novel revert reason", "execution reverted"])
-    def test_escalate(self, msg: str | None) -> None:
+    def test_stop(self, msg: str | None) -> None:
         rc, disp = classify_teardown_failure(msg)
-        assert disp is Disposition.ESCALATE
+        assert disp is Disposition.NON_RETRYABLE
         assert rc is RevertClass.UNKNOWN
 
 
@@ -212,3 +212,20 @@ class TestVaultCashShortage:
         revert_class, disposition = classify_teardown_failure("Insufficient USDC: need 100, have 5 (deficit: 95)")
         assert revert_class == RevertClass.INSUFFICIENT_BALANCE
         assert disposition == Disposition.NON_RETRYABLE
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "TooLittleReceived()",
+        "LBRouter__InsufficientAmountOut(uint256,uint256)",
+        "MinimumAmountInsufficient(uint128,uint128)",
+    ],
+)
+def test_known_minimum_output_reverts_escalate(message):
+    assert classify_teardown_failure(message) == (RevertClass.SLIPPAGE_MINIMUM_VIOLATED, Disposition.ESCALATE)
+
+
+@pytest.mark.parametrize("message", ["SomeMinimumAmountInsufficientWrapper", "MinimumAmountInsufficientExtra"])
+def test_minimum_output_error_name_requires_identifier_boundaries(message):
+    assert classify_teardown_failure(message) == (RevertClass.UNKNOWN, Disposition.NON_RETRYABLE)

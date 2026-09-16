@@ -560,3 +560,29 @@ async def test_execute_resumed_dict_uses_persisted_chain_and_wallet():
     assert context.chain == "base"
     assert context.wallet_address == "0xbase"
     strategy.get_wallet_for_chain.assert_called_with("base")
+
+
+@pytest.mark.asyncio
+async def test_execute_unavailable_simulation_never_requeues_transient_revert():
+    mgr = _mgr()
+    execution = SimpleNamespace(
+        error="Panic(17)",
+        extracted_data={"execution_evidence": {"simulation": {"simulated": False, "failure_kind": "unavailable"}}},
+        transaction_results=[],
+    )
+    attempt = mgr._failed_execution_attempt(execution, Decimal("0.005"), 0, 1)
+    mgr.slippage_manager.execute_with_escalation = AsyncMock(
+        return_value=_exec_fail(attempts=[attempt], message="Panic(17)")
+    )
+    with patch("asyncio.sleep", new=AsyncMock()) as sleep:
+        result = await mgr._execute_intents(
+            teardown_id="teardown-test",
+            strategy=_bare_strategy(),
+            intents=[SimpleNamespace(max_slippage=None, intent_type="VAULT_REDEEM", protocol="metamorpho")],
+            positions=_positions(),
+            mode=TeardownMode.SOFT,
+            teardown_state=_state(1),
+        )
+    assert not result.success and result.intents_failed == 1
+    mgr.slippage_manager.execute_with_escalation.assert_awaited_once()
+    sleep.assert_not_awaited()

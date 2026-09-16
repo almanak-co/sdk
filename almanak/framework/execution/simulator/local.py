@@ -295,7 +295,11 @@ class LocalSimulator(Simulator):
             )
             return 0, decoded
         except Exception as e:
-            raise SimulationError(f"Gas estimation unavailable: {e}") from e
+            from .failures import simulation_failure_kind
+
+            raise SimulationError(
+                f"Gas estimation unavailable: {e}", recoverable=simulation_failure_kind(e) == "transient"
+            ) from e
 
     def _parse_revert_reason(self, error_str: str) -> str:
         """Parse revert reason from error string.
@@ -443,16 +447,20 @@ class LocalSimulator(Simulator):
         except Exception as e:
             return f"Transaction reverted (eth_call failed: {type(e).__name__})"
 
-    async def _create_snapshot_if_needed(self, web3: AsyncWeb3, tx_count: int) -> tuple[Any, list[str]]:
+    async def _create_snapshot_if_needed(self, web3: AsyncWeb3, tx_count: int) -> tuple[Any, list[str], str | None]:
         """Create an EVM snapshot for multi-tx bundles (to restore state after).
 
-        Returns (snapshot_id, warnings). snapshot_id is None when no snapshot
+        Returns (snapshot_id, warnings, failure_kind). snapshot_id is None when no snapshot
         was created (single-tx bundle, remote RPC, or evm_snapshot failure);
         warnings then explains why dependent simulation is unavailable.
         """
         if tx_count <= 1:
-            return None, []
+            return None, [], None
 
+        from .failures import simulation_failure_kind
+
+        failure_kind = "unavailable"
+        failure_reason = "RPC snapshot support is unavailable"
         snapshot_id = None
         snapshot_unavailable = False
         if not is_local_rpc(self._rpc_url):
@@ -473,18 +481,24 @@ class LocalSimulator(Simulator):
                     logger.debug(f"Created EVM snapshot: {snapshot_id}")
                 else:
                     snapshot_unavailable = True
+                    failure_reason = str(result.get("error") or failure_reason)
+                    failure_kind = simulation_failure_kind(failure_reason)
                     logger.warning(
                         "evm_snapshot returned None - snapshot not supported. "
                         "Dependent bundle simulation is unavailable."
                     )
             except TimeoutError:
                 snapshot_unavailable = True
+                failure_kind = "transient"
+                failure_reason = "evm_snapshot timed out"
                 logger.warning(
                     f"evm_snapshot timed out after {_EVM_SNAPSHOT_TIMEOUT}s. "
                     "Dependent bundle simulation is unavailable."
                 )
             except Exception as e:
                 snapshot_unavailable = True
+                failure_kind = simulation_failure_kind(e)
+                failure_reason = str(e)
                 logger.warning(
                     f"evm_snapshot failed (unexpected on Anvil): {e}. Dependent bundle simulation is unavailable."
                 )
@@ -493,10 +507,10 @@ class LocalSimulator(Simulator):
         warnings: list[str] = []
         if snapshot_unavailable:
             warnings.append(
-                "Snapshot unavailable: dependent transactions were not simulated. "
+                f"Snapshot unavailable ({failure_reason}): dependent transactions were not simulated. "
                 "Use a sequential simulation backend or a managed Anvil fork."
             )
-        return snapshot_id, warnings
+        return snapshot_id, warnings, failure_kind if snapshot_unavailable else None
 
     async def _revert_snapshot(self, web3: AsyncWeb3, snapshot_id: Any) -> None:
         """Revert to the pre-simulation snapshot, restoring original state.
@@ -634,6 +648,7 @@ class LocalSimulator(Simulator):
                 simulated=False,
                 gas_estimates=gas_estimates,
                 revert_reason=str(exc),
+                failure_kind="transient" if exc.recoverable else "unavailable",
             )
 
         if error:
@@ -644,6 +659,7 @@ class LocalSimulator(Simulator):
             return 0, SimulationResult(
                 success=False,
                 simulated=not error.startswith(_ESTIMATE_GAS_TIMEOUT_MARKER),
+                failure_kind="transient" if error.startswith(_ESTIMATE_GAS_TIMEOUT_MARKER) else None,
                 gas_estimates=gas_estimates,
                 revert_reason=error,
             )
@@ -693,14 +709,15 @@ class LocalSimulator(Simulator):
         web3 = await self._get_web3()
 
         # Create snapshot for multi-tx bundles (to restore state after simulation)
-        snapshot_id, warnings = await self._create_snapshot_if_needed(web3, tx_count)
+        snapshot_id, warnings, snapshot_failure_kind = await self._create_snapshot_if_needed(web3, tx_count)
         is_multi_tx_bundle = tx_count > 1
 
         if is_multi_tx_bundle and snapshot_id is None:
             return SimulationResult(
                 success=False,
                 simulated=False,
-                revert_reason="Dependent transactions require sequential simulation; RPC snapshot support is unavailable",
+                revert_reason="Dependent transactions require sequential simulation: " + "; ".join(warnings),
+                failure_kind=snapshot_failure_kind,
                 warnings=warnings,
                 simulator_name=self._name,
                 evidence={

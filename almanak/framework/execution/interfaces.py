@@ -585,6 +585,8 @@ class SimulationResult:
         state_changes: State changes that would result from execution
         logs: Event logs that would be emitted
         simulation_url: Link to simulation details (e.g., Tenderly URL)
+        failure_kind: Infrastructure cause: "transient", "unavailable", or None
+            for outcomes requiring revert classification.
 
     Example:
         # Successful simulation
@@ -619,6 +621,7 @@ class SimulationResult:
     simulation_url: str | None = None
     simulator_name: str | None = None
     evidence: dict[str, Any] = field(default_factory=dict)
+    failure_kind: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -633,6 +636,7 @@ class SimulationResult:
             "simulation_url": self.simulation_url,
             "simulator_name": self.simulator_name,
             "evidence": self.evidence,
+            "failure_kind": self.failure_kind,
         }
 
     @classmethod
@@ -649,6 +653,7 @@ class SimulationResult:
             simulation_url=data.get("simulation_url"),
             simulator_name=data.get("simulator_name"),
             evidence=data.get("evidence", {}),
+            failure_kind=data.get("failure_kind"),
         )
 
 

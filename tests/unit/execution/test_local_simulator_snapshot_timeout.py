@@ -80,6 +80,7 @@ class TestEvmSnapshotTimeout:
         result = await asyncio.wait_for(sim.simulate(txs, chain="arbitrum"), timeout=5.0)
 
         assert hung.is_set()
+        assert result.failure_kind == "transient"
         assert not result.success
         assert not result.simulated
         mock_web3.eth.estimate_gas.assert_not_called()

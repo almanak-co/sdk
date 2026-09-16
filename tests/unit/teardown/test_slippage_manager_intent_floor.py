@@ -206,7 +206,7 @@ class TestIntentSlippageFloor:
         )
 
         # After default ladder + auto-approved intermediate levels, should try 15% with 1 retry
-        assert len(slippages_at_15) == 1
+        assert len(slippages_at_15) == manager.levels[0].retries
         # All levels up to 15% are auto-approved, so all are exhausted
         assert result.status == "failed_manual_intervention_required"
 

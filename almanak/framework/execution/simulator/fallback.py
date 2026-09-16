@@ -207,8 +207,8 @@ class FallbackSimulator(Simulator):
         sim_names = [name for _, name in supporting]
         raise SimulationError(
             reason=f"All simulators failed: {sim_names}. Last error: {last_error}",
-            recoverable=False,
-        )
+            recoverable=True,
+        ) from last_error
 
 
 # =============================================================================

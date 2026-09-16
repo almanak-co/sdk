@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -73,4 +74,41 @@ async def test_transient_compilation_failure_reaches_slippage_manager_as_retryab
 
     assert len(captured_attempts) == 1
     assert captured_attempts[0].retryable is True
+    assert captured_attempts[0].disposition == "retry_same_level"
     assert captured_attempts[0].retry_after_seconds == 51.72
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message,expected_calls,expected_status",
+    [
+        ("RPC timeout", 3, "failed_rpc_unreachable"),
+        ("unknown token metadata", 1, "failed_non_retryable"),
+        ("Too little received", 1, "failed_non_retryable"),
+    ],
+)
+async def test_balance_resolution_failure_never_widens_tolerance(message, expected_calls, expected_status):
+    from almanak.framework.teardown.slippage_manager import EscalatingSlippageManager
+
+    manager = TeardownManager(compiler=MagicMock())
+    manager._attach_lp_outstanding = AsyncMock(side_effect=lambda strategy, intent: (intent, None))
+    market = MagicMock()
+    market.balance.side_effect = RuntimeError(message)
+    strategy = SimpleNamespace(deployment_id="balance-retry", chain="arbitrum")
+    intent = {"intent_type": "SWAP", "chain": "arbitrum", "from_token": "WETH", "to_token": "USDC", "amount": "all"}
+    ladder = EscalatingSlippageManager()
+    ladder.config.retry_delay_seconds = 0
+
+    async def execute(current_intent, slippage):
+        return await manager._prepare_execution_attempt(strategy, current_intent, slippage, None, market)
+
+    result = await ladder.execute_with_escalation(
+        intent=intent,
+        position_value=Decimal("100"),
+        execute_func=execute,
+        intent_slippage=Decimal("0.005"),
+    )
+    assert result.status == expected_status
+    assert market.balance.call_count == expected_calls
+    assert [attempt.slippage_used for attempt in result.attempts] == [Decimal("0.005")] * expected_calls
+    manager.compiler.compile.assert_not_called()

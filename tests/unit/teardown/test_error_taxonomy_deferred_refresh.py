@@ -160,9 +160,9 @@ class TestNegativeControls:
             "exactly what the ladder exists for"
         )
 
-    def test_an_unrelated_unknown_error_still_escalates(self):
+    def test_an_unrelated_unknown_error_does_not_widen_slippage(self):
         _, disposition = classify_teardown_failure("execution reverted")
-        assert disposition == Disposition.ESCALATE
+        assert disposition == Disposition.NON_RETRYABLE
 
     def test_insufficient_balance_is_still_non_retryable(self):
         revert_class, disposition = classify_teardown_failure("Insufficient USDC: need 100, have 5 (deficit: 95)")

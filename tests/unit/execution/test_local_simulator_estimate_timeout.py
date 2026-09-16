@@ -71,6 +71,7 @@ class TestEstimateGasTimeout:
         assert not result.simulated
         assert result.gas_estimates == []
         assert "timed out" in result.revert_reason
+        assert result.failure_kind == "transient"
 
     @pytest.mark.asyncio
     async def test_estimate_gas_timeout_constant_matches_state_setup_budget(self):
@@ -100,7 +101,7 @@ class TestEstimateGasTimeout:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "error", [ConnectionError("connection lost"), ValueError("malformed JSON"), RuntimeError("429 rate limit")]
+    "error", [ConnectionError("connection lost"), ValueError("malformed JSON"), RuntimeError("429 rate limit"), RuntimeError("Fork Error: Transport(Custom(reqwest dns error failed to lookup address information))")]
 )
 async def test_provider_failure_is_not_measured_evm_execution(error):
     sim = LocalSimulator(rpc_url="http://localhost:8545", gas_buffer=1.0)
@@ -111,6 +112,7 @@ async def test_provider_failure_is_not_measured_evm_execution(error):
     assert not result.success and not result.simulated
     assert result.gas_estimates == []
     assert "unavailable" in result.revert_reason
+    assert result.failure_kind == ("unavailable" if isinstance(error, ValueError) else "transient")
 
 
 @pytest.mark.asyncio

@@ -259,6 +259,8 @@ class TestFallbackSimulatorCascade:
             await fallback.simulate([mock_tx], chain="arbitrum")
 
         assert "All simulators failed" in str(exc_info.value)
+        assert exc_info.value.recoverable
+        assert isinstance(exc_info.value.__cause__, SimulationError)
 
     @pytest.mark.asyncio
     async def test_primary_succeeds_no_fallback(self):

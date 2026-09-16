@@ -217,7 +217,7 @@ class EscalatingSlippageManager:
                     level=injected_level,
                     slippage=intent_slippage,
                     auto_approve=True,
-                    retries=1,
+                    retries=self.levels[0].retries,
                 )
             )
 

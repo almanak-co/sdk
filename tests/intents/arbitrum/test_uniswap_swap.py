@@ -85,6 +85,55 @@ class TestUniswapV3SwapIntent:
         """Run the exact receipt-fidelity scenario through the EOA path."""
         await self._run_swap_usdc_to_weth(web3, funded_wallet, orchestrator, price_oracle, intent_evidence)
 
+    @pytest.mark.no_zodiac(reason="EOA simulation failure must prove no transaction was submitted")
+    @pytest.mark.intent(IntentType.SWAP)
+    @pytest.mark.asyncio
+    async def test_simulator_outage_preserves_balances_before_successful_retry(
+        self, web3, funded_wallet, orchestrator, price_oracle, intent_evidence
+    ):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from almanak.framework.execution.interfaces import SimulationError
+        from almanak.framework.execution.simulator.fallback import FallbackSimulator
+        from almanak.framework.execution.submission import SubmissionProvenance
+
+        tokens = CHAIN_CONFIGS[CHAIN_NAME]["tokens"]
+        before = {token: get_token_balance(web3, tokens[token], funded_wallet) for token in ("USDC", "WETH")}
+        intent = SwapIntent(
+            from_token="USDC",
+            to_token="WETH",
+            amount=Decimal("100"),
+            max_slippage=SWAP_MAX_SLIPPAGE,
+            protocol="uniswap_v3",
+            chain=CHAIN_NAME,
+        )
+        compiler = IntentCompiler(
+            chain=CHAIN_NAME,
+            wallet_address=funded_wallet,
+            price_oracle=price_oracle,
+            rpc_url=orchestrator.rpc_url,
+        )
+        compiled = compiler.compile(intent)
+        assert compiled.status.value == "SUCCESS", compiled.error
+        assert compiled.action_bundle is not None
+        backends = [MagicMock(), MagicMock()]
+        for backend in backends:
+            backend.supports_chain.return_value = True
+            backend.simulate = AsyncMock(side_effect=SimulationError("RPC timeout", recoverable=True))
+        original = orchestrator.simulator
+        orchestrator.simulator = FallbackSimulator(primary=backends[0], secondary=backends[1])
+        try:
+            failed = await orchestrator.execute(compiled.action_bundle)
+        finally:
+            orchestrator.simulator = original
+        assert not failed.success
+        assert failed.submission_provenance == SubmissionProvenance.NOT_ATTEMPTED
+        assert failed.extracted_data["execution_evidence"]["simulation"]["failure_kind"] == "transient"
+        assert all(
+            get_token_balance(web3, tokens[token], funded_wallet) == balance for token, balance in before.items()
+        )
+        await self._run_swap_usdc_to_weth(web3, funded_wallet, orchestrator, price_oracle, intent_evidence)
+
     async def _run_swap_usdc_to_weth(
         self,
         web3: Web3,

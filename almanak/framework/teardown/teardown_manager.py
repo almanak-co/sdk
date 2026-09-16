@@ -1786,6 +1786,8 @@ class TeardownManager:
             return None
         revert_text = None
         attempts_list = getattr(exec_result, "attempts", None)
+        if attempts_list and getattr(attempts_list[-1], "disposition", None) == Disposition.NON_RETRYABLE.value:
+            return None
         if attempts_list and getattr(attempts_list[-1], "error", None):
             revert_text = attempts_list[-1].error
         if not revert_text:
@@ -2362,11 +2364,17 @@ class TeardownManager:
         shape = self._classify_intent_shape(intent_with_slippage)
         intent_with_slippage, amount_error = self._resolve_all_amount(strategy, intent_with_slippage, market, shape)
         if amount_error is not None:
+            _, disposition = classify_teardown_failure(amount_error)
+            retry_balance_read = disposition == Disposition.RETRY_SAME_LEVEL
             return ExecutionAttempt(
                 success=False,
                 slippage_used=slippage,
                 actual_slippage=Decimal("0"),
                 error=amount_error,
+                retryable=retry_balance_read,
+                disposition=(
+                    Disposition.RETRY_SAME_LEVEL.value if retry_balance_read else Disposition.NON_RETRYABLE.value
+                ),
             )
 
         try:
@@ -2393,6 +2401,11 @@ class TeardownManager:
                 actual_slippage=Decimal("0"),
                 error=f"Compilation failed: {compilation_result.error}",
                 retryable=compilation_result.is_transient,
+                disposition=(
+                    Disposition.RETRY_SAME_LEVEL.value
+                    if compilation_result.is_transient
+                    else Disposition.NON_RETRYABLE.value
+                ),
                 retry_after_seconds=compilation_result.retry_after_seconds,
             )
         if not compilation_result.action_bundle:
@@ -2793,7 +2806,11 @@ class TeardownManager:
                 retryable=False,
                 disposition=Disposition.NON_RETRYABLE.value,
             )
-        revert_class, disposition = classify_teardown_failure(exec_result.error)
+        evidence = getattr(exec_result, "extracted_data", {}).get("execution_evidence", {})
+        simulation = evidence.get("simulation") if isinstance(evidence, dict) else None
+        revert_class, disposition = classify_teardown_failure(
+            exec_result.error, simulation=simulation if isinstance(simulation, dict) else None
+        )
         annotated_error = self._describe_attempt_error(exec_result.error)
         logger.error(
             "Intent %d/%d execution failed [%s -> %s]: %s",
@@ -2850,6 +2867,8 @@ class TeardownManager:
                 slippage_used=slippage,
                 actual_slippage=Decimal("0"),
                 error="No orchestrator/compiler configured for teardown execution",
+                retryable=False,
+                disposition=Disposition.NON_RETRYABLE.value,
             )
 
         try:

@@ -21,14 +21,18 @@ the transport phrasings the intent classifier does not carry, so the two never
 duplicate keyword lists.
 
 Note: ``estimated loss == $0.00`` is a useful secondary tell that a failure was
-not slippage-related (VIB-4258), but classification stays string-only here so it
-is deterministic and unit-testable; the loss heuristic is not a branch input.
+not slippage-related, but the loss heuristic is not a branch input. Simulation
+evidence preserves typed infrastructure failures across the gateway boundary.
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from enum import StrEnum
+from typing import Any
 
+from almanak.framework.execution.simulator.failures import TRANSIENT_RPC_KEYWORDS
 from almanak.framework.intents.error_keywords import categorize_error
 
 
@@ -46,6 +50,7 @@ class RevertClass(StrEnum):
     # failure is pre-submission and no slippage level is relevant to it.
     ROUTE_REFRESH_REFUSED = "route_refresh_refused"
     RECONCILIATION_REQUIRED = "reconciliation_required"
+    SIMULATION_UNAVAILABLE = "simulation_unavailable"
     UNKNOWN = "unknown"
 
 
@@ -57,10 +62,6 @@ class Disposition(StrEnum):
     RETRY_SAME_LEVEL = "retry_same_level"
 
 
-# Transport / RPC phrasings the intent classifier does not carry verbatim.
-# VIB-4258: Anvil lazy-fetch surfaces alloy/reqwest wording. Teardown retries
-# these at the same slippage level rather than escalating — bumping slippage can
-# never make a DNS failure resolve.
 # Lending-vault cash shortage (VIB-5801). The vault cannot settle a redeem right now
 # because the underlying is lent out — distinct from the CALLER being short (which is
 # INSUFFICIENT_BALANCE / NON_RETRYABLE). Selector forms are included because a bare
@@ -72,16 +73,6 @@ _VAULT_CASH_SHORTAGE_KEYWORDS = (
     "0x4323a555",  # keccak("NotEnoughLiquidity()")[:4]
 )
 
-_TRANSPORT_KEYWORDS = (
-    "fork error",
-    "transport",
-    "dns error",
-    "failed to lookup address",
-    "host unreachable",
-    "connection reset",
-    "broken pipe",
-    "eof",
-)
 
 # Deterministic contract-argument / approval / allowance reverts that repeat
 # byte-identical at every slippage level. VIB-4532 (Morpho ``INCONSISTENT_INPUT``),
@@ -107,6 +98,8 @@ _SLIPPAGE_KEYWORDS = (
     "insufficientoutputamount",
     "insufficient output amount",
     "too_little_received",
+    "toolittlereceived",
+    "lbrouter__insufficientamountout",
     "too little received",
     "min_amount_out",
     "minimum output",
@@ -115,7 +108,7 @@ _SLIPPAGE_KEYWORDS = (
 
 # Map the shared intent-classifier category -> teardown (RevertClass, Disposition).
 # "REVERT" is intentionally absent: a bare, unclassified revert falls through to
-# UNKNOWN/ESCALATE so historical behaviour is preserved for ambiguous reverts.
+# UNKNOWN/NON_RETRYABLE: ambiguous reverts cannot justify more price tolerance.
 _CATEGORY_DISPOSITION: dict[str, tuple[RevertClass, Disposition]] = {
     "INSUFFICIENT_FUNDS": (RevertClass.INSUFFICIENT_BALANCE, Disposition.NON_RETRYABLE),
     "COMPILATION_PERMANENT": (RevertClass.LIQUIDITY_UNAVAILABLE, Disposition.NON_RETRYABLE),
@@ -129,18 +122,26 @@ _CATEGORY_DISPOSITION: dict[str, tuple[RevertClass, Disposition]] = {
 }
 
 
-def classify_teardown_failure(error_message: str | None) -> tuple[RevertClass, Disposition]:
+def classify_teardown_failure(
+    error_message: str | None, *, simulation: Mapping[str, Any] | None = None
+) -> tuple[RevertClass, Disposition]:
     """Classify a teardown execution/simulation failure string.
 
     Returns ``(RevertClass, Disposition)``. Check order is significant:
     teardown-specific slippage, transport, and deterministic-revert phrasings are
     matched BEFORE delegating to the shared intent classifier, because teardown's
     correct reaction to a transport blip (retry same level) differs from the
-    intent state machine's (fail fast). An empty / ``None`` error preserves the
-    historical escalate behaviour.
+    intent state machine's (fail fast). Unknown and empty failures stop the attempt.
+    Structured simulation failures take precedence over message keywords.
     """
+    if simulation:
+        kind = simulation.get("failure_kind")
+        if kind == "transient":
+            return RevertClass.TRANSPORT_TRANSIENT, Disposition.RETRY_SAME_LEVEL
+        if kind == "unavailable" or simulation.get("simulated") is False:
+            return RevertClass.SIMULATION_UNAVAILABLE, Disposition.NON_RETRYABLE
     if not error_message:
-        return RevertClass.UNKNOWN, Disposition.ESCALATE
+        return RevertClass.UNKNOWN, Disposition.NON_RETRYABLE
 
     e = error_message.lower()
 
@@ -191,11 +192,11 @@ def classify_teardown_failure(error_message: str | None) -> tuple[RevertClass, D
 
     # 1. Genuine slippage FIRST — a message can carry both "slippage" and a
     #    generic "revert"; the slippage signal wins and escalates.
-    if any(k in e for k in _SLIPPAGE_KEYWORDS):
+    if any(k in e for k in _SLIPPAGE_KEYWORDS) or re.search(r"\bminimumamountinsufficient\b", e):
         return RevertClass.SLIPPAGE_MINIMUM_VIOLATED, Disposition.ESCALATE
 
     # 2. Transport / RPC transient (VIB-4258) — retry same level, never escalate.
-    if any(k in e for k in _TRANSPORT_KEYWORDS):
+    if any(k in e for k in TRANSIENT_RPC_KEYWORDS):
         return RevertClass.TRANSPORT_TRANSIENT, Disposition.RETRY_SAME_LEVEL
 
     # 2b. Lending vault has no CASH to settle right now (VIB-5801) — EVK's
@@ -238,5 +239,5 @@ def classify_teardown_failure(error_message: str | None) -> tuple[RevertClass, D
     if category in _CATEGORY_DISPOSITION:
         return _CATEGORY_DISPOSITION[category]
 
-    # 7. Unknown / bare REVERT -> preserve historical escalate behaviour.
-    return RevertClass.UNKNOWN, Disposition.ESCALATE
+    # An unclassified failure provides no evidence that wider slippage helps.
+    return RevertClass.UNKNOWN, Disposition.NON_RETRYABLE

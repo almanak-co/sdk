@@ -838,8 +838,7 @@ class TestRunTokenConsolidationExecution:
             extracted_data={},
             error="Too little received (slippage)",
         )
-        # Fail the intent's own conservative first attempt AND the first two
-        # ladder level-1 attempts; succeed on the third level-1 attempt.
+        # Exhaust the configured tolerance before moving to the first wider rung.
         level_1 = EscalatingSlippageManager.DEFAULT_LEVELS[0]
         mgr.orchestrator.execute = AsyncMock(side_effect=[failed, failed, failed, _successful_exec_result()])
 
@@ -867,11 +866,9 @@ class TestRunTokenConsolidationExecution:
         # Attempt 1: the intent's own conservative default (SwapIntent 0.5%) —
         # consolidation does not start at an inflated or hardcoded slippage.
         assert seen_slippages[0] == Decimal("0.005")
-        # Attempts 2+: escalation lands exactly on the standard ladder's
-        # level-1 slippage and stays there within its retry budget.
-        assert len(seen_slippages) == 4
-        assert all(s == level_1["slippage"] for s in seen_slippages[1:])
-        assert len(seen_slippages[1:]) <= level_1["retries"]
+        # The injected tolerance inherits the standard retry budget, allowing
+        # transient failures to retry without forcing a wider price tolerance.
+        assert seen_slippages == [Decimal("0.005")] * level_1["retries"] + [level_1["slippage"]]
 
     @pytest.mark.asyncio
     async def test_degraded_commit_does_not_abort_remaining_swaps(self):

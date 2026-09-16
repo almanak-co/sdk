@@ -73,6 +73,7 @@ from .interfaces import (
     NonceError,
     SignedTransaction,
     Signer,
+    SimulationError,
     SimulationResult,
     Simulator,
     SubmissionError,
@@ -1821,9 +1822,18 @@ class ExecutionOrchestrator:
                 },
             )
 
-        simulation_result = await self.simulator.simulate(
-            state.unsigned_txs, context.chain, state_overrides=state_overrides
-        )
+        try:
+            simulation_result = await self.simulator.simulate(
+                state.unsigned_txs, context.chain, state_overrides=state_overrides
+            )
+        except SimulationError as exc:
+            simulation_result = SimulationResult(
+                success=False,
+                simulated=False,
+                revert_reason=str(exc),
+                failure_kind="transient" if exc.recoverable else "unavailable",
+                simulator_name=self.simulator.name,
+            )
         result.simulation_result = simulation_result
         result.extracted_data.setdefault("execution_evidence", {"schema_version": 1})["simulation"] = (
             simulation_result.to_dict()
@@ -1845,6 +1855,8 @@ class ExecutionOrchestrator:
 
         if not simulation_result.simulated:
             result.error = "Simulation was requested but the configured backend did not simulate the operation"
+            if simulation_result.revert_reason:
+                result.error += f": {simulation_result.revert_reason}"
             result.error_phase = ExecutionPhase.SIMULATION
             self._complete_session(session, success=False, error=result.error)
             self._emit_event(ExecutionEventType.SIMULATION_FAILED, context, {"revert_reason": result.error})
