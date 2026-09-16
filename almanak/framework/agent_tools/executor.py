@@ -2914,11 +2914,12 @@ class ToolExecutor:
             # so the directional field names disambiguate and the label stays "".
             **_oriented_price_fields(state.price),
             "tick": state.tick,
-            "liquidity": str(state.liquidity or 0),
+            "liquidity": str(state.liquidity) if state.liquidity is not None else "",
             "fee_tier": state.fee_tier,
             "fee_tier_source": "unspecified",
             "token0_decimals": state.token0_decimals,
             "token1_decimals": state.token1_decimals,
+            **self._fetch_pool_analytics(chain=chain, pool_address=pool_address, protocol=protocol),
         }
         return ToolResponse(status=ToolResponseStatus.SUCCESS, data=data)
 
@@ -3035,10 +3036,7 @@ class ToolExecutor:
         sqrt_price_x96 = int(slot0_hex[0:64], 16)
         tick = _decode_int24(slot0_hex[64:128])
 
-        # Read liquidity (None = unmeasured; historic behaviour reports 0)
-        liquidity, _liquidity_error = self._read_pool_liquidity(chain, pool_address)
-        if liquidity is None:
-            liquidity = 0
+        liquidity, liquidity_error = self._read_pool_liquidity(chain, pool_address)
 
         # Compute human price from sqrtPriceX96
         # Raw price = (sqrtPriceX96 / 2^96)^2 gives token1/token0 in raw units.
@@ -3072,7 +3070,8 @@ class ToolExecutor:
                 "current_price_raw": str(raw_price),
                 **_oriented_price_fields(adjusted_price, sym0, sym1),
                 "tick": tick,
-                "liquidity": str(liquidity),
+                "liquidity": str(liquidity) if liquidity is not None else "",
+                "liquidity_unavailable_reason": liquidity_error,
                 "sqrt_price_x96": str(sqrt_price_x96),
                 # None only when an explicit pool_address was given without a
                 # tier (unmeasured — never fabricated).

@@ -945,7 +945,7 @@ async def test_get_pool_state_malformed_factory_payload_is_rpc_error() -> None:
 async def test_get_pool_state_explicit_pool_address_unmeasured_tier_and_liquidity() -> None:
     """Explicit ``pool_address``: no factory lookup runs, ``fee_tier_source``
     is "unspecified", and a failing/garbled ``liquidity()`` read fails open to
-    the historic "0" while the core slot0 decode still succeeds."""
+    an unmeasured value while the core slot0 decode still succeeds."""
     gateway = MagicMock()
 
     def _call(req: Any, **kwargs: Any) -> Any:
@@ -974,7 +974,8 @@ async def test_get_pool_state_explicit_pool_address_unmeasured_tier_and_liquidit
     assert result.status == "success", result.error
     assert result.data["fee_tier_source"] == "unspecified"
     assert result.data["fee_tier"] is None  # not measured — never fabricated
-    assert result.data["liquidity"] == "0"
+    assert result.data["liquidity"] == ""
+    assert result.data["liquidity_unavailable_reason"]
     assert result.data["tick"] == -100
 
 

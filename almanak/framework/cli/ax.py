@@ -586,8 +586,19 @@ def _start_managed_gateway(
             + (f" --network {resolved_network}" if resolved_network != "mainnet" else "")
         ) from None
 
-    # Ensure cleanup on exit
-    atexit.register(managed.stop)
+    stopped = False
+
+    def stop_managed() -> None:
+        nonlocal stopped
+        if stopped:
+            return
+        stopped = True
+        atexit.unregister(stop_managed)
+        ctx.obj.pop("managed_gateway", None)
+        managed.stop()
+
+    atexit.register(stop_managed)
+    ctx.call_on_close(stop_managed)
 
     # Update context so _run_tool connects to the right port
     ctx.obj["gateway_host"] = managed.host
@@ -601,17 +612,21 @@ def _start_managed_gateway(
 def _run_tool(ctx: click.Context, tool_name: str, arguments: dict):
     """Execute a tool call and return the ToolResponse."""
     executor, client = _get_executor(ctx)
-    try:
-        return asyncio.run(executor.execute(tool_name, arguments))
-    finally:
-        # Only disconnect if no managed gateway (one-shot external connection).
-        # With a managed gateway, keep the connection alive for potential
-        # follow-up commands in the same process.
-        if "managed_gateway" not in ctx.obj:
+    if not ctx.obj.get("disconnect_registered"):
+
+        def disconnect() -> None:
             from almanak.framework.data.tokens import get_token_resolver
 
             get_token_resolver().set_gateway_channel(None)
             client.disconnect()
+            ctx.obj.pop("executor", None)
+            ctx.obj.pop("client", None)
+            ctx.obj.pop("disconnect_registered", None)
+
+        # Composite commands share a connection until all their reads finish.
+        ctx.call_on_close(disconnect)
+        ctx.obj["disconnect_registered"] = True
+    return asyncio.run(executor.execute(tool_name, arguments))
 
 
 # ---------------------------------------------------------------------------
@@ -3855,15 +3870,15 @@ def pool(ctx, token_a, token_b, fee_tier, protocol):
     --fee-tier the protocol's native fee tiers are swept and the deepest
     pool is used.
 
-    Single-address form: identifies what the address is — protocol, pair,
-    fee tier / pool type, LP token — reverse-verified against the owning
-    protocol's factory or registry.
+    Single-address form: identifies and verifies the contract, then reads
+    state and analytics for that exact pool. Unsupported contract kinds
+    retain their identity with an explicit state-unavailability reason.
 
     \b
     Examples:
         almanak ax pool WBTC WETH                      # deepest WBTC-WETH pool
         almanak ax pool USDC ETH --fee-tier 500         # exactly the 0.05% tier
-        almanak ax pool 0x0b1c...2d69                   # identify this address
+        almanak ax pool 0x0b1c...2d69                   # identity, state, analytics
         almanak ax pool 0xbeef...73c9                   # -> kind erc4626_vault (a Morpho vault, not a market)
         almanak ax pool WBTC WETH --json                # JSON output
     """
@@ -3880,8 +3895,16 @@ def pool(ctx, token_a, token_b, fee_tier, protocol):
             )
             sys.exit(1)
         try:
+            from almanak.framework.cli.ax_pool import enrich_pool_identity
+
             response = _run_tool(ctx, "resolve_pool_address", {"address": token_a, "chain": ctx.obj["chain"]})
-            render_result(response, json_output=json_output, title=f"Pool identity: {token_a}")
+            response = enrich_pool_identity(
+                response,
+                address=token_a,
+                chain=ctx.obj["chain"],
+                run_tool=lambda name, args: _run_tool(ctx, name, args),
+            )
+            render_result(response, json_output=json_output, title=f"Pool: {token_a}")
             if _response_is_error(response):
                 sys.exit(1)
         except click.ClickException:

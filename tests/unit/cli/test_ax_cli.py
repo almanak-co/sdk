@@ -139,7 +139,18 @@ class TestLpClose:
         runner = CliRunner()
         result = runner.invoke(
             almanak,
-            ["ax", "--chain", "base", "lp-close", "654321", "--protocol", "uniswap_v4", "--pool", "WETH/USDC/3000", "--yes"],
+            [
+                "ax",
+                "--chain",
+                "base",
+                "lp-close",
+                "654321",
+                "--protocol",
+                "uniswap_v4",
+                "--pool",
+                "WETH/USDC/3000",
+                "--yes",
+            ],
         )
         assert result.exit_code == 0
         args = mock_run_tool.call_args[0][2]
@@ -358,8 +369,10 @@ class TestTokenResolverGatewayWiring:
 
         assert get_token_resolver()._gateway_channel is mock_client.channel
 
-    def test_run_tool_unwires_channel_when_disconnecting_one_shot_client(self):
+    def test_run_tool_unwires_channel_when_command_closes(self):
         from unittest.mock import AsyncMock
+
+        import click
 
         from almanak.framework.cli.ax import _run_tool
         from almanak.framework.data.tokens import get_token_resolver
@@ -368,10 +381,9 @@ class TestTokenResolverGatewayWiring:
         executor = MagicMock()
         executor.execute = AsyncMock(return_value="response")
         client = MagicMock()
-        ctx = MagicMock()
-        ctx.obj = {"executor": executor, "client": client}
-
-        assert _run_tool(ctx, "get_pool_state", {}) == "response"
+        with click.Context(click.Command("pool"), obj={"executor": executor, "client": client}) as ctx:
+            assert _run_tool(ctx, "get_pool_state", {}) == "response"
+            client.disconnect.assert_not_called()
 
         assert get_token_resolver()._gateway_channel is None
         client.disconnect.assert_called_once()

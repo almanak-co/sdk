@@ -18,11 +18,11 @@ import click
 import pytest
 
 
-class _FakeCtx:
+class _FakeCtx(click.Context):
     """Minimal stand-in for click.Context — exposes only ``obj``."""
 
     def __init__(self, data: dict) -> None:
-        self.obj = data
+        super().__init__(click.Command("test"), obj=data)
 
 
 @pytest.fixture

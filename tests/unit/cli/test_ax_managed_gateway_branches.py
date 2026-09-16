@@ -11,9 +11,9 @@ import pytest
 from almanak.framework.cli.ax import _start_managed_gateway
 
 
-class _FakeCtx:
+class _FakeCtx(click.Context):
     def __init__(self, obj: dict) -> None:
-        self.obj = obj
+        super().__init__(click.Command("test"), obj=obj)
 
 
 def _config(*, private_key: str = "") -> SimpleNamespace:
@@ -57,7 +57,15 @@ def test_start_managed_gateway_preserves_port_auth_env_and_process_contract(caps
     assert_signer.assert_called_once_with("operator-key", "0xoperator")
     managed_gateway.assert_called_once_with(settings=settings, anvil_chains=[], wallet_address="0xoperator")
     managed.start.assert_called_once_with(timeout=30.0)
-    register_exit.assert_called_once_with(managed.stop)
+    register_exit.assert_called_once()
+    stop = register_exit.call_args.args[0]
+    ctx.obj["managed_gateway"] = managed
+    ctx.close()
+    managed.stop.assert_called_once()
+    assert "managed_gateway" not in ctx.obj
+    stop()
+    managed.stop.assert_called_once()
+    assert "managed_gateway" not in ctx.obj
     assert ctx.obj == {
         "chain": "base",
         "wallet": "0xoperator",
