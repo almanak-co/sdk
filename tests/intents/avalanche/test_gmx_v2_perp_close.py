@@ -35,6 +35,7 @@ from tests.unit.connectors.gmx_v2.market_fixtures import fake_dynamic_gateway, m
 _ETH_USD_MARKET = market_address("avalanche", "ETH/USD")
 from almanak.connectors.gmx_v2.anvil_order_executor import execute_pending_orders_on_anvil
 from almanak.connectors.gmx_v2.teardown_reads import read_open_positions
+from almanak.framework.backtesting.pnl.receipt_utils import parse_transfer_events
 from almanak.framework.execution.extracted_data import AsyncOrderKind
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
 from almanak.framework.execution.result_enricher import ResultEnricher
@@ -155,12 +156,20 @@ class TestGmxV2PerpCloseIntentAvalanche:
         orchestrator: ExecutionOrchestrator,
         anvil_rpc_url: str,
         price_oracle_avalanche: dict[str, Decimal],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         fork_age_seconds = int(time.time()) - int(web3.eth.get_block("latest")["timestamp"])
         assert abs(fork_age_seconds) <= 7 * 24 * 60 * 60, (
             f"GMX PERP_CLOSE intent proof requires a fork no older than seven days; age={fork_age_seconds}s"
         )
-        parser = GMXv2ReceiptParser()
+        keeper_parser_chains = []
+
+        def keeper_parser(*, chain):
+            keeper_parser_chains.append(chain)
+            return GMXv2ReceiptParser(chain=chain)
+
+        monkeypatch.setattr("almanak.connectors.gmx_v2.anvil_order_executor.GMXv2ReceiptParser", keeper_parser)
+        parser = GMXv2ReceiptParser(chain=CHAIN_NAME)
         compiler = _build_compiler(
             wallet=funded_wallet,
             orchestrator=orchestrator,
@@ -180,6 +189,7 @@ class TestGmxV2PerpCloseIntentAvalanche:
             leverage=Decimal("3"),
         )
         open_compilation = compiler.compile(open_intent)
+        assert open_compilation.status.value == "SUCCESS", open_compilation.error
         assert open_compilation.action_bundle is not None, open_compilation.error
         open_execution = await orchestrator.execute(open_compilation.action_bundle)
         assert open_execution.success, open_execution.error
@@ -226,6 +236,7 @@ class TestGmxV2PerpCloseIntentAvalanche:
             protocol="gmx_v2",
         )
         close_compilation = compiler.compile(close_intent)
+        assert close_compilation.status.value == "SUCCESS", close_compilation.error
         assert close_compilation.action_bundle is not None, close_compilation.error
         close_transactions = close_compilation.action_bundle.transactions
         assert len(close_transactions) == 1
@@ -256,6 +267,16 @@ class TestGmxV2PerpCloseIntentAvalanche:
         assert close_settlement.executed_order_keys == (close_orders[0].order_id,)
         assert len(close_settlement.execution_receipts) == 1
         keeper_receipt = close_settlement.execution_receipts[0]
+        parsed = parser.parse_receipt(keeper_receipt)
+        assert parsed.success
+        decreases = [event.data for event in parsed.events if event.event_name == "PositionDecrease"]
+        assert len(decreases) == 1
+        decrease = decreases[0]
+        assert decrease["size_delta_usd_raw"] > 0 and Decimal(decrease["collateral_delta_amount"]) > 0
+        assert Decimal(decrease["collateral_delta_amount"]) * Decimal(10**6) == Decimal(
+            position_before.collateral_amount
+        )
+        assert Decimal(decrease["collateral_amount"]) == 0
 
         # Layer 3: run the production enrichment path over the terminal keeper
         # receipt. It normalizes raw JSON-RPC numerics before the GMX parser
@@ -274,10 +295,18 @@ class TestGmxV2PerpCloseIntentAvalanche:
         collateral_returned = enriched.extracted_data.get("collateral_returned")
         assert collateral_returned is not None
         assert collateral_returned == Decimal(position_before.collateral_amount)
+        assert keeper_parser_chains and set(keeper_parser_chains) == {CHAIN_NAME}
 
         # Layer 4: collateral reached the wallet and the exact position is closed.
         usdc_after_settlement = get_token_balance(web3, USDC_ADDRESS, funded_wallet)
         assert usdc_after_settlement > usdc_before_settlement
+        transfers = [
+            t for t in parse_transfer_events(keeper_receipt) if t.token_address.lower() == USDC_ADDRESS.lower()
+        ]
+        wallet = funded_wallet.lower()
+        receipt_credit = sum(t.value for t in transfers if t.to_addr.lower() == wallet)
+        receipt_debit = sum(t.value for t in transfers if t.from_addr.lower() == wallet)
+        assert usdc_after_settlement - usdc_before_settlement == receipt_credit - receipt_debit
         positions_after = read_open_positions(gateway, CHAIN_NAME, funded_wallet)
         assert positions_after.ok
         assert positions_after.positions == ()

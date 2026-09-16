@@ -127,8 +127,8 @@ def test_executor_seeds_and_cleans_oracle_state_per_exact_order() -> None:
     assert seed.call_args_list[0].kwargs["markets"] == (_MARKET_A,)
     assert seed.call_args_list[1].kwargs["markets"] == (_MARKET_B,)
     assert execute.call_args_list == [
-        call(provider, _DEPENDENCIES, _KEEPER, _KEY_A),
-        call(provider, _DEPENDENCIES, _KEEPER, _KEY_B),
+        call(provider, _DEPENDENCIES, _KEEPER, _KEY_A, chain="arbitrum"),
+        call(provider, _DEPENDENCIES, _KEEPER, _KEY_B, chain="arbitrum"),
     ]
     clear.assert_not_called()
 
@@ -370,16 +370,53 @@ def test_execution_outcome_requires_an_order_outcome_event() -> None:
     )
 
     with pytest.raises(GmxAnvilOrderExecutionError, match="outcome unmeasured"):
-        _verify_execution_outcome({"logs": []}, _KEY_A, "0xtx")
+        _verify_execution_outcome({"logs": []}, _KEY_A, "0xtx", chain="arbitrum")
     with pytest.raises(GmxAnvilOrderExecutionError, match="no log list"):
-        _verify_execution_outcome({}, _KEY_A, "0xtx")
+        _verify_execution_outcome({}, _KEY_A, "0xtx", chain="arbitrum")
 
 
 def test_execution_outcome_accepts_executed_order() -> None:
     from almanak.connectors.gmx_v2.anvil_order_executor import _verify_execution_outcome
 
     receipt = {"logs": [_outcome_log("OrderExecuted", _KEY_A, _event_emitter_data("OrderExecuted"))]}
-    _verify_execution_outcome(receipt, _KEY_A, "0xtx")  # must not raise
+    _verify_execution_outcome(receipt, _KEY_A, "0xtx", chain="arbitrum")  # must not raise
+
+
+def test_execute_order_measures_collateral_with_execution_chain() -> None:
+    from decimal import Decimal
+
+    from almanak.connectors.gmx_v2.anvil_order_executor import _execute_order
+    from almanak.connectors.gmx_v2.receipt_parser import GMXv2EventType, GMXv2ReceiptParser
+    from tests.unit.connectors.gmx_v2.test_perp_fill_data_vib3873 import _log, _position_decrease_data
+
+    measured = []
+    usdc = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+
+    class CapturingParser(GMXv2ReceiptParser):
+        def parse_logs(self, logs):
+            events = super().parse_logs(logs)
+            measured.extend(event.data for event in events if event.event_type == GMXv2EventType.POSITION_DECREASE)
+            return events
+
+    with patch("tests.unit.connectors.gmx_v2.test_perp_fill_data_vib3873._COLLATERAL", usdc):
+        decrease = _position_decrease_data(order_key=_KEY_A)
+    receipt = {
+        "logs": [
+            _log("PositionDecrease", decrease),
+            _outcome_log("OrderExecuted", _KEY_A, _event_emitter_data("OrderExecuted")),
+        ]
+    }
+    with (
+        patch("almanak.connectors.gmx_v2.anvil_order_executor._send_transaction", return_value="0xtx"),
+        patch("almanak.connectors.gmx_v2.anvil_order_executor._rpc", return_value=receipt),
+        patch("almanak.connectors.gmx_v2.anvil_order_executor._capture_trace_artifact_if_enabled"),
+        patch("almanak.connectors.gmx_v2.anvil_order_executor.GMXv2ReceiptParser", CapturingParser),
+    ):
+        _execute_order(MagicMock(), _DEPENDENCIES, _KEEPER, _KEY_A, chain="arbitrum")
+
+    assert len(measured) == 1
+    assert Decimal(measured[0]["collateral_delta_amount"]) == Decimal("1500")
+    assert Decimal(measured[0]["collateral_amount"]) == Decimal("0")
 
 
 def test_execution_outcome_surfaces_venue_cancellation_reason() -> None:
@@ -391,7 +428,7 @@ def test_execution_outcome_surfaces_venue_cancellation_reason() -> None:
     data = _event_emitter_data("OrderCancelled", reason="OrderNotFulfillableAtAcceptablePrice")
     receipt = {"logs": [_outcome_log("OrderCancelled", _KEY_A, data)]}
     with pytest.raises(GmxAnvilOrderExecutionError, match="OrderNotFulfillableAtAcceptablePrice"):
-        _verify_execution_outcome(receipt, _KEY_A, "0xtx")
+        _verify_execution_outcome(receipt, _KEY_A, "0xtx", chain="arbitrum")
 
 
 def test_execution_outcome_ignores_other_orders_events() -> None:
@@ -404,7 +441,7 @@ def test_execution_outcome_ignores_other_orders_events() -> None:
     data = _event_emitter_data("OrderCancelled", reason="SomeOtherOrder")
     receipt = {"logs": [_outcome_log("OrderCancelled", _KEY_B, data)]}
     with pytest.raises(GmxAnvilOrderExecutionError, match="outcome unmeasured"):
-        _verify_execution_outcome(receipt, _KEY_A, "0xtx")
+        _verify_execution_outcome(receipt, _KEY_A, "0xtx", chain="arbitrum")
 
 
 # ---------------------------------------------------------------------------
@@ -538,7 +575,7 @@ def test_execution_outcome_never_attributes_a_keyless_event() -> None:
     keyless["topics"] = keyless["topics"][:2]  # strip the indexed key topic entirely
     receipt = {"logs": [keyless]}
     with pytest.raises(GmxAnvilOrderExecutionError, match="outcome unmeasured"):
-        _verify_execution_outcome(receipt, _KEY_A, "0xtx")
+        _verify_execution_outcome(receipt, _KEY_A, "0xtx", chain="arbitrum")
 
 
 def _rpc_error(code: grpc.StatusCode, details: str = "") -> grpc.RpcError:

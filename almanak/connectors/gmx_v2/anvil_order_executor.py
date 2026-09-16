@@ -1358,6 +1358,8 @@ def _execute_order(
     dependencies: _GmxDependencies,
     keeper: str,
     order_key: str,
+    *,
+    chain: str,
 ) -> tuple[str, dict[str, Any]]:
     key = bytes.fromhex(_normalize_order_key(order_key).removeprefix("0x"))
     tx_hash = _send_transaction(
@@ -1377,7 +1379,7 @@ def _execute_order(
     # BEFORE outcome verification: a cancelled/frozen order raises there, and a
     # trace of that transaction is control-arm evidence, not an error artifact.
     _capture_trace_artifact_if_enabled(provider, tx_hash)
-    _verify_execution_outcome(dict(receipt), order_key, tx_hash)
+    _verify_execution_outcome(dict(receipt), order_key, tx_hash, chain=chain)
     return tx_hash, dict(receipt)
 
 
@@ -1388,7 +1390,7 @@ _ORDER_OUTCOME_LABELS = {
 }
 
 
-def _verify_execution_outcome(receipt: dict[str, Any], order_key: str, tx_hash: str) -> None:
+def _verify_execution_outcome(receipt: dict[str, Any], order_key: str, tx_hash: str, *, chain: str) -> None:
     """Fail loud when executeOrder settled the order WITHOUT filling it.
 
     A successful ``OrderHandler.executeOrder`` transaction is not proof of a
@@ -1404,7 +1406,7 @@ def _verify_execution_outcome(receipt: dict[str, Any], order_key: str, tx_hash: 
         raise GmxAnvilOrderExecutionError(
             f"GMX executeOrder receipt carried no log list to verify the outcome: {tx_hash}"
         )
-    events = GMXv2ReceiptParser().parse_logs([log for log in logs if isinstance(log, dict)])
+    events = GMXv2ReceiptParser(chain=chain).parse_logs([log for log in logs if isinstance(log, dict)])
     key = _normalize_order_key(order_key)
     outcomes: dict[str, Any] = {}
     for event in events:
@@ -1573,7 +1575,7 @@ def execute_pending_orders_on_anvil(
                             markets=(market_by_key[key],),
                         )
                     )
-                    execute_hash, execute_receipt = _execute_order(provider, dependencies, keeper, key)
+                    execute_hash, execute_receipt = _execute_order(provider, dependencies, keeper, key, chain=chain)
                     transaction_hashes.append(execute_hash)
                     execution_receipts.append(execute_receipt)
                 except BaseException:

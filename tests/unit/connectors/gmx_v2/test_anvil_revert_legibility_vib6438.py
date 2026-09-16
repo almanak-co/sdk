@@ -689,7 +689,7 @@ def test_a_venue_cancellation_is_an_order_rejection_even_though_the_tx_succeeded
     }
 
     with pytest.raises(GmxAnvilOrderExecutionError) as excinfo:
-        _verify_execution_outcome(receipt, key, _TX)
+        _verify_execution_outcome(receipt, key, _TX, chain="arbitrum")
 
     exc = excinfo.value
     assert isinstance(exc, GmxAnvilOrderRejectedError), (

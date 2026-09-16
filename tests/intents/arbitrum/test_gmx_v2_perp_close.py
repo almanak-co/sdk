@@ -36,6 +36,7 @@ from tests.unit.connectors.gmx_v2.market_fixtures import fake_dynamic_gateway, m
 _ETH_USD_MARKET = market_address("arbitrum", "ETH/USD")
 from almanak.connectors.gmx_v2.anvil_order_executor import execute_pending_orders_on_anvil
 from almanak.connectors.gmx_v2.teardown_reads import read_open_positions
+from almanak.framework.backtesting.pnl.receipt_utils import parse_transfer_events
 from almanak.framework.execution.extracted_data import AsyncOrderKind
 from almanak.framework.execution.orchestrator import ExecutionContext, ExecutionOrchestrator
 from almanak.framework.execution.result_enricher import ResultEnricher
@@ -171,6 +172,13 @@ class TestGmxV2PerpCloseIntent:
         assert abs(fork_age_seconds) <= 7 * 24 * 60 * 60, (
             f"GMX PERP_CLOSE intent proof requires a fork no older than seven days; age={fork_age_seconds}s"
         )
+        keeper_parser_chains = []
+
+        def keeper_parser(*, chain):
+            keeper_parser_chains.append(chain)
+            return GMXv2ReceiptParser(chain=chain)
+
+        monkeypatch.setattr("almanak.connectors.gmx_v2.anvil_order_executor.GMXv2ReceiptParser", keeper_parser)
         parser = GMXv2ReceiptParser(chain=CHAIN_NAME)
         compiler = _build_compiler(
             wallet=funded_wallet,
@@ -307,6 +315,16 @@ class TestGmxV2PerpCloseIntent:
         assert close_settlement.executed_order_keys == (close_orders[0].order_id,)
         assert len(close_settlement.execution_receipts) == 1
         keeper_receipt = close_settlement.execution_receipts[0]
+        parsed = parser.parse_receipt(keeper_receipt)
+        assert parsed.success
+        decreases = [event.data for event in parsed.events if event.event_name == "PositionDecrease"]
+        assert len(decreases) == 1
+        decrease = decreases[0]
+        assert decrease["size_delta_usd_raw"] > 0 and Decimal(decrease["collateral_delta_amount"]) > 0
+        assert Decimal(decrease["collateral_delta_amount"]) * Decimal(10**6) == Decimal(
+            position_before.collateral_amount
+        )
+        assert Decimal(decrease["collateral_amount"]) == 0
 
         fill = intent_evidence.capture_parse(
             intent=close_intent,
@@ -347,10 +365,18 @@ class TestGmxV2PerpCloseIntent:
         collateral_returned = enriched.extracted_data.get("collateral_returned")
         assert collateral_returned is not None
         assert collateral_returned == Decimal(position_before.collateral_amount)
+        assert keeper_parser_chains and set(keeper_parser_chains) == {CHAIN_NAME}
 
         # Layer 4: collateral reached the wallet and the exact position is closed.
         usdc_after_settlement = get_token_balance(web3, USDC_ADDRESS, funded_wallet)
         assert usdc_after_settlement > usdc_before_settlement
+        transfers = [
+            t for t in parse_transfer_events(keeper_receipt) if t.token_address.lower() == USDC_ADDRESS.lower()
+        ]
+        wallet = funded_wallet.lower()
+        receipt_credit = sum(t.value for t in transfers if t.to_addr.lower() == wallet)
+        receipt_debit = sum(t.value for t in transfers if t.from_addr.lower() == wallet)
+        assert usdc_after_settlement - usdc_before_settlement == receipt_credit - receipt_debit
         positions_after = read_open_positions(gateway, CHAIN_NAME, funded_wallet)
         assert positions_after.ok
         assert positions_after.positions == ()
