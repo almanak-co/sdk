@@ -310,13 +310,47 @@ Without these hooks, your strategy will lose all internal state on restart. This
     - Persist identity and phase (position IDs, cooldowns, workflow step) — not market exposure. Values that feed `decide()` triggers (debt, exposures, hedge deltas) should be re-read from the market snapshot each cycle: cached intent-derived amounts drift from on-chain reality as interest accrues and prices move.
     - Persisted cooldown/cadence timestamps must be **market-clock** values (`market.timestamp`), never wall-clock — see [Time in Strategies](#time-in-strategies).
 
+### Risk Baseline Lifecycle
+
+Choose the baseline's lifetime to match the risk rule. For a loss limit measured
+from strategy inception, capture the initial measured equity before the first
+trade and persist it with `get_persistent_state()` / `load_persistent_state()`.
+Restore it on restart and preserve it when positions close or reopen. Resetting
+a $10,000 baseline to $9,000 after a $1,000 loss hides that loss from subsequent
+comparisons. Define how deposits, withdrawals, and an explicitly started new
+strategy lifecycle affect the baseline; do not silently reinitialize missing
+state when resuming an existing deployment.
+
+A per-position stop instead establishes a new entry baseline after a confirmed
+open and retires it after the position closes. A trailing drawdown rule maintains
+a persisted high-water mark. Document which rule the strategy implements and
+when its reference value may change. These historical references are persistent
+state; current equity and exposure must still be measured each cycle. Compare
+the same assets, positions, and liabilities in the same units on both sides;
+wallet cash alone is not portfolio equity when capital is deployed in positions.
+
 ## Time in Strategies
 
 Every time-based rule in a strategy — cooldowns, trade cadences, daily counters, "N hours since last fill" — must be computed from **`market.timestamp`**, the snapshot's clock. Never call `datetime.now()` (or `time.time()`) inside `decide()` or `on_intent_executed()` for anything that feeds a decision.
 
 Why: in live trading the two clocks agree, so wall-clock code *appears* to work. In a backtest, weeks of simulated time replay in minutes of wall time — a 24-hour cooldown measured against `datetime.now()` never expires, so the strategy trades once and holds forever. The bug is invisible in unit tests and single-iteration smoke runs; it only surfaces as a silently degenerate backtest.
 
-`on_intent_executed()` receives no market snapshot, so capture the snapshot's timestamp in `decide()` and reuse the captured value when stamping state in the callback:
+`on_intent_executed()` receives no market snapshot, so capture the snapshot's timestamp in `decide()` and reuse the captured value when stamping state in the callback.
+
+!!! warning "Creating a snapshot in a callback does not supply backtest time"
+    Calling `self.create_market_snapshot()` inside a backtest callback can build
+    a snapshot with the current wall-clock timestamp rather than the simulated
+    trade timestamp. Do not use it to obtain historical time for a risk rule,
+    cooldown, or holding period. Capture the timestamp from the snapshot passed
+    to `decide()` instead.
+
+The captured timestamp is **decision time**, not necessarily fill time. With
+delayed execution, a cooldown anchored to that timestamp starts before the fill.
+The example below implements a decision-time cadence recorded on success. A rule
+requiring exact time since fill needs a verified execution timestamp from the
+relevant execution surface; do not substitute decision time and label it fill
+time. If multiple intents can be pending, associate each captured timestamp with
+its own pending action rather than overwriting one shared timestamp.
 
 ```python
 class MyStrategy(IntentStrategy):
@@ -326,6 +360,8 @@ class MyStrategy(IntentStrategy):
         self._pending_ts: datetime | None = None
 
     def decide(self, market: MarketSnapshot) -> Intent:
+        if self._pending_ts is not None:
+            return Intent.hold(reason="Waiting for pending buy to finish")
         now = market.timestamp  # simulated time in backtests, real time live
         if self._last_buy_ts and now - self._last_buy_ts < timedelta(hours=24):
             return Intent.hold(reason="Cadence: waiting for next 24h window")
@@ -335,7 +371,7 @@ class MyStrategy(IntentStrategy):
     def on_intent_executed(self, intent, success, result) -> None:
         if success and self._pending_ts is not None:
             self._last_buy_ts = self._pending_ts  # market clock, NOT datetime.now()
-            self._pending_ts = None
+        self._pending_ts = None
 ```
 
 Wall-clock time is acceptable only for **reporting** fields that never feed a decision (e.g. the `timestamp` on a `TeardownPositionSummary`, log lines, dashboard "generated at" labels).

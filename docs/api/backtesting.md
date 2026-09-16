@@ -4,6 +4,16 @@ Dual-engine backtesting system: PnL simulation with historical prices and paper 
 
 ## PnL Backtester
 
+### Strategy clocks and risk baselines
+
+Use the simulated `market.timestamp` supplied to `decide()` for strategy timing.
+Creating a new snapshot inside an execution callback can return wall-clock time;
+see [Time in Strategies](../getting-started.md#time-in-strategies) for the callback
+pattern and the distinction between decision time and fill time. Define and
+persist the appropriate [risk baseline lifecycle](../getting-started.md#risk-baseline-lifecycle)
+so position reopenings and process restarts do not reset a strategy-level loss
+limit.
+
 ### Historical guards and explicit research variants
 
 PnL backtests cannot currently serve historical tick-level
