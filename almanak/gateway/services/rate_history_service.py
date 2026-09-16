@@ -338,6 +338,10 @@ class RateHistoryRateLimited(RateHistoryUnavailable):
     """Connector received an upstream HTTP 429."""
 
 
+class RateHistoryInvalidRequest(ValueError):
+    """The requested rate-history identity or arguments are invalid."""
+
+
 # =============================================================================
 # Validator helpers (cheap input-shape checks)
 # =============================================================================
@@ -1370,6 +1374,9 @@ class RateHistoryServiceServicer(gateway_pb2_grpc.RateHistoryServiceServicer):
                 start_ts=request.start_ts,
                 end_ts=request.end_ts,
             )
+        except RateHistoryInvalidRequest as exc:
+            _invalid_argument(context, str(exc))
+            return gateway_pb2.FundingRateHistoryResponse(success=False, error=str(exc))
         except RateHistoryRateLimited as exc:
             set_error_from_upstream(
                 context,

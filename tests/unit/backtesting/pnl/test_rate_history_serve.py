@@ -16,6 +16,8 @@ from decimal import Decimal
 import pytest
 
 from almanak.framework.backtesting.pnl.engine import BacktestRateHistoryReader
+from almanak.framework.data.funding.models import FundingRateUnavailableError
+from almanak.framework.data.interfaces import DataSourceUnavailable
 
 TICK = datetime(2026, 4, 21, 14, 30, tzinfo=UTC)
 
@@ -73,7 +75,7 @@ class TestFundingHistory:
 
     def test_fallback_mode_refuses(self):
         source = _FakeSource(history_capable=False)
-        with pytest.raises(ValueError, match="fabrication"):
+        with pytest.raises(FundingRateUnavailableError, match="fabrication"):
             _reader(source).get_funding_rate_history(venue="gmx_v2", market_symbol="ETH-USD", hours=6)
 
     def test_unbound_reader_refuses(self):
@@ -88,7 +90,7 @@ class TestFundingHistory:
         sits mid-window so a final-point-only check cannot pass."""
         degraded_hour = TICK.replace(minute=0, second=0, microsecond=0) - timedelta(hours=3)
         source = _FakeSource(degraded_hours={degraded_hour})
-        with pytest.raises(ValueError, match="partially fabricated"):
+        with pytest.raises(FundingRateUnavailableError, match="partially fabricated"):
             _reader(source).get_funding_rate_history(venue="gmx_v2", market_symbol="ETH-USD", hours=6)
 
     def test_bridge_worker_is_reused_across_calls(self):
@@ -121,7 +123,7 @@ class TestFundingHistory:
         orphan = _Orphan()
         reader._orphaned_future = orphan
 
-        with pytest.raises(ValueError, match="still resolving in the background"):
+        with pytest.raises(DataSourceUnavailable, match="still resolving in the background"):
             reader.get_funding_rate_history(venue="gmx_v2", market_symbol="ETH-USD", hours=2)
         assert source.asked == []  # refused before touching the shared lane
 
@@ -135,3 +137,10 @@ class TestLendingHistoryRefusal:
     def test_lending_rate_history_refuses_with_reason(self):
         with pytest.raises(ValueError, match="connector-default constant"):
             _reader(_FakeSource()).get_lending_rate_history(protocol="aave_v3", token="USDC")
+
+
+def test_history_rejects_another_chain_before_reading_source():
+    source = _FakeSource()
+    with pytest.raises(ValueError, match="chain does not match"):
+        _reader(source).get_funding_rate_history(venue="gmx_v2", market_symbol="ETH-USD", chain="avalanche")
+    assert source.asked == []

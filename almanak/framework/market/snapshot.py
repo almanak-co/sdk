@@ -6238,13 +6238,21 @@ class MarketSnapshot:
         venue: str,
         market_symbol: str,
         hours: int = 168,
-    ) -> DataEnvelope[list[FundingRateSnapshot]]:
-        """Get historical funding rate snapshots for backtesting.
+        *,
+        chain: str | None = None,
+        default: _DefaultT = _NO_DEFAULT,
+    ) -> DataEnvelope[list[FundingRateSnapshot]] | _DefaultT:
+        """Get historical funding snapshots on the requested or snapshot chain.
 
         Args:
             venue: Perps venue (e.g. "hyperliquid").
-            market_symbol: Market symbol (e.g. "ETH-USD").
+            market_symbol: Market symbol or exact market contract address.
             hours: Number of hours of history. Default 168 (7 days).
+            chain: Explicit chain override; defaults to this snapshot's chain.
+            default: Explicit optional-read fallback for typed data unavailability.
+                Logs the failure without marking this read critical. Missing
+                providers, invalid arguments, and unexpected errors still raise.
+                Does not clear failures from earlier required reads.
 
         Returns:
             DataEnvelope[list[FundingRateSnapshot]] sorted ascending.
@@ -6253,7 +6261,13 @@ class MarketSnapshot:
             ValueError: If no rate history reader is configured.
             FundingRateHistoryUnavailableError: If data cannot be retrieved.
         """
+        from almanak.framework.data.exceptions import DataUnavailableError
+        from almanak.framework.data.funding.models import FundingRateUnavailableError
+        from almanak.framework.data.interfaces import DataSourceUnavailable
         from almanak.framework.data.market_snapshot import FundingRateHistoryUnavailableError
+
+        requested_chain = (chain if chain is not None else self.chain).strip().lower()
+        failure_key = f"{requested_chain}:{venue}:{market_symbol}"
 
         if self._rate_history_reader is None:
             self._record_critical_data_failure(
@@ -6266,9 +6280,17 @@ class MarketSnapshot:
                 venue=venue,
                 market_symbol=market_symbol,
                 hours=hours,
+                chain=requested_chain,
             )
         except Exception as e:  # noqa: BLE001
-            self._record_critical_data_failure("funding_rate_history", f"{venue}:{market_symbol}", e)
+            if default is not _NO_DEFAULT and isinstance(
+                e, DataUnavailableError | DataSourceUnavailable | FundingRateUnavailableError
+            ):
+                logger.warning(
+                    "Optional funding_rate_history unavailable for %s; using explicit default: %s", failure_key, e
+                )
+                return default
+            self._record_critical_data_failure("funding_rate_history", failure_key, e)
             raise FundingRateHistoryUnavailableError(
                 venue,
                 market_symbol,

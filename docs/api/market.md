@@ -169,3 +169,26 @@ warning on `MarketSnapshot.reference_price` and ALM-10047 before relying on it.
 Catalog availability alone does not prove that a provider meets a 120-second
 requirement, and fork/injected tests do not qualify hosted data access or asset
 eligibility.
+
+## Funding-rate history
+
+`market.funding_rate_history(venue, market, hours=168, *, chain=None)` uses the
+snapshot's chain unless explicitly overridden. The market may be a venue symbol
+or a supported on-chain market address; addresses retain their `0x` form. Cache
+entries include the chain. A backtest reader rejects a chain other than the run's
+configured chain and continues to use historical tick time.
+
+History is required by default: catching its unavailable-data exception does not
+make a HOLD healthy. When the strategy can operate without history, declare that
+at the call site:
+
+```python
+history = market.funding_rate_history("gmx_v2", market_address, hours=24, default=None)
+if history is None:
+    return Intent.hold(reason="Optional funding history unavailable")
+```
+
+An explicit default handles typed data-unavailability failures and logs the reason
+without recording a critical failure for that call. It does not hide invalid
+requests, reader wiring errors, or failures recorded by other required reads.
+The default is returned as supplied; no zero-rate history is fabricated.

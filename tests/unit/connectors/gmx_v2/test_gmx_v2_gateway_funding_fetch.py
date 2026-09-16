@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from almanak.connectors.gmx_v2.gateway.provider import GmxV2GatewayConnector
-from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+from almanak.gateway.services.rate_history_service import RateHistoryInvalidRequest, RateHistoryUnavailable
 
 _XMR_MARKET = "0x7c54D547FAD72f8AFbf6E5b04403A0168b654C6f"
 _LONG_FACTOR = "-25903000627149213888888"
@@ -163,7 +163,7 @@ async def test_history_uses_exact_verified_address_and_gmx_source() -> None:
 async def test_unknown_market_fails_instead_of_returning_a_default() -> None:
     connector = _connector(_Registry(record=None))
 
-    with pytest.raises(RateHistoryUnavailable, match="does not exist or is not listed"):
+    with pytest.raises(RateHistoryInvalidRequest, match="does not exist or is not listed"):
         await connector.fetch_funding_rate(_Servicer(_Session()), "XMR-USD", "arbitrum", _XMR_MARKET)
 
 

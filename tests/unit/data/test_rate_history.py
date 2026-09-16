@@ -545,6 +545,7 @@ class TestFundingRateFromHyperliquid:
             venue="hyperliquid",
             market_symbol="ETH-USD",
             hours=168,
+            chain="arbitrum",
         )
 
         assert isinstance(envelope, DataEnvelope)
@@ -635,6 +636,7 @@ class TestFundingRateFromHyperliquid:
             venue="hyperliquid",
             market_symbol="ETH-USD",
             hours=168,
+            chain="arbitrum",
         )
 
         assert len(envelope.value) == 1
@@ -1001,6 +1003,7 @@ class TestMarketSnapshotFundingRateHistory:
             venue="hyperliquid",
             market_symbol="ETH-USD",
             hours=168,
+            chain="arbitrum",
         )
 
     def test_funding_rate_history_no_reader(self) -> None:
@@ -1144,7 +1147,7 @@ class TestFundingDecoderContract:
 
         calls: list[tuple[int, int]] = []
 
-        def fake_call(client, gateway_pb2, *, venue, market, start_ts, end_ts):
+        def fake_call(client, gateway_pb2, *, venue, market, start_ts, end_ts, chain):
             calls.append((start_ts, end_ts))
             return SimpleNamespace(
                 success=True,

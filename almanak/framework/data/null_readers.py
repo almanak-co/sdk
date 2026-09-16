@@ -268,6 +268,8 @@ class NullRateHistoryReader:
         venue: str,  # noqa: ARG002
         market_symbol: str,  # noqa: ARG002
         hours: int = 168,  # noqa: ARG002
+        *,
+        chain: str = "",  # noqa: ARG002
     ) -> DataEnvelope[list[FundingRateSnapshot]]:
         raise DataSourceUnavailable(source="funding_rate_history", reason="backtest")
 

@@ -63,7 +63,12 @@ from typing import Any
 from almanak.core.finality import CacheFinality, DataFinality
 from almanak.framework.data.cache.versioned_cache import VersionedDataCache
 from almanak.framework.data.exceptions import DataUnavailableError
-from almanak.framework.data.interfaces import DataSourceUnavailable
+from almanak.framework.data.interfaces import (
+    DataSourceRateLimited,
+    DataSourceTimeout,
+    DataSourceUnavailable,
+    data_source_error_from_grpc,
+)
 from almanak.framework.data.models import (
     DataClassification,
     DataEnvelope,
@@ -102,6 +107,7 @@ def _call_get_funding_rate_history(
     *,
     venue: str,
     market: str,
+    chain: str,
     start_ts: int,
     end_ts: int,
 ) -> Any:
@@ -112,16 +118,36 @@ def _call_get_funding_rate_history(
     request = gateway_pb2.GetFundingRateHistoryRequest(
         venue=venue,
         market=market,
-        chain="",
+        market_address=market if market.startswith("0x") else "",
+        chain=chain,
         start_ts=start_ts,
         end_ts=end_ts,
     )
+    import grpc
+
     try:
         response = client.rate_history.GetFundingRateHistory(request)
-    except Exception as exc:
+    except grpc.RpcError as exc:
+        if exc.code() not in {
+            grpc.StatusCode.UNAVAILABLE,
+            grpc.StatusCode.DEADLINE_EXCEEDED,
+            grpc.StatusCode.RESOURCE_EXHAUSTED,
+            grpc.StatusCode.NOT_FOUND,
+        }:
+            raise
+        typed = data_source_error_from_grpc(exc)
+        if isinstance(typed, DataSourceUnavailable):
+            typed.transport = exc.code() == grpc.StatusCode.UNAVAILABLE
+        if typed is not None:
+            raise typed from exc
+        if exc.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+            raise DataSourceTimeout(source="gateway", timeout_seconds=0.0) from exc
+        if exc.code() == grpc.StatusCode.RESOURCE_EXHAUSTED:
+            raise DataSourceRateLimited(source="gateway", retry_after=0.0) from exc
         raise DataSourceUnavailable(
             source="gateway",
             reason=f"GetFundingRateHistory RPC failed: {exc}",
+            transport=exc.code() == grpc.StatusCode.UNAVAILABLE,
         ) from exc
     if not response.success:
         raise DataSourceUnavailable(
@@ -565,12 +591,15 @@ class RateHistoryReader:
         venue: str,
         market_symbol: str,
         hours: int = 168,
+        *,
+        chain: str = "",
     ) -> DataEnvelope[list[FundingRateSnapshot]]:
         """Fetch historical funding rate snapshots via the gateway.
 
         Args:
             venue: Perps venue (e.g. "hyperliquid", "gmx_v2").
-            market_symbol: Market symbol (e.g. "ETH-USD", "BTC-USD").
+            market_symbol: Market symbol or exact market contract address.
+            chain: Chain for venue identity and cache isolation; required by on-chain venues.
             hours: Number of hours of history to fetch. Default 168 (7 days).
 
         Returns:
@@ -581,7 +610,9 @@ class RateHistoryReader:
             DataUnavailableError: If the gateway returns success=false and no cached data is available.
         """
         venue_lower = venue.lower()
-        market_upper = market_symbol.upper()
+        market_key = market_symbol.strip()
+        market_key = market_key.lower() if market_key.lower().startswith("0x") else market_key.upper()
+        chain_key = chain.strip().lower()
 
         if hours < 1:
             raise ValueError("hours must be >= 1")
@@ -591,7 +622,7 @@ class RateHistoryReader:
         start_ts = int(start_date.timestamp())
         end_ts = int(end_date.timestamp())
 
-        cache_key = f"funding:{venue_lower}:{market_upper}:{start_ts}:{end_ts}"
+        cache_key = f"funding:{chain_key}:{venue_lower}:{market_key}:{start_ts}:{end_ts}"
         cached = self._cache.get(cache_key)
         if cached is not None:
             self._metrics["cache"].successes += 1
@@ -599,19 +630,19 @@ class RateHistoryReader:
             logger.debug(
                 "funding_rate_history_cache_hit venue=%s market=%s version=%s",
                 venue_lower,
-                market_upper,
+                market_key,
                 cached.dataset_version,
             )
             return _build_cached_envelope(snapshots, cached.finality_status)
 
         start_time = time.monotonic()
         try:
-            snapshots = self._fetch_funding_via_gateway(venue_lower, market_upper, start_ts, end_ts)
-        except DataSourceUnavailable as exc:
+            snapshots = self._fetch_funding_via_gateway(venue_lower, market_key, start_ts, end_ts, chain=chain_key)
+        except (DataSourceUnavailable, DataSourceTimeout, DataSourceRateLimited) as exc:
             self._metrics["gateway"].failures += 1
             raise DataUnavailableError(
                 data_type="funding_rate_history",
-                instrument=f"{venue_lower}/{market_upper}",
+                instrument=f"{venue_lower}/{market_key}",
                 reason=str(exc),
             ) from exc
 
@@ -624,7 +655,7 @@ class RateHistoryReader:
         logger.info(
             "funding_rate_history_fetched source=gateway venue=%s market=%s snapshots=%d latency_ms=%d",
             venue_lower,
-            market_upper,
+            market_key,
             len(snapshots),
             latency_ms,
         )
@@ -690,6 +721,8 @@ class RateHistoryReader:
         market: str,
         start_ts: int,
         end_ts: int,
+        *,
+        chain: str = "",
     ) -> list[FundingRateSnapshot]:
         """Translate the ``GetFundingRateHistory`` RPC into ``FundingRateSnapshot``s.
 
@@ -712,6 +745,7 @@ class RateHistoryReader:
                 gateway_pb2,
                 venue=venue,
                 market=market,
+                chain=chain,
                 start_ts=chunk_start,
                 end_ts=chunk_end,
             )

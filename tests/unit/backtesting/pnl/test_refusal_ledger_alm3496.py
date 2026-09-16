@@ -173,7 +173,7 @@ class TestSnapshotRefusalsAreRecorded:
         with pytest.raises(FundingRateHistoryUnavailableError):
             snapshot.funding_rate_history("hyperliquid", "ETH-USD")
         assert ("lending_rate_history", "aave_v3:USDC@arbitrum") in snapshot._critical_data_failures
-        assert ("funding_rate_history", "hyperliquid:ETH-USD") in snapshot._critical_data_failures
+        assert ("funding_rate_history", "arbitrum:hyperliquid:ETH-USD") in snapshot._critical_data_failures
         assert {"lending_rate_history", "funding_rate_history"} <= _recorded_sources(snapshot)
 
 

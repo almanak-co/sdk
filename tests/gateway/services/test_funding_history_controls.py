@@ -195,3 +195,23 @@ async def test_exhausted_429_is_typed_resource_exhausted(
     assert provider.calls == 3
     assert context.code == grpc.StatusCode.RESOURCE_EXHAUSTED
     assert context.trailing_metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "chain,market_address",
+    [("unsupported", ""), ("arbitrum", "0xmalformed"), ("avalanche", "0xmalformed")],
+)
+async def test_invalid_gmx_identity_reports_invalid_argument(servicer, chain, market_address):
+    request = gateway_pb2.GetFundingRateHistoryRequest(
+        venue="gmx_v2",
+        market="ETH-USD",
+        chain=chain,
+        market_address=market_address,
+        start_ts=1_700_000_000,
+        end_ts=1_700_003_600,
+    )
+    context = _Context()
+    response = await servicer.GetFundingRateHistory(request, context)
+    assert context.code == grpc.StatusCode.INVALID_ARGUMENT
+    assert response.success is False

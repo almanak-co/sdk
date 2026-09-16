@@ -2551,6 +2551,8 @@ class BacktestRateHistoryReader:
         import asyncio
         import concurrent.futures
 
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
         # A timed-out worker cannot be cancelled once running — it keeps
         # resolving hours (and mutating the shared source's per-hour cache /
         # degradation set) until its coroutine returns. Refuse to serve while
@@ -2561,10 +2563,11 @@ class BacktestRateHistoryReader:
         if self._orphaned_future is not None:
             if not self._orphaned_future.done():
                 coro.close()
-                raise ValueError(
-                    "rate history unavailable: a previous lookup timed out and its worker is "
+                raise DataSourceUnavailable(
+                    source="backtest_funding_history",
+                    reason="rate history unavailable: a previous lookup timed out and its worker is "
                     "still resolving in the background — refusing to read the shared funding "
-                    "lane while it may still be mutating; retry on a later tick"
+                    "lane while it may still be mutating; retry on a later tick",
                 )
             self._orphaned_future = None
         try:
@@ -2581,29 +2584,38 @@ class BacktestRateHistoryReader:
         future = self._bridge_executor.submit(asyncio.run, coro)
         try:
             return future.result(timeout=30)
-        except concurrent.futures.TimeoutError:
+        except concurrent.futures.TimeoutError as exc:
             # cancel() only helps if the future never started; a running one
             # is orphaned — remember it so later calls refuse until it dies.
             future.cancel()
             self._orphaned_future = future
-            raise
+            raise DataSourceUnavailable(
+                source="backtest_funding_history", reason="Funding history lookup timed out after 30 seconds"
+            ) from exc
 
-    def get_funding_rate_history(self, *, venue: str, market_symbol: str, hours: int = 168) -> Any:
+    def get_funding_rate_history(
+        self, *, venue: str, market_symbol: str, hours: int = 168, chain: str | None = None
+    ) -> Any:
         from datetime import timedelta as _timedelta
 
+        from almanak.framework.data.funding.models import FundingRateUnavailableError
         from almanak.framework.data.models import DataClassification, DataMeta
         from almanak.framework.data.rates.history import DataEnvelope, FundingRateSnapshot
 
+        if chain is not None and chain.lower() != str(self._chain).lower():
+            raise ValueError("funding_rate_history chain does not match the backtest reader")
         if self._timestamp is None:
             raise ValueError("funding_rate_history unavailable: backtest reader is not bound to a tick")
-        if not getattr(self._source, "history_capable", False):
-            raise ValueError(
-                "funding_rate_history unavailable: this run resolves funding from the configured "
-                "fallback rate (use_historical_funding is off) — a constant series labeled history "
-                "would be fabrication; enable historical funding or read funding_rate (point)"
-            )
         if hours < 1:
             raise ValueError(f"funding_rate_history needs hours >= 1, got {hours}")
+        if not getattr(self._source, "history_capable", False):
+            raise FundingRateUnavailableError(
+                venue,
+                market_symbol,
+                "funding_rate_history unavailable: this run resolves funding from the configured "
+                "fallback rate (use_historical_funding is off) — a constant series labeled history "
+                "would be fabrication; enable historical funding or read funding_rate (point)",
+            )
 
         tick_hour = self._timestamp.replace(minute=0, second=0, microsecond=0)
         points = [tick_hour - _timedelta(hours=offset) for offset in range(hours - 1, -1, -1)]
@@ -2625,11 +2637,13 @@ class BacktestRateHistoryReader:
         if was_degraded is not None:
             degraded = [point for point in points if was_degraded(venue, market_symbol, point)]
             if degraded:
-                raise ValueError(
+                raise FundingRateUnavailableError(
+                    venue,
+                    market_symbol,
                     f"funding_rate_history unavailable: {len(degraded)} of {len(points)} hours in the "
                     f"window resolved from the configured fallback rate (first: {degraded[0]}) — "
                     "refusing to serve a partially fabricated history; narrow the window or enable "
-                    "strict_historical_mode to fail per-point"
+                    "strict_historical_mode to fail per-point",
                 )
         snapshots = [
             FundingRateSnapshot(

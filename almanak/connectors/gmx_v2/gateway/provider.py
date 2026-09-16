@@ -362,9 +362,18 @@ class GmxV2GatewayConnector(
         """Resolve and verify one exact GMX market identity for funding."""
         from almanak.core.perp_markets import perp_market_base
         from almanak.gateway.services.pt_rpc_adapter import build_gateway_eth_call
-        from almanak.gateway.services.rate_history_service import RateHistoryUnavailable
+        from almanak.gateway.services.rate_history_service import RateHistoryInvalidRequest, RateHistoryUnavailable
+
+        from .market_registry import GMX_API_BASE_URLS
 
         query = market_address.strip() or market
+        if chain not in GMX_API_BASE_URLS:
+            raise RateHistoryInvalidRequest(f"GMX funding is unsupported on chain {chain!r}")
+        if query.lower().startswith("0x"):
+            from eth_utils import is_address
+
+            if not is_address(query):
+                raise RateHistoryInvalidRequest(f"Invalid GMX market address: {query!r}")
         try:
             record = await self._market_registry.resolve(
                 chain=chain,
@@ -378,14 +387,10 @@ class GmxV2GatewayConnector(
                 f"GMX market identity could not be verified for {market!r} on {chain}: {exc}",
             ) from exc
         if record is None:
-            raise RateHistoryUnavailable(
-                "gmx_market_registry",
-                f"GMX market {query!r} does not exist or is not listed on {chain}",
-            )
+            raise RateHistoryInvalidRequest(f"GMX market {query!r} does not exist or is not listed on {chain}")
         requested_base = perp_market_base(market)
         if requested_base is not None and requested_base.upper() != record.index_symbol.upper():
-            raise RateHistoryUnavailable(
-                "gmx_market_registry",
+            raise RateHistoryInvalidRequest(
                 f"GMX market address {record.market_token} is {record.index_symbol}, not requested {market}",
             )
         return record
