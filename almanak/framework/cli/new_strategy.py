@@ -1134,9 +1134,22 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
 
     elif template == StrategyTemplate.BASIS_TRADE:
         return """
-            spot_price = market.price(self.base_token)
+            hedge_size_usd = self.spot_size_usd * self.hedge_ratio
+            collateral_usd = hedge_size_usd / self.perp_leverage
+            if self._trade_state in (BasisTradeState.IDLE, BasisTradeState.SPOT_BOUGHT):
+                try:
+                    quote_price = market.price(self.quote_token)
+                except ValueError:
+                    return Intent.hold(reason="Cannot check collateral token price")
+                if not quote_price.is_finite() or quote_price <= 0:
+                    return Intent.hold(reason="Collateral token price is unavailable or invalid")
+                collateral_amount = collateral_usd / quote_price
 
             if self._trade_state == BasisTradeState.IDLE:
+                try:
+                    spot_price = market.price(self.base_token)
+                except ValueError:
+                    return Intent.hold(reason="Cannot check base token price")
                 # Check funding rate before entering -- only trade when funding is attractive
                 try:
                     funding = market.funding_rate(self.protocol, self.perp_market)
@@ -1157,8 +1170,9 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 except ValueError:
                     return Intent.hold(reason="Cannot check balance")
 
-                if quote_balance.balance_usd < self.spot_size_usd:
-                    return Intent.hold(reason=f"Insufficient {self.quote_token}")
+                required_quote = (self.spot_size_usd + collateral_usd) / quote_price
+                if quote_balance.balance < required_quote:
+                    return Intent.hold(reason=f"Insufficient {self.quote_token} for spot plus perp collateral")
 
                 # Funding rate is attractive -- buy spot (first leg of basis trade)
                 logger.info(
@@ -1173,15 +1187,20 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 )
 
             elif self._trade_state == BasisTradeState.SPOT_BOUGHT:
-                # Hedge with short perp (second leg)
+                try:
+                    quote_balance = market.balance(self.quote_token)
+                except ValueError:
+                    return Intent.hold(reason="Cannot check balance")
+                if quote_balance.balance < collateral_amount:
+                    return Intent.hold(reason=f"Insufficient {self.quote_token} for perp collateral")
                 logger.info(f"Hedging: opening short perp on {self.perp_market}")
                 return Intent.perp_open(
                     market=self.perp_market,
                     collateral_token=self.quote_token,
-                    collateral_amount=self.spot_size_usd * Decimal("0.1"),
-                    size_usd=self.spot_size_usd * self.hedge_ratio,
+                    collateral_amount=collateral_amount,
+                    size_usd=hedge_size_usd,
                     is_long=False,
-                    leverage=Decimal("10"),
+                    leverage=self.perp_leverage,
                     protocol=self.protocol,
                 )
 
@@ -3058,6 +3077,11 @@ def _get_template_init_params(
         # Basis trade parameters
         self.spot_size_usd = Decimal(str(get_config("spot_size_usd", "10000")))
         self.hedge_ratio = Decimal(str(get_config("hedge_ratio", "1.0")))
+        self.perp_leverage = Decimal(str(get_config("perp_leverage", "10")))
+        for name in ("spot_size_usd", "hedge_ratio", "perp_leverage"):
+            value = getattr(self, name)
+            if not value.is_finite() or value <= 0:
+                raise ValueError(f"{{name}} must be finite and positive")
 
         # Funding rate thresholds (hourly rate, e.g. 0.0001 = 0.01%/hr)
         self.funding_entry_threshold = Decimal(str(get_config("funding_entry_threshold", "0.0001")))
@@ -3065,6 +3089,15 @@ def _get_template_init_params(
 
         # Perp venue for the hedge leg (funding-rate reads + perp intents)
         self.protocol = get_config("protocol", "{protocol}")
+        from almanak.connectors._strategy_base.capabilities_registry import get_protocol_capabilities
+
+        capabilities = get_protocol_capabilities(self.protocol)
+        if not capabilities.get("supports_leverage"):
+            raise ValueError(f"{{self.protocol}} does not declare leverage support")
+        minimum = Decimal(str(capabilities.get("min_leverage", "1")))
+        maximum = Decimal(str(capabilities["max_leverage"]))
+        if not minimum <= self.perp_leverage <= maximum:
+            raise ValueError(f"perp_leverage must be between {{minimum}} and {{maximum}} for {{self.protocol}}")
 
         # Token configuration
         self.base_token = get_config("base_token", "WETH")
@@ -4413,6 +4446,7 @@ def generate_config_json(
                 "perp_market": "ETH/USD",
                 "spot_size_usd": "10000",
                 "hedge_ratio": "1.0",
+                "perp_leverage": "10",
                 "funding_entry_threshold": "0.0001",
                 "funding_exit_threshold": "-0.00005",
             }

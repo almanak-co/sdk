@@ -123,6 +123,11 @@ TEMPLATE_CONFIG_DOCS: dict[str, list[tuple[str, str, str]]] = {
         ("spot_size_usd", "string (Decimal)", "USD size of the spot leg"),
         ("hedge_ratio", "string (Decimal)", "Perp size / spot size (1.0 = delta neutral)"),
         (
+            "perp_leverage",
+            "string (Decimal)",
+            "Perp leverage (default 10); collateral = notional / leverage; liquidation risk remains",
+        ),
+        (
             "funding_entry_threshold",
             "string (Decimal)",
             "Min hourly funding rate to enter (positive = longs pay shorts, e.g. 0.0001 = 0.01%/hr)",

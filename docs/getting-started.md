@@ -520,3 +520,19 @@ OpenAI-compatible provider).
 Both paths share the same gateway, connectors, and execution pipeline.
 
 **Get started:** [Agentic Trading Guide](agentic/index.md)
+
+### Basis-trade collateral and leverage
+
+The `basis_trade` scaffold exposes `perp_leverage` in `config.json`. Its default
+remains **10×** and must be reviewed before running. A spot hedge does not prevent
+liquidation of an undercollateralized perp leg: spot and perp margin are separate.
+The template validates leverage against the venue's declared capability range.
+
+Perp notional is `spot_size_usd * hedge_ratio`; collateral value is notional divided
+by `perp_leverage`. The strategy converts that value into quote-token units using
+a measured price and checks funds for both the spot purchase and remaining perp
+collateral before entry. Missing/invalid prices prevent entry rather than assuming
+a dollar peg. Funding and execution fees are separate from this collateral budget;
+the existing compiler/execution fee and gas preflights still apply to each order.
+Maintain native funds for the full lifecycle, including close orders. This config
+value is a leverage setting, not a fee estimate or an assurance against liquidation.
