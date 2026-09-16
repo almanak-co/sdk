@@ -551,6 +551,18 @@ balance on that chain. Supplying a chain does not authorize sweeping unrelated
 wallet holdings. Unmeasured inventory is refused, including historical rows that
 lack the chain identity needed to prove ownership.
 
+### Configuring TA swap exits
+
+For `ta_swap`, normal teardown uses the same `max_slippage_bps` as ordinary swaps.
+Emergency teardown uses `hard_teardown_max_slippage_bps`, explicitly shown in the
+generated config. Defaults retain the prior tolerances: 50 bps normal and 300 bps
+emergency. Both must be finite, nonnegative and below 10,000 bps.
+
+Optional `protocol` and `swap_params` settings apply to entries and exits alike.
+For example, a Uniswap V3 route may pin its pool with
+`"protocol": "uniswap_v3"` and `"swap_params": {"pool": "0x…"}`. Leaving them
+`null` preserves automatic routing. Teardown always supplies the explicit chain.
+
 ### Basis-trade collateral and leverage
 
 The `basis_trade` scaffold exposes `perp_leverage` in `config.json`. Its default

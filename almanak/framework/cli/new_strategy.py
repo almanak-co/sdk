@@ -680,7 +680,9 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     from_token=self.quote_token,
                     to_token=self.base_token,
                     amount_usd=self.trade_size_usd,
-                    max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),
+                    max_slippage=self.max_slippage_bps / Decimal("10000"),
+                    protocol=self.protocol,
+                    swap_params=self.swap_params,
                 )
             elif sell_signal:
                 base_price = market.price(self.base_token)
@@ -718,7 +720,9 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                         from_token=self.base_token,
                         to_token=self.quote_token,
                         amount_usd=self.trade_size_usd,
-                        max_slippage=Decimal(str(self.max_slippage_bps)) / Decimal("10000"),
+                        max_slippage=self.max_slippage_bps / Decimal("10000"),
+                        protocol=self.protocol,
+                        swap_params=self.swap_params,
                     )
 
             return Intent.hold(reason=reason or "No signal")"""
@@ -1763,7 +1767,8 @@ def _get_template_teardown(
         intents: list[AnyIntent] = []
 
         if self._holding_base:
-            max_slippage = Decimal("0.03") if mode == TeardownMode.HARD else Decimal("0.005")
+            slippage_bps = self.hard_teardown_max_slippage_bps if mode == TeardownMode.HARD else self.max_slippage_bps
+            max_slippage = slippage_bps / Decimal("10000")
             intents.append(
                 Intent.swap(
                     chain=self.chain,
@@ -1771,6 +1776,8 @@ def _get_template_teardown(
                     to_token=self.quote_token,
                     amount="all",
                     max_slippage=max_slippage,
+                    protocol=self.protocol,
+                    swap_params=self.swap_params,
                 )
             )
 
@@ -2945,7 +2952,16 @@ def _get_template_init_params(
 
         # Trading parameters
         self.trade_size_usd = Decimal(str(get_config("trade_size_usd", "1000")))
-        self.max_slippage_bps = int(get_config("max_slippage_bps", 50))
+        self.max_slippage_bps = Decimal(str(get_config("max_slippage_bps", 50)))
+        self.hard_teardown_max_slippage_bps = Decimal(str(get_config("hard_teardown_max_slippage_bps", 300)))
+        for name in ("max_slippage_bps", "hard_teardown_max_slippage_bps"):
+            value = getattr(self, name)
+            if not value.is_finite() or not Decimal("0") <= value < Decimal("10000"):
+                raise ValueError(f"{name} must be finite and in [0, 10000)")
+        self.protocol = get_config("protocol", None)
+        self.swap_params = get_config("swap_params", None)
+        if self.swap_params is not None and not isinstance(self.swap_params, dict):
+            raise ValueError("swap_params must be a mapping or null")
 
         # Gas-worthiness gate:
         #   min_trade_value_usd: absolute floor below which a trade is skipped
@@ -4387,6 +4403,7 @@ def generate_config_json(
                 "sell_percent_b": 1.0,
                 "trade_size_usd": 1000,
                 "max_slippage_bps": 50,
+                "hard_teardown_max_slippage_bps": 300,
                 # Gas-worthiness gate (see strategy decide()):
                 # - min_trade_value_usd: absolute floor; trade is held if trade_size < floor
                 # - max_gas_ratio: reject when estimated gas cost > ratio * trade_size
