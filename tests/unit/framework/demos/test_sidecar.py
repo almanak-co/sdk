@@ -48,6 +48,74 @@ class TestSidecarLoad:
         assert uni.demo_name == "uniswap_lp"
         assert uni.max_iterations == 1
 
+    def test_explicit_connector_gives_one_connector_several_cells(self, repo_layout: Path):
+        path = _write_registry(
+            repo_layout,
+            """
+            connectors:
+              uniswap_v4:
+                demo_dir: strategies/internal/demo_catalog/uniswap_v4_swap
+                chain: base
+                force_action: ""
+                max_iterations: 1
+              uniswap_v4_lp:
+                connector: uniswap_v4
+                demo_dir: almanak/demo_strategies/uniswap_v4_hooks
+                chain: base
+                force_action: open
+                max_iterations: 1
+            """,
+        )
+        registry = SidecarRegistry.load(path)
+        assert set(registry.connectors) == {"uniswap_v4", "uniswap_v4_lp"}
+        assert registry.covered_connectors() == {"uniswap_v4"}
+        lp = registry.connectors["uniswap_v4_lp"]
+        assert (lp.key, lp.connector, lp.demo_name) == ("uniswap_v4_lp", "uniswap_v4", "uniswap_v4_hooks")
+        assert [e.key for e in registry.for_connector("uniswap_v4")] == ["uniswap_v4", "uniswap_v4_lp"]
+
+    def test_cell_key_outside_the_shared_charset_raises(self, repo_layout: Path):
+        """The shell picker's awk only sees `[a-z0-9_]+` keys; a key it cannot read must not load."""
+        path = _write_registry(
+            repo_layout,
+            """
+            connectors:
+              uniswap-v4-lp:
+                connector: uniswap_v4
+                demo_dir: almanak/demo_strategies/uniswap_v4_hooks
+                chain: base
+            """,
+        )
+        with pytest.raises(ValueError, match=r"must match \[a-z0-9_\]\+"):
+            SidecarRegistry.load(path)
+
+    def test_non_string_cell_key_raises_valueerror(self, repo_layout: Path):
+        """`123:` loads as int; callers catch ValueError, so a TypeError would escape as a traceback."""
+        path = _write_registry(
+            repo_layout,
+            """
+            connectors:
+              123:
+                demo_dir: almanak/demo_strategies/uniswap_v4_hooks
+                chain: base
+            """,
+        )
+        with pytest.raises(ValueError, match=r"must match \[a-z0-9_\]\+"):
+            SidecarRegistry.load(path)
+
+    def test_invalid_connector_name_raises(self, repo_layout: Path):
+        path = _write_registry(
+            repo_layout,
+            """
+            connectors:
+              uniswap_v4_lp:
+                connector: "uniswap v4"
+                demo_dir: almanak/demo_strategies/uniswap_v4_hooks
+                chain: base
+            """,
+        )
+        with pytest.raises(ValueError, match="invalid connector name"):
+            SidecarRegistry.load(path)
+
     def test_missing_demo_dir_raises(self, repo_layout: Path):
         path = _write_registry(
             repo_layout,

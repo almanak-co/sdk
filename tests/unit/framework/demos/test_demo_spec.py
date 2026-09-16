@@ -329,6 +329,35 @@ class TestDiscover:
         assert sorted(s.name for s in catalog.for_chain("arbitrum")) == ["alpha", "beta"]
         assert [s.name for s in catalog.for_chain("ethereum")] == ["gamma"]
 
+    def test_by_connector_finds_a_demo_through_a_second_cell(self, demos_root):
+        """A connector whose cells are keyed by alias still resolves to a demo."""
+        demo_dir = _make_demo(demos_root, "alpha", supported_chains=["base"])
+        sidecar = SidecarRegistry(
+            connectors={
+                "uniswap_v4": SidecarEntry(
+                    connector="uniswap_v4",
+                    demo_dir=demos_root / "does_not_exist",
+                    chain="base",
+                    force_action="",
+                    max_iterations=1,
+                ),
+                "uniswap_v4_lp": SidecarEntry(
+                    connector="uniswap_v4",
+                    demo_dir=demo_dir,
+                    chain="base",
+                    force_action="open",
+                    max_iterations=1,
+                    key="uniswap_v4_lp",
+                ),
+            }
+        )
+        catalog = DemoCatalog.discover(demos_root, sidecar_registry=sidecar)
+        # The first cell for this connector points at no demo on disk; the lookup
+        # must keep going rather than returning None.
+        spec = catalog.by_connector("uniswap_v4")
+        assert spec is not None and spec.name == "alpha"
+        assert catalog.by_connector("uniswap_v3") is None
+
     def test_discover_with_custom_sidecar(self, demos_root):
         demo_dir = _make_demo(demos_root, "alpha", supported_chains=["arbitrum"])
         sidecar = SidecarRegistry(

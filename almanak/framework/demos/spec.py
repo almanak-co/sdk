@@ -291,10 +291,11 @@ class DemoCatalog:
     def by_connector(self, connector: str) -> DemoSpec | None:
         if self.sidecar_registry is None:
             return None
-        entry = self.sidecar_registry.connectors.get(connector)
-        if entry is None:
-            return None
-        return self.by_directory(entry.demo_dir)
+        for entry in self.sidecar_registry.for_connector(connector):
+            spec = self.by_directory(entry.demo_dir)
+            if spec is not None:
+                return spec
+        return None
 
     @classmethod
     def discover(

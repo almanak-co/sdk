@@ -49,6 +49,17 @@ from almanak.framework.utils.log_formatters import format_token_amount_human, fo
 
 logger = logging.getLogger(__name__)
 
+FORCE_ACTIONS = ("", "open", "close")
+
+
+def parse_force_action(raw: Any) -> str:
+    """Normalise ``force_action``; an unknown value is refused so a typo cannot fall through to the live decision path."""
+    action = str(raw or "").strip().lower()
+    if action not in FORCE_ACTIONS:
+        raise ValueError(f"force_action must be one of {FORCE_ACTIONS!r}, got {raw!r}")
+    return action
+
+
 if TYPE_CHECKING:
     from almanak.framework.teardown import TeardownMode, TeardownPositionSummary
 
@@ -65,6 +76,7 @@ class UniswapV4HooksConfig:
         amount1: Amount of token1 to provide
         min_position_usd: Minimum total inventory (USD) required to (re)open a position
         fee_hint: Optional fee override for dynamic fee hooks (null = let hook decide)
+        force_action: Force "open" or "close" for testing; "" lets decide() choose
     """
 
     pool: str = "WETH/USDC/3000"
@@ -78,6 +90,7 @@ class UniswapV4HooksConfig:
     # Min-out floor for LP mint/withdraw, as a fraction (0.005 = 0.5%)
     max_slippage: Decimal = Decimal("0.005")
     fee_hint: int | None = None
+    force_action: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +104,7 @@ class UniswapV4HooksConfig:
             "min_position_usd": str(self.min_position_usd),
             "max_slippage": str(self.max_slippage),
             "fee_hint": self.fee_hint,
+            "force_action": self.force_action,
         }
 
     def update(self, **kwargs: Any) -> Any:
@@ -162,6 +176,7 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
         # Minimum total inventory (USD) required to (re)open a position.
         self.min_position_usd = Decimal(str(self.get_config("min_position_usd", "100")))
         self.max_slippage = Decimal(str(self.get_config("max_slippage", "0.005")))
+        self.force_action = parse_force_action(self.get_config("force_action", ""))
 
         # -- Hook discovery --
         # Decode hook capabilities from the hook address's last 14 bits
@@ -205,6 +220,21 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
 
     def decide(self, market: MarketSnapshot) -> Intent | None:
         """Hook-aware LP decision."""
+        # Closing needs only the tracked position id, so it is decided before the
+        # price reads: a price outage must not strand an open position by turning
+        # a requested close into a hold.
+        if self.force_action == "close":
+            if not self._current_position_id:
+                return Intent.hold(reason="Close requested but no position is open")
+            logger.info(f"Forced action: CLOSE V4 hooked LP position {self._current_position_id}")
+            return self._create_close_intent(self._current_position_id)
+
+        # Forcing an open on top of a tracked position mints a second NFT and
+        # overwrites the tracked id, so teardown would close only the newest one and
+        # strand the rest.
+        if self.force_action == "open" and self._current_position_id:
+            return Intent.hold(reason=f"Open forced but position {self._current_position_id} is already open")
+
         try:
             token0_price_usd = market.price(self.token0_address)
             token1_price_usd = market.price(self.token1_address)
@@ -213,6 +243,10 @@ class UniswapV4HooksStrategy(IntentStrategy[UniswapV4HooksConfig]):
             current_price = token0_price_usd / token1_price_usd
         except (ValueError, KeyError, ZeroDivisionError) as e:
             return Intent.hold(reason=f"Price data unavailable: {e}")
+
+        if self.force_action == "open":
+            logger.info("Forced action: OPEN V4 hooked LP position")
+            return self._create_open_intent(current_price)
 
         # =================================================================
         # Position open -> rebalance if price has drifted out of range

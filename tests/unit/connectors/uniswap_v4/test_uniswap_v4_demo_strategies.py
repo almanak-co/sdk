@@ -21,7 +21,7 @@ from almanak.connectors.uniswap_v4.hooks import (
     hook_data_to_wire,
     warn_empty_hook_data,
 )
-from almanak.demo_strategies.uniswap_v4_hooks.strategy import UniswapV4HooksStrategy
+from almanak.demo_strategies.uniswap_v4_hooks.strategy import UniswapV4HooksStrategy, parse_force_action
 from almanak.framework.intents import Intent
 from almanak.framework.intents.vocabulary import IntentType
 from almanak.framework.teardown import TeardownMode
@@ -332,6 +332,56 @@ class TestV4HooksDemoHookDataWireFormat:
         for intent in (close, teardown):
             bundle = adapter.compile_lp_close_intent(intent, gateway.liquidity, KEY.currency0, KEY.currency1)
             assert bundle.transactions, bundle.metadata
+
+    def test_force_action_open_mints_before_any_inventory_read(self):
+        """The sidecar cell injects force_action=open: iteration 1 is the mint, not a balancing swap."""
+        strategy = _bare_hooks_strategy(EmptyHookDataEncoder())
+        strategy._current_position_id = None
+        strategy.token0_address = "0x4200000000000000000000000000000000000006"
+        strategy.token1_address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+        market = MagicMock()
+        market.price = lambda address: _ORACLE["WETH"] if address == strategy.token0_address else _ORACLE["USDC"]
+        market.balance = MagicMock(side_effect=KeyError("no inventory"))
+
+        strategy.force_action = ""
+        assert strategy.decide(market).intent_type == IntentType.HOLD and market.balance.called
+
+        market.balance.reset_mock()
+        strategy.force_action = "open"
+        intent = strategy.decide(market)
+        assert not market.balance.called
+        assert intent.intent_type == IntentType.LP_OPEN and (intent.amount0, intent.amount1) == (
+            strategy.amount0,
+            strategy.amount1,
+        )
+        bundle = _offline_base_adapter().compile_lp_open_intent(intent, _ORACLE)
+        assert bundle.transactions, bundle.metadata
+
+    def test_forced_close_survives_a_price_outage(self):
+        """A close needs only the position id, so a dead price feed must not strand the position."""
+        strategy = _bare_hooks_strategy(EmptyHookDataEncoder())
+        strategy.force_action = "close"
+        strategy._current_position_id = "42"
+        market = MagicMock()
+        market.price = MagicMock(side_effect=KeyError("price feed down"))
+        intent = strategy.decide(market)
+        assert intent.intent_type == IntentType.LP_CLOSE and intent.position_id == "42"
+        assert not market.price.called
+
+    def test_forced_open_refuses_to_stack_on_an_open_position(self):
+        """Forcing an open on a tracked position would mint a second NFT and strand the first."""
+        strategy = _bare_hooks_strategy(EmptyHookDataEncoder())
+        strategy.force_action = "open"
+        strategy._current_position_id = "42"
+        market = MagicMock()
+        market.price = lambda address: Decimal("2500") if address == strategy.token0_address else Decimal("1")
+        intent = strategy.decide(market)
+        assert intent.intent_type == IntentType.HOLD and "42" in intent.reason
+
+    def test_unknown_force_action_is_refused(self):
+        assert [parse_force_action(v) for v in (None, "", " Open ", "close")] == ["", "", "open", "close"]
+        with pytest.raises(ValueError, match="force_action must be one of"):
+            parse_force_action("mint")
 
     def test_adapter_refuses_untyped_hook_data(self):
         """An empty string or raw bytes is not the wire format: the adapter refuses both lanes."""

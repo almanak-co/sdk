@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import textwrap
@@ -17,14 +16,11 @@ from pathlib import Path
 
 import pytest
 
-
 PICKER = Path(__file__).resolve().parents[4] / "scripts" / "ci" / "pick_sidecar_matrix.py"
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", *args], cwd=repo, check=True, capture_output=True, text=True
-    )
+    return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
 
 
 @pytest.fixture
@@ -109,9 +105,7 @@ def _run_picker(repo: Path, base_sha: str, head_sha: str = "HEAD") -> dict:
         text=True,
     )
     if proc.returncode != 0:
-        raise AssertionError(
-            f"picker failed (rc={proc.returncode})\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
-        )
+        raise AssertionError(f"picker failed (rc={proc.returncode})\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}")
     line = output_file.read_text().strip()
     assert line.startswith("matrix="), f"unexpected output: {line!r}"
     return json.loads(line[len("matrix=") :])
@@ -142,9 +136,7 @@ class TestPicker:
         matrix = _run_picker(repo, base_sha)
         assert matrix["include"] == []
 
-    def test_connector_dir_selects_only_that_connector(
-        self, repo: Path, base_sha: str
-    ):
+    def test_connector_dir_selects_only_that_connector(self, repo: Path, base_sha: str):
         _checkout_branch(repo, "case_aerodrome")
         (repo / "almanak/connectors/aerodrome/adapter.py").write_text("change")
         _commit(repo, "aerodrome only")
@@ -159,6 +151,106 @@ class TestPicker:
         matrix = _run_picker(repo, base_sha)
         assert _connectors(matrix) == {"aerodrome"}
 
+    def test_second_cell_for_a_connector_follows_its_connector_dir(self, repo: Path, base_sha: str):
+        registry = repo / ".github" / "sidecar-demos.yml"
+        second_cell = textwrap.dedent(
+            """
+            aerodrome_swap:
+              connector: aerodrome
+              demo_dir: almanak/demo_strategies/aerodrome_swap
+              chain: base
+              force_action: ""
+              max_iterations: 1
+            """
+        )
+        registry.write_text(registry.read_text() + textwrap.indent(second_cell, "  "))
+        swap_demo = repo / "almanak" / "demo_strategies" / "aerodrome_swap"
+        swap_demo.mkdir()
+        (swap_demo / "marker").write_text("aerodrome_swap")
+        _git(repo, "add", "-A")
+        _commit(repo, "register a second aerodrome cell")
+        base = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        _checkout_branch(repo, "case_second_cell_connector")
+        (repo / "almanak/connectors/aerodrome/adapter.py").write_text("change")
+        _commit(repo, "aerodrome connector only")
+        assert _connectors(_run_picker(repo, base)) == {"aerodrome", "aerodrome_swap"}
+
+        _git(repo, "checkout", "-q", "main")
+        _checkout_branch(repo, "case_second_cell_demo")
+        (swap_demo / "strategy.py").write_text("x")
+        _git(repo, "add", "-A")
+        _commit(repo, "second cell demo only")
+        assert _connectors(_run_picker(repo, base)) == {"aerodrome_swap"}
+
+    def test_malformed_connector_name_fails_closed(self, repo: Path, base_sha: str):
+        registry = repo / ".github" / "sidecar-demos.yml"
+        registry.write_text(
+            textwrap.dedent(
+                """
+                connectors:
+                  aerodrome_swap:
+                    connector: "aero drome"
+                    demo_dir: almanak/demo_strategies/aerodrome_swap
+                    chain: base
+                """
+            ).strip()
+        )
+        _git(repo, "add", "-A")
+        _commit(repo, "malformed connector name")
+        # A name that cannot match almanak/connectors/<name>/ would drop the cell
+        # from the matrix with no error; the picker must refuse the registry instead.
+        with pytest.raises(AssertionError):
+            _run_picker(repo, base_sha)
+
+    def test_connector_without_a_directory_fails_closed(self, repo: Path, base_sha: str):
+        registry = repo / ".github" / "sidecar-demos.yml"
+        registry.write_text(
+            textwrap.dedent(
+                """
+                connectors:
+                  aerodrome_swap:
+                    demo_dir: almanak/demo_strategies/aerodrome_swap
+                    chain: base
+                    force_action: ""
+                    max_iterations: 1
+                """
+            ).strip()
+        )
+        _git(repo, "add", "-A")
+        _commit(repo, "cell attributed to a nonexistent connector dir")
+        # No almanak/connectors/aerodrome_swap/ exists, so the cell could never be
+        # selected by a connector-dir change; refusing beats silently under-selecting.
+        with pytest.raises(AssertionError):
+            _run_picker(repo, base_sha)
+
+    def test_cell_key_outside_the_shared_charset_fails_closed(self, repo: Path, base_sha: str):
+        registry = repo / ".github" / "sidecar-demos.yml"
+        registry.write_text(
+            textwrap.dedent(
+                """
+                connectors:
+                  aerodrome:
+                    demo_dir: almanak/demo_strategies/aerodrome_lp
+                    chain: base
+                    force_action: open
+                    max_iterations: 1
+                  aerodrome-swap:
+                    connector: aerodrome
+                    demo_dir: almanak/demo_strategies/aerodrome_swap
+                    chain: base
+                    force_action: ""
+                    max_iterations: 1
+                """
+            ).strip()
+        )
+        _git(repo, "add", "-A")
+        _commit(repo, "hyphenated cell key")
+        # The shell picker cannot see this key, so accepting it here would let the
+        # two pickers disagree about the matrix.
+        with pytest.raises(AssertionError):
+            _run_picker(repo, base_sha)
+
     def test_gateway_dir_selects_all(self, repo: Path, base_sha: str):
         _checkout_branch(repo, "case_gateway")
         (repo / "almanak/gateway/server.py").write_text("change")
@@ -171,9 +263,7 @@ class TestPicker:
             "aave_v3",
         }
 
-    def test_non_connector_framework_change_runs_all(
-        self, repo: Path, base_sha: str
-    ):
+    def test_non_connector_framework_change_runs_all(self, repo: Path, base_sha: str):
         # Safer-by-default semantics: any framework change outside connectors/
         # is treated as cross-cutting and forces RUN-ALL. This caught the
         # April-29 sidecar coverage gap.
@@ -191,9 +281,7 @@ class TestPicker:
             "aave_v3",
         }
 
-    def test_quarantined_connector_dropped_from_matrix(
-        self, repo: Path, base_sha: str
-    ):
+    def test_quarantined_connector_dropped_from_matrix(self, repo: Path, base_sha: str):
         # Quarantine the demo backing the aerodrome connector entry.
         quarantine_path = repo / "scripts" / "ci" / "demo-quarantine.yml"
         quarantine_path.parent.mkdir(parents=True, exist_ok=True)
