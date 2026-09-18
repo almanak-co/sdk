@@ -19,6 +19,7 @@ Reference:
 https://github.com/safe-global/safe-smart-account/blob/main/contracts/libraries/MultiSend.sol
 
 Example:
+    ```python
     from almanak.framework.execution.signer.safe.multisend import MultiSendEncoder
 
     # Encode multiple transactions
@@ -36,6 +37,7 @@ Example:
         payload.operation,
         ...
     )
+    ```
 """
 
 import logging
@@ -74,12 +76,14 @@ class MultiSendPayload:
         operation: Always DELEGATECALL for MultiSend
 
     Example:
+        ```python
         payload = MultiSendPayload(
             to="0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
             data="0x8d80ff0a...",
             value=0,
             operation=SafeOperation.DELEGATE_CALL,
         )
+        ```
     """
 
     to: str
@@ -106,6 +110,7 @@ class MultiSendEncoder:
     4. Prepend the multiSend(bytes) function selector
 
     Example:
+        ```python
         # Encode transactions
         payload = MultiSendEncoder.build_payload(
             transactions=[approve_tx, swap_tx, add_liquidity_tx],
@@ -116,6 +121,7 @@ class MultiSendEncoder:
         # Use with Safe.execTransaction
         # The Safe will DELEGATECALL to MultiSend
         # MultiSend will CALL each target contract
+        ```
     """
 
     @staticmethod

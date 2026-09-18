@@ -4,6 +4,7 @@ This module provides the BridgeIntent dataclass for expressing cross-chain
 bridge transfers as first-class intents.
 
 Example:
+    ```python
     from almanak.framework.intents import Intent
 
     # Bridge 1000 USDC from Base to Arbitrum
@@ -21,6 +22,7 @@ Example:
         from_chain="optimism",
         to_chain="arbitrum",
     )
+    ```
 """
 
 from collections.abc import Sequence
@@ -146,6 +148,7 @@ class BridgeIntent(BaseIntent):
         created_at: Timestamp when the intent was created
 
     Example:
+        ```python
         # Bridge 1000 USDC from Base to Arbitrum with 0.5% max slippage
         intent = BridgeIntent(
             token="USDC",
@@ -162,6 +165,7 @@ class BridgeIntent(BaseIntent):
             from_chain="optimism",
             to_chain="arbitrum",
         )
+        ```
     """
 
     token: str

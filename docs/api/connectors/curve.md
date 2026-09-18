@@ -16,9 +16,7 @@
 | [Optimism](../../chains/optimism.md) | EVM | ``LP_CLOSE``, ``LP_OPEN``, ``SWAP`` |
 | [Polygon](../../chains/polygon.md) | EVM | ``LP_CLOSE``, ``LP_OPEN``, ``SWAP`` |
 
-## API Reference
-
 ::: almanak.connectors.curve
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

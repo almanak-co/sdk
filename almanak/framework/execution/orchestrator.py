@@ -15,6 +15,7 @@ The orchestrator:
 At each step, events are emitted for observability.
 
 Example:
+    ```python
     from almanak.framework.execution import LocalKeySigner, PublicMempoolSubmitter, DirectSimulator
     from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 
@@ -30,6 +31,7 @@ Example:
     )
 
     result = await orchestrator.execute(action_bundle)
+    ```
 """
 
 import asyncio
@@ -213,11 +215,10 @@ class ExecutionResult:
         swap_amounts: Swap execution data for SWAP intents
         lp_close_data: LP close data for LP_CLOSE intents
         prediction_fill: Polymarket CLOB fill data for PREDICTION_BUY / PREDICTION_SELL
-            intents. Populated by the runner's CLOB branch (VIB-3218). Strategy
+            intents. Populated by the runner's CLOB branch. Strategy
             authors should read ``result.prediction_fill.filled_shares`` rather
             than assuming the intent's requested size filled.
-        bridge_data: Typed source-chain deposit data for BRIDGE intents
-            (VIB-3226). Populated by ResultEnricher via the bridge adapter's
+        bridge_data: Typed source-chain deposit data for BRIDGE intents. Populated by ResultEnricher via the bridge adapter's
             receipt parser. The destination-chain settlement is tracked
             asynchronously by EnsoStateProvider; ``bridge_data.destination_tx_hash``
             is a forward-looking hook and will usually be ``None`` here.
@@ -229,10 +230,10 @@ class ExecutionResult:
             than by the strategy wallet.
         bin_ids: TraderJoe V2 bin IDs for LP positions
         protocol_fees: Typed ProtocolFees enrichment, when a receipt parser
-            emits it (VIB-159). Top-level slot so strategy callbacks can read
+            emits it. Top-level slot so strategy callbacks can read
             ``result.protocol_fees`` rather than digging in ``extracted_data``.
         primitive_money_legs: Connector-declared ``PrimitiveMoneyLegs`` (US-008/
-            US-009), when a migrated connector emits it (VIB-159). Top-level slot
+            US-009), when a migrated connector emits it. Top-level slot
             mirrors ``swap_amounts`` / ``lp_close_data``; also kept in
             ``extracted_data`` for the legacy ledger dispatcher fallback.
         extracted_data: Flexible dict for protocol-specific extracted data
@@ -292,8 +293,10 @@ class ExecutionResult:
             Extracted value or default
 
         Example:
+            ```python
             tick_lower = result.get_extracted("tick_lower", int, 0)
             liquidity = result.get_extracted("liquidity")
+            ```
         """
         value = self.extracted_data.get(key)
         if value is None:
@@ -538,8 +541,7 @@ def _wei_lending_protocols() -> frozenset[str]:
     Derived from each connector's manifest ``metadata_amount_encoding``
     declaration (VIB-4851 C1) — the encoding convention lives next to the
     compiler that produces it, and this single derived set keeps the
-    description formatter and the pre-flight balance checker in sync
-    (VIB-3747). Every undeclared lending protocol (morpho_blue, compound_v3,
+    description formatter and the pre-flight balance checker in sync. Every undeclared lending protocol (morpho_blue, compound_v3,
     curvance, ...) ships human-readable amounts that must be multiplied by
     ``10**decimals`` to compare against on-chain ``balanceOf`` values.
 
@@ -595,7 +597,7 @@ def _normalize_protocol_key(protocol: Any) -> str:
     - convert spaces and hyphens to underscores
 
     Returns ``""`` for non-string inputs so callers can short-circuit
-    without raising on malformed metadata. (VIB-3747)
+    without raising on malformed metadata.
     """
     if not isinstance(protocol, str):
         return ""
@@ -978,7 +980,7 @@ def _preflight_swap_requirements(metadata: dict, protocol: str) -> list[_Require
     ``from_token``/``amount_in`` fields describe the intermediate token that
     won't exist in the wallet until the pre-swap tx has run.  When present,
     ``original_from_token``/``original_amount_in`` pin the token the wallet
-    actually holds today and must win (VIB-2533).
+    actually holds today and must win.
 
     VIB-3747: Curve and Aerodrome SWAP compilers ship ``amount_in`` as a
     human-readable Decimal (``str(amount_decimal)``) instead of wei. The
@@ -1120,6 +1122,7 @@ class ExecutionOrchestrator:
     Events are emitted at each step for observability.
 
     Example:
+        ```python
         orchestrator = ExecutionOrchestrator(
             signer=signer,
             submitter=submitter,
@@ -1132,6 +1135,7 @@ class ExecutionOrchestrator:
             print(f"All transactions confirmed: {result.transaction_results}")
         else:
             print(f"Execution failed at {result.error_phase}: {result.error}")
+        ```
     """
 
     def __init__(
@@ -1168,7 +1172,7 @@ class ExecutionOrchestrator:
                 chain-specific default (300s for Ethereum L1, 120s for L2s).
             session_store: Optional ExecutionSessionStore for crash recovery checkpoints
             tx_risk_config: Transaction risk configuration (uses default if not provided)
-            registry_preflight: Optional async callback (VIB-4614) that inspects an
+            registry_preflight: Optional async callback that inspects an
                 ActionBundle BEFORE on-chain submission and returns a rejection
                 reason string when an open auto-mode position-registry row would
                 collide with this open (preventing an orphan NFT mint), or ``None``
@@ -1177,7 +1181,7 @@ class ExecutionOrchestrator:
                 ``_phase_registry_preflight`` phase stays layering-clean. ``None``
                 disables the phase (no-op) — paper/backtest orchestrators and any
                 caller without a registry-backed StateManager pass ``None``.
-            managed_fork: Tri-state managed-fork declaration (ALM-3184),
+            managed_fork: Tri-state managed-fork declaration,
                 forwarded to ``refresh_deferred_bundle``. The gateway declares
                 it from ``GatewaySettings.network``. ``None`` means undeclared,
                 which resolves to production. Declaration only, never inferred
@@ -1657,14 +1661,14 @@ class ExecutionOrchestrator:
         return result
 
     async def _phase_registry_preflight(self, state: ExecutionPipelineState) -> ExecutionResult | None:
-        """Step 1.7 (VIB-4614): reject an auto-mode LP open that would orphan an NFT.
+        """Step 1.7: reject an auto-mode LP open that would orphan an NFT.
 
         Runs BETWEEN build and validate — after the bundle compiled to ≥1 tx
         (so we know it is a real open) but BEFORE any on-chain submission. The
         bug this closes (incident S2, ``UniV3ClLpAuditStrategy``): a second
         handle-less ``LP_OPEN`` into a pool that already has an open auto-mode
         registry row mints a real NFT on-chain and only fails afterward at
-        registry persistence with :class:`RegistryAutoCollisionError`, leaving
+        registry persistence with `RegistryAutoCollisionError`, leaving
         an orphan NFT that no accounting/registry row tracks.
 
         The orchestrator holds no StateManager; the actual DB lookup lives in
@@ -3208,7 +3212,7 @@ class ExecutionOrchestrator:
         """Get current gas prices from the network.
 
         Delegates the EIP-1559 floor + max-fee math to the shared
-        :func:`build_eip1559_fees` helper (VIB-5419) so the priority fee is
+        `build_eip1559_fees` helper so the priority fee is
         floored to the per-chain descriptor value when the node returns ``0``
         or the RPC raises — not only on exception.
 

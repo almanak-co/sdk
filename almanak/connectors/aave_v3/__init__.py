@@ -45,6 +45,7 @@ Supported chains:
 - X Layer
 
 Example:
+    ```python
     from almanak.connectors.aave_v3 import AaveV3Adapter, AaveV3Config
 
     config = AaveV3Config(
@@ -77,6 +78,7 @@ Example:
         positions=positions,
         reserve_data=reserve_data,
     )
+    ```
 """
 
 from __future__ import annotations

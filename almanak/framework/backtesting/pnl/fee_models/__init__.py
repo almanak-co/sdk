@@ -31,6 +31,7 @@ Registry Functions:
     - FeeModelRegistry: Registry class for fee model discovery
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.fee_models import (
         FeeModel,
         UniswapV3FeeModel,
@@ -43,6 +44,7 @@ Example:
 
     # Or instantiate directly
     fee_model = UniswapV3FeeModel()
+    ```
 """
 
 import importlib

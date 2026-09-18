@@ -10,6 +10,7 @@ This SDK provides a single entry point for all Polymarket operations:
 - On-chain token operations
 
 Example:
+    ```python
     from almanak.connectors.polymarket import PolymarketSDK, PolymarketConfig
     from almanak.framework.gateway_client import GatewayClient
     from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
@@ -36,6 +37,7 @@ Example:
     for tx in approval_txs:
         # Sign and submit tx...
         pass
+    ```
 """
 
 from decimal import Decimal

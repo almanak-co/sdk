@@ -20,6 +20,7 @@ Supported chains:
 - Avalanche
 
 Example:
+    ```python
     from almanak.connectors.aave_v3 import AaveV3Adapter, AaveV3Config
 
     config = AaveV3Config(
@@ -39,6 +40,7 @@ Example:
         asset="ETH",
         amount=Decimal("0.5"),
     )
+    ```
 """
 
 import logging
@@ -497,6 +499,7 @@ class AaveV3Adapter:
     - Liquidation price calculations
 
     Example:
+        ```python
         config = AaveV3Config(
             chain="arbitrum",
             wallet_address="0x...",
@@ -511,6 +514,7 @@ class AaveV3Adapter:
 
         # Check health factor
         hf = adapter.calculate_health_factor(positions, prices)
+        ```
     """
 
     def __init__(
@@ -1576,6 +1580,7 @@ def create_adapter_with_prices(
     Pass in prices from your MarketSnapshot or PriceAggregator.
 
     Example:
+        ```python
         from almanak.connectors.aave_v3 import create_adapter_with_prices, AaveV3Config
 
         # Get prices from your data layer
@@ -1590,6 +1595,7 @@ def create_adapter_with_prices(
 
         # Now health factor calculations use real prices
         hf = adapter.calculate_health_factor(positions, reserve_data)
+        ```
 
     Args:
         config: Adapter configuration

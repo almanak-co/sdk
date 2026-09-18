@@ -11,6 +11,7 @@ These plots are designed for lending protocols like Aave V3, Morpho Blue,
 Compound V3, and Spark.
 
 Example:
+    ```python
     from almanak.framework.dashboard.plots.lending_plots import (
         plot_health_factor_gauge,
         plot_ltv_ratio,
@@ -29,6 +30,7 @@ Example:
         assets={"WETH": 10000, "USDC": 5000, "WBTC": 3000},
     )
     st.plotly_chart(fig)
+    ```
 """
 
 from dataclasses import dataclass

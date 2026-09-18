@@ -31,6 +31,7 @@ Export Organization:
     - Exceptions: Comprehensive error hierarchy
 
 Example:
+    ```python
     from almanak.connectors.polymarket import (
         ClobClient,
         PolymarketConfig,
@@ -45,6 +46,7 @@ Example:
     markets = client.get_markets(MarketFilters(active=True, limit=10))
     for market in markets:
         print(f"{market.question}: YES={market.yes_price}, NO={market.no_price}")
+    ```
 """
 
 # Lazy attribute access (VIB-4835). Polymarket's manifest-declared

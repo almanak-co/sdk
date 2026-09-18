@@ -33,6 +33,7 @@ class OHLCVModule:
         cache: The SQLite-based cache for storing candles
 
     Example:
+        ```python
         from almanak.framework.data.indicators.rsi import CoinGeckoOHLCVProvider
         from almanak.framework.data.cache.ohlcv_cache import OHLCVCache
 
@@ -43,6 +44,7 @@ class OHLCVModule:
         # Get OHLCV data as DataFrame
         df = module.get_ohlcv("ETH", timeframe="1h", limit=100)
         print(df.columns)  # timestamp, open, high, low, close, volume
+        ```
     """
 
     def __init__(

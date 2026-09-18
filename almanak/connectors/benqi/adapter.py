@@ -12,6 +12,7 @@ BENQI uses a qiToken model (Compound V2 architecture):
 Supported chain: Avalanche
 
 Example:
+    ```python
     from almanak.connectors.benqi import BenqiAdapter, BenqiConfig
 
     config = BenqiConfig(
@@ -25,6 +26,7 @@ Example:
 
     # Borrow AVAX against USDC collateral
     result = adapter.borrow(asset="AVAX", amount=Decimal("10"))
+    ```
 """
 
 from __future__ import annotations

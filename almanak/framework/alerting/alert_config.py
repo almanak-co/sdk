@@ -179,7 +179,7 @@ class AlertConfig:
     - Quiet hours: None (disabled) — all severities sent 24/7.
     - Escalation timeout: 900s (15 min) — unacknowledged alerts escalate.
 
-    For production deployments, use :meth:`default_production` which enables
+    For production deployments, use `default_production` which enables
     quiet hours (22:00-06:00 UTC, CRITICAL-only).
 
     Attributes:

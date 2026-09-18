@@ -12,6 +12,7 @@ Key Components:
     - PancakeSwapV3FeeModel: Fee model using pool fee tiers
 
 Example:
+    ```python
     from almanak.connectors.pancakeswap_v3.fee_model import (
         PancakeSwapV3FeeModel,
         PancakeSwapV3FeeTier,
@@ -24,6 +25,7 @@ Example:
         intent_type=IntentType.SWAP,
         fee_tier=PancakeSwapV3FeeTier.LOW,  # Override default
     )
+    ```
 """
 
 from dataclasses import dataclass
@@ -108,6 +110,7 @@ class PancakeSwapV3FeeModel(FeeModel):
         token_pair_tiers: Optional mapping of token pairs to their fee tiers
 
     Example:
+        ```python
         model = PancakeSwapV3FeeModel(default_fee_tier=PancakeSwapV3FeeTier.MEDIUM)
 
         # Using default tier
@@ -119,6 +122,7 @@ class PancakeSwapV3FeeModel(FeeModel):
             intent_type=IntentType.SWAP,
             fee_tier=PancakeSwapV3FeeTier.LOW,
         )
+        ```
     """
 
     default_fee_tier: PancakeSwapV3FeeTier = PancakeSwapV3FeeTier.MEDIUM

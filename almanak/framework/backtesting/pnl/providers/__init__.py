@@ -15,6 +15,7 @@ Provider Registry:
     - ProviderMetadata: Metadata about registered providers
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.providers import (
         CoinGeckoDataProvider,
         ChainlinkDataProvider,
@@ -51,6 +52,7 @@ Example:
     async for timestamp, market_state in provider.iterate(config):
         eth_price = market_state.get_price("WETH")
         # ... process market state
+    ```
 """
 
 from .aggregated import (

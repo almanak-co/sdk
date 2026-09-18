@@ -132,6 +132,7 @@ class BalancerFlashLoanAdapter:
     The Vault contract holds all pool liquidity, enabling large flash loans.
 
     Example:
+        ```python
         config = BalancerFlashLoanConfig(
             chain="arbitrum",
             wallet_address="0x...",
@@ -145,6 +146,7 @@ class BalancerFlashLoanAdapter:
             amounts=[1000000000, 500000000000000000],
             user_data=b"",
         )
+        ```
     """
 
     def __init__(self, chain: str, protocol: str = "balancer") -> None:

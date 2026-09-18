@@ -14,6 +14,7 @@ Supported chains:
 - Monad
 
 Example:
+    ```python
     from almanak.connectors.uniswap_v3 import UniswapV3Adapter, UniswapV3Config
 
     config = UniswapV3Config(
@@ -34,6 +35,7 @@ Example:
 
     sdk = UniswapV3SDK(chain="arbitrum", rpc_url="https://arb1.arbitrum.io/rpc")
     pool = sdk.get_pool_address(weth_addr, usdc_addr, fee_tier=3000)
+    ```
 """
 
 from __future__ import annotations

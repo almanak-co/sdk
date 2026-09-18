@@ -140,6 +140,7 @@ class PendleAdapter:
     - PT/YT redemption at maturity
 
     Example:
+        ```python
         adapter = PendleAdapter(rpc_url="https://arb1.arbitrum.io/rpc", chain="arbitrum")
 
         # Build a swap transaction
@@ -154,6 +155,7 @@ class PendleAdapter:
                 swap_type="token_to_pt",
             )
         )
+        ```
     """
 
     # Mapping from ActionType to Pendle action types

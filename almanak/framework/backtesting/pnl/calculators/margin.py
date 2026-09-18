@@ -14,6 +14,7 @@ Margin Validation Formula:
         collateral / position_size >= margin_ratio
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.calculators.margin import (
         MarginValidator,
         MarginValidationResult,
@@ -28,6 +29,7 @@ Example:
         margin_ratio=Decimal("0.1"),  # 10% initial margin required
     )
     # result.is_valid = True (1000/10000 = 0.1 >= 0.1)
+    ```
 
 References:
     - GMX V2 Margin: https://docs.gmx.io/docs/trading/v2#margin
@@ -138,6 +140,7 @@ class MarginValidator:
         protocol_margins: Protocol-specific margin requirements
 
     Example:
+        ```python
         validator = MarginValidator()
 
         # Check if we can open a $10,000 position with $1,500 collateral
@@ -155,6 +158,7 @@ class MarginValidator:
             available_capital=Decimal("5000"),
         )
         # utilization.utilization_ratio = 0.5 (50% utilized)
+        ```
     """
 
     default_initial_margin_ratio: Decimal = Decimal("0.1")  # 10%
@@ -225,6 +229,7 @@ class MarginValidator:
             ValueError: If position_size or collateral is negative
 
         Example:
+            ```python
             result = validator.validate_margin(
                 position_size=Decimal("10000"),
                 collateral=Decimal("1000"),
@@ -236,6 +241,7 @@ class MarginValidator:
             else:
                 # Reject position, need more collateral
                 print(f"Need ${result.shortfall} more collateral")
+            ```
         """
         if position_size < Decimal("0"):
             raise ValueError(f"position_size cannot be negative, got {position_size}")
@@ -316,6 +322,7 @@ class MarginValidator:
             MarginValidationResult for the combined position
 
         Example:
+            ```python
             # Can I add $5000 to my position with $500 more collateral?
             result = validator.validate_position_increase(
                 current_position_size=Decimal("10000"),
@@ -323,6 +330,7 @@ class MarginValidator:
                 additional_size=Decimal("5000"),
                 additional_collateral=Decimal("500"),
             )
+            ```
         """
         new_position_size = current_position_size + additional_size
         new_collateral = current_collateral + additional_collateral
@@ -354,11 +362,13 @@ class MarginValidator:
             True if margin is sufficient, False otherwise
 
         Example:
+            ```python
             if not validator.check_sufficient_collateral(
                 position_size=Decimal("10000"),
                 collateral=Decimal("500"),
             ):
                 return  # Reject position
+            ```
         """
         result = self.validate_margin(position_size, collateral, margin_ratio)
 
@@ -390,6 +400,7 @@ class MarginValidator:
             MarginUtilization with current state
 
         Example:
+            ```python
             utilization = validator.calculate_margin_utilization(
                 total_margin_used=Decimal("5000"),
                 total_notional=Decimal("50000"),
@@ -397,6 +408,7 @@ class MarginValidator:
             )
             print(f"Margin utilization: {utilization.utilization_ratio * 100:.1f}%")
             # "Margin utilization: 50.0%"
+            ```
         """
         total_capital = total_margin_used + available_capital
 
@@ -464,6 +476,7 @@ class MarginValidator:
             ``None`` when the position is permitted.
 
         Example:
+            ```python
             can_open, reason, rejection = validator.evaluate_open(
                 position_size=Decimal("10000"),
                 collateral=Decimal("1000"),
@@ -472,6 +485,7 @@ class MarginValidator:
             )
             if not can_open:
                 print(f"Cannot open position ({rejection}): {reason}")
+            ```
         """
         required_ratio = margin_ratio or self.default_initial_margin_ratio
 
@@ -558,8 +572,10 @@ class MarginValidator:
             Maximum leverage (e.g., 10 for 10% margin)
 
         Example:
+            ```python
             max_leverage = validator.get_max_leverage_for_margin(Decimal("0.1"))
             # max_leverage = 10
+            ```
         """
         if margin_ratio <= Decimal("0"):
             raise ValueError("margin_ratio must be greater than 0")
@@ -580,11 +596,13 @@ class MarginValidator:
             Required collateral amount
 
         Example:
+            ```python
             collateral = validator.get_required_collateral(
                 position_size=Decimal("10000"),
                 margin_ratio=Decimal("0.1"),
             )
             # collateral = 1000
+            ```
         """
         required_ratio = margin_ratio or self.default_initial_margin_ratio
         return position_size * required_ratio

@@ -11,6 +11,7 @@ Key Components:
 Examples:
     Basic usage with default settings:
 
+        ```python
         from almanak.framework.backtesting.pnl import PnLBacktester, PnLBacktestConfig
         from almanak.framework.backtesting.pnl.providers import CoinGeckoDataProvider
 
@@ -32,9 +33,10 @@ Examples:
         )
         result = await backtester.backtest(strategy, config)
         print(result.summary())
-
+        ```
     Institutional mode for production-grade compliance:
 
+        ```python
         # Institutional mode enforces strict data quality, reproducibility,
         # and compliance requirements for institutional trading operations.
         config = PnLBacktestConfig(
@@ -56,6 +58,7 @@ Examples:
         if result.data_quality and result.data_quality.coverage_ratio is not None:
             print(f"Data coverage: {result.data_quality.coverage_ratio:.1%}")
             print(f"Sources used: {result.data_quality.source_breakdown}")
+        ```
 """
 
 import copy
@@ -598,7 +601,7 @@ class BacktestableStrategy(Protocol):
 
 @functools.lru_cache(maxsize=1)
 def _default_apy_tables() -> Any:
-    """One connector-declared APY table for the generic lane (ALM-2943).
+    """One connector-declared APY table for the generic lane.
 
     The same tables the lending lane accrues with and ``lending_rate``
     serves — the engine must not carry a second, disagreeing default.
@@ -1095,7 +1098,7 @@ def _pool_ohlcv_manifest_key(
 
 
 class BacktestOHLCVView:
-    """Serves ``market.ohlcv()`` from the run's own price series (ALM-2962).
+    """Serves ``market.ohlcv()`` from the run's own price series.
 
     The accessor was ``unconfigured`` in backtests, so candle-reading
     strategies (momentum from closes) held every tick while the SAME strategy
@@ -1111,12 +1114,12 @@ class BacktestOHLCVView:
       already served; timestamps are reconstructed back from the bound tick.
     - **Timeframes** resample through the indicator engine's ``_series_for``
       (whole multiples of the tick interval; anything else refuses), which
-      also inherits the measured-granularity refusal (ALM-2957) when present.
+      also inherits the measured-granularity refusal when present.
     - ``pool_address`` reads delegate only to a run-scoped exact-pool source
       built from prewarmed, archive-authenticated pool descriptors. They never
       substitute the generic token-price series.
 
-    Bound per tick via :meth:`bind`.
+    Bound per tick via `bind`.
     """
 
     def __init__(
@@ -1410,7 +1413,7 @@ class BacktestOHLCVView:
 
 
 class SimulatedGasView:
-    """Serves ``decide()``-time gas reads from the engine's gas model (ALM-2951).
+    """Serves ``decide()``-time gas reads from the engine's gas model.
 
     The strategy-facing gas helpers (``gas_price`` /
     ``estimate_swap_gas_cost_usd`` / ``is_trade_worthwhile``) were silent
@@ -1418,7 +1421,7 @@ class SimulatedGasView:
     the same static gwei ladder the engine charges fills with
     (``config.gas_price_gwei``, chain-default aware) and the tick's gas-asset
     price — modeled, not historical, matching the engine's own gas
-    accounting. Bound per tick via :meth:`bind`.
+    accounting. Bound per tick via `bind`.
     """
 
     def __init__(self, backtester: Any, config: Any) -> None:
@@ -1461,7 +1464,7 @@ class SimulatedGasView:
 
 
 class SimulatedPositionView:
-    """Serves decide()-time position reads from the engine's own tracked state (ALM-2943).
+    """Serves decide()-time position reads from the engine's own tracked state.
 
     ``position_health`` / ``aave_health_factor`` refused (or went silently
     ``None``) on the SIM'S OWN lending position, and ``lp_position_value``
@@ -1482,7 +1485,7 @@ class SimulatedPositionView:
       tick prices) plus the fees the marker has accrued so far. Unknown
       position ids raise (refuse + ledger at the accessor; never silent None).
 
-    Bound per tick via :meth:`bind`.
+    Bound per tick via `bind`.
     """
 
     def __init__(self, portfolio: "SimulatedPortfolio") -> None:
@@ -1495,17 +1498,17 @@ class SimulatedPositionView:
         self._timestamp = timestamp
 
     def position_health(self, protocol: str, market_id: str = "") -> Any:
-        """Health of the sim's lending state for ``protocol``, as :class:`PositionHealth`.
+        """Health of the sim's lending state for ``protocol``, as `PositionHealth`.
 
         Mirrors the live no-position contract: a RECOGNISED LENDING venue the
         sim holds no lending position for returns the empty-account shape (no
         debt ⇒ ``Infinity`` health factor, zero collateral/debt) — exactly what
         an on-chain ``getUserAccountData`` read of an empty account yields.
 
-        That contract is lending-shaped only (ALM-3064). A perpetuals venue
+        That contract is lending-shaped only. A perpetuals venue
         (connector-declared perps read, or an open simulated perp on the
         requested protocol) and an unrecognised protocol both REFUSE with
-        :class:`HealthUnavailableError` — the same answer the live lane gives
+        `HealthUnavailableError` — the same answer the live lane gives
         (``PositionHealthProvider.get_health`` fails closed on protocols
         without a lending read). A 20x perp 0.35% from its liquidation price
         answered with a lending-shaped ``Infinity`` is a fabricated safe value,
@@ -1581,13 +1584,13 @@ class SimulatedPositionView:
     def _refuse_non_lending_health(self, protocol_norm: str) -> None:
         """Raise ``HealthUnavailableError`` unless ``protocol_norm`` is a recognised lending venue.
 
-        Called only on the no-lending-position branch of :meth:`position_health`.
-        Dispatch is registry-driven, never protocol-name literals (VIB-4851):
+        Called only on the no-lending-position branch of `position_health`.
+        Dispatch is registry-driven, never protocol-name literals:
 
         - **Perpetuals venue** — ``PerpsReadRegistry.canonical`` resolves it, OR
           the sim holds an open perp booked under it. ``position_health`` models
           lending health only; a lending-shaped ``Infinity`` for a leveraged perp
-          is a fabricated safe answer (ALM-3064). Refuse.
+          is a fabricated safe answer. Refuse.
         - **Unrecognised protocol** — neither a perps read nor the lending reads
           the live lane dispatches on (``LendingReadRegistry.market_health_reader``
           / ``supports_account_state`` — the exact "Unsupported protocol for
@@ -1786,7 +1789,7 @@ class SimulatedPositionView:
 
 class BacktestPoolPriceView:
     """Serves ``pool_price`` / ``pool_price_by_pair`` as the run's labeled
-    PAIR-RATIO proxy (ALM-2943).
+    PAIR-RATIO proxy.
 
     The accessors were ``unconfigured`` in backtests, so LP strategies that
     gate every action on the venue pool price held forever while the same
@@ -1813,13 +1816,13 @@ class BacktestPoolPriceView:
       INFORMATIONAL (never EXECUTION_GRADE), ``meta.source`` /
       ``meta.proxy_source`` mark the proxy, and a warn-once names it —
       the same doctrine as the pool-candle proxy
-      (:meth:`BacktestOHLCVView.get_pool_ohlcv`).
+      (`get_pool_ohlcv`).
     - Pool-address-scoped calls resolve ONLY preflight-pinned job descriptors;
       unknown addresses refuse + ledger. No process-global enumerated pool
       table participates. Unpriceable legs (no price in the run's series)
       refuse + ledger, as the unconfigured accessor did.
 
-    Bound per tick via :meth:`bind`; :meth:`bind_snapshot` attaches the
+    Bound per tick via `bind`; `bind_snapshot` attaches the
     tick's snapshot so refusals land in the decision-input ledger.
     """
 
@@ -2092,7 +2095,7 @@ class BacktestPoolHistoryReader:
     - Provenance stamps happen provider-side (the broker's pool-history
       lane records serves/misses on the run manifest).
 
-    Bound per tick via :meth:`bind`.
+    Bound per tick via `bind`.
     """
 
     def __init__(self, provider: Any, chain: str | None) -> None:
@@ -2235,9 +2238,9 @@ class BacktestPoolAnalyticsReader:
       the model's backwards-compat contract. ``utilization_rate`` stays None
       (DEX pools).
     - ``best_pool`` keeps refusing — LIVE ``best_pool`` is itself deferred
-      to a gateway RPC (VIB-4729), so a refusal IS live parity.
+      to a gateway RPC, so a refusal IS live parity.
 
-    Bound per tick via :meth:`bind`.
+    Bound per tick via `bind`.
     """
 
     _MONEY_FIELDS = ("tvl_usd", "volume_24h_usd", "volume_7d_usd", "fee_apr", "fee_apy")
@@ -2534,7 +2537,7 @@ class BacktestRateHistoryReader:
       — same constant-series objection; an honest serve needs the historical
       as-of APY plane.
 
-    Bound per tick via :meth:`bind`.
+    Bound per tick via `bind`.
     """
 
     def __init__(self, source: Any, chain: str | None) -> None:
@@ -2673,14 +2676,14 @@ class BacktestRateHistoryReader:
 
 
 class BacktestVolatilityCalculator:
-    """Close-to-close realized vol over the run's own close series (ALM-2943).
+    """Close-to-close realized vol over the run's own close series.
 
     ``realized_vol`` / ``vol_cone`` refused ("no volatility calculator")
     while ``ohlcv()`` served the same token — vol-targeting strategies held
     forever in backtest. This wraps the live
-    :class:`~almanak.framework.data.volatility.realized.RealizedVolatilityCalculator`
+    `almanak.framework.data.volatility.realized.RealizedVolatilityCalculator`
     over the candles the snapshot already fetches through
-    :class:`BacktestOHLCVView` (close-only bars, no look-ahead).
+    `BacktestOHLCVView` (close-only bars, no look-ahead).
 
     Honesty: ONLY ``estimator="close_to_close"`` serves. The backtest bars
     carry ``open == high == low == close``, so an intrabar-range estimator
@@ -2767,7 +2770,7 @@ class BacktestVolatilityCalculator:
 
 class SimulatedSlippageView:
     """Serves ``market.estimate_slippage`` from the engine's own slippage
-    models (ALM-2943).
+    models.
 
     The accessor refused ("no slippage estimator configured") while the
     engine executed every fill with a configured ``SlippageModel``. One
@@ -2787,7 +2790,7 @@ class SimulatedSlippageView:
     - ``recommended_max_size`` linearly extrapolates the model to the
       100 bps budget (the live estimator's ``recommended_max`` convention).
 
-    Bound per tick via :meth:`bind`; :meth:`bind_snapshot` attaches the
+    Bound per tick via `bind`; `bind_snapshot` attaches the
     tick's snapshot so refusals land in the decision-input ledger.
     """
 
@@ -3197,7 +3200,7 @@ def _zero_seed_candidates(
     Without the registered map this set is price-derived, so the native gas
     asset -- which is priced through its wrapped ERC-20 rather than under a key
     of its own -- was never seeded, and ``market.balance("ETH")`` raised on
-    every tick instead of answering zero (ALM-3067). Registered-only, never
+    every tick instead of answering zero. Registered-only, never
     guessed: unregistered symbols and other chains stay honest misses, matching
     the alias bridge's rule (blueprint 31 §2).
     """
@@ -3309,7 +3312,7 @@ async def discover_token_coverage(
 ) -> list[_TokenCoverageDiscovery]:
     """Discover measured range coverage when the provider supports it.
 
-    This is intentionally separate from :func:`classify_token_availability`:
+    This is intentionally separate from `classify_token_availability`:
     providers without the additive range capability keep their established
     membership/point-probe behavior byte-for-byte.
     """
@@ -3928,7 +3931,7 @@ def _canonical_chain_name(chain: str) -> str:
 class _NoFallbackProvider:
     """Fallback for a first-use perp overlay: it serves only its own index series.
 
-    Satisfies :class:`HistoricalDataProvider` so the connector factory can take
+    Satisfies `HistoricalDataProvider` so the connector factory can take
     it as the fallback argument, but every method refuses: a market prepared at
     first use must be priced by its own venue series or not at all, and the
     overlay never drives the run's iteration.
@@ -4009,6 +4012,7 @@ class PnLBacktester:
             fallback values.
 
     Example:
+        ```python
         backtester = PnLBacktester(
             data_provider=CoinGeckoDataProvider(),
             fee_models={"default": DefaultFeeModel()},
@@ -4040,6 +4044,7 @@ class PnLBacktester:
             slippage_models={"default": DefaultSlippageModel()},
             data_config=data_config,
         )
+        ```
     """
 
     data_provider: HistoricalDataProvider
@@ -4505,7 +4510,7 @@ class PnLBacktester:
             chain: The run's chain (``BacktestRunContext.chain``). Threaded
                 into every adapter config so a chain-less intent resolves its
                 pool descriptors, funding and APY providers on the chain the
-                backtest runs on, not ``DEFAULT_CHAIN`` (ALM-3427). ``None``
+                backtest runs on, not ``DEFAULT_CHAIN``. ``None``
                 keeps the adapters' own default.
         """
         # An EXPLICIT strategy_type still forces a single adapter (escape
@@ -5156,12 +5161,14 @@ class PnLBacktester:
             PreflightReport with pass/fail status and detailed check results.
 
         Example:
+            ```python
             preflight = await backtester.run_preflight_validation(config)
             if not preflight.passed:
                 print(preflight.summary())
                 # Handle validation failure
             else:
                 result = await backtester.backtest(strategy, config)
+            ```
         """
         if _copy_config:
             config = copy.deepcopy(config)
@@ -7247,8 +7254,8 @@ class PnLBacktester:
         """Resolve the simulated gas cost for an intent.
 
         Estimates gas units for the intent type, resolves the native gas
-        asset price (:meth:`_resolve_gas_eth_price`) and the gas price in gwei
-        (:meth:`_resolve_gas_price_gwei`), records tracking side effects
+        asset price (`_resolve_gas_eth_price`) and the gas price in gwei
+        (`_resolve_gas_price_gwei`), records tracking side effects
         (data-quality source, fallback usage, gas price records), and
         computes the final USD cost.
 
@@ -7391,7 +7398,7 @@ class PnLBacktester:
     def _market_gas_asset_price(self, market_state: MarketState, symbol: str) -> Decimal | None:
         """Price a gas-asset symbol from ``market_state``.
 
-        Address-native market states (VIB-5508) keep plain-symbol reads an
+        Address-native market states keep plain-symbol reads an
         honest miss, so after the symbol lookup misses, retry through the
         engine's registered ``{SYMBOL: (chain, address)}`` map — the engine
         must be able to consume the data it registered itself (the gas lane's
@@ -7443,8 +7450,7 @@ class PnLBacktester:
         1. Historical gas price from gas_provider (if use_historical_gas_gwei=True)
         2. MarketState.gas_price_gwei (if populated by data provider)
         3. config.gas_price_gwei -- source "config" when user-set, or
-           "chain_default" when it is the chain-aware registry default
-           (VIB-5088). Both are static fabrications for compliance purposes;
+           "chain_default" when it is the chain-aware registry default. Both are static fabrications for compliance purposes;
            "chain_default" additionally refuses to resolve in institutional
            mode (no user value + no historical datum = raise, never fabricate).
 
@@ -7561,7 +7567,7 @@ class PnLBacktester:
 
         Runs after adapter dispatch declined the intent, so an adapter that
         genuinely handles a type outside the generic envelope is unaffected.
-        Anything else outside :data:`GENERIC_SIMULATED_INTENT_TYPES` used to
+        Anything else outside `GENERIC_SIMULATED_INTENT_TYPES` used to
         become a costed no-op (fees/gas charged, zero token flows, no
         position); it is now a fatal, run-stopping error — the design
         decision is that no backtest runs past an intent it cannot simulate.
@@ -7741,7 +7747,7 @@ class PnLBacktester:
         """Calculate the token inflows and outflows for an intent.
 
         Dispatches to per-intent-type helpers in
-        :mod:`almanak.framework.backtesting.pnl._engine_helpers` (Phase 6C.3).
+        `almanak.framework.backtesting.pnl._engine_helpers` (Phase 6C.3).
         Unmatched intent types (HOLD, PERP_CLOSE, ...) return empty flow
         dicts.  PERP_OPEN emits its explicitly declared collateral token as a
         wallet outflow; legacy perp intents without collateral fields remain
@@ -7786,8 +7792,8 @@ class PnLBacktester:
         """Create a position delta for intents that create positions.
 
         Dispatches to per-intent-type handlers through
-        :data:`_POSITION_DELTA_HANDLERS` (mirroring
-        :func:`_engine_helpers.calculate_token_flows`). Intent types without
+        `_POSITION_DELTA_HANDLERS` (mirroring
+        `_engine_helpers.calculate_token_flows`). Intent types without
         a handler (SWAP, HOLD, closes, ...) do not create positions and
         return ``None`` without extracting a USD amount.
 
@@ -8238,10 +8244,10 @@ class PnLBacktester:
         """Resolve the SUPPLY position a WITHDRAW intent closes or reduces.
 
         The withdrawn principal must come OUT of the matched supply
-        position (VIB-5097): without this linkage the inflow double-counts
+        position: without this linkage the inflow double-counts
         against the still-open position. Matching follows the perp-close
         pattern (exact-id precedence, then FIFO by (token, protocol) via
-        :func:`find_lending_close_position_id`).
+        `find_lending_close_position_id`).
 
         Semantics:
 
@@ -8290,12 +8296,12 @@ class PnLBacktester:
     ) -> _CloseResolution:
         """Resolve the BORROW position a REPAY intent closes or reduces.
 
-        Debt-side mirror of :meth:`_resolve_withdraw_close` (VIB-5098): the
+        Debt-side mirror of `_resolve_withdraw_close`: the
         repaid principal must come OUT of the matched BORROW position --
         without this linkage the outflow debits cash while the debt keeps
         counting against equity (a $2,000 repay burned ~$2,000). Matching
         targets BORROW positions only via
-        :func:`find_borrow_close_position_id` (exact-id precedence, then
+        `find_borrow_close_position_id` (exact-id precedence, then
         FIFO by (token, protocol), fail closed).
 
         Semantics:

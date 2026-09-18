@@ -145,6 +145,7 @@ class DataCache:
         ttl_seconds: Time-to-live in seconds (0 = no expiration)
 
     Example:
+        ```python
         # Create cache with 1-hour TTL
         cache = DataCache("/path/to/cache.db", ttl_seconds=3600)
 
@@ -167,6 +168,7 @@ class DataCache:
             provider=my_data_provider,
             interval="1h",
         )
+        ```
     """
 
     def __init__(
@@ -732,6 +734,7 @@ class DataCache:
             Number of data points cached
 
         Example:
+            ```python
             from almanak.framework.backtesting.pnl.providers import CoinGeckoDataProvider
 
             provider = CoinGeckoDataProvider(api_key="...")
@@ -746,6 +749,7 @@ class DataCache:
                 interval="1h",
             )
             print(f"Cached {count} data points")
+            ```
         """
         total_cached = 0
 
@@ -833,6 +837,7 @@ class DataCache:
             Number of data points cached
 
         Example:
+            ```python
             # Pre-load data
             data = {
                 "ETH": [(datetime(2024, 1, 1, 0), eth_ohlcv_0), ...],
@@ -846,6 +851,7 @@ class DataCache:
                 end_date=datetime(2024, 1, 31),
                 data=data,
             )
+            ```
         """
         total_cached = 0
 

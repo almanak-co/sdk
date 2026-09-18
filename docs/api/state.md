@@ -2,71 +2,53 @@
 
 Three-tier state persistence for strategy data.
 
-## StateManager
-
 ::: almanak.framework.state.StateManager
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source
-
-## StateManagerConfig
 
 ::: almanak.framework.state.StateManagerConfig
     options:
-      show_root_heading: true
-
-## StateTier
+      heading_level: 2
 
 ::: almanak.framework.state.StateTier
     options:
-      show_root_heading: true
-
-## StateData
+      heading_level: 2
 
 ::: almanak.framework.state.StateData
     options:
-      show_root_heading: true
+      heading_level: 2
 
 ## Migrations
 
-### StateMigration
-
 ::: almanak.framework.state.StateMigration
     options:
-      show_root_heading: true
-
-### MigrationRegistry
+      heading_level: 3
 
 ::: almanak.framework.state.MigrationRegistry
     options:
-      show_root_heading: true
-
-### MigrationResult
+      heading_level: 3
 
 ::: almanak.framework.state.MigrationResult
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Position Management
 
-### PositionManager
-
 ::: almanak.framework.state.PositionManager
     options:
-      show_root_heading: true
-
-### PositionRecord
+      heading_level: 3
 
 ::: almanak.framework.state.PositionRecord
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Exceptions
 
 ::: almanak.framework.state.StateConflictError
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ::: almanak.framework.state.StateNotFoundError
     options:
-      show_root_heading: true
+      heading_level: 3

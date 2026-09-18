@@ -21,6 +21,7 @@ Interest Rate Sources:
     - PROTOCOL: Use protocol-specific default rates
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.calculators.interest import (
         InterestCalculator,
         InterestResult,
@@ -36,6 +37,7 @@ Example:
         compound=True,
     )
     print(f"Interest earned: ${result.interest}")
+    ```
 
 References:
     - Aave V3 Interest: https://docs.aave.com/developers/guides/rates-guide
@@ -164,6 +166,7 @@ class InterestCalculator:
         chain: Blockchain for historical APY lookups (default: ethereum)
 
     Example:
+        ```python
         calculator = InterestCalculator()
 
         # Calculate compound interest for 30 days
@@ -186,6 +189,7 @@ class InterestCalculator:
             market="USDC",
             timestamp=datetime(2024, 1, 15, tzinfo=UTC),
         )
+        ```
     """
 
     interest_rate_source: InterestRateSource = InterestRateSource.FIXED
@@ -290,11 +294,13 @@ class InterestCalculator:
             Supply APY as decimal (0.03 = 3%)
 
         Example:
+            ```python
             apy = await calculator.get_historical_supply_apy(
                 protocol="aave_v3",
                 market="USDC",
                 timestamp=datetime(2024, 1, 15, tzinfo=UTC),
             )
+            ```
         """
         # If not using historical source, return default
         if self.interest_rate_source != InterestRateSource.HISTORICAL:
@@ -364,11 +370,13 @@ class InterestCalculator:
             Borrow APY as decimal (0.05 = 5%)
 
         Example:
+            ```python
             apy = await calculator.get_historical_borrow_apy(
                 protocol="aave_v3",
                 market="USDC",
                 timestamp=datetime(2024, 1, 15, tzinfo=UTC),
             )
+            ```
         """
         # If not using historical source, return default
         if self.interest_rate_source != InterestRateSource.HISTORICAL:
@@ -542,6 +550,7 @@ class InterestCalculator:
             InterestResult with interest amount and metadata
 
         Example:
+            ```python
             # Compound interest for $10,000 at 5% APY over 30 days
             result = calculator.calculate_interest(
                 principal=Decimal("10000"),
@@ -559,6 +568,7 @@ class InterestCalculator:
                 compound=False,
             )
             # result.interest ≈ $41.10 (very similar for short periods)
+            ```
         """
         # Convert timedelta to days if needed
         if isinstance(time_delta, timedelta):
@@ -682,6 +692,7 @@ class InterestCalculator:
             InterestResult with total interest and metadata
 
         Example:
+            ```python
             # Variable APY: 3% for first 10 days, then 5% for next 20 days
             result = calculator.calculate_interest_variable_apy(
                 principal=Decimal("10000"),
@@ -690,6 +701,7 @@ class InterestCalculator:
                     (Decimal("20"), Decimal("0.05")),
                 ],
             )
+            ```
         """
         if not apy_schedule:
             return InterestResult(

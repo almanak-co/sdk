@@ -11,6 +11,7 @@ Available Signers:
     - ZodiacRolesSigner: Backward-compatible alias for ZodiacSigner
 
 Example:
+    ```python
     # EOA signing
     from almanak.framework.execution.signer import LocalKeySigner
 
@@ -27,6 +28,7 @@ Example:
     )
     safe_signer = create_safe_signer(config)
     signed_tx = await safe_signer.sign_with_web3(tx, web3, eoa_nonce)
+    ```
 """
 
 from almanak.framework.execution.signer.local import LocalKeySigner

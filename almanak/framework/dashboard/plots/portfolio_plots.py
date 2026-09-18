@@ -9,6 +9,7 @@ This module provides visualization components for portfolio-level metrics includ
 These plots are useful for any strategy type to track overall performance.
 
 Example:
+    ```python
     from almanak.framework.dashboard.plots.portfolio_plots import (
         plot_portfolio_value_over_time,
         plot_pnl_waterfall,
@@ -21,6 +22,7 @@ Example:
         benchmark_data=eth_hold_df,
     )
     st.plotly_chart(fig)
+    ```
 """
 
 from dataclasses import dataclass

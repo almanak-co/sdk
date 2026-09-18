@@ -17,9 +17,7 @@
 | [Optimism](../../chains/optimism.md) | EVM | ``FLASH_LOAN`` |
 | [Polygon](../../chains/polygon.md) | EVM | ``FLASH_LOAN`` |
 
-## API Reference
-
 ::: almanak.connectors.balancer_v2
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

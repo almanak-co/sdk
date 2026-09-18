@@ -19,6 +19,7 @@ Supported Chains:
 - Monad (uses a chain-specific Morpho Blue deployment, not the universal address)
 
 Example:
+    ```python
     from almanak.connectors.morpho_blue import (
         MorphoBlueAdapter,
         MorphoBlueConfig,
@@ -54,6 +55,7 @@ Example:
     sdk = MorphoBlueSDK(chain="ethereum")
     position = sdk.get_position(market_id, user_address)
     print(f"Supply shares: {position.supply_shares}")
+    ```
 """
 
 from __future__ import annotations

@@ -11,7 +11,7 @@ concurrent updates.  Each agent has exactly one row in the WARM tier
 Important: Each strategy uses exactly one gateway and vice versa.
 No two strategies share a gateway.
 
-Durability invariant (VIB-3156):
+Durability invariant:
     A successful ``save_state()`` call guarantees durability or raises.
 
     Operationally, every file-backed WARM backend writes the new version,
@@ -59,13 +59,13 @@ from .registry_errors import RegistryAutoCollisionError  # noqa: E402
 
 
 def _default_local_db_path_str() -> str:
-    """Resolve the local SQLite path via the canonical helper (VIB-3761).
+    """Resolve the local SQLite path via the canonical helper.
 
     Wrapped so the import (and the hosted-mode check inside the helper) is
     deferred to dataclass construction rather than module load — this
     matters because ``StateManagerConfig`` is constructed in hosted mode
     even though its ``db_path`` is unused there. We swallow
-    :class:`LocalPathError` so a hosted-mode construction does not fail
+    `LocalPathError` so a hosted-mode construction does not fail
     just because someone touched the SQLite default; the path simply
     isn't used in that mode.
     """
@@ -409,6 +409,7 @@ class StateManagerConfig:
         load_state_on_startup: Load all active states from WARM to HOT on startup
 
     Example:
+        ```python
         # PostgreSQL backend (default, production)
         config = StateManagerConfig(
             warm_backend=WarmBackendType.POSTGRESQL,
@@ -420,6 +421,7 @@ class StateManagerConfig:
             warm_backend=WarmBackendType.SQLITE,
             sqlite_config=SQLiteConfigLight(db_path="./state.db"),
         )
+        ```
     """
 
     enable_hot: bool = True
@@ -624,7 +626,7 @@ class PostgresStore:
         Single-row-per-agent model: uses UPSERT when *expected_version* is
         ``None``, or a version-guarded UPDATE for CAS.
 
-        Durability (VIB-3156):
+        Durability:
             The write runs in a single transaction so the version, state_data,
             and checksum columns are updated atomically. PostgreSQL's default
             ``synchronous_commit = on`` guarantees the transaction is flushed
@@ -804,7 +806,7 @@ class PostgresStore:
     ) -> list["PortfolioSnapshot"]:
         """The ``limit`` most-recent snapshots, ordered **oldest-first**.
 
-        Mirrors :meth:`SQLiteStore.get_recent_snapshots`: selects newest-first
+        Mirrors `get_recent_snapshots`: selects newest-first
         (``ORDER BY timestamp DESC LIMIT N``) then reverses, so a caller that
         reads ``[-1]`` as "latest" gets the true tail and a caller that walks
         the window forward gets chronological order.
@@ -881,7 +883,7 @@ class PostgresStore:
         bool,
     ]:
         """Projected NAV samples inside a time window (VIB-5059 P2). Postgres twin
-        of :meth:`SQLiteStore.get_snapshots_in_window` — identical contract.
+        of `get_snapshots_in_window` — identical contract.
 
         Returns ``(rows, truncated)`` with ``rows`` = ``(timestamp,
         total_value_usd_text, available_cash_usd_text, value_confidence,
@@ -949,7 +951,7 @@ class PostgresStore:
         bool,
     ]:
         """NAV-component series for lifetime drawdown (VIB-5118/5134). Postgres twin
-        of :meth:`SQLiteStore.get_nav_series` — identical contract.
+        of `get_nav_series` — identical contract.
 
         Returns ``(rows, truncated)`` with ``rows`` = ``(timestamp,
         total_value_usd_text, available_cash_usd_text, id, positions_json_text,
@@ -961,7 +963,7 @@ class PostgresStore:
         are valued and kept), casting all to ``::text`` so the caller owns the
         Empty≠Zero decision.
 
-        Two fetch modes (VIB-5134), mirroring the SQLite twin:
+        Two fetch modes, mirroring the SQLite twin:
 
         - ``since=None`` (full scan): newest ``scan_cap`` rows, oldest-first;
           ``truncated`` when older history was dropped.
@@ -975,7 +977,7 @@ class PostgresStore:
         it keeps this Postgres twin's return type byte-identical to the SQLite twin's
         (whose column is ``TEXT``), so the facade contract is backend-agnostic — the
         caller can never tell which backend served the row — and preserves the
-        raw-text Empty≠Zero semantics. Same pattern as :meth:`get_snapshots_in_window`.
+        raw-text Empty≠Zero semantics. Same pattern as `get_snapshots_in_window`.
         """
         if scan_cap <= 0:
             raise ValueError(f"scan_cap must be positive, got {scan_cap}")
@@ -1105,7 +1107,7 @@ class PostgresStore:
     ) -> list["LedgerEntry"]:
         """Transaction ledger entries (newest first), with optional filters.
 
-        Mirrors :meth:`SQLiteStore.get_ledger_entries`.
+        Mirrors `get_ledger_entries`.
         """
         if not self._initialized:
             await self.initialize()
@@ -1156,7 +1158,7 @@ class PostgresStore:
     ) -> Decimal:
         """Σ transaction_ledger.gas_usd for a deployment (VIB-4225 ACC-02).
 
-        Postgres counterpart of :meth:`SQLiteStore.sum_ledger_gas_usd`.
+        Postgres counterpart of `sum_ledger_gas_usd`.
         ``NULLIF(gas_usd, '')::numeric`` handles the parser-didn't-emit
         empty-string case; ``COALESCE(SUM(...), 0)`` handles the no-rows
         case. VIB-4721/4722: ``transaction_ledger`` has a single identity
@@ -1178,12 +1180,12 @@ class PostgresStore:
         return Decimal(str(total or 0))
 
     async def get_ledger_quant_stats(self, deployment_id: str) -> "LedgerQuantStats":
-        """SQL-side ledger aggregates for the dashboard quant tiles (VIB-5059).
+        """SQL-side ledger aggregates for the dashboard quant tiles.
 
-        Postgres counterpart of :meth:`SQLiteStore.get_ledger_quant_stats`:
+        Postgres counterpart of `get_ledger_quant_stats`:
         one aggregate statement, O(1) rows transferred, NO JSON-blob columns
         selected. ``gas_usd`` is stored as text-numeric (hosted PG convention,
-        see :meth:`sum_ledger_gas_usd`); the cast to exact ``numeric`` runs
+        see `sum_ledger_gas_usd`); the cast to exact ``numeric`` runs
         ONLY behind a finite-numeric-literal guard so NULL / empty / garbage /
         non-finite (``NaN`` / ``Infinity``) text contributes zero instead of
         failing the whole aggregate and zeroing every tile (parity with the
@@ -1191,7 +1193,7 @@ class PostgresStore:
 
         Zero-row semantics: counts → 0, sum → ``Decimal("0")``,
         ``first_action_wallet_value_usd`` stays ``None`` (the caller computes
-        the anchor from :meth:`get_ledger_anchor_candidates`).
+        the anchor from `get_ledger_anchor_candidates`).
         """
         from almanak.framework.observability.ledger import LedgerQuantStats
 
@@ -1239,9 +1241,9 @@ class PostgresStore:
         limit: int = 64,
         offset: int = 0,
     ) -> list["LedgerEntry"]:
-        """Oldest-first ledger rows that can anchor "Deployed" (VIB-5059).
+        """Oldest-first ledger rows that can anchor "Deployed".
 
-        Postgres counterpart of :meth:`SQLiteStore.get_ledger_anchor_candidates`
+        Postgres counterpart of `get_ledger_anchor_candidates`
         — same column projection (``id`` plus the three columns the VIB-3914
         anchor walk reads), same blob-presence filter, same ascending order
         with the mandatory ``LIMIT`` bound and the same intentional
@@ -1290,7 +1292,7 @@ class PostgresStore:
     ) -> list[dict]:
         """Typed accounting events as raw dicts (caller deserializes payload_json).
 
-        Mirrors :meth:`SQLiteStore.get_accounting_events`.
+        Mirrors `get_accounting_events`.
 
         Filter is by ``deployment_id`` so the same
         signature works for SQLite and Postgres callers — see the identity
@@ -1337,8 +1339,8 @@ class PostgresStore:
     ) -> list[dict]:
         """Position lifecycle events as raw dicts (timestamp ASC).
 
-        Mirrors :meth:`SQLiteStore.get_position_events_sync`. The ``_dict``
-        suffix distinguishes this from :meth:`get_position_events` (not
+        Mirrors `get_position_events_sync`. The ``_dict``
+        suffix distinguishes this from `get_position_events` (not
         implemented here) which returns ``PositionEvent`` dataclasses.
 
         Filter is by ``deployment_id`` (see identity comment above).
@@ -1401,10 +1403,10 @@ class PostgresStore:
     async def save_position_event(self, event: "PositionEvent") -> bool:
         """Persist a position lifecycle event to ``position_events`` (hosted PG).
 
-        Mirrors :meth:`SQLiteStore.save_position_event` (``sqlite.py:2464``).
+        Mirrors `save_position_event` (``sqlite.py:2464``).
         First-write-wins via ``ON CONFLICT (id) DO NOTHING`` — matches the
         SQLite ``INSERT OR IGNORE`` semantic. Companion partial-UPDATE for
-        attribution columns is :meth:`update_position_attribution` (VIB-3944).
+        attribution columns is `update_position_attribution`.
 
         VIB-4721/4722: ``position_events`` has a single identity column,
         ``deployment_id`` (the legacy hosted identity column was DROPPED by the
@@ -1499,11 +1501,11 @@ class PostgresStore:
     ) -> list[dict]:
         """Return the full chronological lifecycle for one position.
 
-        Mirrors :meth:`SQLiteStore.get_position_history` (``sqlite.py:2621``):
+        Mirrors `get_position_history` (``sqlite.py:2621``):
         ``ORDER BY timestamp ASC`` so ``pnl_attributor.run_attribution_on_close``
         sees the OPEN event before the CLOSE event when pairing for FIFO
-        realised-PnL attribution (VIB-3944). Row shape goes through
-        :func:`_pg_row_to_position_event_dict` for parity with the SQLite
+        realised-PnL attribution. Row shape goes through
+        `_pg_row_to_position_event_dict` for parity with the SQLite
         dict shape.
         """
         if not self._initialized:
@@ -1536,7 +1538,7 @@ class PostgresStore:
     ) -> bool:
         """Partial-update the attribution columns on a single position_event row.
 
-        Mirrors :meth:`SQLiteStore.update_position_attribution`
+        Mirrors `update_position_attribution`
         (``sqlite.py:2540``). Returns ``True`` iff the WHERE clause matched
         a row (i.e. ``event_id`` exists); ``False`` if the row is missing
         — the caller logs a warning and degrades attribution to a soft
@@ -1613,7 +1615,7 @@ class PostgresStore:
     ) -> list[dict]:
         """Return open ``position_registry`` rows for a deployment (hosted PG).
 
-        Mirrors :meth:`SQLiteStore.get_position_registry_open_rows`
+        Mirrors `get_position_registry_open_rows`
         (``sqlite.py:4065``) and matches the in-handler SQL in
         ``state_service.GetPositionRegistryOpenRows`` (``state_service.py:3661``)
         — same column list, same dynamic-WHERE shape, same payload-parse
@@ -1705,7 +1707,7 @@ class PostgresStore:
     async def insert_position_registry_row_if_absent(self, *, row: Any) -> bool:
         """Backfill insert: add a registry row only if absent (hosted PG).
 
-        Mirrors :meth:`SQLiteStore.insert_position_registry_row_if_absent`
+        Mirrors `insert_position_registry_row_if_absent`
         (``sqlite.py:4160``). ``INSERT ... ON CONFLICT DO NOTHING`` keyed on
         ``(deployment_id, chain, primitive, physical_identity_hash)`` —
         same conflict target as the live atomic primitive's UPSERT in
@@ -1798,7 +1800,7 @@ def _coerce_dt(value: Any) -> datetime | None:
     asyncpg already returns a ``datetime``; the wrapper is here to handle
     the rare case where a row was hand-fabricated for tests using a string.
     Returns ``None`` only when ``value`` is ``None`` or an unrecognised type
-    — for required (NOT NULL) columns use :func:`_require_dt` instead so
+    — for required (NOT NULL) columns use `_require_dt` instead so
     a malformed row fails loudly.
     """
     if value is None:
@@ -1925,11 +1927,11 @@ def _required_decimal_from_row(
     ways — the key is missing, the value is SQL ``NULL``, or the value is
     empty / whitespace text — and none of them is a corrupt measurement, so
     all three take the declared default. This mirrors
-    :func:`_optional_flow_from_row` directly above, and the two gateway-side
+    `_optional_flow_from_row` directly above, and the two gateway-side
     readers of the *same column in the same table*
     (``state_service._pg_portfolio_metrics_to_proto`` and
     ``gateway_state_manager.get_portfolio_metrics``), which share this exact
-    predicate — see :func:`is_legacy_absent_text` for the full four-reader list.
+    predicate — see `is_legacy_absent_text` for the full four-reader list.
     Before VIB-5915 this call site read ``Decimal(row.get(column) or "0")``;
     narrowing it to key-presence only made a schema-permitted ``NULL`` fatal,
     and the ``ValueError`` landed in ``runner_state``'s broad
@@ -1941,7 +1943,7 @@ def _required_decimal_from_row(
     (blueprint 27 §7.6 — ``gas_spent_usd: Decimal``, "always populated"), so
     they have no ``None`` state to preserve. §10.10 binds the three
     ``Decimal | None`` columns, which are read by
-    :func:`_optional_flow_from_row` and ``decode_optional_decimal_text``
+    `_optional_flow_from_row` and ``decode_optional_decimal_text``
     instead. Without a ``legacy_default`` (e.g. ``initial_value_usd``, which
     is ``NOT NULL``) an absent column still raises.
 
@@ -2034,7 +2036,7 @@ def _pg_row_to_ledger_entry(row: Any) -> "LedgerEntry":
 def _pg_row_to_accounting_event_dict(row: Any) -> dict[str, Any]:
     """Convert an ``accounting_events`` row to the SQLite-shaped dict.
 
-    Keys mirror :meth:`SQLiteStore.get_accounting_events_sync` so consumers
+    Keys mirror `get_accounting_events_sync` so consumers
     reading either backend see identical shapes. ``timestamp`` is ISO-8601
     (matching SQLite); ``payload_json`` is a string (asyncpg returns the
     JSONB column as ``str`` because we cast ``::text``).
@@ -2800,9 +2802,9 @@ class StateManager:
             snapshot: PortfolioSnapshot to persist.
 
         Returns:
-            Snapshot ID on success. Raises :class:`AccountingPersistenceError`
+            Snapshot ID on success. Raises `AccountingPersistenceError`
             on backend write failure, missing WARM backend, or unsupported
-            backend so the runner can halt the cycle in live mode (VIB-3157).
+            backend so the runner can halt the cycle in live mode.
             Paper/dry-run suppression is handled upstream by the runner.
         """
         if not self._initialized:
@@ -2967,7 +2969,7 @@ class StateManager:
     ) -> list["PortfolioSnapshot"]:
         """Get the ``limit`` most-recent portfolio snapshots, oldest-first.
 
-        Unlike :meth:`get_snapshots_since` (oldest-first *from a ``since``
+        Unlike `get_snapshots_since` (oldest-first *from a ``since``
         anchor*, for cursor-paginated charts), this returns the latest window
         so a consumer reading ``[-1]`` always gets the true latest snapshot.
         See VIB-5026: the PnL/quant-header loader paired ASC-from-``since``
@@ -3024,8 +3026,8 @@ class StateManager:
         positions_text)``; ``available_cash_text`` added in VIB-5942 for the
         wallet-NAV series).
 
-        **Loud, not graceful.** Unlike :meth:`get_snapshots_since` /
-        :meth:`get_recent_snapshots` (which swallow backend errors and return ``[]``
+        **Loud, not graceful.** Unlike `get_snapshots_since` /
+        `get_recent_snapshots` (which swallow backend errors and return ``[]``
         so the default dashboard render degrades quietly), the windowed path is
         explicitly requested by the operator going back in time: a backend failure
         or a missing backend is **raised**, not masked as an empty-but-OK series the
@@ -3070,8 +3072,8 @@ class StateManager:
         newer than a cursor (the incremental-fold path); ``since=None`` is the full
         history scan.
 
-        **Graceful, not loud.** Like :meth:`get_recent_snapshots` (and unlike the
-        operator-requested time-travel :meth:`get_snapshots_in_window`), a backend
+        **Graceful, not loud.** Like `get_recent_snapshots` (and unlike the
+        operator-requested time-travel `get_snapshots_in_window`), a backend
         failure or missing backend returns ``([], False)`` rather than raising:
         lifetime drawdown is a *default* header metric, and the caller degrades to
         the recent-window drawdown when the full series is unavailable — better than
@@ -3158,9 +3160,9 @@ class StateManager:
             metrics: PortfolioMetrics to persist.
 
         Returns:
-            ``True`` on success. Raises :class:`AccountingPersistenceError`
+            ``True`` on success. Raises `AccountingPersistenceError`
             on backend write failure, missing WARM backend, or unsupported
-            backend so the runner can halt the cycle in live mode (VIB-3157).
+            backend so the runner can halt the cycle in live mode.
             Paper/dry-run suppression is handled upstream by the runner.
         """
         if not self._initialized:
@@ -3321,9 +3323,9 @@ class StateManager:
     async def save_ledger_entry(self, entry: "LedgerEntry") -> None:
         """Save a transaction ledger entry to the WARM backend.
 
-        Raises :class:`AccountingPersistenceError` on backend write failure,
+        Raises `AccountingPersistenceError` on backend write failure,
         missing WARM backend, or unsupported backend so the runner can halt
-        the cycle in live mode (VIB-3157). Paper/dry-run suppression is
+        the cycle in live mode. Paper/dry-run suppression is
         handled upstream by the runner.
 
         Args:
@@ -3394,24 +3396,24 @@ class StateManager:
         a strict monotone status-priority guard.
 
         This is the runtime registry-mode write path. The function-level
-        primitive at :func:`almanak.framework.accounting.commit.save_ledger_and_registry`
+        primitive at `almanak.framework.accounting.commit.save_ledger_and_registry`
         validates inputs and dispatches here for ``mode='registry'`` calls;
-        ``mode='accounting_only'`` callers use :meth:`save_ledger_entry`
+        ``mode='accounting_only'`` callers use `save_ledger_entry`
         directly. Callers MUST go through one of those two surfaces — see
         ``tests/unit/state/test_position_registry_no_writers.py`` for the
         anti-bypass guard.
 
         Failure contract:
-        - :class:`RegistryAutoCollisionError` (auto-mode partial-unique-index
+        - `RegistryAutoCollisionError` (auto-mode partial-unique-index
           violation, VIB-4200) propagates UNCHANGED — it is a programming-bug
-          class distinct from :class:`AccountingPersistenceError`. The
+          class distinct from `AccountingPersistenceError`. The
           VIB-3762 paper-mode-leniency rule does NOT apply: collisions
           surface uniformly across ``live`` / ``paper`` / ``dry_run`` so the
           author's missing ``registry_handle`` cannot ship to live unnoticed.
         - Any other backend error (CHECK violation, OperationalError,
           ``ix_registry_handle`` violation, etc.) is wrapped as
-          :class:`AccountingPersistenceError` with ``write_kind=ACCOUNTING``
-          so the runner's existing fail-closed pipeline (VIB-3157 / VIB-3762)
+          `AccountingPersistenceError` with ``write_kind=ACCOUNTING``
+          so the runner's existing fail-closed pipeline
           handles it.
         The transaction is rolled back by the backend method before either
         exception propagates; no partial state lands on disk.
@@ -3542,9 +3544,9 @@ class StateManager:
         - Teardown's pre-flight ("what's open?") check for cutover-flipped
           primitives.
 
-        Audit M3 (CodeRabbit): on a backend that does not implement
+        Audit M3: on a backend that does not implement
         cutover storage (``GatewayStateManager`` — see
-        :class:`CutoverStorageNotSupported`), this method raises rather
+        `CutoverStorageNotSupported`), this method raises rather
         than silently returning ``[]``. A silent ``[]`` is indistinguishable
         from "fresh DB, no rows" — the boot guard would interpret the
         empty result as "registry is the source of truth and it is
@@ -3591,9 +3593,9 @@ class StateManager:
         an orphan NFT) and shares the predicate with the post-mint commit-path
         classifier. Delegates to the WARM backend's typed read.
 
-        Raises :class:`CutoverStorageNotSupported` on backends that don't
+        Raises `CutoverStorageNotSupported` on backends that don't
         implement the typed read (e.g. ``GatewayStateManager``) — see
-        :meth:`get_position_registry_open_rows` for the silent-``[]`` rationale.
+        `get_position_registry_open_rows` for the silent-``[]`` rationale.
         The preflight phase treats that exception as "cannot check, proceed"
         so a non-SQLite backend never blocks an open; the post-mint
         commit-path classifier remains the backstop there.
@@ -3618,8 +3620,8 @@ class StateManager:
         """Backfill insert (``INSERT … ON CONFLICT DO NOTHING``).
 
         Idempotent under restart. Used by
-        :class:`almanak.framework.migration.BackfillReader`. Raises
-        :class:`CutoverStorageNotSupported` on backends that don't
+        `almanak.framework.migration.BackfillReader`. Raises
+        `CutoverStorageNotSupported` on backends that don't
         implement the typed write — see ``get_position_registry_open_rows``
         for the rationale.
         """
@@ -3643,7 +3645,7 @@ class StateManager:
     ) -> None:
         """Idempotent insert of a baseline migration_state row.
 
-        Raises :class:`CutoverStorageNotSupported` on backends that
+        Raises `CutoverStorageNotSupported` on backends that
         don't implement migration_state — silent no-op would let the
         boot guard's read return ``None`` and trigger
         ``RegistryCutoverNotDeployedError`` even when the build's
@@ -3673,7 +3675,7 @@ class StateManager:
     ) -> Any | None:
         """Return the parsed migration_state row, or None when missing.
 
-        Raises :class:`CutoverStorageNotSupported` on backends that
+        Raises `CutoverStorageNotSupported` on backends that
         don't implement migration_state. Returning ``None`` on an
         unsupported backend would be indistinguishable from "row not
         yet created", which the boot guard treats as
@@ -3762,7 +3764,7 @@ class StateManager:
         ``position_type`` is in the filter set.
 
         Used by the backfill driver loop. Raises
-        :class:`CutoverStorageNotSupported` on backends that don't
+        `CutoverStorageNotSupported` on backends that don't
         implement the typed read — silent ``[]`` would let the
         backfill complete with zero synthesized rows on a deployment
         that actually has historical positions.
@@ -3860,11 +3862,11 @@ class StateManager:
             return []
 
     async def get_ledger_quant_stats(self, deployment_id: str) -> "LedgerQuantStats":
-        """SQL-side ledger aggregates for the dashboard quant tiles (VIB-5059).
+        """SQL-side ledger aggregates for the dashboard quant tiles.
 
-        Mirrors the :meth:`get_recent_snapshots` delegation pattern: no WARM
+        Mirrors the `get_recent_snapshots` delegation pattern: no WARM
         backend, an unsupported backend, or a failed read all degrade to the
-        zero-valued :class:`LedgerQuantStats` — the same inputs the legacy
+        zero-valued `LedgerQuantStats` — the same inputs the legacy
         dashboard load produced from an empty ledger list, so the tiles
         render the honest empty state rather than erroring.
         """
@@ -3895,10 +3897,10 @@ class StateManager:
         limit: int = 64,
         offset: int = 0,
     ) -> list["LedgerEntry"]:
-        """Oldest-first first-action anchor candidate rows (VIB-5059).
+        """Oldest-first first-action anchor candidate rows.
 
         Delegates to the WARM backend's LIMIT-bounded projection (see
-        :meth:`SQLiteStore.get_ledger_anchor_candidates`). Degrades to an
+        `get_ledger_anchor_candidates`). Degrades to an
         empty list on no/unsupported backend or read failure — the caller's
         anchor walk then falls back to portfolio-metrics, exactly as the
         legacy path did when no ledger row carried pre-state.
@@ -3932,7 +3934,7 @@ class StateManager:
         on no rows, no warm backend, or unsupported backend (the runner's
         ``_build_metrics_for_snapshot`` reads ``hasattr`` first; this fallback
         guards against an old backend that pre-dates the aggregator method).
-        Raises :class:`AccountingPersistenceError` so the runner halts the
+        Raises `AccountingPersistenceError` so the runner halts the
         cycle in live mode (VIB-3762 contract).
         """
         if not self._initialized:
@@ -4040,7 +4042,7 @@ class StateManager:
         """True iff a warm backend able to serve accounting events is wired.
 
         Single source of truth for the structural guard that
-        :meth:`get_accounting_events_sync` runs internally — the read consults
+        `get_accounting_events_sync` runs internally — the read consults
         THIS probe, so a capability check can never drift from the read it
         gates. Callers that must distinguish "backend structurally absent"
         (Empty ≠ Zero — UNMEASURED) from "backend present, no events"
@@ -4067,7 +4069,7 @@ class StateManager:
         Returns [] when no warm backend or the backend predates this method.
         No LIMIT is applied: accurate cost basis requires the full event history.
 
-        The structural guard is :meth:`has_accounting_event_backend` so the
+        The structural guard is `has_accounting_event_backend` so the
         capability probe and this read can never diverge. The ``[]`` return
         contract is unchanged (PortfolioValuer and other sync consumers rely on
         it); callers that need the absent-vs-empty distinction probe first.
@@ -4119,24 +4121,24 @@ class StateManager:
             return []
 
     def has_first_snapshot_backend(self) -> bool:
-        """True iff a warm backend able to serve the earliest snapshot synchronously is wired (VIB-4394).
+        """True iff a warm backend able to serve the earliest snapshot synchronously is wired.
 
-        Structural guard for :meth:`get_first_snapshot_sync`, mirroring
-        :meth:`has_accounting_event_backend`. ``False`` means the sync earliest-
+        Structural guard for `get_first_snapshot_sync`, mirroring
+        `has_accounting_event_backend`. ``False`` means the sync earliest-
         snapshot read is structurally unavailable (Empty ≠ Zero — UNMEASURED):
         e.g. the hosted ``GatewayStateManager`` exposes no first-snapshot reader,
-        so the boot OPENING_BALANCE seed (VIB-4394) no-ops there rather than
+        so the boot OPENING_BALANCE seed no-ops there rather than
         substituting empty inventory. Read-only; never raises.
         """
         return self._warm is not None and hasattr(self._warm, "get_first_snapshot_sync")
 
     def get_first_snapshot_sync(self, deployment_id: str) -> "PortfolioSnapshot | None":
-        """Synchronous earliest-snapshot query — delegates to the warm backend (VIB-4394).
+        """Synchronous earliest-snapshot query — delegates to the warm backend.
 
         Used by the boot FIFO reconstruction
         (``_run_loop_helpers.reconstruct_lending_basis_store``) to seed pre-
         existing wallet inventory as OPENING_BALANCE lots. Returns ``None`` when no
-        warm backend supports it (probe with :meth:`has_first_snapshot_backend`
+        warm backend supports it (probe with `has_first_snapshot_backend`
         first to distinguish "structurally absent" from "no snapshot yet"). The
         ``None`` return makes the seed a no-op rather than fabricating empty
         inventory — Empty ≠ Zero.
@@ -4160,9 +4162,9 @@ class StateManager:
         deployment_id: str,
         position_key: str | None = None,
     ) -> list[dict]:
-        """Async-context accounting event query for the dashboard service (VIB-3933).
+        """Async-context accounting event query for the dashboard service.
 
-        Distinct from :meth:`get_accounting_events_sync` (which PortfolioValuer
+        Distinct from `get_accounting_events_sync` (which PortfolioValuer
         calls synchronously from inside the snapshot pipeline). The dashboard
         service is async and must not block the event loop on Postgres I/O,
         so it goes through this async sibling.
@@ -4229,9 +4231,9 @@ class StateManager:
         position_type: str | None = None,
         event_type: str | None = None,
     ) -> list[dict]:
-        """Async-context position event query for the dashboard service (VIB-3933).
+        """Async-context position event query for the dashboard service.
 
-        See :meth:`get_accounting_events_for_dashboard` for the dispatch
+        See `get_accounting_events_for_dashboard` for the dispatch
         rationale. PostgresStore exposes the async ``get_position_events_dict``;
         SQLiteStore exposes the sync ``get_position_events_sync`` which we
         invoke through ``run_in_executor``.

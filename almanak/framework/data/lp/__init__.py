@@ -11,6 +11,7 @@ Key Features:
     - Track IL exposure for active LP positions
 
 Example:
+    ```python
     from almanak.framework.data.lp import ILCalculator, ILResult
 
     # Create calculator
@@ -30,6 +31,7 @@ Example:
         price_change_pct=Decimal("20"),
     )
     print(f"Projected IL: {projected.il_percent:.2f}%")
+    ```
 """
 
 from .calculator import (

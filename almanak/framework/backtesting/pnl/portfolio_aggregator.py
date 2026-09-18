@@ -306,6 +306,7 @@ class PortfolioAggregator:
         _positions_by_type: Internal dict grouping positions by position type
 
     Example:
+        ```python
         aggregator = PortfolioAggregator()
 
         # Add positions from different protocols
@@ -321,6 +322,7 @@ class PortfolioAggregator:
 
         # Filter by type
         lp_positions = aggregator.get_positions(position_type=PositionType.LP)
+        ```
     """
 
     positions: list[SimulatedPosition] = field(default_factory=list)

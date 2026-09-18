@@ -31,9 +31,11 @@ class DriftDataClient:
     and oracle prices. No authentication required.
 
     Example:
+        ```python
         client = DriftDataClient()
         markets = client.get_perp_markets()
         oracle_prices = client.get_oracle_prices()
+        ```
     """
 
     def __init__(

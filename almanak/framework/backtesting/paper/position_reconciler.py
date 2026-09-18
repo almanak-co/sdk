@@ -11,6 +11,7 @@ Key Features:
     - Support for Uniswap V3 LP, GMX V2 perps, and Aave V3 lending positions
 
 Example:
+    ```python
     from almanak.framework.backtesting.paper.position_reconciler import (
         PositionReconciler,
         TrackedPosition,
@@ -34,6 +35,7 @@ Example:
     discrepancies = await reconciler.reconcile(web3, wallet_address)
     for d in discrepancies:
         print(f"Discrepancy: {d}")
+    ```
 """
 
 import logging
@@ -253,6 +255,7 @@ class PositionReconciler:
         reconciliation_history: History of reconciliation results
 
     Example:
+        ```python
         reconciler = PositionReconciler(chain="arbitrum")
 
         # Track an LP position from intent execution
@@ -268,6 +271,7 @@ class PositionReconciler:
 
         # Later, reconcile against on-chain state
         discrepancies = await reconciler.reconcile(web3, wallet_address)
+        ```
     """
 
     chain: str = DEFAULT_CHAIN

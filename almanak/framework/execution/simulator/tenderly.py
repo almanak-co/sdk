@@ -14,6 +14,7 @@ API Documentation:
     https://docs.tenderly.co/simulations-and-forks/simulation-api
 
 Example:
+    ```python
     simulator = TenderlySimulator(
         account_slug="my-account",
         project_slug="my-project",
@@ -30,6 +31,7 @@ Example:
         print(f"Gas estimates: {result.gas_estimates}")
     else:
         print(f"Would revert: {result.revert_reason}")
+    ```
 """
 
 import json
@@ -74,6 +76,7 @@ class TenderlySimulator(Simulator):
         timeout_seconds: Request timeout
 
     Example:
+        ```python
         simulator = TenderlySimulator(
             account_slug="my-account",
             project_slug="my-project",
@@ -89,6 +92,7 @@ class TenderlySimulator(Simulator):
             chain="arbitrum",
             state_overrides={"0xSafeAddress": {"balance": hex(10 * 10**18)}},
         )
+        ```
     """
 
     def __init__(

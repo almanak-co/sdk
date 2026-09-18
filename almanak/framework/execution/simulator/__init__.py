@@ -16,6 +16,7 @@ Factory Function:
     - create_simulator: Create the appropriate simulator based on configuration
 
 Example:
+    ```python
     # Simple pass-through (no simulation)
     from almanak.framework.execution.simulator import DirectSimulator
     simulator = DirectSimulator()
@@ -36,6 +37,7 @@ Example:
         chain="arbitrum",
         state_overrides=state_overrides,
     )
+    ```
 """
 
 import logging
@@ -89,6 +91,7 @@ def create_simulator(
         Appropriate Simulator implementation
 
     Example:
+        ```python
         # Load from environment
         simulator = create_simulator()
 
@@ -106,6 +109,7 @@ def create_simulator(
 
         # Auto-detect Anvil - uses LocalSimulator (fast, on-node estimation)
         simulator = create_simulator(rpc_url="http://localhost:8545")
+        ```
     """
     # Load config from environment if not provided
     if config is None:

@@ -14,6 +14,7 @@ Key Features:
     - USD liquidity estimation from raw liquidity values
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.fee_models.liquidity import (
         query_pool_liquidity,
         PoolLiquidityResult,
@@ -26,6 +27,7 @@ Example:
     )
     print(f"Pool liquidity: {result.liquidity}")
     print(f"Estimated TVL: ${result.liquidity_usd:,.0f}")
+    ```
 """
 
 import logging
@@ -200,6 +202,7 @@ async def query_pool_liquidity(
         PoolLiquidityResult with liquidity data
 
     Example:
+        ```python
         from web3 import Web3
 
         web3 = Web3(Web3.HTTPProvider("https://arb1.arbitrum.io/rpc"))
@@ -210,6 +213,7 @@ async def query_pool_liquidity(
         )
         print(f"Liquidity: {result.liquidity}")
         print(f"TVL estimate: ${result.liquidity_usd:,.0f}")
+        ```
     """
     pool_checksum = web3.to_checksum_address(pool_address)
 

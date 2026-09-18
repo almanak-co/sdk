@@ -260,10 +260,10 @@ class MarketSnapshotBuilder:
         (static fee assumption, fixture-backed analytics, or HOLD) inside
         backtests.
 
-        VIB-4728 / POOL-7 (VIB-4755) extends the same pattern to pool
+        VIB-4728 / POOL-7 extends the same pattern to pool
         history: ``NullPoolHistoryReader`` is injected for the same
         determinism reason. ``for_strategy_runner`` wires the live
-        ``PoolHistoryReader`` (VIB-4757); the Null reader here keeps
+        ``PoolHistoryReader``; the Null reader here keeps
         backtests deterministic regardless.
         """
         from almanak.framework.data.null_readers import (
@@ -504,7 +504,7 @@ class MarketSnapshotBuilder:
 def _build_stateless_calculators(
     source: Any | None,
 ) -> tuple[Any, Any, Any]:
-    """Construct the T3-B (VIB-4844) stateless calculators for a snapshot.
+    """Construct the T3-B stateless calculators for a snapshot.
 
     Returns ``(il_calculator, volatility_calculator, risk_calculator)``.
 
@@ -619,8 +619,7 @@ def _make_gateway_rpc_call(gateway_client: Any) -> Any:
     bytes`` over ``gateway_client.eth_call`` (no strategy-container egress).
     ``None`` / ``"0x"`` responses become empty bytes so the pure decoders raise
     the typed "response too short" error rather than crashing on ``None``.
-    Shared by the price providers (VIB-4924) and the RPC-backed readers
-    (VIB-4845) so both speak the same gateway proxy.
+    Shared by the price providers and the RPC-backed readers so both speak the same gateway proxy.
     """
     from almanak.framework.data.interfaces import DataSourceError
 

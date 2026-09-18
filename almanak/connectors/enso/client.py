@@ -15,6 +15,7 @@ Transport (VIB-2986, Phase 5):
     so the fallback is moot there.
 
 Example:
+    ```python
     from almanak.connectors.enso import EnsoClient, EnsoConfig
 
     config = EnsoConfig(
@@ -31,6 +32,7 @@ Example:
         amount_in=1000000000,  # 1000 USDC (6 decimals)
         slippage_bps=50,
     )
+    ```
 """
 
 import logging
@@ -163,6 +165,7 @@ class EnsoClient:
     - Approving tokens for the Enso router
 
     Example:
+        ```python
         config = EnsoConfig(
             chain="arbitrum",
             wallet_address="0x...",
@@ -176,6 +179,7 @@ class EnsoClient:
             amount_in=1000000000,
             slippage_bps=50,
         )
+        ```
     """
 
     def __init__(self, config: EnsoConfig) -> None:
@@ -334,6 +338,7 @@ class EnsoClient:
             PriceImpactExceedsThresholdError: If price impact exceeds threshold
 
         Example:
+            ```python
             # Same-chain swap on Arbitrum
             route = client.get_route(
                 token_in="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",  # USDC
@@ -348,6 +353,7 @@ class EnsoClient:
                 amount_in=1000000000,
                 destination_chain_id=42161,  # Arbitrum
             )
+            ```
         """
         from_addr = from_address or self.config.wallet_address
         strategy = routing_strategy or self.config.routing_strategy
@@ -735,6 +741,7 @@ class EnsoClient:
             RouteTransaction with cross-chain transaction data
 
         Example:
+            ```python
             # Bridge USDC from Base to Arbitrum (swap to WETH on arrival)
             client = EnsoClient(EnsoConfig(chain="base", wallet_address="0x..."))
             route = client.get_cross_chain_route(
@@ -743,6 +750,7 @@ class EnsoClient:
                 amount_in=1000 * 10**6,  # 1000 USDC
                 destination_chain="arbitrum",
             )
+            ```
         """
         destination_chain_id = self.resolve_chain_id(destination_chain)
 

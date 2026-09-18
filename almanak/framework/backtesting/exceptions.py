@@ -4,6 +4,7 @@ This module defines custom exceptions for backtesting operations,
 including historical data unavailability and validation errors.
 
 Example:
+    ```python
     from almanak.framework.backtesting.exceptions import HistoricalDataUnavailableError
 
     if strict_mode and volume_data is None:
@@ -13,6 +14,7 @@ Example:
             timestamp=datetime.now(),
             message="Historical volume unavailable for pool",
         )
+    ```
 """
 
 from datetime import datetime
@@ -47,6 +49,7 @@ class NoAcceptableDataSourceError(BacktestError):
         remediation: Concrete, actionable guidance on how to make the call succeed.
 
     Example:
+        ```python
         raise NoAcceptableDataSourceError(
             data_type="volume",
             identifier="WETH/USDC",
@@ -57,6 +60,7 @@ class NoAcceptableDataSourceError(BacktestError):
                 "allow_volume_fallback=True to accept the rough heuristic."
             ),
         )
+        ```
     """
 
     def __init__(
@@ -115,6 +119,7 @@ class HistoricalDataUnavailableError(BacktestError):
         protocol: Optional protocol identifier
 
     Example:
+        ```python
         raise HistoricalDataUnavailableError(
             data_type="volume",
             identifier="0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
@@ -123,6 +128,7 @@ class HistoricalDataUnavailableError(BacktestError):
             chain="ethereum",
             protocol="uniswap_v3",
         )
+        ```
     """
 
     def __init__(

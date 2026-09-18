@@ -9,6 +9,7 @@ This connector provides:
 - JupiterReceiptParser: Balance-delta parser for extracting swap results
 
 Example:
+    ```python
     from almanak.connectors.jupiter import JupiterClient, JupiterAdapter, JupiterConfig
 
     config = JupiterConfig(wallet_address="your-solana-pubkey")
@@ -21,6 +22,7 @@ Example:
         amount=1000000000,
         slippage_bps=50,
     )
+    ```
 """
 
 from __future__ import annotations

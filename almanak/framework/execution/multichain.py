@@ -12,6 +12,7 @@ Key Features:
     - Aggregates results into unified MultiChainExecutionResult
 
 Example:
+    ```python
     from almanak.framework.execution.multichain import MultiChainOrchestrator
 
     # Create orchestrator from multi-chain config
@@ -25,6 +26,7 @@ Example:
 
     # Execute dependent intents sequentially
     results = await orchestrator.execute_sequence(intents)
+    ```
 """
 
 import asyncio
@@ -260,6 +262,7 @@ class MultiChainOrchestrator:
     - All execution methods return results (never raise for intent failures)
 
     Example:
+        ```python
         # Create from config
         config = MultiChainRuntimeConfig(
             chains=['arbitrum', 'optimism'],
@@ -285,6 +288,7 @@ class MultiChainOrchestrator:
             Intent.supply("aave_v3", "WETH", Decimal("0.05"), chain="arbitrum"),
         ]
         results = await orchestrator.execute_sequence(sequence)
+        ```
     """
 
     def __init__(

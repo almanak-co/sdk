@@ -7,6 +7,7 @@ This module provides a registry for historical data providers, enabling:
 - Runtime provider lookup by name
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.providers.registry import ProviderRegistry
     from almanak.framework.backtesting.pnl.providers import ChainlinkDataProvider
 
@@ -23,6 +24,7 @@ Example:
     # Get providers by priority
     providers = ProviderRegistry.get_by_priority()
     # Returns list sorted by priority (lowest number first)
+    ```
 """
 
 import logging
@@ -101,6 +103,7 @@ class ProviderRegistry:
             - 51-100: Secondary/fallback sources
 
     Example:
+        ```python
         # Register a provider with priority
         ProviderRegistry.register(
             "chainlink",
@@ -119,6 +122,7 @@ class ProviderRegistry:
 
         # Create a provider instance
         provider = ProviderRegistry.create("chainlink", chain="arbitrum")
+        ```
     """
 
     _providers: dict[str, ProviderMetadata] = {}
@@ -140,10 +144,12 @@ class ProviderRegistry:
             metadata: Optional metadata about the provider (description, supported_tokens, etc.)
 
         Example:
+            ```python
             ProviderRegistry.register("chainlink", ChainlinkDataProvider, priority=10, metadata={
                 "description": "Chainlink on-chain price feeds",
                 "supported_chains": ["ethereum", "arbitrum"],
             })
+            ```
         """
         name_lower = name.lower()
         extra_metadata = dict(metadata or {})
@@ -189,9 +195,11 @@ class ProviderRegistry:
             The provider class, or None if not found
 
         Example:
+            ```python
             ChainlinkClass = ProviderRegistry.get("chainlink")
             if ChainlinkClass:
                 provider = ChainlinkClass(chain="arbitrum")
+            ```
         """
         meta = cls._providers.get(name.lower())
         return meta.provider_class if meta else None
@@ -237,8 +245,10 @@ class ProviderRegistry:
             List of ProviderMetadata sorted by priority
 
         Example:
+            ```python
             for meta in ProviderRegistry.get_by_priority():
                 print(f"{meta.name}: priority {meta.priority}")
+            ```
         """
         return sorted(cls._providers.values(), key=lambda m: m.priority)
 
@@ -320,9 +330,11 @@ class ProviderRegistry:
             Provider instance, or None if not found
 
         Example:
+            ```python
             provider = ProviderRegistry.create("chainlink", chain="arbitrum")
             if provider:
                 price = await provider.get_price("ETH", datetime.now())
+            ```
         """
         provider_class = cls.get(name)
         if provider_class is None:
@@ -347,10 +359,12 @@ class ProviderRegistry:
             ProviderMetadata for the best matching provider, or None if none match
 
         Example:
+            ```python
             # Get best provider for ETH on Arbitrum
             meta = ProviderRegistry.get_best_provider(token="ETH", chain="arbitrum")
             if meta:
                 provider = meta.provider_class(chain="arbitrum")
+            ```
         """
         candidates = cls._matching_providers(token=token, chain=chain)
 

@@ -140,7 +140,7 @@ class BorrowIntent(BaseIntent):
         Rejected: any positive ``Decimal`` or the chained ``"all"`` literal,
         both of which bundle an on-chain supply that the accounting layer cannot
         record as a distinct SUPPLY event. Raises
-        :class:`BundledCollateralBorrowError`.
+        `BundledCollateralBorrowError`.
 
         Protocols whose native open is an *atomic* supply+borrow (e.g. a Fluid
         vault ``operate()`` that mints an NFT-CDP and supplies + borrows in one
@@ -206,13 +206,13 @@ class BorrowIntent(BaseIntent):
         collateral-supply approval and the borrow selector on the Safe
         manifest. These synthetic intents are never executed and never reach
         the accounting ledger, so the 1:1 ledger→event invariant the
-        :meth:`validate_borrow_intent` guard protects does not apply.
+        `validate_borrow_intent` guard protects does not apply.
 
         This uses ``model_construct`` (Pydantic's trusted-data constructor) to
         skip the model validator while still applying field defaults
         (``intent_id``, ``created_at``). Do NOT use this for any
         strategy-emitted or executable borrow — those must go through
-        :meth:`Intent.borrow` / normal construction so the guard fires.
+        `borrow` / normal construction so the guard fires.
         """
         return cls.model_construct(**fields)
 

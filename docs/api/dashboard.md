@@ -88,6 +88,7 @@ Two rules that prevent permanently-empty dashboards:
 
 ::: almanak.framework.dashboard
     options:
+      heading_level: 3
       members:
         - render_pnl_section
         - render_cost_stack_section
@@ -103,19 +104,29 @@ hand-rolling indicator/position/performance UI.
 ### Technical analysis (RSI, MACD, Bollinger, …)
 
 ::: almanak.framework.dashboard.templates.ta_dashboard
+    options:
+      heading_level: 4
 
 ### Liquidity provision
 
 ::: almanak.framework.dashboard.templates.lp_dashboard
+    options:
+      heading_level: 4
 
 ### Lending
 
 ::: almanak.framework.dashboard.templates.lending_dashboard
+    options:
+      heading_level: 4
 
 ### Perpetuals
 
 ::: almanak.framework.dashboard.templates.perp_dashboard
+    options:
+      heading_level: 4
 
 ### Prediction markets
 
 ::: almanak.framework.dashboard.templates.prediction_dashboard
+    options:
+      heading_level: 4

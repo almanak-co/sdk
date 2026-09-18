@@ -7,6 +7,7 @@ Provides access to the Polymarket Central Limit Order Book (CLOB) API:
 - Order management
 
 Example:
+    ```python
     from almanak.connectors.polymarket import ClobClient, PolymarketConfig
 
     config = PolymarketConfig.from_env()
@@ -18,6 +19,7 @@ Example:
     # Fetch market data
     markets = client.get_markets(MarketFilters(active=True))
     orderbook = client.get_orderbook(token_id="123...")
+    ```
 """
 
 import base64

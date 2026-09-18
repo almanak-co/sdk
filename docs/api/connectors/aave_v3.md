@@ -21,9 +21,7 @@
 | [Polygon](../../chains/polygon.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 | [X-Layer](../../chains/xlayer.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 
-## API Reference
-
 ::: almanak.connectors.aave_v3
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

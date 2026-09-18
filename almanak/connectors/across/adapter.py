@@ -17,6 +17,7 @@ Supported Operations:
 - estimate_completion_time(): Get typical completion times
 
 Example:
+    ```python
     adapter = AcrossBridgeAdapter()
 
     quote = adapter.get_quote(
@@ -27,6 +28,7 @@ Example:
     )
 
     tx = adapter.build_deposit_tx(quote, recipient="0x...")
+    ```
 """
 
 import logging
@@ -218,6 +220,7 @@ class AcrossBridgeAdapter(BridgeAdapter):
     - Multi-chain support (Ethereum, Arbitrum, Optimism, Base, Polygon)
 
     Example:
+        ```python
         adapter = AcrossBridgeAdapter()
 
         # Get quote
@@ -233,6 +236,7 @@ class AcrossBridgeAdapter(BridgeAdapter):
 
         # Check status after deposit
         status = adapter.check_status(deposit_tx_hash)
+        ```
     """
 
     def __init__(self, config: AcrossConfig | None = None, token_resolver: "TokenResolverType | None" = None) -> None:

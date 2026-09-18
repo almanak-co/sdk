@@ -8,6 +8,7 @@ completion by polling the destination chain for token arrival rather than
 querying a bridge-specific status API.
 
 Example:
+    ```python
     from almanak.framework.execution.enso_state_provider import EnsoStateProvider
 
     provider = EnsoStateProvider(
@@ -21,6 +22,7 @@ Example:
         deposit_id="base:arbitrum:0xabc...:WETH:1000000000000000000",
     )
     # Returns: {"status": "completed", "destination_balance": ...}
+    ```
 """
 
 import asyncio
@@ -133,6 +135,7 @@ class EnsoStateProvider:
         "enso:{source_chain}:{dest_chain}:{tx_hash}:{token}:{expected_amount}:{initial_balance}"
 
     Example:
+        ```python
         provider = EnsoStateProvider(
             rpc_urls={"base": "http://...", "arbitrum": "http://..."},
             wallet_address="0x...",
@@ -153,6 +156,7 @@ class EnsoStateProvider:
             if status["status"] == "completed":
                 break
             await asyncio.sleep(10)
+        ```
     """
 
     def __init__(

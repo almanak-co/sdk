@@ -414,6 +414,7 @@ class RollingForkManager:
             ``ALMANAK_FORK_HEALTH_TIMEOUT``).
 
     Example:
+        ```python
         manager = RollingForkManager(
             rpc_url="https://arb1.arbitrum.io/rpc",
             chain="arbitrum",
@@ -422,6 +423,7 @@ class RollingForkManager:
         await manager.fund_wallet("0x...", eth_amount=Decimal("10"))
         # ... paper trading ...
         await manager.stop()
+        ```
     """
 
     rpc_url: str

@@ -10,7 +10,7 @@ strategies). ``JoeLendAdapter`` is retained only so historical receipts
 can still be parsed via ``JoeLendReceiptParser``; instantiating the
 adapter raises ``JoeLendDeprecatedError`` on construction.
 
-Full removal is tracked for July (VIB-3960).
+Full removal is tracked for July.
 """
 
 from __future__ import annotations

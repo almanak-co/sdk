@@ -11,6 +11,7 @@ Key Features:
     - Health metrics tracking
 
 Example:
+    ```python
     from almanak.gateway.data.ohlcv import BinanceOHLCVProvider
 
     provider = BinanceOHLCVProvider()
@@ -18,6 +19,7 @@ Example:
 
     for candle in candles[-3:]:
         print(f"{candle.timestamp}: close={candle.close}")
+    ```
 """
 
 import asyncio
@@ -110,9 +112,11 @@ class BinanceOHLCVProvider:
         - Up to 1000 candles per request
 
     Example:
+        ```python
         provider = BinanceOHLCVProvider(cache_ttl=60)
         candles = await provider.get_ohlcv("WETH", timeframe="5m", limit=100)
         print(f"Got {len(candles)} 5-minute candles")
+        ```
     """
 
     API_BASE = "https://api.binance.com/api/v3"

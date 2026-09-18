@@ -13,9 +13,7 @@
 | [Arbitrum](../../chains/arbitrum.md) | EVM | ``PERP_CANCEL_ORDER``, ``PERP_CLOSE``, ``PERP_OPEN`` |
 | [Avalanche](../../chains/avalanche.md) | EVM | ``PERP_CANCEL_ORDER``, ``PERP_CLOSE``, ``PERP_OPEN`` |
 
-## API Reference
-
 ::: almanak.connectors.gmx_v2
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

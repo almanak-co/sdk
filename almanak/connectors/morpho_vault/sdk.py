@@ -28,10 +28,12 @@ Supported operations:
 - Build unsigned transactions for deposit, redeem, and approve
 
 Example:
+    ```python
     from almanak.connectors.morpho_vault.sdk import MetaMorphoSDK
 
     sdk = MetaMorphoSDK(gateway_client, chain="ethereum")
     info = sdk.get_vault_info("0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB")
+    ```
 """
 
 import json

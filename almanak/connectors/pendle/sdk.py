@@ -538,6 +538,7 @@ class PendleSDK:
     - Minting/redeeming SY and PY tokens
 
     Example:
+        ```python
         sdk = PendleSDK(rpc_url="https://arb1.arbitrum.io/rpc", chain="arbitrum")
 
         # Build swap transaction (WETH -> PT-wstETH)
@@ -548,6 +549,7 @@ class PendleSDK:
             amount_in=10**18,  # 1 WETH
             min_pt_out=10**18,  # Minimum PT to receive
         )
+        ```
     """
 
     def __init__(

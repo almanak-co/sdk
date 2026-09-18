@@ -12,6 +12,7 @@ Key Features:
     - DataConfidence tracking (HIGH for Chainlink/TWAP, MEDIUM for CoinGecko)
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.providers import (
         AggregatedDataProvider,
         ChainlinkDataProvider,
@@ -36,6 +37,7 @@ Example:
     from almanak.framework.backtesting.config import BacktestDataConfig
     config = BacktestDataConfig(price_provider="auto")  # Chainlink -> TWAP -> CoinGecko
     provider = await AggregatedDataProvider.create_with_data_config(config, chain="arbitrum")
+    ```
 """
 
 import logging
@@ -132,6 +134,7 @@ class ProviderConfig:
         extra: Additional provider-specific configuration
 
     Example:
+        ```python
         # Chainlink provider config
         chainlink_config = ProviderConfig(
             provider_type="chainlink",
@@ -145,6 +148,7 @@ class ProviderConfig:
             provider_type="coingecko",
             api_key="CG-xxx...",
         )
+        ```
     """
 
     provider_type: str
@@ -307,6 +311,7 @@ class AggregatedDataProvider:
         stats: Statistics about provider usage and fallbacks
 
     Example:
+        ```python
         # Create with explicit providers
         aggregated = AggregatedDataProvider(
             providers=[chainlink_provider, twap_provider, coingecko_provider],
@@ -319,6 +324,7 @@ class AggregatedDataProvider:
         # Fetch with source tracking
         result = await aggregated.get_price_with_source("ETH", datetime.now())
         print(f"Got ${result.price} from {result.source}")
+        ```
     """
 
     # Default priority for this provider (when used in registry)
@@ -397,6 +403,7 @@ class AggregatedDataProvider:
             ValueError: If configs is empty or a provider type is unknown.
 
         Example:
+            ```python
             configs = [
                 ProviderConfig(
                     provider_type="chainlink",
@@ -409,6 +416,7 @@ class AggregatedDataProvider:
                 ),
             ]
             provider = AggregatedDataProvider.create_from_config(configs)
+            ```
         """
         if not configs:
             raise ValueError("At least one provider config is required")
@@ -535,6 +543,7 @@ class AggregatedDataProvider:
             ValueError: If price_provider mode is invalid.
 
         Example:
+            ```python
             from almanak.framework.backtesting.config import BacktestDataConfig
 
             # Auto mode - tries Chainlink first, then TWAP, then CoinGecko
@@ -544,6 +553,7 @@ class AggregatedDataProvider:
             # Single provider mode
             config = BacktestDataConfig(price_provider="chainlink")
             provider = await AggregatedDataProvider.create_with_data_config(config)
+            ```
         """
         mode = data_config.price_provider
 
@@ -947,8 +957,10 @@ class AggregatedDataProvider:
             ValueError: If all providers fail to return a price
 
         Example:
+            ```python
             result = await aggregated.get_price_data("ETH", datetime.now())
             print(f"Price: ${result.price}, Source: {result.data_source}")
+            ```
         """
         result = await self.get_price_with_source(token, timestamp)
         return PriceData(

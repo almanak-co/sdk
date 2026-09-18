@@ -12,9 +12,7 @@
 |-------|--------|-------------------|
 | No strategy support declared | N/A | No strategy intents registered |
 
-## API Reference
-
 ::: almanak.connectors.joelend
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

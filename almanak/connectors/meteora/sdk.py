@@ -62,12 +62,14 @@ class MeteoraSDK:
     - Compute PDAs for positions, bin arrays, etc.
 
     Example:
+        ```python
         sdk = MeteoraSDK(wallet_address="your-pubkey")
         pool = sdk.get_pool("pool-address")
         ixs, position_kp = sdk.build_open_position_transaction(
             pool=pool, lower_bin_id=8388600, upper_bin_id=8388620,
             amount_x=1_000_000, amount_y=500_000_000,
         )
+        ```
     """
 
     def __init__(

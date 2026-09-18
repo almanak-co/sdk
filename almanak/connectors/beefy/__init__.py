@@ -1,4 +1,4 @@
-"""Beefy connector — gateway-side only (VIB-4810).
+"""Beefy connector — gateway-side only.
 
 The strategy-side adapter / SDK for Beefy has not been written yet —
 this folder currently only carries the gateway-side vault-token lookup.

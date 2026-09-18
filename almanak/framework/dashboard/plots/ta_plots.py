@@ -25,6 +25,7 @@ single-indicator path (``target=None``) is unchanged. Both paths share one
 trace-builder per indicator, so they can never drift.
 
 Example:
+    ```python
     from almanak.framework.dashboard.plots.ta_plots import (
         plot_price_with_signals,
         plot_rsi_indicator,
@@ -48,6 +49,7 @@ Example:
         oversold=30,
     )
     st.plotly_chart(fig)
+    ```
 """
 
 from dataclasses import dataclass

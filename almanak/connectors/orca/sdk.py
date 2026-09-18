@@ -78,6 +78,7 @@ class OrcaWhirlpoolSDK:
     - Compute PDAs for positions, tick arrays, etc.
 
     Example:
+        ```python
         sdk = OrcaWhirlpoolSDK(wallet_address="your-pubkey")
         pool = sdk.get_pool_info("pool-address")
         ixs, nft_mint = sdk.build_open_position_ix(
@@ -88,6 +89,7 @@ class OrcaWhirlpoolSDK:
             amount_b_max=500_000_000,
             liquidity=1000000,
         )
+        ```
     """
 
     def __init__(

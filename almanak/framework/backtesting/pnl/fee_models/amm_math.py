@@ -14,6 +14,7 @@ Key Formulas:
         - Price impact depends on liquidity depth at current price
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.fee_models.amm_math import (
         calculate_v2_price_impact,
         calculate_v3_price_impact,
@@ -38,6 +39,7 @@ Example:
         fee_bps=3000,
     )
     impact = calculate_v3_price_impact(v3_state, trade_amount_usd=Decimal("50000"))
+    ```
 """
 
 import logging
@@ -292,9 +294,11 @@ def calculate_v2_output_amount(
         Output amount of the other token
 
     Example:
+        ```python
         pool = V2PoolState(reserve_in=Decimal("1000000"), reserve_out=Decimal("2000"))
         amount_out = calculate_v2_output_amount(pool, Decimal("10000"))
         # For $10k into $1M reserves: expect ~19.8 output tokens
+        ```
     """
     if amount_in <= 0:
         return Decimal("0")
@@ -334,6 +338,7 @@ def calculate_v2_price_impact(
         PriceImpactResult with calculated price impact
 
     Example:
+        ```python
         pool = V2PoolState(
             reserve_in=Decimal("1000000"),
             reserve_out=Decimal("2000"),
@@ -341,6 +346,7 @@ def calculate_v2_price_impact(
         )
         result = calculate_v2_price_impact(pool, Decimal("50000"))
         print(f"Price impact: {result.slippage_pct}%")  # ~4.76%
+        ```
     """
     if amount_in <= 0:
         return PriceImpactResult(
@@ -421,12 +427,14 @@ def calculate_v2_price_impact_usd(
         PriceImpactResult with calculated price impact
 
     Example:
+        ```python
         result = calculate_v2_price_impact_usd(
             total_liquidity_usd=Decimal("2000000"),  # $2M pool
             trade_amount_usd=Decimal("50000"),        # $50k trade
             fee_bps=30,
         )
         print(f"Price impact: {result.slippage_pct}%")  # ~4.76%
+        ```
     """
     if total_liquidity_usd <= 0 or trade_amount_usd <= 0:
         return PriceImpactResult(
@@ -666,6 +674,7 @@ def calculate_v3_price_impact(
         PriceImpactResult with calculated price impact
 
     Example:
+        ```python
         v3_state = V3PoolState(
             sqrt_price_x96=79228162514264337593543950336,  # price = 1.0
             liquidity=1000000000000000000,  # 1e18 liquidity
@@ -673,6 +682,7 @@ def calculate_v3_price_impact(
         )
         result = calculate_v3_price_impact(v3_state, Decimal("10000"))
         print(f"Price impact: {result.slippage_pct}%")
+        ```
     """
     if amount_in <= 0 or pool_state.liquidity <= 0:
         return PriceImpactResult(
@@ -755,6 +765,7 @@ def calculate_v3_price_impact_usd(
         PriceImpactResult with calculated price impact
 
     Example:
+        ```python
         result = calculate_v3_price_impact_usd(
             liquidity_usd=Decimal("5000000"),    # $5M active liquidity
             trade_amount_usd=Decimal("50000"),   # $50k trade
@@ -762,6 +773,7 @@ def calculate_v3_price_impact_usd(
             concentration_factor=Decimal("3.0"),  # 3x effective depth
         )
         print(f"Price impact: {result.slippage_pct}%")
+        ```
     """
     if liquidity_usd <= 0 or trade_amount_usd <= 0:
         return PriceImpactResult(

@@ -26,16 +26,16 @@ VIB-4854 (W2) lifts the dispatch onto each connector:
 
 Public API is **byte-equivalent** with the pre-W2 module:
 
-* :class:`ReceiptParser` — structural Protocol for a parser instance.
-* :class:`ReceiptParserRegistry` — registry façade with the same
+* `ReceiptParser` — structural Protocol for a parser instance.
+* `ReceiptParserRegistry` — registry façade with the same
   ``get`` / ``register`` / ``unregister`` / ``list_protocols`` /
   ``is_registered`` / ``clear_cache`` surface.
-* :func:`get_parser`, :func:`register_parser`, :func:`list_parsers`,
-  :func:`is_parser_available` — module-level convenience functions
+* `get_parser`, `register_parser`, `list_parsers`,
+  `is_parser_available` — module-level convenience functions
   backed by a shared default registry instance.
-* :func:`extract_position_id` — high-level NFT / LP-position-id
+* `extract_position_id` — high-level NFT / LP-position-id
   extractor that picks the right parser by ``protocol`` + ``chain``.
-* :class:`ReceiptParserError`, :class:`ParserNotFoundError` — exception
+* `ReceiptParserError`, `ParserNotFoundError` — exception
   types.
 
 The legacy ``_BUILTIN_LOADERS`` class attribute is removed; the
@@ -122,7 +122,7 @@ class ReceiptParserRegistry:
       connector-provided one. Used by tests and by strategy-side
       consumers that need to substitute a parser at runtime.
     * **Alias normalisation** — ``protocol`` is run through
-      :func:`almanak.connectors._strategy_base.protocol_aliases.normalize_protocol`
+      `almanak.connectors._strategy_base.protocol_aliases.normalize_protocol`
       before lookup, so chain-scoped renames
       (e.g. ``("mantle", "uniswap_v3")`` → ``"agni_finance"``) resolve
       identically to the pre-W2 behaviour.
@@ -144,7 +144,7 @@ class ReceiptParserRegistry:
         """Resolve ``protocol`` to a parser instance.
 
         See class docstring for cache / alias semantics. Raises
-        :class:`ValueError` if the protocol isn't known.
+        `ValueError` if the protocol isn't known.
         """
         protocol_lower = normalize_protocol(kwargs.get("chain", ""), protocol)
 
@@ -331,11 +331,11 @@ def extract_position_id(
 ) -> int | str | None:
     """Extract an LP-position id from an execution result.
 
-    Picks the right parser via :func:`get_parser` and calls its
+    Picks the right parser via `get_parser` and calls its
     ``extract_position_id`` method on each receipt embedded in
     ``result`` until one returns a non-``None`` id.
 
-    Supported result shapes are documented on :func:`_coerce_to_receipts`.
+    Supported result shapes are documented on `_coerce_to_receipts`.
 
     ``chain`` is required for correctness — the parser's per-chain
     address tables key on it. Omitting it defaults to ``"arbitrum"``

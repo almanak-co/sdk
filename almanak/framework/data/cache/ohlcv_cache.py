@@ -25,6 +25,7 @@ class OHLCVCache:
         db_path: Path to the SQLite database file
 
     Example:
+        ```python
         cache = OHLCVCache("/path/to/cache.db")
 
         # Store candles
@@ -37,6 +38,7 @@ class OHLCVCache:
             start=datetime(2024, 1, 1),
             end=datetime(2024, 1, 31)
         )
+        ```
     """
 
     def __init__(self, db_path: str | None = None) -> None:

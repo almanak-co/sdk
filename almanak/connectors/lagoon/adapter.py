@@ -5,6 +5,7 @@ ExecutionOrchestrator can execute. It delegates transaction building to
 the LagoonVaultSDK and wraps results in ActionBundle containers.
 
 Example:
+    ```python
     from almanak.connectors.lagoon import LagoonVaultSDK, LagoonVaultAdapter
     from almanak.core.models.params import UpdateTotalAssetsParams
 
@@ -18,6 +19,7 @@ Example:
         pending_deposits=0,
     )
     bundle = adapter.build_propose_valuation_bundle(params)
+    ```
 """
 
 import logging

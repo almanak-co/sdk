@@ -332,6 +332,7 @@ class PredictionPositionMonitor:
     - Partial exits when liquidity is insufficient
 
     Example:
+        ```python
         monitor = PredictionPositionMonitor(
             deployment_id="my-strategy",
             check_interval=60,
@@ -361,6 +362,7 @@ class PredictionPositionMonitor:
         for result in results:
             if result.triggered:
                 print(f"Event: {result.event}, Action: {result.suggested_action}")
+        ```
     """
 
     # Default check interval in seconds
@@ -741,7 +743,7 @@ class PredictionPositionMonitor:
         """Check if market resolution is approaching.
 
         Computes the effective pre-close timeout in seconds using the
-        precedence rules in :meth:`_resolve_exit_before_seconds`. Sub-hour
+        precedence rules in `_resolve_exit_before_seconds`. Sub-hour
         markets (e.g. ``btc-updown-5m``) use
         ``exit_before_resolution_seconds``; legacy strategies setting
         ``exit_before_resolution_hours`` continue to work unchanged.
@@ -1000,7 +1002,7 @@ class PredictionPositionMonitor:
 
     @staticmethod
     def _snap_sell_min_price_to_tick(price: Decimal, tick_size: Decimal) -> Decimal:
-        """Snap a SELL ``min_price`` down onto a valid tick (VIB-3217).
+        """Snap a SELL ``min_price`` down onto a valid tick.
 
         We floor (ROUND_DOWN) so that any pre-applied safety margin (e.g. the
         ``* 0.95`` multiplier used by stop-loss / trailing-stop paths) is
@@ -1072,6 +1074,7 @@ class PredictionPositionMonitor:
             available liquidity is too low for even a partial exit).
 
         Example:
+            ```python
             results = monitor.check_positions(snapshots)
             for result in results:
                 if result.triggered and result.suggested_action == "SELL":
@@ -1080,6 +1083,7 @@ class PredictionPositionMonitor:
                     if sell_intent:
                         # Execute the sell intent
                         compiler.compile(sell_intent)
+            ```
         """
         from almanak.framework.intents.vocabulary import PredictionSellIntent
 

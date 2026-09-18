@@ -17,9 +17,7 @@
 | [Optimism](../../chains/optimism.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 | [Polygon](../../chains/polygon.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 
-## API Reference
-
 ::: almanak.connectors.sushiswap_v3
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

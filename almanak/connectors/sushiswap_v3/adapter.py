@@ -337,6 +337,7 @@ class SushiSwapV3Adapter:
     - Managing slippage protection
 
     Example:
+        ```python
         config = SushiSwapV3Config(
             chain="arbitrum",
             wallet_address="0x...",
@@ -362,6 +363,7 @@ class SushiSwapV3Adapter:
             tick_lower=-887220,
             tick_upper=887220,
         )
+        ```
     """
 
     def __init__(self, config: SushiSwapV3Config, token_resolver: "TokenResolverType | None" = None) -> None:

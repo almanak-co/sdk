@@ -50,44 +50,36 @@ is_address_based_token_reference("USDC", "arbitrum")  # False - deprecated symbo
 is_address_based_token_reference("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum")  # True
 ```
 
-## get_token_resolver
-
 ::: almanak.framework.data.tokens.get_token_resolver
     options:
-      show_root_heading: true
-
-## TokenResolver
+      heading_level: 2
 
 ::: almanak.framework.data.tokens.TokenResolver
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source
-
-## ResolvedToken
 
 ::: almanak.framework.data.tokens.ResolvedToken
     options:
-      show_root_heading: true
-
-## BridgeType
+      heading_level: 2
 
 ::: almanak.framework.data.tokens.BridgeType
     options:
-      show_root_heading: true
+      heading_level: 2
 
 ## Exceptions
 
 ::: almanak.framework.data.tokens.TokenResolutionError
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ::: almanak.framework.data.tokens.TokenNotFoundError
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ::: almanak.framework.data.tokens.AmbiguousTokenError
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Symbol deprecation
 
@@ -97,8 +89,8 @@ the warning into an error.
 
 ::: almanak.framework.data.tokens.SymbolTokenResolutionError
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ::: almanak.framework.data.tokens.SymbolTokenResolutionWarning
     options:
-      show_root_heading: true
+      heading_level: 3

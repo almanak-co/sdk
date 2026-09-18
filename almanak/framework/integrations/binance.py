@@ -5,6 +5,7 @@ through the gateway. All API calls are proxied through the gateway, which
 handles rate limiting and keeps API keys secure.
 
 Example:
+    ```python
     from almanak.framework.integrations import binance
 
     # Get 24h ticker
@@ -19,6 +20,7 @@ Example:
     # Get order book
     order_book = binance.get_order_book("BTCUSDT", limit=20)
     print(f"Best bid: {order_book.bids[0].price}")
+    ```
 """
 
 from dataclasses import dataclass

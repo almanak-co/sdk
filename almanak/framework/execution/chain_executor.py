@@ -12,6 +12,7 @@ Key Features:
     - Async-first design for non-blocking execution
 
 Example:
+    ```python
     from almanak.framework.execution.chain_executor import ChainExecutor
 
     # Create executor for Arbitrum
@@ -26,6 +27,7 @@ Example:
 
     # Get current nonce
     nonce = await executor.get_current_nonce()
+    ```
 """
 
 import asyncio
@@ -288,6 +290,7 @@ class ChainExecutor:
     - Wallet address is derived once at initialization and cached
 
     Example:
+        ```python
         # Create executor
         executor = ChainExecutor(
             chain="arbitrum",
@@ -310,6 +313,7 @@ class ChainExecutor:
         result = await executor.execute_transaction(unsigned_tx)
         if result.success:
             print(f"Transaction confirmed: {result.tx_hash}")
+        ```
     """
 
     def __init__(
@@ -1155,6 +1159,7 @@ class ChainExecutor:
             ExecutionError: If Safe signer is not configured or txs is empty
 
         Example:
+            ```python
             # Create multiple transactions
             txs = [approve_tx, swap_tx, add_liquidity_tx]
 
@@ -1162,6 +1167,7 @@ class ChainExecutor:
             result = await executor.execute_bundle(txs)
             if result.success:
                 print(f"Bundle executed: {result.tx_hash}")
+            ```
         """
         if self._safe_signer is None:
             raise ExecutionError("Atomic bundle execution requires Safe mode")

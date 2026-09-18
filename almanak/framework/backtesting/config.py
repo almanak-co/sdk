@@ -9,21 +9,24 @@ Key Components:
 Examples:
     Basic configuration with defaults:
 
+        ```python
         from almanak.framework.backtesting.config import BacktestDataConfig
 
         config = BacktestDataConfig()
-
+        ```
     Configuration with strict mode (fails if historical data unavailable):
 
+        ```python
         config = BacktestDataConfig(
             strict_historical_mode=True,
             use_historical_volume=True,
             use_historical_funding=True,
             use_historical_apy=True,
         )
-
+        ```
     Configuration with custom fallbacks:
 
+        ```python
         from decimal import Decimal
 
         config = BacktestDataConfig(
@@ -32,13 +35,15 @@ Examples:
             supply_apy_fallback=Decimal("0.02"),
             borrow_apy_fallback=Decimal("0.04"),
         )
-
+        ```
     Configuration with caching enabled:
 
+        ```python
         config = BacktestDataConfig(
             enable_persistent_cache=True,
             cache_directory="/path/to/cache",
         )
+        ```
 """
 
 from dataclasses import dataclass
@@ -131,11 +136,13 @@ class BacktestDataConfig:
             If None, uses system temp directory.
 
     Example:
+        ```python
         config = BacktestDataConfig(
             price_provider="auto",
             use_historical_volume=True,
             strict_historical_mode=False,
         )
+        ```
     """
 
     # Price provider configuration

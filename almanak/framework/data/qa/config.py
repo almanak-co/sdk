@@ -4,6 +4,7 @@ This module provides configuration management for the Data QA Framework,
 including token lists, validation thresholds, and test parameters.
 
 Example:
+    ```python
     from almanak.framework.data.qa.config import load_config, QAConfig
 
     # Load default configuration
@@ -13,6 +14,7 @@ Example:
 
     # Load custom configuration
     config = load_config("path/to/custom_config.yaml")
+    ```
 """
 
 import logging

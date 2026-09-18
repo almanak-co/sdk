@@ -25,6 +25,7 @@ What moved to :mod:`almanak.config.runtime`:
       back-compat — they have a single canonical home in ``almanak.config.runtime``.
 
 Example:
+    ```python
     # Build a runtime config from env (Phase 5a-2 entry point):
     from almanak.config.runtime import runtime_config_from_env
     rc = runtime_config_from_env(chain="arbitrum", network="anvil")
@@ -38,6 +39,7 @@ Example:
         rpc_url="https://arb1.arbitrum.io/rpc",
         private_key="0x...",
     )
+    ```
 """
 
 import logging
@@ -286,6 +288,7 @@ class LocalRuntimeConfig:
         - Wallet address is derived once at initialization and cached
 
     Example:
+        ```python
         # From environment variables (Phase 5a-2 entry point):
         from almanak.config.runtime import runtime_config_from_env
         rc = runtime_config_from_env(chain="arbitrum")
@@ -302,6 +305,7 @@ class LocalRuntimeConfig:
         # Access derived fields
         print(config.wallet_address)  # 0x71C7...
         print(config.chain_id)  # 42161
+        ```
     """
 
     # Required fields
@@ -824,6 +828,7 @@ class MultiChainRuntimeConfig:
         - Wallet address is derived once at initialization and cached
 
     Example:
+        ```python
         # Create multi-chain config
         config = MultiChainRuntimeConfig(
             chains=['arbitrum', 'optimism', 'base'],
@@ -845,6 +850,7 @@ class MultiChainRuntimeConfig:
             protocols=["aave_v3", "gmx_v2"],
             private_key="0x...",
         )
+        ```
     """
 
     # Required fields
@@ -1238,12 +1244,14 @@ class MultiChainRuntimeConfig:
             MultiChainRuntimeConfig instance configured for a single chain
 
         Example:
+            ```python
             # Convert from old single-chain pattern
             config = MultiChainRuntimeConfig.from_single_chain(
                 chain="arbitrum",
                 protocols=["aave_v3", "gmx_v2"],
                 private_key="0x...",
             )
+            ```
         """
         return cls(
             chains=[chain],
@@ -1290,6 +1298,7 @@ class MultiChainRuntimeConfig:
             ConfigurationError: If required parameters are missing for the mode
 
         Example:
+            ```python
             # EOA mode
             config = MultiChainRuntimeConfig.create(
                 chains=["arbitrum"],
@@ -1319,6 +1328,7 @@ class MultiChainRuntimeConfig:
                 signer_service_url="https://...",
                 signer_service_jwt="...",
             )
+            ```
         """
         from almanak.framework.execution.signer.safe import (
             SafeSigner,

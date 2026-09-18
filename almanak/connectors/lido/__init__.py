@@ -12,6 +12,7 @@ Supported chains:
 - Arbitrum, Optimism, Polygon (wstETH only)
 
 Example:
+    ```python
     from almanak.connectors.lido import LidoAdapter, LidoConfig
 
     config = LidoConfig(
@@ -25,6 +26,7 @@ Example:
 
     # Wrap stETH to wstETH
     result = adapter.wrap(amount=Decimal("1.0"))
+    ```
 """
 
 from __future__ import annotations

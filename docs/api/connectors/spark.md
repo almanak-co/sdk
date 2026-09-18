@@ -12,9 +12,7 @@
 |-------|--------|-------------------|
 | [Ethereum](../../chains/ethereum.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 
-## API Reference
-
 ::: almanak.connectors.spark
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

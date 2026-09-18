@@ -21,6 +21,7 @@ Contract Requirements:
     - Simulator: Must return SimulationResult even if simulation is skipped
 
 Example:
+    ```python
     from almanak.framework.execution.interfaces import Signer, Submitter, Simulator
 
     class LocalKeySigner(Signer):
@@ -36,6 +37,7 @@ Example:
         ) -> list[SubmissionResult]:
             # Submit via eth_sendRawTransaction
             ...
+    ```
 """
 
 from abc import ABC, abstractmethod
@@ -267,7 +269,7 @@ class GasEstimationError(ExecutionError):
 
 
 class DeferredRefreshError(ExecutionError):
-    """Raised when a deferred bundle cannot be safely refreshed (VIB-6228).
+    """Raised when a deferred bundle cannot be safely refreshed.
 
     A bundle carrying ``metadata["deferred_swap"] = True`` is a bundle whose
     calldata the compiler declared **known-stale** — aggregator routes
@@ -277,7 +279,7 @@ class DeferredRefreshError(ExecutionError):
     submitted, and this exception is how that refusal is signalled.
 
     ``ExecutionOrchestrator._handle_execution_exception`` already maps
-    :class:`ExecutionError` to the canonical failure ``ExecutionResult``
+    `ExecutionError` to the canonical failure ``ExecutionResult``
     (``result.error = str(exc)``, ``error_phase = result.phase``, session
     closed, ``EXECUTION_FAILED`` emitted), so raising this cannot escape the
     pipeline or crash the runner — no orchestrator branch is needed.
@@ -372,6 +374,7 @@ class UnsignedTransaction:
         metadata: Additional context (e.g., intent_id, description)
 
     Example:
+        ```python
         # EIP-1559 transaction
         tx = UnsignedTransaction(
             to="0x1234....",
@@ -393,6 +396,7 @@ class UnsignedTransaction:
             gas_price=30_000_000_000,  # 30 gwei
             tx_type=TransactionType.LEGACY,
         )
+        ```
     """
 
     to: str | None  # None for contract creation
@@ -528,11 +532,13 @@ class SignedTransaction:
         signed_at: Timestamp when the transaction was signed
 
     Example:
+        ```python
         signed = SignedTransaction(
             raw_tx="0xf86c...",
             tx_hash="0xabcd...",
             unsigned_tx=unsigned_tx,
         )
+        ```
     """
 
     raw_tx: str
@@ -589,6 +595,7 @@ class SimulationResult:
             for outcomes requiring revert classification.
 
     Example:
+        ```python
         # Successful simulation
         result = SimulationResult(
             success=True,
@@ -609,6 +616,7 @@ class SimulationResult:
             simulated=True,
             revert_reason="ERC20: transfer amount exceeds balance",
         )
+        ```
     """
 
     success: bool
@@ -810,6 +818,7 @@ class Signer(ABC):
     - Proper RLP encoding for the transaction type
 
     Example:
+        ```python
         class LocalKeySigner(Signer):
             def __init__(self, private_key: str):
                 # Validate and store key securely
@@ -846,6 +855,7 @@ class Signer(ABC):
             @property
             def address(self) -> str:
                 return self._account.address
+        ```
     """
 
     @abstractmethod
@@ -930,6 +940,7 @@ class Submitter(ABC):
     5. On gas error: Raise GasEstimationError with details
 
     Example:
+        ```python
         class PublicMempoolSubmitter(Submitter):
             def __init__(self, rpc_url: str):
                 self._rpc_url = rpc_url
@@ -967,6 +978,7 @@ class Submitter(ABC):
                     block_number=receipt["blockNumber"],
                     # ... etc
                 )
+        ```
     """
 
     @abstractmethod
@@ -1072,6 +1084,7 @@ class Simulator(ABC):
         - Simulation needs to reflect the SAFE's balances, not the EOA's
 
     Example:
+        ```python
         class DirectSimulator(Simulator):
             '''Pass-through simulator that skips actual simulation.'''
 
@@ -1115,6 +1128,7 @@ class Simulator(ABC):
                     state_changes=response.state_changes,
                     simulation_url=response.dashboard_url,
                 )
+        ```
     """
 
     @property

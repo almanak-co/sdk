@@ -12,6 +12,7 @@ Key Features:
 - Integration with RiskGuard for pre-execution validation
 
 Example:
+    ```python
     from almanak.framework.state.in_flight import InFlightExposureTracker, InFlightAsset, InFlightStatus
 
     tracker = InFlightExposureTracker(chains=['arbitrum', 'optimism'])
@@ -33,6 +34,7 @@ Example:
 
     # Update status when bridge completes
     tracker.mark_completed('bridge-123')
+    ```
 """
 
 import logging

@@ -19,6 +19,7 @@ Aave V3 Rate Units:
     - Conversion: APY = rate / 1e27 (already annualized in the subgraph)
 
 Example:
+    ```python
     from almanak.connectors.aave_v3.backtest_apy import AaveV3APYProvider
     from datetime import datetime, UTC
 
@@ -34,6 +35,7 @@ Example:
         )
         for apy in apys:
             print(f"{apy.source_info.timestamp}: supply={apy.supply_apy:.4f}, borrow={apy.borrow_apy:.4f}")
+    ```
 """
 
 import logging
@@ -172,6 +174,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
         client: SubgraphClient for querying The Graph
 
     Example:
+        ```python
         provider = AaveV3APYProvider()
 
         # Use as async context manager
@@ -189,6 +192,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             apys = await provider.get_apy(...)
         finally:
             await provider.close()
+        ```
     """
 
     def __init__(
@@ -457,6 +461,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             Returns LOW confidence fallback results if subgraph unavailable.
 
         Example:
+            ```python
             apys = await provider.get_apy(
                 protocol="aave_v3",
                 market="USDC",
@@ -465,6 +470,7 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             )
             for apy in apys:
                 print(f"Supply: {apy.supply_apy:.4f}, Borrow: {apy.borrow_apy:.4f}")
+            ```
         """
         symbol = self._normalize_market_symbol(market)
         chain = _canonical_chain(_chain_override if _chain_override is not None else self._config.chain)
@@ -642,12 +648,14 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             List of APYResult objects
 
         Example:
+            ```python
             apys = await provider.get_apy_for_chain(
                 chain="arbitrum",
                 market="USDC",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
             )
+            ```
         """
         # Use chain override parameter for thread-safe chain switching
         return await self.get_apy(
@@ -676,8 +684,10 @@ class AaveV3APYProvider(HistoricalAPYProvider):
             APYResult with current rates
 
         Example:
+            ```python
             apy = await provider.get_current_apy("USDC")
             print(f"Current USDC supply APY: {apy.supply_apy:.4f}")
+            ```
         """
         chain = _canonical_chain(chain or self._config.chain)
         now = datetime.now(UTC)

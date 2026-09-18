@@ -5,12 +5,14 @@ staking protocols, with on-chain lending rate reads as fallback. Supports
 filtering by token, chain, minimum TVL, and sorting by APY/TVL/risk.
 
 Example:
+    ```python
     from almanak.framework.data.yields.aggregator import YieldAggregator
 
     agg = YieldAggregator()
     envelope = agg.get_yield_opportunities("USDC", chains=["arbitrum", "base"])
     for opp in envelope.value:
         print(f"{opp.protocol} on {opp.chain}: {opp.apy:.2f}% APY, ${opp.tvl_usd} TVL")
+    ```
 """
 
 from __future__ import annotations

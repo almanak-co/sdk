@@ -310,6 +310,7 @@ class UniswapV3Adapter:
     - Managing slippage protection
 
     Example:
+        ```python
         config = UniswapV3Config(
             chain="arbitrum",
             wallet_address="0x...",
@@ -331,6 +332,7 @@ class UniswapV3Adapter:
             amount_usd=Decimal("1000"),
         )
         bundle = adapter.compile_swap_intent(intent)
+        ```
     """
 
     def __init__(self, config: UniswapV3Config, token_resolver: "TokenResolverType | None" = None) -> None:

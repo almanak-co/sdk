@@ -25,6 +25,7 @@ to them. A genuine "subgraph returned nothing / errored" surfaces as
 propagates to the caller (no silent zero-fill).
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.providers.multi_dex_volume import (
         MultiDEXVolumeProvider,
     )
@@ -39,6 +40,7 @@ Example:
             end_date=date(2024, 1, 31),
             protocol="uniswap_v3",
         )
+    ```
 """
 
 from __future__ import annotations
@@ -80,6 +82,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
         fallback_volume: Volume to return for routing-level mismatches
 
     Example:
+        ```python
         provider = MultiDEXVolumeProvider()
         async with provider:
             volumes = await provider.get_volume(
@@ -89,6 +92,7 @@ class MultiDEXVolumeProvider(HistoricalVolumeProvider):
                 end_date=date(2024, 1, 31),
                 protocol="uniswap_v3",
             )
+        ```
     """
 
     def __init__(

@@ -1,6 +1,8 @@
 # Market Snapshot
 
 ::: almanak.framework.market
+    options:
+      heading_level: 2
 
 ## Overview
 
@@ -85,10 +87,14 @@ HOLD proves the swap or teardown path was exercised.
 ## Builder factories
 
 ::: almanak.framework.market.builders.MarketSnapshotBuilder
+    options:
+      heading_level: 3
 
 ## Typed errors
 
 ::: almanak.framework.market.errors
+    options:
+      heading_level: 3
 
 ### HOLD contract for data-unavailable errors
 
@@ -145,10 +151,14 @@ def decide(self, market: MarketSnapshot) -> Intent:
 ## Return-type DTOs
 
 ::: almanak.framework.market.models
+    options:
+      heading_level: 3
 
 ## Provider Protocols (sync adapters)
 
 ::: almanak.framework.market.services
+    options:
+      heading_level: 3
 
 ### Token-adjusted equity references
 

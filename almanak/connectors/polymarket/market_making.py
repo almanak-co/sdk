@@ -13,6 +13,7 @@ support the unique characteristics of prediction markets where prices
 represent probabilities (0.01 to 0.99).
 
 Example:
+    ```python
     from almanak.connectors.polymarket.market_making import (
         Quote,
         RiskParameters,
@@ -42,6 +43,7 @@ Example:
         num_levels=3,
         size_per_level=Decimal("10"),
     )
+    ```
 """
 
 from dataclasses import dataclass

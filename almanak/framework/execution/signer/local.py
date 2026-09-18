@@ -9,6 +9,7 @@ SECURITY NOTE:
     with high-value wallets, consider using a KMS-based signer instead.
 
 Example:
+    ```python
     from almanak.framework.execution.signer import LocalKeySigner
 
     # Create signer from private key
@@ -19,6 +20,7 @@ Example:
 
     # Get wallet address
     print(f"Wallet address: {signer.address}")
+    ```
 """
 
 import logging
@@ -58,6 +60,7 @@ class LocalKeySigner(Signer):
         address: The checksummed Ethereum address derived from the private key
 
     Example:
+        ```python
         # Initialize with private key
         signer = LocalKeySigner(private_key="0x...")
 
@@ -76,6 +79,7 @@ class LocalKeySigner(Signer):
         # Sign transaction
         signed = await signer.sign(tx, chain="arbitrum")
         print(f"Signed tx hash: {signed.tx_hash}")
+        ```
     """
 
     def __init__(self, private_key: str) -> None:
@@ -88,7 +92,9 @@ class LocalKeySigner(Signer):
             SigningError: If the private key is invalid
 
         Example:
+            ```python
             signer = LocalKeySigner(private_key="0xabc123...")
+            ```
         """
         try:
             self._account: LocalAccount = Account.from_key(private_key)
@@ -109,8 +115,10 @@ class LocalKeySigner(Signer):
             Checksummed Ethereum address (0x-prefixed, 42 characters)
 
         Example:
+            ```python
             signer = LocalKeySigner(private_key="0x...")
             print(signer.address)  # 0x71C7656EC7ab88b098defB751B7401B5f6d8976F
+            ```
         """
         return self._address
 
@@ -137,6 +145,7 @@ class LocalKeySigner(Signer):
             ValueError: If transaction fields are malformed
 
         Example:
+            ```python
             tx = UnsignedTransaction(
                 to="0x1234...",
                 value=1_000_000_000_000_000_000,  # 1 ETH
@@ -148,6 +157,7 @@ class LocalKeySigner(Signer):
                 max_priority_fee_per_gas=1_000_000_000,
             )
             signed = await signer.sign(tx, chain="ethereum")
+            ```
         """
         # Validate transaction fields
         self._validate_transaction(tx)

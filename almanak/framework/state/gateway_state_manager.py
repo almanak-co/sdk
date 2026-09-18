@@ -97,6 +97,7 @@ class GatewayStateManager:
     The interface mirrors the standard StateManager but works via gRPC.
 
     Example:
+        ```python
         from almanak.framework.gateway_client import GatewayClient
         from almanak.framework.state.gateway_state_manager import GatewayStateManager
 
@@ -105,6 +106,7 @@ class GatewayStateManager:
             state = await state_manager.load_state("my-strategy")
             if state:
                 print(f"Loaded state version {state.version}")
+        ```
     """
 
     def __init__(self, client: GatewayClient, timeout: float = 30.0):

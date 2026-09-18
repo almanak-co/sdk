@@ -8,6 +8,7 @@ pre-built unsigned transactions.
 No authentication is required.
 
 Example:
+    ```python
     from almanak.connectors.kamino import KaminoClient, KaminoConfig
 
     config = KaminoConfig(wallet_address="your-solana-wallet-pubkey")
@@ -22,6 +23,7 @@ Example:
         reserve="D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59",
         amount="100.0",
     )
+    ```
 """
 
 import logging
@@ -80,11 +82,13 @@ class KaminoClient:
     No authentication is required.
 
     Example:
+        ```python
         config = KaminoConfig(wallet_address="your-solana-wallet-pubkey")
         client = KaminoClient(config)
 
         reserves = client.get_reserves()
         tx = client.deposit(reserve=reserves[0].address, amount="100.0")
+        ```
     """
 
     def __init__(self, config: KaminoConfig) -> None:

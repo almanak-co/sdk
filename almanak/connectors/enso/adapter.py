@@ -17,6 +17,7 @@ router handles the Permit2 flow itself after receiving the standard approval.
 This is an Enso-internal detail and may vary across chains.
 
 Example:
+    ```python
     from almanak.connectors.enso import EnsoAdapter, EnsoConfig
 
     config = EnsoConfig(
@@ -37,6 +38,7 @@ Example:
 
     # Then fetch fresh swap transaction immediately before execution
     fresh_swap_tx = adapter.get_fresh_swap_transaction(bundle.metadata)
+    ```
 """
 
 import logging
@@ -128,6 +130,7 @@ class EnsoAdapter:
     - ERC-20 approval handling
 
     Example:
+        ```python
         config = EnsoConfig(chain="arbitrum", wallet_address="0x...")
         adapter = EnsoAdapter(config)
 
@@ -137,6 +140,7 @@ class EnsoAdapter:
             amount_usd=Decimal("1000"),
         )
         bundle = adapter.compile_swap_intent(intent)
+        ```
     """
 
     def __init__(
@@ -556,6 +560,7 @@ class EnsoAdapter:
             Exception: If route fetching fails
 
         Example:
+            ```python
             # After executing approval, fetch fresh swap data
             fresh_tx = adapter.get_fresh_swap_transaction(bundle.metadata)
 
@@ -567,6 +572,7 @@ class EnsoAdapter:
                 gas_limit=fresh_tx["gas_estimate"],
                 ...
             )
+            ```
         """
         route_params = metadata.get("route_params")
         if not route_params:

@@ -7,6 +7,7 @@ The store uses file-based JSON storage with atomic writes to prevent
 corruption. Sessions are stored in a configurable directory.
 
 Example:
+    ```python
     from almanak.framework.execution.session_store import ExecutionSessionStore
     from almanak.framework.execution.session import ExecutionSession, ExecutionPhase
 
@@ -30,6 +31,7 @@ Example:
 
     # Mark session complete
     store.mark_complete("sess_123", success=True)
+    ```
 """
 
 import json
@@ -73,6 +75,7 @@ class ExecutionSessionStore:
         storage_path: Path to the directory where sessions are stored
 
     Example:
+        ```python
         store = ExecutionSessionStore(storage_path="./state/sessions")
 
         # Save session
@@ -86,6 +89,7 @@ class ExecutionSessionStore:
 
         # Mark complete
         store.mark_complete("sess_123", success=True)
+        ```
     """
 
     def __init__(self, storage_path: str = DEFAULT_STORAGE_PATH) -> None:

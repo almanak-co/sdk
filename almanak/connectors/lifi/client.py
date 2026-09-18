@@ -6,6 +6,7 @@ LiFi is a cross-chain liquidity meta-aggregator that routes through bridges
 optimal cross-chain and same-chain swap routes.
 
 Example:
+    ```python
     from almanak.connectors.lifi import LiFiClient, LiFiConfig
 
     config = LiFiConfig(chain_id=42161, wallet_address="0x...")
@@ -20,6 +21,7 @@ Example:
         from_amount="1000000000",  # 1000 USDC
         from_address="0x...",
     )
+    ```
 """
 
 import logging
@@ -107,6 +109,7 @@ class LiFiClient:
     - Querying supported tokens and chains
 
     Example:
+        ```python
         config = LiFiConfig(chain_id=42161, wallet_address="0x...")
         client = LiFiClient(config)
 
@@ -118,6 +121,7 @@ class LiFiClient:
             from_amount="1000000000",
             from_address="0x...",
         )
+        ```
     """
 
     def __init__(self, config: LiFiConfig) -> None:

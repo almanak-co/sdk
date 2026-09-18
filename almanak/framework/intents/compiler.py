@@ -12,12 +12,14 @@ The compiler:
 6. Returns an ActionBundle ready for execution
 
 Example:
+    ```python
     from almanak.framework.intents import Intent
     from almanak.framework.intents.compiler import IntentCompiler
 
     compiler = IntentCompiler(chain="arbitrum")
     intent = Intent.swap("USDC", "ETH", amount_usd=Decimal("1000"))
     bundle = compiler.compile(intent)
+    ```
 """
 
 import logging
@@ -427,6 +429,7 @@ class IntentCompiler:
     into low-level transaction data ready for execution on-chain.
 
     Example:
+        ```python
         compiler = IntentCompiler(
             chain="arbitrum",
             wallet_address="0x...",
@@ -437,6 +440,7 @@ class IntentCompiler:
         if result.status == CompilationStatus.SUCCESS:
             # Execute result.action_bundle
             pass
+        ```
     """
 
     _PRIMITIVE_COMPILER_ROUTES: ClassVar[Mapping[IntentType, _PrimitiveCompilerRoute]] = {
@@ -522,7 +526,7 @@ class IntentCompiler:
                 DEPRECATED: Use gateway_client instead for production deployments.
             rpc_timeout: HTTP timeout for direct RPC calls in seconds.
             default_lp_slippage: Default tolerance for BALANCED LP operations
-                (:data:`LP_SLIPPAGE_DEFAULT`, ``0.01`` = 1%), applied when the
+                (`LP_SLIPPAGE_DEFAULT`, ``0.01`` = 1%), applied when the
                 intent declares neither ``max_slippage`` nor
                 ``protocol_params["lp_slippage"]``. It is a **price** tolerance,
                 not a per-leg amount haircut: on the V3-family / Slipstream mint
@@ -791,7 +795,7 @@ class IntentCompiler:
     def _swap_compiler_context_kwargs(self) -> dict[str, Any]:
         """Build kwargs for a swap-pipeline context (base + swap-specific knobs).
 
-        Used by both :class:`SwapCompilerContext` and :class:`CLCompilerContext`
+        Used by both `SwapCompilerContext` and `CLCompilerContext`
         construction. Lending/perp/bridge compilers that don't compile swaps
         should NOT call this — they construct ``BaseCompilerContext`` directly.
         """
@@ -1256,7 +1260,7 @@ class IntentCompiler:
     # =========================================================================
 
     def _family_compile_intent(self, intent: AnyIntent) -> CompilationResult | None:
-        """Ask every registered :class:`ChainFamilyAdapter` if it owns ``intent``.
+        """Ask every registered `ChainFamilyAdapter` if it owns ``intent``.
 
         Returns the first non-None response. Used by the per-intent dispatch
         helpers (``_dispatch_swap_protocol_route`` /
@@ -1268,7 +1272,7 @@ class IntentCompiler:
         cross-chain edge case where an SVM-only protocol (``meteora_dlmm`` /
         ``orca_whirlpools`` / ``raydium_clmm``) is submitted against an EVM
         chain — SvmFamily returns an explicit "supported only on Solana"
-        :class:`CompilationResult` rather than letting the intent fall
+        `CompilationResult` rather than letting the intent fall
         through to the generic "unsupported protocol on <chain>" error.
         """
         for family in all_families():
@@ -1546,7 +1550,7 @@ class IntentCompiler:
         PT swap passed the gate as the chain default (``uniswap_v3``, which
         does consume pins), then compiled against Pendle, which does not read
         ``swap_params`` at all, and the pin was silently discarded — exactly
-        the outcome this gate exists to make impossible (CodeRabbit, PR #3644).
+        the outcome this gate exists to make impossible.
 
         Inference is consulted only when the intent declares no protocol.
 
@@ -2062,7 +2066,7 @@ class IntentCompiler:
         that DO support this LP verb so the user can correct the selection.
         This closes the docs/runtime capability mismatch where the support
         matrix advertises a protocol generically (e.g. Balancer, which is
-        flash-loan-only) while its LP intents are not routable (ALM-2729).
+        flash-loan-only) while its LP intents are not routable.
 
         Mirrors the existing LP_COLLECT_FEES capability error and uses the same
         ``CompilerRegistry`` — the registry connector compilers populate as they
@@ -2119,7 +2123,7 @@ class IntentCompiler:
         Dispatch order is preserved from the pre-refactor method.
 
         VIB-4803: Solana protocol routing (meteora_dlmm / orca_whirlpools /
-        raydium_clmm) now lives in :class:`SvmFamily.compile_intent`. The
+        raydium_clmm) now lives in `SvmFamily.compile_intent`. The
         family.compile_intent contract:
 
         * EvmFamily returns None -> fall through to connector dispatch.
@@ -2127,10 +2131,10 @@ class IntentCompiler:
           tuple it owns, including cross-chain mismatches (e.g. meteora_dlmm
           on an EVM chain -> FAILED with explicit error).
 
-        We iterate every registered family (in :class:`ChainFamily` enum
+        We iterate every registered family (in `ChainFamily` enum
         order) so a cross-chain protocol mismatch (Solana-only protocol on
         EVM chain) is caught by SvmFamily even when ``self._family`` is
-        :class:`EvmFamily`.
+        `EvmFamily`.
         """
         return self._family_compile_intent(intent)
 
@@ -2212,8 +2216,8 @@ class IntentCompiler:
         Extracted in Phase 6B backlog so ``_compile_lp_close`` itself stays small.
         Dispatch order is preserved from the pre-refactor method.
 
-        VIB-4803: Solana protocol routing moved to :class:`SvmFamily.compile_intent`.
-        See :meth:`_dispatch_lp_open_protocol_route` for the contract.
+        VIB-4803: Solana protocol routing moved to `SvmFamily.compile_intent`.
+        See `_dispatch_lp_open_protocol_route` for the contract.
         """
         return self._family_compile_intent(intent)
 
@@ -2702,7 +2706,7 @@ class IntentCompiler:
     def _expand_native_aliases_in_price_oracle(self) -> None:
         """Fill missing wrapped/native counterparts in ``self.price_oracle``.
 
-        Rationale (VIB-3136): ``MarketSnapshot.get_price_oracle_dict()`` returns
+        Rationale: ``MarketSnapshot.get_price_oracle_dict()`` returns
         only the symbols the strategy actually touched — typically the native
         token (e.g. ``POL``). DEX swap adapters then ask the dict for the
         wrapped symbol (e.g. ``WPOL``, since ``resolve_for_swap`` wraps native

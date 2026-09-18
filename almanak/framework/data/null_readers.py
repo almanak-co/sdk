@@ -1,6 +1,6 @@
 """Null readers for deterministic backtest / paper-fork factories.
 
-VIB-4728 / POOL-7 (VIB-4755) — moving pool history egress to the
+VIB-4728 / POOL-7 — moving pool history egress to the
 gateway introduced the same backtest-determinism risk VIB-4727
 identified for pool analytics: a live gateway call at backtest time
 makes "works in backtest" silently diverge from production behaviour
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 
 
 class NullPoolHistoryReader:
-    """Always-raises stub used by backtest factories (VIB-4755).
+    """Always-raises stub used by backtest factories.
 
     Live gateway HTTP at backtest time = nondeterministic results
     across runs — strategies that "work in backtest" then silently
@@ -97,7 +97,7 @@ class NullPoolHistoryReader:
 
 
 class NullPriceAggregator:
-    """Always-raises ``twap()`` / ``lwap()`` stub for backtest factories (VIB-4924).
+    """Always-raises ``twap()`` / ``lwap()`` stub for backtest factories.
 
     ``MarketSnapshotBuilder.for_strategy_runner`` injects a real
     ``GatewayMarketPriceAggregator`` (twap over the gateway ``GetDexTwap``
@@ -139,7 +139,7 @@ class NullPriceAggregator:
 
 
 class NullPoolReaderRegistry:
-    """Always-raises pool-resolution stub for backtest factories (VIB-4924).
+    """Always-raises pool-resolution stub for backtest factories.
 
     ``MarketSnapshot.twap`` resolves the pool via the registry *before* calling
     the aggregator, so a ``None`` registry would raise a bare ``ValueError``
@@ -168,7 +168,7 @@ class NullPoolReaderRegistry:
 
 
 class NullPoolReserveReader:
-    """Always-raises ``get_pool_reserves`` stub for backtest factories (VIB-4845).
+    """Always-raises ``get_pool_reserves`` stub for backtest factories.
 
     ``MarketSnapshotBuilder.for_strategy_runner`` injects a real
     ``GatewayPoolReserveReader`` (slot0 / liquidity / balanceOf reads over the
@@ -191,7 +191,7 @@ class NullPoolReserveReader:
 
 
 class NullLiquidityDepthReader:
-    """Always-raises ``read_liquidity_depth`` stub for backtest factories (VIB-4845).
+    """Always-raises ``read_liquidity_depth`` stub for backtest factories.
 
     The live reader scans tick bitmaps over the gateway eth_call proxy; a live
     read at replay time would be nondeterministic. Backtest factories inject
@@ -215,7 +215,7 @@ class NullLiquidityDepthReader:
 
 
 class NullSlippageEstimator:
-    """Always-raises ``estimate_slippage`` stub for backtest factories (VIB-4845).
+    """Always-raises ``estimate_slippage`` stub for backtest factories.
 
     The live estimator calls an on-chain quoter over the gateway eth_call proxy;
     a live read at replay time would be
@@ -238,7 +238,7 @@ class NullSlippageEstimator:
 
 
 class NullRateHistoryReader:
-    """Always-raises rate-history stub for backtest factories (VIB-4845).
+    """Always-raises rate-history stub for backtest factories.
 
     ``MarketSnapshotBuilder.for_strategy_runner`` injects the real
     ``RateHistoryReader`` (thin gRPC client of the gateway ``RateHistoryService``

@@ -17,6 +17,7 @@ Features:
     - Resume from saved state support
 
 Example:
+    ```python
     from almanak.framework.backtesting.paper.background import (
         BackgroundPaperTrader,
         PaperTraderState,
@@ -39,6 +40,7 @@ Example:
 
     # Stop gracefully
     bg_trader.stop()
+    ```
 """
 
 import asyncio
@@ -718,6 +720,7 @@ class BackgroundPaperTrader:
         save_interval_seconds: Interval between state saves (default: 60)
 
     Example:
+        ```python
         bg_trader = BackgroundPaperTrader(
             config=config,
             state_dir=Path("/path/to/state"),
@@ -732,6 +735,7 @@ class BackgroundPaperTrader:
 
         # Stop gracefully
         bg_trader.stop()
+        ```
     """
 
     config: PaperTraderConfig

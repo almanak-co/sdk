@@ -7,6 +7,7 @@ Key Exceptions:
       a strategy's configuration fails validation.
 
 Example:
+    ```python
     from decimal import Decimal
     from almanak.framework.strategies.exceptions import ConfigValidationError
 
@@ -21,6 +22,7 @@ Example:
                     "trade_size_usd must be > 0",
                     field="trade_size_usd",
                 )
+    ```
 """
 
 
@@ -39,10 +41,12 @@ class ConfigValidationError(Exception):
             when the error is cross-field or not attributable to a single field.
 
     Example:
+        ```python
         raise ConfigValidationError(
             "rsi_overbought must be greater than rsi_oversold",
             field="rsi_overbought",
         )
+        ```
     """
 
     def __init__(self, message: str, field: str | None = None) -> None:

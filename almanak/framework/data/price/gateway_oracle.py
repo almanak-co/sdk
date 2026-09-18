@@ -24,6 +24,7 @@ class GatewayPriceOracle(PriceOracle):
     which has access to the actual price sources (CoinGecko, Chainlink, etc.).
 
     Example:
+        ```python
         from almanak.framework.gateway_client import GatewayClient
         from almanak.framework.data.price.gateway_oracle import GatewayPriceOracle
 
@@ -31,6 +32,7 @@ class GatewayPriceOracle(PriceOracle):
             oracle = GatewayPriceOracle(client)
             result = await oracle.get_aggregated_price("ETH", "USD")
             print(f"ETH price: ${result.price}")
+        ```
     """
 
     def __init__(

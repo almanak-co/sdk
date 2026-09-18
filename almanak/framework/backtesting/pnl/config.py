@@ -10,6 +10,7 @@ Key Components:
 Examples:
     Basic configuration with minimal settings:
 
+        ```python
         from almanak.framework.backtesting.pnl.config import PnLBacktestConfig
         from datetime import datetime
         from decimal import Decimal
@@ -28,9 +29,10 @@ Examples:
                 }
             ],
         )
-
+        ```
     Custom configuration with fee/slippage models:
 
+        ```python
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 6, 1),
@@ -41,9 +43,10 @@ Examples:
             gas_price_gwei=Decimal("30"),
             inclusion_delay_blocks=2,
         )
-
+        ```
     Institutional mode for production-grade backtests:
 
+        ```python
         # Institutional mode automatically enforces:
         # - strict_reproducibility=True (audit trails)
         # - allow_degraded_data=False (data quality)
@@ -62,6 +65,7 @@ Examples:
         result = await backtester.backtest(strategy, config)
         if not result.institutional_compliance:
             print(f"Compliance issues: {result.compliance_violations}")
+        ```
 """
 
 import hashlib
@@ -197,6 +201,7 @@ class PnLBacktestConfig:
         reconciliation_alert_threshold_pct: Threshold percentage for triggering reconciliation alerts (default: 5%)
 
     Example:
+        ```python
         config = PnLBacktestConfig(
             start_time=datetime(2024, 1, 1),
             end_time=datetime(2024, 6, 1),
@@ -204,6 +209,7 @@ class PnLBacktestConfig:
         )
         print(f"Duration: {config.duration_days:.1f} days")
         print(f"Estimated ticks: {config.estimated_ticks}")
+        ```
     """
 
     # Time range configuration

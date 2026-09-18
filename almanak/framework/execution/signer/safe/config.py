@@ -14,6 +14,7 @@ Environment Variables:
     ALMANAK_SIGNER_SERVICE_JWT: JWT token for signer service authentication
 
 Example:
+    ```python
     from almanak.framework.execution.signer.safe.config import SafeWalletMapping, SafeSignerConfig
 
     # Load wallet mapping
@@ -26,6 +27,7 @@ Example:
         wallet_config=wallet_config,
         private_key="0x...",  # Required for direct mode, optional for zodiac mode
     )
+    ```
 """
 
 import json
@@ -70,11 +72,13 @@ class SafeWalletConfig:
         role_key: The role key for Zodiac authorization (default: "AlmanakAgentRole")
 
     Example:
+        ```python
         config = SafeWalletConfig(
             safe_address="0xSafe...",
             eoa_address="0xEOA...",
             zodiac_roles_address="0xZodiac...",
         )
+        ```
     """
 
     safe_address: str
@@ -119,12 +123,14 @@ class SafeSignerConfig:
         gas_buffer_multiplier: Multiplier for gas estimates (default: 2.0)
 
     Example:
+        ```python
         config = SafeSignerConfig(
             mode="direct",
             wallet_config=wallet_config,
             private_key="0x...",
             gas_buffer_multiplier=2.0,
         )
+        ```
     """
 
     mode: str
@@ -184,9 +190,11 @@ class SafeWalletMapping:
     ```
 
     Example:
+        ```python
         mapping = SafeWalletMapping()
         config = mapping.get_config("0xSafeAddress...")
         eoa = mapping.get_eoa_address("0xSafeAddress...")
+        ```
     """
 
     def __init__(self, env_var: str = "ALMANAK_PLATFORM_WALLETS") -> None:

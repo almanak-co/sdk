@@ -10,6 +10,7 @@ Selection Criteria:
 - reliability: Prefer bridges with higher historical reliability
 
 Example:
+    ```python
     from almanak.framework.intents.bridge_selector import BridgeSelector
     from almanak.connectors.across import AcrossBridgeAdapter
     from almanak.connectors.stargate import StargateBridgeAdapter
@@ -27,6 +28,7 @@ Example:
 
     if result.quote:
         print(f"Selected {result.bridge.name} with fee {result.quote.fee_amount}")
+    ```
 """
 
 import logging
@@ -191,6 +193,7 @@ class BridgeSelector:
         default_priority: Default selection priority
 
     Example:
+        ```python
         selector = BridgeSelector([
             AcrossBridgeAdapter(),
             StargateBridgeAdapter(),
@@ -203,6 +206,7 @@ class BridgeSelector:
             to_chain="optimism",
             priority="cost",
         )
+        ```
     """
 
     def __init__(

@@ -79,6 +79,7 @@ class FlashLoanIntent(BaseIntent):
         created_at: Timestamp when the intent was created
 
     Example:
+        ```python
         # Flash loan arbitrage: borrow USDC, swap through two DEXs
         Intent.flash_loan(
             provider="aave",
@@ -90,6 +91,7 @@ class FlashLoanIntent(BaseIntent):
             ],
             chain="ethereum"
         )
+        ```
 
     Note:
         The callback_intents are executed atomically within the flash loan transaction.
@@ -135,7 +137,7 @@ class FlashLoanIntent(BaseIntent):
         FlashLoanIntent ships a hand-rolled dict literal here (rather than
         delegating to ``model_dump``) because the nested ``callback_intents``
         list needs each element's per-class ``serialize()`` to dispatch
-        correctly. The reserved ``registry_handle`` field (VIB-4192) is
+        correctly. The reserved ``registry_handle`` field is
         emitted unconditionally (with value ``None`` when unset) for schema
         stability — see UAT card §D1.S2 / D2.M1 for the per-class
         defaulted-None round-trip contract.
@@ -221,6 +223,7 @@ class StakeIntent(BaseIntent):
         - Ethena: Stakes USDe, receives sUSDe (ERC4626 vault)
 
     Example:
+        ```python
         # Stake 1 ETH with Lido, receive wstETH (wrapped, non-rebasing)
         intent = Intent.stake(
             protocol="lido",
@@ -245,6 +248,7 @@ class StakeIntent(BaseIntent):
             amount="all",
             chain="ethereum",
         )
+        ```
     """
 
     protocol: str
@@ -314,6 +318,7 @@ class UnstakeIntent(BaseIntent):
         - Ethena: Initiates cooldown on sUSDe (unstaking has a cooldown period)
 
     Example:
+        ```python
         # Unstake 1 wstETH with Lido
         intent = Intent.unstake(
             protocol="lido",
@@ -337,6 +342,7 @@ class UnstakeIntent(BaseIntent):
             amount="all",
             chain="ethereum",
         )
+        ```
     """
 
     protocol: str
@@ -387,7 +393,7 @@ class VaultDepositIntent(BaseIntent):
     """Intent to deposit assets into an ERC-4626 vault.
 
     Supports any vault protocol registered with
-    :mod:`almanak.connectors._strategy_base.vaults` (e.g. ``metamorpho``; future:
+    `almanak.connectors._strategy_base.vaults` (e.g. ``metamorpho``; future:
     ``beefy``, ``yearn_v3``). The ``protocol`` field is the dispatch key.
 
     Attributes:
@@ -399,12 +405,14 @@ class VaultDepositIntent(BaseIntent):
         created_at: Timestamp when the intent was created
 
     Example:
+        ```python
         intent = Intent.vault_deposit(
             protocol="metamorpho",
             vault_address="0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB",
             amount=Decimal("1000"),
             chain="ethereum",
         )
+        ```
     """
 
     protocol: str
@@ -458,7 +466,7 @@ class VaultRedeemIntent(BaseIntent):
     """Intent to redeem shares from an ERC-4626 vault.
 
     Supports any vault protocol registered with
-    :mod:`almanak.connectors._strategy_base.vaults`.
+    `almanak.connectors._strategy_base.vaults`.
 
     Attributes:
         protocol: Registered vault protocol name (case-insensitive)
@@ -480,6 +488,7 @@ class VaultRedeemIntent(BaseIntent):
         created_at: Timestamp when the intent was created
 
     Example:
+        ```python
         # Redeem specific amount of shares
         intent = Intent.vault_redeem(
             protocol="metamorpho",
@@ -506,6 +515,7 @@ class VaultRedeemIntent(BaseIntent):
             allow_force_deallocate=True,
             max_force_deallocate_penalty_bps=5,
         )
+        ```
     """
 
     protocol: str
@@ -575,11 +585,13 @@ class WrapNativeIntent(BaseIntent):
         created_at: Timestamp when the intent was created
 
     Example:
+        ```python
         intent = WrapNativeIntent(
             token="WETH",
             amount=Decimal("0.5"),
             chain="arbitrum",
         )
+        ```
     """
 
     token: str
@@ -635,11 +647,13 @@ class UnwrapNativeIntent(BaseIntent):
         created_at: Timestamp when the intent was created
 
     Example:
+        ```python
         intent = UnwrapNativeIntent(
             token="WETH",
             amount=Decimal("0.5"),
             chain="arbitrum",
         )
+        ```
     """
 
     token: str

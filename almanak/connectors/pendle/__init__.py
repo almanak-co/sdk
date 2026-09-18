@@ -25,7 +25,7 @@ Example::
 
     sdk = PendleSDK(rpc_url="https://arb1.arbitrum.io/rpc", chain="arbitrum")
 
-Lazy attribute access (VIB-4835)
+Lazy attribute access
 --------------------------------
 Strategy-facing symbols (``PendleSDK``, ``PendleAdapter``, …) are exposed
 via PEP 562 ``__getattr__``. Gateway boot may load the manifest-declared

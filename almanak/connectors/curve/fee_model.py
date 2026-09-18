@@ -12,6 +12,7 @@ Key Components:
     - CurveFeeModel: Fee model with dynamic fee calculation
 
 Example:
+    ```python
     from almanak.connectors.curve.fee_model import (
         CurveFeeModel,
         CurvePoolType,
@@ -33,6 +34,7 @@ Example:
         pool_type=CurvePoolType.TRICRYPTO,
         pool_imbalance=Decimal("0.1"),  # 10% imbalance
     )
+    ```
 """
 
 from dataclasses import dataclass
@@ -111,6 +113,7 @@ class CurveFeeModel(FeeModel):
         imbalance_sensitivity: How much imbalance affects fees (default 2)
 
     Example:
+        ```python
         model = CurveFeeModel()
 
         # Basic stable swap
@@ -127,6 +130,7 @@ class CurveFeeModel(FeeModel):
             pool_type=CurvePoolType.TRICRYPTO,
             pool_imbalance=Decimal("0.2"),
         )
+        ```
     """
 
     base_fees: dict[CurvePoolType, Decimal] | None = None

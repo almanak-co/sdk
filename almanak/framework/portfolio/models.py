@@ -404,10 +404,12 @@ class PortfolioSnapshot:
     - Historical charts
 
     Example:
+        ```python
         snapshot = strategy.get_portfolio_snapshot(market)
         # snapshot.total_value_usd = Decimal("15234.50")
         # snapshot.value_confidence = ValueConfidence.HIGH
         # snapshot.positions = [PositionValue(...), ...]
+        ```
     """
 
     timestamp: datetime

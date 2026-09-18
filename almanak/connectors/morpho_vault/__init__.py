@@ -14,6 +14,7 @@ Supported Chains:
 - Base
 
 Example:
+    ```python
     from almanak.connectors.morpho_vault import (
         MetaMorphoAdapter,
         MetaMorphoConfig,
@@ -42,6 +43,7 @@ Example:
     # Parse transaction receipts
     parser = MetaMorphoReceiptParser()
     parse_result = parser.parse_receipt(receipt)
+    ```
 """
 
 from __future__ import annotations

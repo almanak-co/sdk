@@ -13,9 +13,7 @@
 | [Base](../../chains/base.md) | EVM | ``VAULT_DEPOSIT``, ``VAULT_REDEEM`` |
 | [Ethereum](../../chains/ethereum.md) | EVM | ``VAULT_DEPOSIT``, ``VAULT_REDEEM`` |
 
-## API Reference
-
 ::: almanak.connectors.lagoon
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

@@ -11,6 +11,7 @@ Key Features:
     - Manages Safe nonce caching for bundles
 
 Example:
+    ```python
     class MySafeSigner(SafeSigner):
         async def sign_with_web3(self, tx, web3, eoa_nonce):
             # Implementation specific signing logic
@@ -19,6 +20,7 @@ Example:
         async def sign_bundle_with_web3(self, txs, web3, eoa_nonce, chain):
             # Implementation specific bundle signing
             ...
+    ```
 """
 
 import logging
@@ -75,10 +77,12 @@ class SafeSigner(Signer):
         gas_buffer_multiplier: Multiplier for gas estimates (default 2.0)
 
     Example:
+        ```python
         class DirectSafeSigner(SafeSigner):
             async def sign_with_web3(self, tx, web3, eoa_nonce):
                 # Sign via Safe.execTransaction()
                 ...
+        ```
     """
 
     def __init__(self, config: SafeSignerConfig) -> None:

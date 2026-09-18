@@ -18,6 +18,7 @@ The BacktestResult model includes institutional compliance tracking:
     - data_source_capabilities: Map of provider names to their capabilities
 
 Example:
+    ```python
     result = await backtester.backtest(strategy, config)
 
     # Check institutional compliance
@@ -29,6 +30,7 @@ Example:
     # Access data quality metrics
     if result.data_quality and result.data_quality.coverage_ratio is not None:
         print(f"Coverage: {result.data_quality.coverage_ratio:.1%}")
+    ```
 """
 
 from dataclasses import dataclass, field
@@ -49,7 +51,7 @@ if TYPE_CHECKING:
 
 
 def decimal_str(value: Decimal) -> str:
-    """Serialize a Decimal in fixed-point, human-readable form (VIB-5083).
+    """Serialize a Decimal in fixed-point, human-readable form.
 
     A bare ``str(Decimal("0E+17"))`` renders as ``"0E+17"`` -- a profit_factor
     of zero divided by a huge gross loss, or any sum that inflated the
@@ -1495,7 +1497,7 @@ class EquityPoint:
         position_value_usd: LP + lending position value (when using PortfolioValuer)
         valuation_source: "portfolio_valuer" or "simple" — indicates which pricing path was used
         numeraire_price_usd: USD price of the strategy's declared numeraire token at this
-            timestamp, captured for the numeraire reporting projection (VIB-5127). ``None``
+            timestamp, captured for the numeraire reporting projection. ``None``
             for USD-numeraire strategies (the default) and for points where the numeraire
             token was unpriceable — the reporting layer divides ``value_usd`` by this to
             value the portfolio in the numeraire. ``value_usd`` itself always stays USD.
@@ -1649,7 +1651,7 @@ class TradeRecord:
 
         A successful trade with ``pnl_usd is None`` realized nothing yet (an
         opening / inventory-building trade); a failed trade is excluded from
-        performance metrics entirely (VIB-5083).
+        performance metrics entirely.
         """
         return self.success and self.pnl_usd is not None
 
@@ -1658,9 +1660,8 @@ class TradeRecord:
         """Net PnL after fees, slippage, and gas, or ``None`` if unrealized.
 
         ``None`` (no realized PnL) stays ``None`` rather than collapsing to a
-        bare cost figure -- an opening trade is not a loss equal to its costs
-        (VIB-5083). Callers that aggregate win/loss must gate on
-        :attr:`has_realized_pnl` first.
+        bare cost figure -- an opening trade is not a loss equal to its costs. Callers that aggregate win/loss must gate on
+        `has_realized_pnl` first.
         """
         if self.pnl_usd is None:
             return None
@@ -1669,7 +1670,7 @@ class TradeRecord:
     def realized_net_pnl(self) -> Decimal:
         """Net PnL of a realized trade as a guaranteed Decimal.
 
-        Precondition: :attr:`has_realized_pnl` is True. Callers in the metrics
+        Precondition: `has_realized_pnl` is True. Callers in the metrics
         layer filter on that first; this method gives them a non-Optional
         return so win/loss aggregation type-checks without per-call narrowing.
         """
@@ -1721,7 +1722,7 @@ class TradeRecord:
 class NumeraireMetrics:
     """Equity-curve-derived metrics denominated in a strategy's numeraire token.
 
-    Populated only when a strategy declares a non-USD ``quote_asset`` (VIB-5127);
+    Populated only when a strategy declares a non-USD ``quote_asset``;
     ``BacktestMetrics.numeraire_metrics`` is ``None`` for USD strategies, so a USD
     artifact serializes byte-for-byte as before. These are the metrics that flow
     purely from the equity curve, recomputed on the numeraire-denominated equity
@@ -1820,8 +1821,8 @@ class BacktestMetrics:
         win_rate: Percentage of profitable trades as decimal (0.6 = 60%)
         total_trades: Total number of trades executed
         profit_factor: Ratio of gross profit to gross loss
-        total_return_pct: Total return as a percentage (15 = 15% return). (VIB-2915)
-        annualized_return_pct: Annualized return as a percentage (15 = 15% return). (VIB-2915)
+        total_return_pct: Total return as a percentage (15 = 15% return).
+        annualized_return_pct: Annualized return as a percentage (15 = 15% return).
         total_fees_usd: Total protocol fees paid
         total_slippage_usd: Total slippage incurred
         total_gas_usd: Total gas costs
@@ -1829,7 +1830,7 @@ class BacktestMetrics:
         losing_trades: Number of losing trades (realized PnL <= 0)
         trades_with_realized_pnl: Successful trades that realized PnL -- the
             win/loss denominator. Opening trades (pnl_usd=None) and rejected
-            fills are excluded (VIB-5083).
+            fills are excluded.
         failed_trades: Rejected fills (success=False), reported separately so
             they never inflate total_trades-driven averages or win/loss stats.
         avg_trade_pnl_usd: Average PnL per realized-PnL trade
@@ -1998,9 +1999,9 @@ class BacktestMetrics:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary.
 
-        Every Decimal is normalized via :func:`_decimal_str` so display
+        Every Decimal is normalized via `_decimal_str` so display
         artifacts like ``profit_factor: 0E+17`` never leak into JSON or
-        reports (VIB-5083); they render as finite, plain-notation values.
+        reports; they render as finite, plain-notation values.
 
         The ``*_numeraire`` fields (and the legacy ``numeraire_metrics``
         sub-block) are emitted only when populated (a token-quoted strategy),
@@ -2531,7 +2532,7 @@ class BacktestResult:
 
     @property
     def total_return_pct(self) -> Decimal:
-        """Canonical total return as an actual percentage (e.g. 10 for 10%). (VIB-2915)
+        """Canonical total return as an actual percentage (e.g. 10 for 10%).
 
         For a token-quoted strategy the canonical performance expression is the
         numeraire (blueprint 31 §7), so the return is computed on the

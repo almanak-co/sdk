@@ -8,6 +8,7 @@ Key Functions:
     - validate_loaded_config: Validate a loaded configuration dictionary
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.config_loader import (
         load_config_from_result,
         ConfigLoadError,
@@ -20,6 +21,7 @@ Example:
         result = await backtester.backtest(strategy, config)
     except ConfigLoadError as e:
         print(f"Failed to load config: {e}")
+    ```
 """
 
 import json
@@ -101,6 +103,7 @@ def load_config_from_result(
         FileNotFoundError: If the result file does not exist
 
     Example:
+        ```python
         # Basic usage
         result = load_config_from_result("results/backtest_20240601.json")
         config = result.config
@@ -112,6 +115,7 @@ def load_config_from_result(
         # Access metadata
         if result.metadata:
             print(f"Original SDK version: {result.metadata.get('sdk_version')}")
+        ```
     """
     path = _resolve_result_file(result_path)
     data = _read_result_json(path)
@@ -243,11 +247,13 @@ def validate_loaded_config(config_data: dict[str, Any]) -> ValidationResult:  # 
         ValidationResult with any errors and warnings
 
     Example:
+        ```python
         result = validate_loaded_config(config_dict)
         if not result.is_valid:
             print(f"Validation errors: {result.errors}")
         if result.warnings:
             print(f"Warnings: {result.warnings}")
+        ```
     """
     errors = _validate_config_errors(config_data)
     warnings = _unknown_config_field_warnings(config_data)

@@ -10,6 +10,7 @@ Design Principles:
     - UX First: Clear error messages, simulation URLs for debugging
 
 Example:
+    ```python
     # From environment variables
     config = SimulationConfig.from_env()
 
@@ -25,6 +26,7 @@ Example:
     if config.should_simulate():
         simulator = create_simulator(config)
         result = await simulator.simulate(txs, chain)
+    ```
 """
 
 import logging
@@ -215,6 +217,7 @@ class SimulationConfig:
         ALMANAK_SIMULATION_TIMEOUT: Timeout in seconds (default 10)
 
     Example:
+        ```python
         # Load from environment
         config = SimulationConfig.from_env()
 
@@ -226,6 +229,7 @@ class SimulationConfig:
         if config.should_simulate():
             # Create and use simulator
             ...
+        ```
     """
 
     enabled: bool = True
@@ -330,11 +334,13 @@ class SimulationConfig:
             SimulationConfig instance
 
         Example:
+            ```python
             # Standard usage
             config = SimulationConfig.from_env()
 
             # Custom prefix
             config = SimulationConfig.from_env(prefix="MY_APP_")
+            ```
         """
         if prefix == "ALMANAK_" and dotenv_path is None:
             cfg = load_config().simulation

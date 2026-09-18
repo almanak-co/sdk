@@ -18,6 +18,7 @@ Key Concepts:
     - step: How far to advance between splits (controls overlap)
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.walk_forward import (
         split_walk_forward,
         WalkForwardConfig,
@@ -39,6 +40,7 @@ Example:
     for window in windows:
         print(f"Train: {window.train_start} to {window.train_end}")
         print(f"Test:  {window.test_start} to {window.test_end}")
+    ```
 """
 
 from __future__ import annotations
@@ -164,6 +166,7 @@ class WalkForwardConfig:
             Default is 2.
 
     Example:
+        ```python
         # Non-overlapping (anchored) walk-forward
         config = WalkForwardConfig(
             train_size=timedelta(days=90),
@@ -185,6 +188,7 @@ class WalkForwardConfig:
             step=timedelta(days=30),
             gap=timedelta(days=1),  # 1-day implementation lag
         )
+        ```
     """
 
     train_size: timedelta
@@ -268,11 +272,13 @@ class WalkForwardConfig:
             WalkForwardConfig instance
 
         Example:
+            ```python
             # 90-day train, 30-day test, non-overlapping
             config = WalkForwardConfig.from_days(90, 30)
 
             # 90-day train, 30-day test, weekly rolling
             config = WalkForwardConfig.from_days(90, 30, step_days=7)
+            ```
         """
         return cls(
             train_size=timedelta(days=train_days),
@@ -432,6 +438,7 @@ def split_walk_forward_tuples(
         List of (train_start, train_end, test_start, test_end) tuples
 
     Example:
+        ```python
         splits = split_walk_forward_tuples(
             start_date=datetime(2023, 1, 1),
             end_date=datetime(2024, 1, 1),
@@ -442,6 +449,7 @@ def split_walk_forward_tuples(
         for train_start, train_end, test_start, test_end in splits:
             print(f"Train: {train_start} - {train_end}")
             print(f"Test:  {test_start} - {test_end}")
+        ```
     """
     windows = split_walk_forward(
         start_date=start_date,
@@ -1271,6 +1279,7 @@ async def run_walk_forward_optimization(
         ValueError: If base_config dates don't allow enough windows
 
     Example:
+        ```python
         from almanak.framework.backtesting.pnl import (
             WalkForwardConfig,
             run_walk_forward_optimization,
@@ -1300,6 +1309,7 @@ async def run_walk_forward_optimization(
         )
 
         print(result.summary())
+        ```
     """
     # Import here to avoid circular imports
     from almanak.framework.backtesting.pnl.config import PnLBacktestConfig

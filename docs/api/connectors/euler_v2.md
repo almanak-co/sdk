@@ -15,9 +15,7 @@
 | [Base](../../chains/base.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 | [Ethereum](../../chains/ethereum.md) | EVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 
-## API Reference
-
 ::: almanak.connectors.euler_v2
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

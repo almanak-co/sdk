@@ -13,6 +13,7 @@ Key difference from Raydium:
 - position_id = base58 pubkey of position account
 
 Example:
+    ```python
     config = MeteoraConfig(wallet_address="your-solana-pubkey")
     adapter = MeteoraAdapter(config)
 
@@ -25,6 +26,7 @@ Example:
         protocol="meteora_dlmm",
     )
     bundle = adapter.compile_lp_open_intent(intent)
+    ```
 """
 
 from __future__ import annotations
@@ -80,6 +82,7 @@ class MeteoraAdapter:
     Solana VersionedTransactions built from Meteora DLMM instructions.
 
     Example:
+        ```python
         config = MeteoraConfig(wallet_address="your-solana-pubkey")
         adapter = MeteoraAdapter(config)
 
@@ -92,6 +95,7 @@ class MeteoraAdapter:
             range_upper=Decimal("200"),
         )
         bundle = adapter.compile_lp_open_intent(intent)
+        ```
     """
 
     def __init__(

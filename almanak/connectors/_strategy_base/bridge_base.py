@@ -15,6 +15,7 @@ Supported patterns:
 - Message-passing bridges (e.g., LayerZero)
 
 Example:
+    ```python
     class MyBridgeAdapter(BridgeAdapter):
         @property
         def name(self) -> str:
@@ -23,6 +24,7 @@ Example:
         def get_quote(self, token, amount, from_chain, to_chain, max_slippage):
             # Implementation
             pass
+    ```
 """
 
 from abc import ABC, abstractmethod

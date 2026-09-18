@@ -9,6 +9,7 @@ Drift is the #1 Solana perps DEX ($1.13B TVL). This adapter supports:
 - Remaining accounts resolution (oracles + active positions)
 
 Example:
+    ```python
     from almanak.connectors.drift import DriftAdapter, DriftConfig
 
     config = DriftConfig(
@@ -27,6 +28,7 @@ Example:
         protocol="drift",
     )
     bundle = adapter.compile_perp_open_intent(intent)
+    ```
 """
 
 from __future__ import annotations

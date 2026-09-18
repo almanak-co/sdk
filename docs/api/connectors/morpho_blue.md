@@ -17,9 +17,7 @@
 | [Polygon](../../chains/polygon.md) | EVM | ``BORROW``, ``FLASH_LOAN``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 | [Robinhood](../../chains/robinhood.md) | EVM | ``BORROW``, ``FLASH_LOAN``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 
-## API Reference
-
 ::: almanak.connectors.morpho_blue
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

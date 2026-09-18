@@ -93,6 +93,7 @@ class ExecutionHandler(Protocol):
     3. supported_protocols - Lists protocol names this handler supports
 
     Example:
+        ```python
         class MyHandler:
             @property
             def supported_protocols(self) -> list[str]:
@@ -104,6 +105,7 @@ class ExecutionHandler(Protocol):
             async def execute(self, bundle: ActionBundle) -> ExecutionResult:
                 # Custom execution logic
                 ...
+        ```
     """
 
     @property
@@ -174,6 +176,7 @@ class ExecutionHandlerRegistry:
     naming concrete venue classes in framework code.
 
     Example:
+        ```python
         registry = ExecutionHandlerRegistry()
 
         # Handler claims its venue's protocol slug(s) via
@@ -182,6 +185,7 @@ class ExecutionHandlerRegistry:
 
         # Route bundles
         handler = registry.get_handler(bundle)  # None -> on-chain path
+        ```
     """
 
     def __init__(self) -> None:
@@ -248,10 +252,12 @@ class ExecutionHandlerRegistry:
             Handler if found, None otherwise
 
         Example:
+            ```python
             handler = registry.get_handler(bundle)
             if handler is None:
                 raise ValueError("No handler found for bundle")
             result = await handler.execute(bundle)
+            ```
         """
         # Fast path: protocol in metadata
         protocol = bundle.metadata.get("protocol")

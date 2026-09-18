@@ -10,6 +10,7 @@ Stargate Protocol:
 - Native asset transfers (no wrapped tokens)
 
 Example:
+    ```python
     from almanak.connectors.stargate import StargateBridgeAdapter
 
     adapter = StargateBridgeAdapter()
@@ -19,6 +20,7 @@ Example:
         from_chain="arbitrum",
         to_chain="optimism",
     )
+    ```
 """
 
 from __future__ import annotations

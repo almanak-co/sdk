@@ -8,90 +8,70 @@ The primary orchestrator used when running with the gateway sidecar.
 
 ::: almanak.framework.execution.GatewayExecutionOrchestrator
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source
-
-## ExecutionOrchestrator
 
 ::: almanak.framework.execution.ExecutionOrchestrator
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source
-
-## ExecutionResult
 
 ::: almanak.framework.execution.ExecutionResult
     options:
-      show_root_heading: true
-
-## ExecutionContext
+      heading_level: 2
 
 ::: almanak.framework.execution.ExecutionContext
     options:
-      show_root_heading: true
+      heading_level: 2
 
 ## Result Enrichment
 
 After successful execution, `ResultEnricher` automatically extracts data from transaction receipts (position IDs, swap amounts, etc.) and attaches it to the result.
 
-### ResultEnricher
-
 ::: almanak.framework.execution.ResultEnricher
     options:
-      show_root_heading: true
-
-### SwapAmounts
+      heading_level: 3
 
 ::: almanak.framework.execution.SwapAmounts
     options:
-      show_root_heading: true
-
-### LPCloseData
+      heading_level: 3
 
 ::: almanak.framework.execution.LPCloseData
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Signers
 
-### LocalKeySigner
-
 ::: almanak.framework.execution.LocalKeySigner
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Simulators
 
-### DirectSimulator
-
 ::: almanak.framework.execution.DirectSimulator
     options:
-      show_root_heading: true
-
-### TenderlySimulator
+      heading_level: 3
 
 ::: almanak.framework.execution.TenderlySimulator
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Receipt Parsing
 
-### ReceiptParserRegistry
-
 ::: almanak.framework.execution.ReceiptParserRegistry
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Exceptions
 
 ::: almanak.framework.execution.ExecutionError
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ::: almanak.framework.execution.SimulationError
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ::: almanak.framework.execution.SigningError
     options:
-      show_root_heading: true
+      heading_level: 3

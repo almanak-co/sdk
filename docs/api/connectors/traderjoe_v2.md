@@ -15,9 +15,7 @@
 | [BNB Chain](../../chains/bsc.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 | [Ethereum](../../chains/ethereum.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 
-## API Reference
-
 ::: almanak.connectors.traderjoe_v2
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

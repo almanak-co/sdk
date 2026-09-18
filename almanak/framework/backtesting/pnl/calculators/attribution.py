@@ -10,6 +10,7 @@ These breakdowns help identify which protocols, strategies, and assets are
 driving returns and which are underperforming.
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.calculators.attribution import (
         AttributionCalculator,
         attribute_pnl_by_protocol,
@@ -41,6 +42,7 @@ Example:
         pnl_by_asset=by_asset,
         tolerance=Decimal("0.01"),  # 1 cent tolerance for rounding
     )
+    ```
 """
 
 from collections.abc import Callable, Iterable, Mapping
@@ -152,12 +154,14 @@ class AttributionCalculator:
             Must return ``None`` for trades that realized nothing.
 
     Example:
+        ```python
         calc = AttributionCalculator()
 
         # Get all attributions
         by_protocol = calc.attribute_pnl_by_protocol(trades)
         by_intent = calc.attribute_pnl_by_intent_type(trades)
         by_asset = calc.attribute_pnl_by_asset(trades)
+        ```
     """
 
     use_net_pnl: bool = True
@@ -466,6 +470,7 @@ def verify_attribution_totals(
         True if all attributions sum correctly within tolerance, False otherwise
 
     Example:
+        ```python
         is_valid = verify_attribution_totals(
             trades=trades,
             pnl_by_protocol=by_protocol,
@@ -474,6 +479,7 @@ def verify_attribution_totals(
         )
         if not is_valid:
             logger.warning("Attribution totals do not match!")
+        ```
     """
     # Calculate expected total from trades. A trade with no realized PnL
     # (None -- an opening / inventory-building trade, VIB-5083) contributes
@@ -518,7 +524,9 @@ def calculate_all_attributions(
         Tuple of (pnl_by_protocol, pnl_by_intent_type, pnl_by_asset) dictionaries
 
     Example:
+        ```python
         by_protocol, by_intent, by_asset = calculate_all_attributions(trades)
+        ```
     """
     calc = AttributionCalculator(use_net_pnl=use_net_pnl, pnl_override=pnl_override)
     return (

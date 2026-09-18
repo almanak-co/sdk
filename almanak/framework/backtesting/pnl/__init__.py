@@ -11,6 +11,7 @@ Key Components:
     - PnLBacktester: Main backtesting engine
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl import PnLBacktester, PnLBacktestConfig
 
     config = PnLBacktestConfig(
@@ -22,6 +23,7 @@ Example:
     backtester = PnLBacktester(data_provider, fee_models, slippage_models)
     result = await backtester.backtest(strategy, config)
     print(result.summary())
+    ```
 """
 
 from __future__ import annotations

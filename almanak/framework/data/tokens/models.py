@@ -95,7 +95,7 @@ class TokenRef:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to the stable TokenRef wire shape.
 
-        Writes the canonical lowercase chain name (VIB-4851). Legacy records
+        Writes the canonical lowercase chain name. Legacy records
         carrying UPPERCASE enum values keep loading: ``from_dict`` routes
         through the case-insensitive ``ChainRegistry.resolve``.
         """
@@ -186,11 +186,13 @@ class BridgeType(Enum):
         CANONICAL: Token is the canonical/official bridge representation for cross-chain transfers
 
     Example:
+        ```python
         # Native USDC on Arbitrum (issued by Circle directly)
         native_usdc = ResolvedToken(..., bridge_type=BridgeType.NATIVE)
 
         # Bridged USDC.e on Arbitrum (bridged from Ethereum)
         bridged_usdc = ResolvedToken(..., bridge_type=BridgeType.BRIDGED)
+        ```
     """
 
     NATIVE = "NATIVE"
@@ -203,7 +205,7 @@ class PegClass(Enum):
 
     A peg class is permission to use a configured reference value when live
     pricing is unavailable; it is deliberately separate from
-    :attr:`Token.is_stablecoin`, which is descriptive metadata and must never
+    `is_stablecoin`, which is descriptive metadata and must never
     authorize a fabricated price by itself.
     """
 
@@ -224,6 +226,7 @@ class ChainTokenConfig:
         bridge_type: Bridge status of the token on this chain
 
     Example:
+        ```python
         # USDC.e on Arbitrum has different address than native USDC
         usdc_e_config = ChainTokenConfig(
             address="0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
@@ -231,6 +234,7 @@ class ChainTokenConfig:
             is_native=False,
             bridge_type=BridgeType.BRIDGED,
         )
+        ```
     """
 
     address: str
@@ -272,6 +276,7 @@ class ResolvedToken:
         resolved_at: Timestamp when the token was resolved
 
     Example:
+        ```python
         resolved_usdc = ResolvedToken(
             symbol="USDC",
             address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
@@ -289,6 +294,7 @@ class ResolvedToken:
             is_verified=True,
             resolved_at=datetime.now(),
         )
+        ```
     """
 
     symbol: str
@@ -464,6 +470,7 @@ class Token:
                                   be reset to zero before approving a new amount
 
     Example:
+        ```python
         usdc = Token(
             symbol="USDC",
             name="USD Coin",
@@ -483,6 +490,7 @@ class Token:
                 ),
             },
         )
+        ```
     """
 
     symbol: str
@@ -630,6 +638,7 @@ class ChainToken:
         bridge_canonical: Whether this is the canonical/official bridge representation
 
     Example:
+        ```python
         weth_token = Token(symbol="WETH", name="Wrapped Ether", decimals=18)
         weth_arbitrum = ChainToken(
             token=weth_token,
@@ -638,6 +647,7 @@ class ChainToken:
             decimals=18,
             bridge_canonical=True,
         )
+        ```
     """
 
     token: Token

@@ -15,11 +15,13 @@ Key Features:
     - Comprehensive logging for observability
 
 Example:
+    ```python
     from almanak.integrations.coingecko.gateway.price_source import CoinGeckoPriceSource
 
     source = CoinGeckoPriceSource(api_key="your-api-key")
     result = await source.get_price("WETH", "USD")
     print(f"Price: {result.price}, Confidence: {result.confidence}")
+    ```
 """
 
 import asyncio
@@ -504,6 +506,7 @@ class CoinGeckoPriceSource(BasePriceSource):
         request_timeout: HTTP request timeout in seconds (default 10)
 
     Example:
+        ```python
         # Create source with default settings
         source = CoinGeckoPriceSource()
 
@@ -518,6 +521,7 @@ class CoinGeckoPriceSource(BasePriceSource):
         result = await source.get_price("WETH", "USD")
         if result.stale:
             logger.warning("Using stale price data")
+        ```
     """
 
     # API endpoints

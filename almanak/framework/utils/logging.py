@@ -146,11 +146,13 @@ def configure_logging(
         stream: Output stream (defaults to sys.stdout)
 
     Example:
+        ```python
         # Local development
         configure_logging(level=LogLevel.DEBUG, format=LogFormat.CONSOLE)
 
         # Production
         configure_logging(level=LogLevel.INFO, format=LogFormat.JSON)
+        ```
     """
     global _logging_configured
 
@@ -258,8 +260,10 @@ def get_logger(name: str) -> structlog.stdlib.BoundLogger:
         A structured logger instance
 
     Example:
+        ```python
         logger = get_logger(__name__)
         logger.info("processing_started", deployment_id="momentum_v1")
+        ```
     """
     if not _logging_configured:
         # Configure with defaults if not yet configured
@@ -279,8 +283,10 @@ def add_context(**kwargs: Any) -> None:
         **kwargs: Key-value pairs to add to context
 
     Example:
+        ```python
         add_context(correlation_id="abc-123", deployment_id="momentum_v1")
         logger.info("processing")  # Will include correlation_id and deployment_id
+        ```
     """
     structlog.contextvars.bind_contextvars(**kwargs)
 
@@ -292,8 +298,10 @@ def clear_context() -> None:
     of a new request or iteration.
 
     Example:
+        ```python
         clear_context()
         add_context(correlation_id="new-123")
+        ```
     """
     structlog.contextvars.clear_contextvars()
 
@@ -314,7 +322,9 @@ def unbind_context(*keys: str) -> None:
         *keys: Keys to remove from context
 
     Example:
+        ```python
         unbind_context("tx_hash", "nonce")
+        ```
     """
     structlog.contextvars.unbind_contextvars(*keys)
 
@@ -328,10 +338,12 @@ def with_context(**kwargs: Any) -> AbstractContextManager[None]:
         **kwargs: Key-value pairs to add temporarily
 
     Example:
+        ```python
         with with_context(tx_hash="0x123"):
             logger.info("signing")  # Includes tx_hash
             logger.info("submitting")  # Includes tx_hash
         logger.info("done")  # Does not include tx_hash
+        ```
 
     Returns:
         Context manager
@@ -354,8 +366,10 @@ def get_stdlib_logger(name: str) -> logging.Logger:
         A standard library Logger instance
 
     Example:
+        ```python
         logger = get_stdlib_logger(__name__)
         logger.info("legacy code", extra={"key": "value"})
+        ```
     """
     if not _logging_configured:
         configure_logging()

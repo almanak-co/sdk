@@ -9,6 +9,7 @@ Supported Benchmarks:
     - DEFI_INDEX: DeFi index (weighted basket of DeFi tokens)
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.providers.benchmark import (
         Benchmark,
         get_benchmark_returns,
@@ -30,6 +31,7 @@ Example:
         end=datetime(2024, 6, 1),
         interval_seconds=3600,  # hourly
     )
+    ```
 """
 
 import logging
@@ -212,12 +214,14 @@ async def get_benchmark_returns(
         Length will be (number of price points - 1)
 
     Example:
+        ```python
         returns = await get_benchmark_returns(
             benchmark=Benchmark.ETH_HOLD,
             start=datetime(2024, 1, 1),
             end=datetime(2024, 1, 31),
         )
         # returns will have ~29 daily returns
+        ```
     """
     prices = await get_benchmark_price_series(benchmark, start, end, interval_seconds)
 

@@ -5,6 +5,7 @@ Provides close-to-close (log-return standard deviation) and Parkinson
 are pure math on OHLCV data -- no external API calls needed.
 
 Example:
+    ```python
     from almanak.framework.data.volatility.realized import (
         RealizedVolatilityCalculator,
     )
@@ -16,6 +17,7 @@ Example:
     cone = calc.vol_cone(candles_90d, windows=[7, 14, 30, 90], timeframe="1h")
     for entry in cone.entries:
         print(f"{entry.window_days}d: {entry.current_vol:.2%} (p{entry.percentile:.0f})")
+    ```
 """
 
 from __future__ import annotations

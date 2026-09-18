@@ -13,6 +13,7 @@ Performance Targets:
     - Disk lookup: <10ms
 
 Example:
+    ```python
     from almanak.framework.data.tokens.cache import TokenCacheManager
     from almanak.framework.data.tokens.models import ResolvedToken
 
@@ -27,6 +28,7 @@ Example:
 
     # Retrieve by symbol
     token = cache.get("arbitrum", symbol="USDC")
+    ```
 """
 
 import asyncio
@@ -170,11 +172,13 @@ def cache_key(chain: str, *, address: str | None = None, symbol: str | None = No
         ValueError: If neither or both address and symbol are provided
 
     Example:
+        ```python
         key = cache_key("arbitrum", address="0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
         # Returns: "arbitrum:0xaf88d065e77c8cc2239327c5edb3a432268e5831"
 
         key = cache_key("arbitrum", symbol="USDC")
         # Returns: "arbitrum:USDC"
+        ```
     """
     if address is not None and symbol is not None:
         raise ValueError("Cannot specify both address and symbol")
@@ -209,6 +213,7 @@ class TokenCacheManager:
         max_size: Maximum number of entries (default 10000)
 
     Example:
+        ```python
         cache = TokenCacheManager()
 
         # Store tokens
@@ -222,6 +227,7 @@ class TokenCacheManager:
 
         # Force persistence
         cache.flush()
+        ```
     """
 
     DEFAULT_CACHE_FILE = "~/.almanak/token_cache.json"
@@ -568,11 +574,13 @@ class TokenCacheManager:
             ResolvedToken if found, None otherwise
 
         Example:
+            ```python
             # Get by address
             token = cache.get("arbitrum", address="0xaf88...")
 
             # Get by symbol
             token = cache.get("arbitrum", symbol="USDC")
+            ```
         """
         key = cache_key(chain, address=address, symbol=symbol)
 
@@ -649,7 +657,9 @@ class TokenCacheManager:
                 True, preserving every pre-existing caller's behavior.
 
         Example:
+            ```python
             cache.put(resolved_usdc_token)
+            ```
         """
         with self._lock:
             self._ensure_disk_loaded()

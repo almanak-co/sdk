@@ -13,6 +13,7 @@ Supported Chains:
 - Avalanche
 
 Example:
+    ```python
     from almanak.connectors.benqi import (
         BenqiAdapter,
         BenqiConfig,
@@ -31,6 +32,7 @@ Example:
     # Parse receipts
     parser = BenqiReceiptParser(underlying_decimals=6)
     events = parser.parse_receipt(receipt)
+    ```
 """
 
 from __future__ import annotations

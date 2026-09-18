@@ -11,6 +11,7 @@ Key Features:
     - Source health tracking for routing decisions
 
 Example:
+    ```python
     from almanak.gateway.data.price.aggregator import PriceAggregator
     from almanak.integrations.coingecko.gateway.price_source import CoinGeckoPriceSource
 
@@ -18,6 +19,7 @@ Example:
     aggregator = PriceAggregator(sources=sources)
     result = await aggregator.get_aggregated_price("WETH", "USD")
     print(f"Price: {result.price}, Confidence: {result.confidence}")
+    ```
 """
 
 from __future__ import annotations
@@ -290,6 +292,7 @@ class PriceAggregator:
         partial_failure_penalty: Confidence reduction per failed source
 
     Example:
+        ```python
         # Single source
         aggregator = PriceAggregator(sources=[CoinGeckoPriceSource()])
         result = await aggregator.get_aggregated_price("ETH")
@@ -301,6 +304,7 @@ class PriceAggregator:
         ])
         result = await aggregator.get_aggregated_price("ETH")
         print(f"Median price: {result.price}, Confidence: {result.confidence}")
+        ```
     """
 
     def __init__(

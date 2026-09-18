@@ -15,6 +15,7 @@ All methods are async to support efficient I/O operations and concurrent request
 Examples:
     Implementing a volume provider:
 
+        ```python
         from almanak.framework.backtesting.pnl.providers.base import (
             HistoricalVolumeProvider,
         )
@@ -31,9 +32,10 @@ Examples:
             ) -> list[VolumeResult]:
                 # Fetch volume data from your source
                 ...
-
+        ```
     Using a provider:
 
+        ```python
         provider = MyVolumeProvider()
         volumes = await provider.get_volume(
             pool_address="0x...",
@@ -43,6 +45,7 @@ Examples:
         )
         for vol in volumes:
             print(f"{vol.source_info.timestamp}: {vol.value} ({vol.source_info.confidence})")
+        ```
 """
 
 from abc import ABC, abstractmethod
@@ -108,12 +111,14 @@ class HistoricalVolumeProvider(ABC):
             Implementations should document their specific exceptions.
 
         Example:
+            ```python
             volumes = await provider.get_volume(
                 pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
                 chain="arbitrum",
                 start_date=date(2024, 1, 1),
                 end_date=date(2024, 1, 31),
             )
+            ```
         """
         ...
 
@@ -171,11 +176,13 @@ class HistoricalFundingProvider(ABC):
             Implementations should document their specific exceptions.
 
         Example:
+            ```python
             rates = await provider.get_funding_rates(
                 market="ETH-USD",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
             )
+            ```
         """
         ...
 
@@ -229,12 +236,14 @@ class HistoricalAPYProvider(ABC):
             Implementations should document their specific exceptions.
 
         Example:
+            ```python
             apys = await provider.get_apy(
                 protocol="aave_v3",
                 market="USDC",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
             )
+            ```
         """
         ...
 
@@ -284,11 +293,13 @@ class HistoricalLiquidityProvider(ABC):
             (V2-style), depth represents total pool TVL.
 
         Example:
+            ```python
             liquidity = await provider.get_liquidity_depth(
                 pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
                 chain="arbitrum",
                 timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
             )
+            ```
         """
         ...
 

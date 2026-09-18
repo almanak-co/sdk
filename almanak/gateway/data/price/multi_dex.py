@@ -16,6 +16,7 @@ registry (VIB-4811 / Phase 3). Adding a new DEX is purely a new
 ``GatewayDexQuoteCapability`` provider — no edit to this file required.
 
 Example:
+    ```python
     from almanak.gateway.data.price.multi_dex import MultiDexPriceService, Dex
 
     service = MultiDexPriceService(chain="ethereum")
@@ -34,6 +35,7 @@ Example:
         amount_in=Decimal("10000"),
     )
     print(f"Best venue: {best.dex} with {best.amount_out} WETH")
+    ```
 """
 
 from __future__ import annotations
@@ -489,6 +491,7 @@ class MultiDexPriceService:
         dexs: List of DEXs to query
 
     Example:
+        ```python
         service = MultiDexPriceService(chain="ethereum")
 
         # Get prices from all DEXs
@@ -504,6 +507,7 @@ class MultiDexPriceService:
             token_out="WETH",
             amount_in=Decimal("10000"),
         )
+        ```
     """
 
     def __init__(

@@ -9,6 +9,7 @@ This module provides essential SDK functions for Uniswap V3 operations:
 Ported and improved from src-v0/transaction_builder/protocols/uniswap_v3/uniswap_v3_sdk.py.
 
 Example:
+    ```python
     from almanak.connectors.uniswap_v3.sdk import UniswapV3SDK
 
     sdk = UniswapV3SDK(chain="arbitrum", rpc_url="https://arb1.arbitrum.io/rpc")
@@ -31,6 +32,7 @@ Example:
         slippage_bps=50,
         deadline=int(time.time()) + 300,
     )
+    ```
 """
 
 import logging
@@ -563,6 +565,7 @@ class UniswapV3SDK:
     - Tick math utilities
 
     Example:
+        ```python
         sdk = UniswapV3SDK(chain="arbitrum", rpc_url="https://arb1.arbitrum.io/rpc")
 
         # Compute pool address (no RPC needed)
@@ -579,6 +582,7 @@ class UniswapV3SDK:
             amount_in=10**18,  # 1 WETH
             fee_tier=3000,
         )
+        ```
     """
 
     def __init__(

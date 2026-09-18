@@ -14,6 +14,7 @@ Key Features:
     - No fallback for transaction reverts (that's a real failure)
 
 Example:
+    ```python
     fallback_simulator = FallbackSimulator(
         primary=TenderlySimulator(...),
         fallbacks=[AlchemySimulator(...), LocalSimulator(...)],
@@ -21,6 +22,7 @@ Example:
 
     # Will try Tenderly first, then Alchemy, then LocalSimulator
     result = await fallback_simulator.simulate(txs, chain="arbitrum")
+    ```
 """
 
 import logging
@@ -58,6 +60,7 @@ class FallbackSimulator(Simulator):
         - SimulationError with recoverable=False
 
     Example:
+        ```python
         fallback = FallbackSimulator(
             primary=TenderlySimulator(...),
             fallbacks=[AlchemySimulator(...), LocalSimulator(rpc_url=...)],
@@ -65,6 +68,7 @@ class FallbackSimulator(Simulator):
 
         # Tries Tenderly -> Alchemy -> LocalSimulator
         result = await fallback.simulate(txs, chain="arbitrum")
+        ```
     """
 
     def __init__(

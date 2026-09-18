@@ -13,6 +13,7 @@ Key Components:
     - UniswapV3SlippageModel: Liquidity-aware slippage estimation
 
 Example:
+    ```python
     from almanak.connectors.uniswap_v3.fee_model import (
         UniswapV3FeeModel,
         UniswapV3SlippageModel,
@@ -28,6 +29,7 @@ Example:
         market_state=market_state,
         fee_tier=UniswapV3FeeTier.LOW,  # Override default
     )
+    ```
 """
 
 from dataclasses import dataclass
@@ -114,6 +116,7 @@ class UniswapV3FeeModel(FeeModel):
         token_pair_tiers: Optional mapping of token pairs to their fee tiers
 
     Example:
+        ```python
         model = UniswapV3FeeModel(default_fee_tier=UniswapV3FeeTier.MEDIUM)
 
         # Using default tier
@@ -126,6 +129,7 @@ class UniswapV3FeeModel(FeeModel):
             market_state,
             fee_tier=UniswapV3FeeTier.LOW,
         )
+        ```
     """
 
     default_fee_tier: UniswapV3FeeTier = UniswapV3FeeTier.MEDIUM
@@ -273,6 +277,7 @@ class UniswapV3SlippageModel:
         _liquidity_source: Source of the liquidity data (internal)
 
     Example:
+        ```python
         model = UniswapV3SlippageModel(
             base_slippage_pct=Decimal("0.0005"),
             liquidity_depth_usd=Decimal("500000"),
@@ -297,6 +302,7 @@ class UniswapV3SlippageModel:
         slippage = model.calculate_slippage(
             IntentType.SWAP, Decimal("10000"), market_state
         )
+        ```
     """
 
     base_slippage_pct: Decimal = Decimal("0.0005")  # 0.05% base slippage
@@ -323,12 +329,14 @@ class UniswapV3SlippageModel:
             source: Source of the liquidity data (e.g., "on-chain", "estimated")
 
         Example:
+            ```python
             from almanak.framework.backtesting.pnl.fee_models.liquidity import (
                 query_pool_liquidity,
             )
 
             result = await query_pool_liquidity(pool_address, web3)
             model.set_liquidity(result.liquidity_usd, source=result.source)
+            ```
         """
         self._actual_liquidity_usd = liquidity_usd
         self._liquidity_source = source

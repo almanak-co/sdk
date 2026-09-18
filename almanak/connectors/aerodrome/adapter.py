@@ -14,6 +14,7 @@ Key Concepts:
 - Fungible LP tokens (not NFTs)
 
 Example:
+    ```python
     config = AerodromeConfig(
         chain="base",
         wallet_address="0x...",
@@ -28,6 +29,7 @@ Example:
         stable=False,
         slippage_bps=50,
     )
+    ```
 """
 
 import logging
@@ -423,6 +425,7 @@ class AerodromeAdapter:
     - Managing slippage protection
 
     Example:
+        ```python
         config = AerodromeConfig(
             chain="base",
             wallet_address="0x...",
@@ -446,6 +449,7 @@ class AerodromeAdapter:
             stable=True,
             slippage_bps=10,
         )
+        ```
     """
 
     def __init__(self, config: AerodromeConfig, token_resolver: "TokenResolverType | None" = None) -> None:

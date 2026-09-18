@@ -32,6 +32,7 @@ class GatewayAlertManager:
     which has access to the actual alerting channels (Slack, Telegram).
 
     Example:
+        ```python
         from almanak.framework.gateway_client import GatewayClient
         from almanak.framework.alerting.gateway_alert_manager import GatewayAlertManager
 
@@ -42,6 +43,7 @@ class GatewayAlertManager:
                 severity="info",
             )
             print(f"Alert sent: {result.success}")
+        ```
     """
 
     def __init__(

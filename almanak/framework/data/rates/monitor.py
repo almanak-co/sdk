@@ -17,6 +17,7 @@ the wrapper class will be removed once the caller-migration follow-up
 ticket VIB-4869 lands.
 
 Example:
+    ```python
     from almanak.framework.data.rates import RateMonitor, RateSide
 
     monitor = RateMonitor(chain="ethereum")
@@ -26,6 +27,7 @@ Example:
 
     # Get best supply rate across all protocols
     best = await monitor.get_best_lending_rate("USDC", RateSide.SUPPLY)
+    ```
 """
 
 import asyncio
@@ -714,6 +716,7 @@ class RateMonitor:
         protocols: List of protocols to monitor
 
     Example:
+        ```python
         monitor = RateMonitor(chain="ethereum")
 
         # Get specific rate
@@ -724,6 +727,7 @@ class RateMonitor:
 
         # Get all rates for a protocol
         rates = await monitor.get_protocol_rates("aave_v3")
+        ```
     """
 
     def __init__(

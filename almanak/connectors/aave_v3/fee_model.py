@@ -16,6 +16,7 @@ Key Components:
     - AaveV3FeeModel: Fee model for Aave V3 lending operations
 
 Example:
+    ```python
     from almanak.connectors.aave_v3.fee_model import AaveV3FeeModel
 
     fee_model = AaveV3FeeModel(borrow_origination_fee_pct=Decimal("0.0001"))
@@ -25,6 +26,7 @@ Example:
         amount_usd=Decimal("10000"),
         market_state=market_state,
     )
+    ```
 """
 
 from dataclasses import dataclass
@@ -73,6 +75,7 @@ class AaveV3FeeModel(FeeModel):
             for completeness
 
     Example:
+        ```python
         # Simple uniform fee
         model = AaveV3FeeModel(borrow_origination_fee_pct=Decimal("0.0001"))
 
@@ -84,6 +87,7 @@ class AaveV3FeeModel(FeeModel):
                 "WETH": Decimal("0.0001"),  # 0.01% for WETH
             },
         )
+        ```
     """
 
     borrow_origination_fee_pct: Decimal = Decimal("0.0001")  # 0.01% default

@@ -18,11 +18,13 @@ LP close flow (1 transaction):
   1. PositionManager.modifyLiquidities([DECREASE_LIQUIDITY, TAKE_PAIR, BURN_POSITION], deadline)
 
 Example:
+    ```python
     from almanak.connectors.uniswap_v4.adapter import UniswapV4Adapter
 
     adapter = UniswapV4Adapter(chain="arbitrum")
     bundle = adapter.compile_swap_intent(intent, price_oracle)
     bundle = adapter.compile_lp_open_intent(intent, price_oracle)
+    ```
 """
 
 from __future__ import annotations

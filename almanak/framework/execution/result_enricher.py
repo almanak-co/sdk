@@ -11,12 +11,14 @@ This enables strategy authors to access extracted data directly via:
     result.position_id  # Instead of manual parsing
 
 Example:
+    ```python
     enricher = ResultEnricher(parser_registry)
     enriched_result = enricher.enrich(result, intent, context)
 
     # Strategy can now use:
     if enriched_result.position_id:
         track_position(enriched_result.position_id)
+    ```
 """
 
 from __future__ import annotations
@@ -58,11 +60,11 @@ def _is_primitive_money_legs(value: Any) -> bool:
 
 
 def stamp_trading_wallet(receipt: dict[str, Any], wallet: str) -> dict[str, Any]:
-    """Stamp the effective trading wallet onto a receipt copy (VIB-6043).
+    """Stamp the effective trading wallet onto a receipt copy.
 
     Thin deferred-import wrapper around the connector-side helper (same
     framework -> connector boundary discipline as
-    :func:`_is_primitive_money_legs`): the shared resolver lives with the
+    `_is_primitive_money_legs`): the shared resolver lives with the
     receipt-parser base infrastructure that consumes it
     (``almanak/connectors/_strategy_base/base/receipt_wallet.py``), and must
     not load at framework-module import time.
@@ -200,8 +202,7 @@ def _pool_meta_lookup_protocols() -> frozenset[str]:
     """Receipt-parser keys whose connector declares the ``pool_meta_lookup`` kwarg.
 
     The Curve parser resolves an uncurated pool's coin addresses / symbols /
-    pool_type from the on-chain MetaRegistry on a static-registry miss
-    (VIB-5628).
+    pool_type from the on-chain MetaRegistry on a static-registry miss.
     """
     return _receipt_parser_kwarg_keys("pool_meta_lookup")
 
@@ -229,6 +230,7 @@ class ResultEnricher:
        wrapping (see _legacy_warn / _invoke_extract).
 
     Example:
+        ```python
         enricher = ResultEnricher()
 
         # In StrategyRunner after execution:
@@ -239,6 +241,7 @@ class ResultEnricher:
         # Strategy callback receives enriched result:
         strategy.on_intent_executed(intent, success=True, result=result)
         # Strategy can use result.position_id directly!
+        ```
     """
 
     # Protocol fees apply across money-bearing intents. Parsers that do not
@@ -437,13 +440,13 @@ class ResultEnricher:
 
         A receipt parser may publish ``EXTRA_EXTRACTIONS_BY_INTENT`` —
         ``{intent_type: (field, ...)}`` — naming extra fields it can extract beyond
-        the generic :data:`EXTRACTION_SPECS` base (e.g. the US-009
+        the generic `EXTRACTION_SPECS` base (e.g. the US-009
         ``primitive_money_legs`` seam for a PT redeem WITHDRAW). The framework reads
         it generically so connector-specific field choices live in the connector,
         not this enricher (the alternative — a per-protocol overlay — names the
         protocol here; ``test_connector_descriptor`` forbids that for migrated
         connectors). Additive with order-preserving dedup, mirroring
-        :meth:`_merge_spec_with_overlay`; each field is still gated by the parser's
+        `_merge_spec_with_overlay`; each field is still gated by the parser's
         ``SUPPORTED_EXTRACTIONS`` at extraction time, so a stray declaration cannot
         force an unsupported extract.
         """
@@ -465,8 +468,7 @@ class ResultEnricher:
     def _with_parser_extraction_removals(spec: list[str], parser: Any, intent_type: str) -> list[str]:
         """Drop a parser's CONNECTOR-DECLARED per-intent non-applicable fields.
 
-        Subtractive sibling of :meth:`_with_parser_extra_extractions`
-        (VIB-5896). A receipt parser may publish
+        Subtractive sibling of `_with_parser_extra_extractions`. A receipt parser may publish
         ``EXTRACTION_REMOVALS_BY_INTENT`` — ``{intent_type: frozenset(field,
         ...)}`` — naming base-spec fields that structurally do not exist for its
         venue (e.g. Curve StableSwap is tickless, so the V3-shaped
@@ -548,7 +550,7 @@ class ResultEnricher:
         This method extracts relevant data from transaction receipts based
         on the intent type and attaches it to the ExecutionResult.
 
-        IMPORTANT (VIB-3159): In live mode this method FAILS CLOSED. Parsers
+        IMPORTANT: In live mode this method FAILS CLOSED. Parsers
         that return ExtractError — or raise — cause CriticalAccountingError
         to propagate. Paper / backtest callers must construct the enricher
         with live_mode=False to downgrade those errors to warnings + a
@@ -575,12 +577,14 @@ class ResultEnricher:
             CriticalAccountingError: when live_mode is True and a parser
                 returns ExtractError (or raises). Inherits from Exception
                 so the strategy runner's recovery path in run_iteration can
-                catch it and return ACCOUNTING_FAILED (VIB-3180).
+                catch it and return ACCOUNTING_FAILED.
 
         Example:
+            ```python
             result = enricher.enrich(result, intent, context)
             # result.position_id is now populated (if LP_OPEN)
             # result.swap_amounts is now populated (if SWAP)
+            ```
         """
 
         if not result.success:
@@ -775,16 +779,16 @@ class ResultEnricher:
 
         VIB-3706 introduced this off-chain path because Polymarket CLOB
         orders submit off-chain and produce no on-chain receipts; the runner
-        attaches a :class:`PredictionFill` to ``result.prediction_fill`` in
-        :meth:`StrategyRunner._single_chain_execute_clob`.
+        attaches a `PredictionFill` to ``result.prediction_fill`` in
+        `_single_chain_execute_clob`.
 
         VIB-3708: rather than read ``prediction_fill`` directly here (which
         forks parsing logic between the enricher and the parser), this
         method now constructs an ``OrderResponse``-shaped dict from
         ``prediction_fill`` + ``bundle_metadata`` + ``extracted_data["order_id"]``
         and routes it through
-        :meth:`PolymarketReceiptParser.parse_order_response` to obtain a
-        typed :class:`TradeResult`. The resulting fields are then mapped to
+        `parse_order_response` to obtain a
+        typed `TradeResult`. The resulting fields are then mapped to
         the spec keys (``outcome_tokens_received`` / ``cost_basis`` /
         ``market_id`` for BUY, ``outcome_tokens_sold`` / ``proceeds`` /
         ``market_id`` for SELL).
@@ -800,7 +804,7 @@ class ResultEnricher:
         parser bug.  If the parser is present but ``parse_order_response``
         raises (a parser bug on data the framework is about to book), the
         behavior is mode-aware: in live mode this raises
-        :class:`~almanak.framework.execution.extract_result.CriticalAccountingError`
+        `almanak.framework.execution.extract_result.CriticalAccountingError`
         (VIB-3159 fail-closed contract, same policy as
         ``_handle_extract_error``); in paper / backtest mode it keeps
         VIB-3706's warn-and-fallback so a parser bug cannot silently drop
@@ -1174,8 +1178,8 @@ class ResultEnricher:
         """Construct an OrderResponse-shaped dict for parse_order_response.
 
         Mirrors the CLOB API response shape documented on
-        :meth:`PolymarketReceiptParser.parse_order_response` — populated from
-        the runner-attached :class:`PredictionFill` plus compiler-side
+        `parse_order_response` — populated from
+        the runner-attached `PredictionFill` plus compiler-side
         bundle_metadata. The parser tolerates missing fields, but we
         provide them all so log messages and edge cases line up with
         production responses.
@@ -1291,7 +1295,7 @@ class ResultEnricher:
     ) -> None:
         """Extract a single field from receipts and attach to result.
 
-        Handles the three-variant ExtractResult contract (VIB-3159):
+        Handles the three-variant ExtractResult contract:
           * ExtractOk      -> attach to result
           * ExtractMissing -> no-op (benign "no event of this type")
           * ExtractError   -> raise CriticalAccountingError in live mode,
@@ -1623,7 +1627,7 @@ class ResultEnricher:
         ``ActionBundle.metadata["selected_fee_tier"]``.
 
         Returns framework-generic kwargs only. Connector-specific parser
-        kwargs are appended by :meth:`_build_extract_kwargs_for_parser`.
+        kwargs are appended by `_build_extract_kwargs_for_parser`.
         """
         if field == "async_orders" and intent_type:
             # Intent type is authoritative for async order kind; event payloads may
@@ -1715,10 +1719,9 @@ class ResultEnricher:
 
         Two values feed this signature today:
 
-        * ``fee_tier_bps`` — DEX pool fee tier (VIB-3204), sourced from
+        * ``fee_tier_bps`` — DEX pool fee tier, sourced from
           ``ActionBundle.metadata["selected_fee_tier"]``.
-        * ``protocol_fee_usd`` — aggregator integrator fee in USD
-          (VIB-3210), sourced from
+        * ``protocol_fee_usd`` — aggregator integrator fee in USD, sourced from
           ``ActionBundle.metadata["protocol_fee_usd"]``. LiFi captures this
           at compile time from ``quote.estimate.total_fee_usd``; Enso does
           not have a USD-denominated quote field yet, so the key stays
@@ -2180,7 +2183,7 @@ class ResultEnricher:
 
     @staticmethod
     def _merge_receipt_logs(receipts: list[dict[str, Any]]) -> dict[str, Any]:
-        """Union the ``logs`` of every receipt into one synthetic receipt (VIB-5416).
+        """Union the ``logs`` of every receipt into one synthetic receipt.
 
         A multi-transaction intent (e.g. a Lido wrapped STAKE: submit ETH→stETH,
         then wrap stETH→wstETH) splits its money legs across txs. A receipt parser
@@ -2287,8 +2290,7 @@ class ResultEnricher:
     ) -> list[dict[str, Any]]:
         """Normalize successful post-submission receipts for enrichment.
 
-        ``trading_wallet`` is stamped exactly as in :meth:`_collect_receipts`
-        (VIB-6043) — a keeper-executed order receipt is parsed by the same
+        ``trading_wallet`` is stamped exactly as in `_collect_receipts` — a keeper-executed order receipt is parsed by the same
         parsers and needs the same Safe-aware wallet.
         """
         collected: list[dict[str, Any]] = []
@@ -2380,11 +2382,13 @@ def enrich_result(
         Enriched ExecutionResult
 
     Example:
+        ```python
         # live / default
         result = enrich_result(result, intent, context)
 
         # paper / backtest
         result = enrich_result(result, intent, context, live_mode=False)
+        ```
     """
     if live_mode is None:
         return get_enricher().enrich(result, intent, context, bundle_metadata=bundle_metadata)

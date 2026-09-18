@@ -18,6 +18,7 @@ Key Contract Addresses (Polygon Mainnet — V2):
 - USDC.e (source):    0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174
 
 Example:
+    ```python
     from almanak.connectors.polymarket import CtfSDK
     from almanak.framework.gateway_client import GatewayClient
     from almanak.framework.web3.gateway_provider import GatewayWeb3Provider
@@ -39,6 +40,7 @@ Example:
     resolution = sdk.get_condition_resolution(condition_id, web3)
     if resolution.is_resolved:
         tx = sdk.build_redeem_tx(condition_id, [1, 2], wallet_address)
+    ```
 """
 
 import json
@@ -310,6 +312,7 @@ class CtfSDK:
     can be signed and submitted using a signer.
 
     Example:
+        ```python
         from almanak.framework.gateway_client import GatewayClient
         gateway_client = GatewayClient()
         gateway_client.connect()
@@ -332,6 +335,7 @@ class CtfSDK:
             index_sets=[1, 2],
             sender="0x...",
         )
+        ```
     """
 
     def __init__(

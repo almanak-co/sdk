@@ -25,6 +25,7 @@ real 4-layer on-chain test the moment the vault adapter lands in
 ``register_vault_adapter``.
 
 Example:
+    ```python
     from almanak.connectors.lagoon import LagoonVaultSDK, LagoonVaultAdapter
 
     sdk = LagoonVaultSDK(gateway_client, chain="ethereum")
@@ -33,6 +34,7 @@ Example:
     from almanak.connectors.lagoon import LagoonVaultDeployer, VaultDeployParams
 
     deployer = LagoonVaultDeployer()
+    ```
 """
 
 from __future__ import annotations

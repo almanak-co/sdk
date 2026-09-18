@@ -24,11 +24,13 @@ Hook capability bits (from PoolManager.sol):
     Bit  0: AFTER_REMOVE_LIQUIDITY_RETURNS_DELTA
 
 Example:
+    ```python
     from almanak.connectors.uniswap_v4.hooks import HookFlags
 
     flags = HookFlags.from_address("0x...hook_address...")
     if flags.before_swap:
         print("Hook has beforeSwap callback")
+    ```
 """
 
 from __future__ import annotations
@@ -290,6 +292,7 @@ class HookDataEncoder(ABC):
     that the hook contract expects.
 
     Example:
+        ```python
         class DynamicFeeEncoder(HookDataEncoder):
             def encode(self, **kwargs) -> bytes:
                 fee_override = kwargs.get("fee_override", 3000)
@@ -301,6 +304,7 @@ class HookDataEncoder(ABC):
 
         encoder = DynamicFeeEncoder()
         hook_data = encoder.encode(fee_override=500)
+        ```
     """
 
     @abstractmethod

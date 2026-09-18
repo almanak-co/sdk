@@ -57,11 +57,13 @@ class ClobActionHandler:
         execution or protect access with locks.
 
     Example:
+        ```python
         handler = ClobActionHandler(clob_client)
 
         if handler.can_handle(bundle):
             result = await handler.execute(bundle)
             print(f"Order {result.order_id}: {result.status}")
+        ```
 
     Registry Usage:
         registry = ExecutionHandlerRegistry()

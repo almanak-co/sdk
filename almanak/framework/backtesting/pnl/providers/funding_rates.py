@@ -18,6 +18,7 @@ Key Features:
     - Falls back to a default rate when data is unavailable
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.providers.funding_rates import (
         FundingRateProvider,
         FundingRateData,
@@ -33,6 +34,7 @@ Example:
         timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=timezone.utc),
     )
     print(f"Funding rate: {rate.rate} ({rate.annualized_rate_pct}% APR)")
+    ```
 """
 
 import logging
@@ -276,6 +278,7 @@ class FundingRateProvider:
             gateway-owned)
 
     Example:
+        ```python
         provider = FundingRateProvider()
 
         # Get historical funding rate
@@ -290,6 +293,7 @@ class FundingRateProvider:
             protocol="hyperliquid",
             market="BTC-USD",
         )
+        ```
     """
 
     def __init__(

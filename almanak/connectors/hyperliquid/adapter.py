@@ -658,6 +658,7 @@ class HyperliquidAdapter:
     - Managing leverage and margin settings
 
     Example:
+        ```python
         config = HyperliquidConfig(
             network="mainnet",
             wallet_address="0x...",
@@ -677,6 +678,7 @@ class HyperliquidAdapter:
 
         # Cancel order
         cancel_result = adapter.cancel_order(order_id=result.order_id)
+        ```
     """
 
     def __init__(

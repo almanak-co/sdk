@@ -5,6 +5,7 @@ using the RSICalculator and CoinGeckoOHLCVProvider. It validates RSI bounds,
 calculates rolling RSI history, and determines overbought/oversold signals.
 
 Example:
+    ```python
     from almanak.framework.data.qa.test_definitions.rsi import RSITest
     from almanak.framework.data.qa.config import load_config
 
@@ -14,6 +15,7 @@ Example:
 
     for result in results:
         print(f"{result.token}: RSI={result.current_rsi:.2f} ({result.signal})")
+    ```
 """
 
 import logging
@@ -117,12 +119,14 @@ class RSITest:
         rsi_calculator: RSI calculator instance
 
     Example:
+        ```python
         config = load_config()
         test = RSITest(config)
         results = await test.run()
 
         passed = all(r.passed for r in results)
         print(f"RSI Test: {'PASSED' if passed else 'FAILED'}")
+        ```
     """
 
     def __init__(

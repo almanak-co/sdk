@@ -8,12 +8,14 @@ When no CoinGecko API key is present, this source becomes the primary price
 provider, making local dev and Anvil testing work without rate-limit issues.
 
 Example:
+    ```python
     from almanak.integrations.chainlink.gateway.live import ChainlinkPriceSource
 
     source = ChainlinkPriceSource(chain="arbitrum", network="mainnet")
     result = await source.get_price("WETH", "USD")
     print(f"Price: {result.price}, Confidence: {result.confidence}")
     await source.close()
+    ```
 """
 
 from __future__ import annotations

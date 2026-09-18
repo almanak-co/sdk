@@ -24,6 +24,7 @@ class KrakenTokenResolver:
     This resolver handles the mapping in both directions.
 
     Example:
+        ```python
         resolver = KrakenTokenResolver()
 
         # Convert to Kraken format
@@ -32,6 +33,7 @@ class KrakenTokenResolver:
 
         # Convert from Kraken format
         standard = resolver.from_kraken_symbol("XETH")  # "ETH"
+        ```
     """
 
     # Special mappings for tokens that differ between chains
@@ -152,6 +154,7 @@ class KrakenChainMapper:
     that include the chain name and sometimes the asset.
 
     Example:
+        ```python
         mapper = KrakenChainMapper()
 
         # Get deposit method
@@ -161,6 +164,7 @@ class KrakenChainMapper:
         # Get withdrawal method
         method = mapper.get_withdraw_method("arbitrum")
         # Returns: "Arbitrum One"
+        ```
     """
 
     # Chain -> Kraken network name for deposits

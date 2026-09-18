@@ -5,6 +5,7 @@ using the MultiDexPriceService. It validates on-chain price discovery with
 WETH-quoted prices.
 
 Example:
+    ```python
     from almanak.framework.data.qa.test_definitions.dex_spot import DEXSpotPriceTest
     from almanak.framework.data.qa.config import load_config
 
@@ -14,6 +15,7 @@ Example:
 
     for result in results:
         print(f"{result.token}: {result.price_weth} WETH via {result.best_dex}")
+    ```
 """
 
 import logging
@@ -81,12 +83,14 @@ class DEXSpotPriceTest:
         trade_size: Trade size in WETH for quotes
 
     Example:
+        ```python
         config = load_config()
         test = DEXSpotPriceTest(config)
         results = await test.run()
 
         passed = all(r.passed for r in results)
         print(f"DEX Spot Test: {'PASSED' if passed else 'FAILED'}")
+        ```
     """
 
     def __init__(

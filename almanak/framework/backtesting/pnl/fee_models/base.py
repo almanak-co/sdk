@@ -10,6 +10,7 @@ Key Components:
     - get_fee_model: Convenience function for registry lookup
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.fee_models.base import (
         FeeModel,
         get_fee_model,
@@ -25,6 +26,7 @@ Example:
     class CustomFeeModel(FeeModel):
         def calculate_fee(self, trade_amount: Decimal, **kwargs: Any) -> Decimal:
             return trade_amount * Decimal("0.001")
+    ```
 """
 
 from abc import ABC, abstractmethod
@@ -50,6 +52,7 @@ class FeeModel(ABC):
         model_name: Unique identifier for this fee model (property)
 
     Example:
+        ```python
         class MyFeeModel(FeeModel):
             @property
             def model_name(self) -> str:
@@ -62,6 +65,7 @@ class FeeModel(ABC):
             ) -> Decimal:
                 fee_rate = Decimal("0.003")  # 0.3%
                 return trade_amount * fee_rate
+        ```
     """
 
     @property
@@ -162,6 +166,7 @@ class FeeModelRegistry:
     ``register_fee_model`` decorator) overlay the manifest-derived entries.
 
     Example:
+        ```python
         # Register a custom model
         FeeModelRegistry.register("my_protocol", MyFeeModel)
 
@@ -171,6 +176,7 @@ class FeeModelRegistry:
 
         # Get all registered protocols
         protocols = FeeModelRegistry.list_protocols()
+        ```
     """
 
     # Runtime (manual) registrations — overlay the manifest-derived entries.
@@ -361,9 +367,11 @@ def register_fee_model(
         Class decorator
 
     Example:
+        ```python
         @register_fee_model("my_protocol", description="My custom fee model")
         class MyFeeModel(FeeModel):
             ...
+        ```
     """
 
     def decorator(cls: type[FeeModel]) -> type[FeeModel]:
@@ -386,9 +394,11 @@ def get_fee_model(protocol: str) -> FeeModel | None:
         Instantiated fee model or None if not found
 
     Example:
+        ```python
         model = get_fee_model("uniswap_v3")
         if model:
             fee = model.calculate_fee(Decimal("1000"))
+        ```
     """
     model_class = FeeModelRegistry.get(protocol)
     if model_class:

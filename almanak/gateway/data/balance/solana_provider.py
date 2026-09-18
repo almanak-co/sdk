@@ -11,6 +11,7 @@ Key Features:
     - RPC error handling with retry and clear error messages
 
 Example:
+    ```python
     from almanak.gateway.data.balance.solana_provider import SolanaBalanceProvider
 
     provider = SolanaBalanceProvider(
@@ -26,6 +27,7 @@ Example:
     # Query USDC balance
     result = await provider.get_balance("USDC")
     print(f"USDC Balance: {result.balance}")
+    ```
 """
 
 import asyncio

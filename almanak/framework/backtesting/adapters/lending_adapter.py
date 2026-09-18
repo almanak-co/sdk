@@ -17,6 +17,7 @@ Key Features:
     - Support for connector-declared historical APY providers
 
 Example:
+    ```python
     from almanak.framework.backtesting.adapters.lending_adapter import (
         LendingBacktestAdapter,
         LendingBacktestConfig,
@@ -40,6 +41,7 @@ Example:
 
     # Use in backtesting
     fill = adapter.execute_intent(intent, portfolio, market_state)
+    ```
 """
 
 import asyncio
@@ -127,6 +129,7 @@ class LendingBacktestConfig(StrategyBacktestConfig):
         protocol: Default protocol for rate/threshold lookups (e.g., "aave_v3", "compound_v3")
 
     Example:
+        ```python
         config = LendingBacktestConfig(
             strategy_type="lending",
             interest_accrual_method="compound",
@@ -135,6 +138,7 @@ class LendingBacktestConfig(StrategyBacktestConfig):
             default_supply_apy=Decimal("0.04"),  # 4% supply APY
             default_borrow_apy=Decimal("0.06"),  # 6% borrow APY
         )
+        ```
     """
 
     interest_accrual_method: Literal["compound", "simple"] = "compound"
@@ -327,6 +331,7 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         data_config: BacktestDataConfig for historical data provider settings (optional)
 
     Example:
+        ```python
         # With config and data_config
         from almanak.framework.backtesting.config import BacktestDataConfig
 
@@ -354,6 +359,7 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
         if adapter.should_rebalance(position, market_state):
             # Strategy should consider adjusting position
             pass
+        ```
     """
 
     config_class = LendingBacktestConfig
@@ -1432,6 +1438,7 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
                 uses market_state.timestamp for reproducible backtests.
 
         Example:
+            ```python
             # In backtesting loop with portfolio access
             for position in portfolio.positions:
                 if position.position_type == PositionType.BORROW:
@@ -1439,6 +1446,7 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
                         position, portfolio, market_state, elapsed_seconds,
                         timestamp=market_state.timestamp
                     )
+            ```
         """
         # For borrow positions, auto-sync collateral from portfolio before update
         if position.position_type == PositionType.BORROW:
@@ -1468,12 +1476,14 @@ class LendingBacktestAdapter(StrategyBacktestAdapter):
             Dictionary mapping borrow position IDs to their collateral values
 
         Example:
+            ```python
             # Sync before a batch update
             collateral_map = adapter.sync_collateral_from_portfolio(portfolio, market_state)
 
             # Then update each position
             for position in portfolio.positions:
                 adapter.update_position(position, market_state, elapsed_seconds)
+            ```
         """
         total_collateral = self._get_total_collateral_value(portfolio, market_state)
         result: dict[str, Decimal] = {}

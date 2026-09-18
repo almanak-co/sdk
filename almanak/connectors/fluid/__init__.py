@@ -5,8 +5,7 @@ polygon. Fluid is routerless: each pool is a per-pair contract; pool
 discovery and quoting go through the DexReservesResolver (quotes match
 on-chain execution to the wei — Phase-0 validation, VIB-5028).
 
-Out of scope here (later phases): fToken lending SUPPLY/WITHDRAW
-(VIB-5030), vault BORROW/REPAY (VIB-5031), and LP via SmartLending /
+Out of scope here (later phases): fToken lending SUPPLY/WITHDRAW, vault BORROW/REPAY, and LP via SmartLending /
 smart vaults (VIB-5032 — direct pool LP is whitelist-gated on-chain).
 
 Key contracts (identical addresses on all supported chains):
@@ -14,6 +13,7 @@ Key contracts (identical addresses on all supported chains):
 - DexReservesResolver: 0x05Bd8269A20C472b148246De20E6852091BF16Ff
 
 Example:
+    ```python
     from almanak.connectors.fluid import FluidAdapter, FluidConfig
 
     config = FluidConfig(
@@ -22,6 +22,7 @@ Example:
         rpc_url="https://arb-mainnet.g.alchemy.com/v2/...",
     )
     adapter = FluidAdapter(config)
+    ```
 """
 
 from __future__ import annotations

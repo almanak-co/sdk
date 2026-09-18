@@ -114,7 +114,7 @@ class PoolAnalyticsResult:
 
 @dataclass(frozen=True)
 class TokenPool:
-    """One venue where a token trades (VIB-6599).
+    """One venue where a token trades.
 
     Money fields are ``Decimal | None`` — ``None`` means the provider did not
     measure the figure, ``Decimal("0")`` means it measured zero. This surface
@@ -422,7 +422,7 @@ class PoolAnalyticsReader:
         page: int = 0,
         allow_fallback_provider: bool = False,
     ) -> DataEnvelope[TokenPools]:
-        """List the venues where a token trades, with per-venue depth (VIB-6599).
+        """List the venues where a token trades, with per-venue depth.
 
         Answers "where can this token actually be traded, and how deep is each
         venue?" — the check that belongs BEFORE a strategy is written, not
@@ -591,7 +591,7 @@ class PoolAnalyticsReader:
 
 
 class NullPoolAnalyticsReader:
-    """Always-raises stub used by backtest factories (VIB-4727).
+    """Always-raises stub used by backtest factories.
 
     Live gateway HTTP at backtest time = nondeterministic results across
     runs — strategies that "work in backtest" then silently change behavior

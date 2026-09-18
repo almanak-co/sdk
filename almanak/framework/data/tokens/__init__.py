@@ -23,6 +23,7 @@ Token Resolution Exceptions:
     - InvalidTokenAddressError: Malformed token address
 
 Example:
+    ```python
     from almanak.framework.data.tokens import get_token_resolver
 
     # Get the singleton resolver
@@ -47,6 +48,7 @@ Example:
 
     # Resolve for swap (auto-wraps native tokens like ETH -> WETH)
     token = resolver.resolve_for_swap("eip155:42161/slip44:60", "arbitrum")  # Returns WETH
+    ```
 """
 
 from .caip import ParsedAsset, parse_caip19, token_ref_to_caip19

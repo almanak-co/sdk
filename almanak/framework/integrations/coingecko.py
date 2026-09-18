@@ -5,6 +5,7 @@ market data through the gateway. All API calls are proxied through the
 gateway, which handles rate limiting and API key management.
 
 Example:
+    ```python
     from almanak.framework.integrations import coingecko
 
     # Get single token price
@@ -19,6 +20,7 @@ Example:
     markets = coingecko.get_markets(vs_currency="usd", per_page=10)
     for m in markets:
         print(f"{m.name}: ${m.current_price}")
+    ```
 """
 
 from dataclasses import dataclass
@@ -64,8 +66,10 @@ def get_price(
         Exception: On API errors
 
     Example:
+        ```python
         prices = get_price("ethereum", vs_currencies=["usd", "eur"])
         # Returns: {"usd": "2500.50", "eur": "2300.25"}
+        ```
     """
     client = get_gateway_client()
     if not client.is_connected:
@@ -100,8 +104,10 @@ def get_prices(
         Exception: On API errors
 
     Example:
+        ```python
         prices = get_prices(["ethereum", "bitcoin"], vs_currencies=["usd"])
         # Returns: {"ethereum": {"usd": "2500.50"}, "bitcoin": {"usd": "45000.00"}}
+        ```
     """
     client = get_gateway_client()
     if not client.is_connected:
@@ -146,9 +152,11 @@ def get_markets(
         Exception: On API errors
 
     Example:
+        ```python
         markets = get_markets(vs_currency="usd", per_page=10)
         for m in markets:
             print(f"{m.name}: ${m.current_price} (rank {m.market_cap_rank})")
+        ```
     """
     client = get_gateway_client()
     if not client.is_connected:

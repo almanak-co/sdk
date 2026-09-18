@@ -74,33 +74,25 @@ supplied `--config-file` with conflicting guard choices is rejected; start a new
 backtest to evaluate a different variant. `--allow-missing-prices` only relaxes
 token-price checks and cannot bypass required historical pool analytics.
 
-### PnLBacktester
-
 ::: almanak.framework.backtesting.PnLBacktester
     options:
-      show_root_heading: true
+      heading_level: 3
       members_order: source
-
-### PnLBacktestConfig
 
 ::: almanak.framework.backtesting.PnLBacktestConfig
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Paper Trader
 
-### PaperTrader
-
 ::: almanak.framework.backtesting.PaperTrader
     options:
-      show_root_heading: true
+      heading_level: 3
       members_order: source
-
-### PaperTraderConfig
 
 ::: almanak.framework.backtesting.PaperTraderConfig
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Results
 
@@ -113,48 +105,36 @@ USD-valued (`value_usd`, with `numeraire_price_usd` per point). Check
 BTC-growth strategy declared `"USD"` reports USD performance, not BTC. Backtests read the
 decorator value; the per-deployment `config.json` override is applied on live runs.
 
-### BacktestResult
-
 ::: almanak.framework.backtesting.BacktestResult
     options:
-      show_root_heading: true
-
-### BacktestMetrics
+      heading_level: 3
 
 ::: almanak.framework.backtesting.BacktestMetrics
     options:
-      show_root_heading: true
-
-### PaperTradingSummary
+      heading_level: 3
 
 ::: almanak.framework.backtesting.PaperTradingSummary
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Data Providers
 
-### HistoricalDataProvider
-
 ::: almanak.framework.backtesting.HistoricalDataProvider
     options:
-      show_root_heading: true
-
-### HistoricalDataConfig
+      heading_level: 3
 
 ::: almanak.framework.backtesting.HistoricalDataConfig
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Crisis Scenarios
 
-### CrisisScenario
-
 ::: almanak.framework.backtesting.CrisisScenario
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Parallel Execution
 
 ::: almanak.framework.backtesting.run_parallel_backtests
     options:
-      show_root_heading: true
+      heading_level: 3

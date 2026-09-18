@@ -5,6 +5,7 @@ price data with WETH denomination. It fetches token/USD and ETH/USD OHLCV data
 from CoinGecko and derives WETH-denominated prices.
 
 Example:
+    ```python
     from almanak.framework.data.qa.test_definitions.dex_historical import DEXHistoricalTest
     from almanak.framework.data.qa.config import load_config
 
@@ -14,6 +15,7 @@ Example:
 
     for result in results:
         print(f"{result.token}: {result.total_points} points - {'PASS' if result.passed else 'FAIL'}")
+    ```
 """
 
 import logging
@@ -95,12 +97,14 @@ class DEXHistoricalTest:
         ohlcv_provider: CoinGecko OHLCV provider instance
 
     Example:
+        ```python
         config = load_config()
         test = DEXHistoricalTest(config)
         results = await test.run()
 
         passed = all(r.passed for r in results)
         print(f"DEX Historical Test: {'PASSED' if passed else 'FAILED'}")
+        ```
     """
 
     def __init__(

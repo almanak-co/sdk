@@ -11,6 +11,7 @@ Key Features:
     - Track IL exposure for active LP positions
 
 Example:
+    ```python
     from almanak.framework.data.lp import ILCalculator, ILResult
 
     # Create calculator
@@ -32,6 +33,7 @@ Example:
         weight_b=Decimal("0.5"),
     )
     print(f"Projected IL: {projected.il_percent:.2f}%")
+    ```
 """
 
 import logging
@@ -365,6 +367,7 @@ class ILCalculator:
     and tracking IL exposure for active positions.
 
     Example:
+        ```python
         calc = ILCalculator()
 
         # Calculate IL for a 50/50 pool
@@ -380,6 +383,7 @@ class ILCalculator:
         for pct in [10, 25, 50, 100]:
             proj = calc.project_il(price_change_pct=Decimal(pct))
             print(f"Price +{pct}%: IL = {proj.il_percent:.4f}%")
+        ```
     """
 
     def __init__(
@@ -512,7 +516,7 @@ class ILCalculator:
     ) -> ILResult:
         """Calculate IL for concentrated liquidity positions (Uniswap V3).
 
-        True V3 math (ALM-2948): position composition at entry and now via
+        True V3 math: position composition at entry and now via
         the shared CL kernel's three-case formula, IL = pool_value /
         hold_value - 1. Replaces the previous heuristic (V2 IL times an
         ad-hoc range-width amplification), which also compared raw tick

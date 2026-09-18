@@ -133,10 +133,12 @@ class SolanaRpcClient:
     and async wrappers that run sync calls in a thread pool.
 
     Example:
+        ```python
         client = SolanaRpcClient(SolanaRpcConfig(rpc_url="https://api.mainnet-beta.solana.com"))
         blockhash = await client.get_latest_blockhash()
         sig = await client.send_transaction(signed_tx_base64)
         receipt = await client.confirm_and_get_receipt(sig)
+        ```
     """
 
     def __init__(self, config: SolanaRpcConfig) -> None:

@@ -17,6 +17,7 @@ Key Components:
     - MovingAverageCalculator: SMA, EMA, WMA
 
 Example:
+    ```python
     from almanak.framework.data.indicators import (
         RSICalculator,
         BollingerBandsCalculator,
@@ -35,6 +36,7 @@ Example:
     # Use registry for discovery
     for name in IndicatorRegistry.list_all():
         print(f"Available: {name}")
+    ```
 """
 
 from .adx import ADXCalculator

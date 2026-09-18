@@ -11,6 +11,7 @@ in production. It orchestrates the full execution pipeline:
 6. Error alerting via AlertManager
 
 Example:
+    ```python
     from almanak.framework.runner import StrategyRunner, RunnerConfig
     from almanak.framework.strategies import MomentumStrategy
 
@@ -35,6 +36,7 @@ Example:
     result = await runner.run_iteration(strategy)
     if result.success:
         print(f"Iteration succeeded: {result.status.value}")
+    ```
 """
 
 from almanak.framework.runner.inner_runner import (

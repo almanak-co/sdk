@@ -12,6 +12,7 @@ All returns are wrapped in DataEnvelope[PoolPrice] with provenance metadata
 including block number, finality, and source identification.
 
 Example:
+    ```python
     from almanak.framework.data.pools.reader import UniswapV3PoolPriceReader
 
     reader = UniswapV3PoolPriceReader(rpc_call=my_rpc_call_fn)
@@ -23,6 +24,7 @@ Example:
     from almanak.framework.data.pools.reader import PoolReaderRegistry
     registry = PoolReaderRegistry(rpc_call=my_rpc_call_fn)
     reader = registry.get_reader("base", "aerodrome_slipstream")
+    ```
 """
 
 from __future__ import annotations
@@ -859,7 +861,7 @@ class CurvePoolReader(UniswapV3PoolPriceReader):
     that still verifies readability before returning the pool.
 
     Any required read that fails (revert, empty return, zero coin address,
-    non-positive quote) raises :class:`DataUnavailableError` — values are
+    non-positive quote) raises `DataUnavailableError` — values are
     never fabricated.
     """
 
@@ -1418,9 +1420,11 @@ class PoolReaderRegistry:
     the same ``rpc_call`` and ``token_resolver`` from the registry.
 
     Example:
+        ```python
         registry = PoolReaderRegistry(rpc_call=my_rpc_fn)
         reader = registry.get_reader("base", "aerodrome_slipstream")
         envelope = reader.read_pool_price("0x...", "base")
+        ```
 
     Args:
         rpc_call: Callable(chain, to_address, calldata_hex) -> bytes.

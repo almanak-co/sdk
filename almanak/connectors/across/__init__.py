@@ -10,6 +10,7 @@ Features:
 - Available on Ethereum, Arbitrum, Optimism, Base, Polygon, and more
 
 Example:
+    ```python
     from almanak.connectors.across import AcrossBridgeAdapter, AcrossConfig
 
     config = AcrossConfig(timeout_seconds=1800)  # 30 min timeout
@@ -25,6 +26,7 @@ Example:
 
     # Build deposit transaction
     tx = adapter.build_deposit_tx(quote, recipient="0x...")
+    ```
 """
 
 from __future__ import annotations

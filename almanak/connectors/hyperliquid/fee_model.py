@@ -25,6 +25,7 @@ Key Components:
     - HyperliquidFeeModel: Fee model for Hyperliquid perpetual operations
 
 Example:
+    ```python
     from almanak.connectors.hyperliquid.fee_model import (
         HyperliquidFeeModel,
         HyperliquidFeeTier,
@@ -44,6 +45,7 @@ Example:
     # With custom 14-day volume (auto-selects tier)
     fee_model = HyperliquidFeeModel(volume_14d=Decimal("150000000"))  # $150M
     fee = fee_model.calculate_fee(Decimal("10000"), is_maker=False)
+    ```
 """
 
 from dataclasses import dataclass, field
@@ -175,6 +177,7 @@ class HyperliquidFeeModel(FeeModel):
         custom_maker_fee: Override maker fee rate (optional)
 
     Example:
+        ```python
         # Default VIP 0 tier
         model = HyperliquidFeeModel()
 
@@ -189,6 +192,7 @@ class HyperliquidFeeModel(FeeModel):
 
         # HIP-3 market (2x base fees)
         model = HyperliquidFeeModel(is_hip3_market=True)
+        ```
     """
 
     fee_tier: HyperliquidFeeTier = HyperliquidFeeTier.VIP_0
@@ -282,6 +286,7 @@ class HyperliquidFeeModel(FeeModel):
             Fee amount in USD
 
         Example:
+            ```python
             # Taker order
             fee = model.calculate_fee(Decimal("10000"), is_maker=False)
 
@@ -290,6 +295,7 @@ class HyperliquidFeeModel(FeeModel):
 
             # With leverage (fee applies to full notional)
             fee = model.calculate_fee(Decimal("1000"), leverage=10)  # $10k notional
+            ```
         """
         # Determine fee rate based on order type
         is_maker = kwargs.get("is_maker", False)

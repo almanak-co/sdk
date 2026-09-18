@@ -1,4 +1,4 @@
-"""Yearn connector — gateway-side only (VIB-4810).
+"""Yearn connector — gateway-side only.
 
 The strategy-side adapter / SDK for Yearn has not been written yet —
 this folder currently only carries the gateway-side vault-token lookup.

@@ -12,6 +12,7 @@ LocalSimulator simulates against the actual state of the connected RPC,
 making it perfect for Anvil forks where you've modified state (e.g., funded wallets).
 
 Example:
+    ```python
     from almanak.framework.execution.simulator import LocalSimulator
     from almanak.framework.execution.interfaces import UnsignedTransaction
 
@@ -29,6 +30,7 @@ Example:
 
     result = await simulator.simulate([unsigned_tx], chain="ethereum")
     # result.gas_estimates contains accurate estimates from eth_estimateGas
+    ```
 """
 
 import asyncio
@@ -153,6 +155,7 @@ class LocalSimulator(Simulator):
                     returns raw gas estimates to avoid double-buffering.
 
     Example:
+        ```python
         simulator = LocalSimulator(
             rpc_url="http://127.0.0.1:8545",
         )
@@ -163,6 +166,7 @@ class LocalSimulator(Simulator):
             print(f"Gas estimates: {result.gas_estimates}")
         else:
             print(f"Simulation failed: {result.revert_reason}")
+        ```
     """
 
     def __init__(

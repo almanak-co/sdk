@@ -13,9 +13,7 @@
 | [Base](../../chains/base.md) | EVM | ``LP_CLOSE``, ``LP_OPEN``, ``SWAP`` |
 | [Optimism](../../chains/optimism.md) | EVM | ``LP_CLOSE``, ``LP_OPEN``, ``SWAP`` |
 
-## API Reference
-
 ::: almanak.connectors.aerodrome
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

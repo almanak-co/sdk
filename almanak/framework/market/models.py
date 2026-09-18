@@ -198,7 +198,7 @@ class PriceData:
         """Preserve available provider metadata without inventing missing fields.
 
         Some legacy aggregators return a scalar or a duck-typed result instead
-        of the canonical :class:`PriceResult`. Keep their usable price while
+        of the canonical `PriceResult`. Keep their usable price while
         treating absent or malformed provenance as unmeasured.
         """
         price = getattr(result, "price", result)
@@ -261,7 +261,7 @@ class ReferenceMarketStatus(StrEnum):
 class MarketSessionData:
     """Regular-session state of one exchange, with no price attached.
 
-    Produced by :meth:`MarketSnapshot.market_session`. The status comes from the
+    Produced by `market_session`. The status comes from the
     published exchange calendar (holidays, early closes, DST), evaluated at the
     snapshot timestamp, so it is identical on a live chain, an Anvil fork, and a
     historical backtest tick. ``UNKNOWN`` is the fail-closed answer for an
@@ -406,7 +406,7 @@ class ReferencePriceData:
 
 @dataclass
 class PtPriceData:
-    """Typed, strategy-safe result of ``MarketSnapshot.pt_price`` (VIB-5311).
+    """Typed, strategy-safe result of ``MarketSnapshot.pt_price``.
 
     A pure pass-through of the gateway PT/YT-USD price contract
     (``PtPriceResponse``, VIB-5309/5310) — the gateway is the single price
@@ -457,7 +457,7 @@ class PtPriceData:
 
     @property
     def is_stale(self) -> bool:
-        """True when the mark is stale — for a strategy to gate on before trusting it (VIB-5312).
+        """True when the mark is stale — for a strategy to gate on before trusting it.
 
         Combines BOTH staleness signals so a caller never has to (and never
         silently drops one): the gateway's raw ``stale`` flag OR a
@@ -475,7 +475,7 @@ class PtPriceData:
 
 @dataclass(frozen=True)
 class LendingMarketInfo:
-    """Typed result of ``MarketSnapshot.lending_markets`` / ``lending_market`` (VIB-5985).
+    """Typed result of ``MarketSnapshot.lending_markets`` / ``lending_market``.
 
     A pure pass-through of the gateway ``LendingMarket`` contract. Immutable
     market params only (tokens, oracle, IRM, LLTV) — live supply/borrow state is

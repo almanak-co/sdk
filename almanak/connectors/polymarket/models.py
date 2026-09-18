@@ -173,6 +173,7 @@ class ApiCredentials(BaseModel):
         - POLYMARKET_PASSPHRASE: Passphrase for API requests (required for trading)
 
     Example:
+        ```python
         # Load from environment
         creds = ApiCredentials.from_env()
 
@@ -182,6 +183,7 @@ class ApiCredentials(BaseModel):
             secret=SecretStr("your-base64-secret"),
             passphrase=SecretStr("your-passphrase"),
         )
+        ```
     """
 
     api_key: str = Field(description="API key for L2 authentication")
@@ -304,6 +306,7 @@ class PolymarketConfig(BaseModel):
             - POLYMARKET_DATA_API_URL: Override data_api_base_url
 
     Example:
+        ```python
         from almanak.connectors.polymarket import (
             ClobClient,
             PolymarketConfig,
@@ -345,6 +348,7 @@ class PolymarketConfig(BaseModel):
             wallet_address="0x...",
             data_api_base_url="https://my-proxy.example.com/data",
         )
+        ```
     """
 
     # Reject legacy signer kwargs (`private_key`, `signer_service_url`,

@@ -823,6 +823,7 @@ async def diagnose_revert(
         RevertDiagnostic with analysis and suggestions
 
     Example:
+        ```python
         diagnostic = await diagnose_revert(
             intent=lp_open_intent,
             chain="arbitrum",
@@ -832,6 +833,7 @@ async def diagnose_revert(
             gas_warnings=["tx 3/3: execution reverted: STF"],
         )
         logger.error(diagnostic.format())
+        ```
     """
     # Extract what the intent needs (ERC-20 tokens)
     requirements = extract_token_requirements(intent, chain)
@@ -1065,8 +1067,10 @@ class VerboseRevertReport:
     Use format() for human-readable output or to_dict() for JSON serialization.
 
     Example:
+        ```python
         report = build_verbose_revert_report(context, bundle, tx_results)
         logger.error(report.format())
+        ```
     """
 
     # Execution context
@@ -1361,6 +1365,7 @@ def build_verbose_revert_report(
         VerboseRevertReport ready for format() or to_dict()
 
     Example:
+        ```python
         report = build_verbose_revert_report(
             context=context,
             action_bundle=action_bundle,
@@ -1368,6 +1373,7 @@ def build_verbose_revert_report(
             raw_error=first_reverted.error,
         )
         logger.error(report.format())
+        ```
     """
     now = datetime.now(UTC)
     return VerboseRevertReport(

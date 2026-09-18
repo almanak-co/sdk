@@ -67,6 +67,7 @@ class RaydiumCLMMSDK:
     - Compute PDAs for positions, tick arrays, etc.
 
     Example:
+        ```python
         sdk = RaydiumCLMMSDK(wallet_address="your-pubkey", rpc_url="...")
         pool = sdk.get_pool_info("pool-address")
         ixs, nft_mint = sdk.build_open_position_ix(
@@ -77,6 +78,7 @@ class RaydiumCLMMSDK:
             amount_b=500_000_000,
             liquidity=1000000,
         )
+        ```
     """
 
     def __init__(

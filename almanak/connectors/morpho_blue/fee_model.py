@@ -23,6 +23,7 @@ Key Components:
     - MorphoFeeModel: Fee model for Morpho lending operations
 
 Example:
+    ```python
     from almanak.connectors.morpho_blue.fee_model import MorphoFeeModel
 
     fee_model = MorphoFeeModel()
@@ -39,6 +40,7 @@ Example:
         amount_usd=Decimal("10000"),
         liquidation_incentive_factor=Decimal("1.05"),
     )
+    ```
 """
 
 from dataclasses import dataclass, field
@@ -85,6 +87,7 @@ class MorphoFeeModel(FeeModel):
         asset_liquidation_incentives: Per-asset liquidation incentive factors
 
     Example:
+        ```python
         # Standard Morpho Blue model
         model = MorphoFeeModel()
 
@@ -96,6 +99,7 @@ class MorphoFeeModel(FeeModel):
                 "WBTC": Decimal("1.06"),  # 6% for BTC
             },
         )
+        ```
     """
 
     liquidation_incentive_factor: Decimal = Decimal("1.05")  # 5% penalty

@@ -6,15 +6,15 @@ strategies.
 **VIB-4859 / W7**: This module is now a thin gRPC client of the gateway's
 ``RateHistoryService``. All HTTP / Web3 egress for lending APY + funding
 rate history happens on the gateway side via
-:class:`GatewayLendingRateHistoryCapability` and
-:class:`GatewayFundingHistoryCapability` implementations on the
+`GatewayLendingRateHistoryCapability` and
+`GatewayFundingHistoryCapability` implementations on the
 corresponding connectors. The strategy container holds no protocol-specific
 dispatch and no outbound HTTP clients.
 
-The :class:`RateHistoryReader` public API +
-:class:`LendingRateSnapshot` / :class:`FundingRateSnapshot` dataclasses
+The `RateHistoryReader` public API +
+`LendingRateSnapshot` / `FundingRateSnapshot` dataclasses
 are preserved verbatim. Cache integration with
-:class:`VersionedDataCache` stays strategy-side (it's the backtest-replay
+`VersionedDataCache` stays strategy-side (it's the backtest-replay
 determinism layer per the plan §7.4 risk mitigation).
 
 The DeFi Llama fallback chain that lived in the pre-W7 code is tracked
@@ -23,6 +23,7 @@ into the gateway, it joins this dispatcher automatically through the
 ``GatewayLendingRateHistoryCapability`` registry.
 
 Example:
+    ```python
     from almanak.framework.data.rates.history import (
         RateHistoryReader,
         LendingRateSnapshot,
@@ -49,6 +50,7 @@ Example:
     )
     for snap in envelope.value:
         print(snap.rate, snap.annualized_rate, snap.timestamp)
+    ```
 """
 
 from __future__ import annotations
@@ -466,13 +468,13 @@ class RateHistoryReader:
 
     All upstream egress (TheGraph subgraphs, DefiLlama aggregator,
     Hyperliquid Info API) lives gateway-side via
-    :class:`GatewayLendingRateHistoryCapability` /
-    :class:`GatewayFundingHistoryCapability` implementations on the
+    `GatewayLendingRateHistoryCapability` /
+    `GatewayFundingHistoryCapability` implementations on the
     corresponding connectors. The strategy container only speaks the
     ``RateHistoryService`` gRPC contract.
 
-    Results are wrapped in :class:`DataEnvelope` with INFORMATIONAL
-    classification and stored in :class:`VersionedDataCache` for
+    Results are wrapped in `DataEnvelope` with INFORMATIONAL
+    classification and stored in `VersionedDataCache` for
     deterministic backtest replay.
 
     Args:

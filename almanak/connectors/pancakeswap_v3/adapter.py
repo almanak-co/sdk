@@ -14,6 +14,7 @@ Supported chains:
 - Arbitrum
 
 Example:
+    ```python
     from almanak.connectors.pancakeswap_v3 import (
         PancakeSwapV3Adapter,
         PancakeSwapV3Config,
@@ -31,6 +32,7 @@ Example:
         token_out="WBNB",
         amount_in=Decimal("100"),
     )
+    ```
 """
 
 import logging
@@ -164,6 +166,7 @@ class PancakeSwapV3Adapter:
     PancakeSwap V3 is a Uniswap V3 fork with different fee tiers (100, 500, 2500, 10000 bps).
 
     Example:
+        ```python
         config = PancakeSwapV3Config(
             chain="bnb",
             wallet_address="0x...",
@@ -172,6 +175,7 @@ class PancakeSwapV3Adapter:
 
         # Swap 100 USDT for WBNB
         result = adapter.swap_exact_input("USDT", "WBNB", Decimal("100"))
+        ```
     """
 
     def __init__(self, config: PancakeSwapV3Config, token_resolver: "TokenResolverType | None" = None) -> None:

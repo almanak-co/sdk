@@ -9,6 +9,7 @@ serializing them into a VersionedTransaction. The SolanaExecutionPlanner
 handles the serialized transaction format.
 
 Example:
+    ```python
     config = RaydiumConfig(wallet_address="your-solana-pubkey")
     adapter = RaydiumAdapter(config)
 
@@ -21,6 +22,7 @@ Example:
         protocol="raydium_clmm",
     )
     bundle = adapter.compile_lp_open_intent(intent)
+    ```
 """
 
 from __future__ import annotations
@@ -69,6 +71,7 @@ class RaydiumAdapter:
     Solana VersionedTransactions built from Raydium CLMM instructions.
 
     Example:
+        ```python
         config = RaydiumConfig(wallet_address="your-solana-pubkey")
         adapter = RaydiumAdapter(config)
 
@@ -81,6 +84,7 @@ class RaydiumAdapter:
             protocol="raydium_clmm",
         )
         bundle = adapter.compile_lp_open_intent(intent)
+        ```
     """
 
     def __init__(

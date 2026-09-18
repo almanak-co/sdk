@@ -5,6 +5,7 @@ using Jinja2 templates. The reports include executive summaries, detailed metric
 charts, trade logs, and configuration information.
 
 Example:
+    ```python
     from almanak.framework.backtesting.report_generator import generate_report
 
     # Generate HTML report
@@ -18,6 +19,7 @@ Example:
         equity_chart_html=equity_curve_html,
         pnl_histogram_html=histogram_html,
     )
+    ```
 """
 
 import logging

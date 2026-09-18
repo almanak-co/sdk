@@ -23,6 +23,7 @@ per-DEX configuration; they are now thin wrappers around the same gRPC
 service (see ``pnl/providers/lending/__init__.py``).
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.providers.lending_apy import (
         LendingAPYProvider,
         LendingAPYData,
@@ -38,6 +39,7 @@ Example:
         timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=timezone.utc),
     )
     print(f"Supply APY: {apy.supply_apy_pct}%, Borrow APY: {apy.borrow_apy_pct}%")
+    ```
 """
 
 from __future__ import annotations

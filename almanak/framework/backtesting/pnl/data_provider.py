@@ -10,6 +10,7 @@ Key Components:
     - OHLCV: OHLCV (Open-High-Low-Close-Volume) data structure
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.data_provider import (
         HistoricalDataProvider,
         MarketState,
@@ -27,6 +28,7 @@ Example:
     async for timestamp, market_state in data_provider.iterate(config):
         price = market_state.get_price("WETH")
         # ... process market state
+    ```
 """
 
 import re
@@ -417,7 +419,7 @@ class MarketState:
         gas_price_gwei: Gas price in gwei at this timestamp (optional)
         metadata: Additional market data (e.g., funding rates, liquidity)
         symbol_aliases: Registered ``{SYMBOL_UPPER: (chain, address)}`` read
-            aliases (see :meth:`register_symbol_aliases`). Not serialized:
+            aliases (see `register_symbol_aliases`). Not serialized:
             derived per run from the engine's registered token-address map.
         price_observations: Provider-attributed metadata for entries in
             ``prices``. Custom/legacy providers may omit it; consumers must
@@ -591,7 +593,7 @@ class MarketState:
         """Return measured metadata for the resolved price key, when supplied.
 
         The lookup follows the same address/symbol alias precedence as
-        :meth:`get_price`.  There is deliberately no fallback constructed
+        `get_price`.  There is deliberately no fallback constructed
         from ``MarketState.timestamp`` or ``metadata``: a legacy provider that
         emitted only a scalar price did not prove either its observation time
         or per-token source.
@@ -825,9 +827,11 @@ class HistoricalDataProvider(Protocol):
             DataSourceUnavailable: If the data source is unavailable
 
         Example:
+            ```python
             async for timestamp, market_state in provider.iterate(config):
                 eth_price = market_state.get_price("WETH")
                 # Process market state
+            ```
         """
         ...
         # This is needed to make the method signature a generator
@@ -863,7 +867,7 @@ class HistoricalDataProvider(Protocol):
 class HistoricalCoverageProvider(Protocol):
     """Additive range-coverage capability for historical data providers.
 
-    This deliberately does not extend :class:`HistoricalDataProvider`:
+    This deliberately does not extend `HistoricalDataProvider`:
     existing third-party providers remain valid, while callers feature-detect
     this richer contract when range-aware preflight or automatic price-cadence
     negotiation is required.

@@ -15,6 +15,7 @@ Key Features:
     - Configurable execution coordination
 
 Example:
+    ```python
     from almanak.framework.backtesting.adapters.multi_protocol_adapter import (
         MultiProtocolBacktestAdapter,
         MultiProtocolBacktestConfig,
@@ -36,6 +37,7 @@ Example:
 
     # Use in backtesting
     fill = adapter.execute_intent(intent, portfolio, market_state)
+    ```
 """
 
 import logging
@@ -279,6 +281,7 @@ class MultiProtocolBacktestConfig(StrategyBacktestConfig):
             Default 5.0 seconds.
 
     Example:
+        ```python
         config = MultiProtocolBacktestConfig(
             strategy_type="multi_protocol",
             reconcile_positions=True,
@@ -293,6 +296,7 @@ class MultiProtocolBacktestConfig(StrategyBacktestConfig):
             },
             liquidation_warning_threshold=Decimal("1.4"),
         )
+        ```
     """
 
     reconcile_positions: bool = True
@@ -438,6 +442,7 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
         config: Multi-protocol-specific configuration (optional)
 
     Example:
+        ```python
         # With config
         config = MultiProtocolBacktestConfig(
             strategy_type="multi_protocol",
@@ -455,6 +460,7 @@ class MultiProtocolBacktestAdapter(StrategyBacktestAdapter):
 
         # Calculate unified risk across all positions
         risk_result = adapter.calculate_unified_risk(portfolio, market_state)
+        ```
     """
 
     config_class = MultiProtocolBacktestConfig

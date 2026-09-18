@@ -81,6 +81,7 @@ class PaperPortfolioTracker:
         total_gas_cost_usd: Cumulative gas cost in USD
 
     Example:
+        ```python
         tracker = PaperPortfolioTracker(deployment_id="my_strategy")
         tracker.start_session({"ETH": Decimal("10"), "USDC": Decimal("10000")})
 
@@ -92,6 +93,7 @@ class PaperPortfolioTracker:
 
         # Get session summary
         summary = tracker.get_summary()
+        ```
     """
 
     deployment_id: str
@@ -119,11 +121,13 @@ class PaperPortfolioTracker:
             chain: Target blockchain (default: arbitrum)
 
         Example:
+            ```python
             tracker.start_session({
                 "ETH": Decimal("10"),
                 "USDC": Decimal("10000"),
                 "WBTC": Decimal("0.5"),
             })
+            ```
         """
         self.session_started = datetime.now(UTC)
         self.chain = chain
@@ -150,6 +154,7 @@ class PaperPortfolioTracker:
             trade: The PaperTrade to record
 
         Example:
+            ```python
             trade = PaperTrade(
                 timestamp=datetime.now(timezone.utc),
                 block_number=12345,
@@ -161,6 +166,7 @@ class PaperPortfolioTracker:
                 tokens_out={"USDC": Decimal("2000")},
             )
             tracker.record_trade(trade)
+            ```
         """
         intent_type = _trade_intent_type(trade)
         if _has_negative_token_flows(trade):
@@ -212,6 +218,7 @@ class PaperPortfolioTracker:
             error: The PaperTradeError to record
 
         Example:
+            ```python
             error = PaperTradeError(
                 timestamp=datetime.now(timezone.utc),
                 intent={"type": "SWAP"},
@@ -219,6 +226,7 @@ class PaperPortfolioTracker:
                 error_message="Slippage exceeded",
             )
             tracker.record_error(error)
+            ```
         """
         self.errors.append(error)
 
@@ -235,9 +243,11 @@ class PaperPortfolioTracker:
             Net PnL in USD (positive = profit, negative = loss)
 
         Example:
+            ```python
             prices = {"ETH": Decimal("2000"), "USDC": Decimal("1")}
             pnl = tracker.get_pnl_usd(prices)
             # Returns: Decimal("500") if portfolio gained $500
+            ```
         """
         initial_value = self._calculate_portfolio_value(self.initial_balances, current_prices)
         current_value = self._calculate_portfolio_value(self.current_balances, current_prices)
@@ -255,8 +265,10 @@ class PaperPortfolioTracker:
             PaperTradingSummary with session statistics
 
         Example:
+            ```python
             summary = tracker.get_summary()
             print(summary.summary())  # Human-readable summary
+            ```
         """
         # Calculate duration
         if self.session_started is not None:
@@ -306,9 +318,11 @@ class PaperPortfolioTracker:
             PaperTradingSummary with pnl_usd populated
 
         Example:
+            ```python
             prices = {"ETH": Decimal("2000"), "USDC": Decimal("1")}
             summary = tracker.get_summary_with_pnl(prices)
             print(f"PnL: ${summary.pnl_usd}")
+            ```
         """
         summary = self.get_summary()
         summary.pnl_usd = self.get_pnl_usd(current_prices)

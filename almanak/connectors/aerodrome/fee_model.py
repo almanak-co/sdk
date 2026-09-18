@@ -12,6 +12,7 @@ Key Components:
     - AerodromeFeeModel: Fee model with pool-type-based fees
 
 Example:
+    ```python
     from almanak.connectors.aerodrome.fee_model import (
         AerodromeFeeModel,
         AerodromePoolType,
@@ -31,6 +32,7 @@ Example:
         Decimal("1000"),
         intent_type=IntentType.SWAP,
     )
+    ```
 """
 
 from dataclasses import dataclass
@@ -96,6 +98,7 @@ class AerodromeFeeModel(FeeModel):
         token_pair_pool_types: Optional mapping of token pairs to pool types
 
     Example:
+        ```python
         model = AerodromeFeeModel(
             stable_fee_pct=Decimal("0.0001"),
             volatile_fee_pct=Decimal("0.003"),
@@ -114,6 +117,7 @@ class AerodromeFeeModel(FeeModel):
             intent_type=IntentType.SWAP,
             pool_type=AerodromePoolType.VOLATILE,
         )
+        ```
     """
 
     stable_fee_pct: Decimal = Decimal("0.0001")  # 0.01% for stable pools

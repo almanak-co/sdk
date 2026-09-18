@@ -10,6 +10,7 @@ This is the cross-protocol routing analogue of
 ``almanak.framework.intents.bridge_selector.BridgeSelector``.
 
 Example:
+    ```python
     from almanak.framework.intents.flash_loan_selector import FlashLoanSelector
     from almanak.connectors.aave_v3.flash_loan_provider import AaveFlashLoanProvider
     from almanak.connectors.balancer_v2.flash_loan_provider import BalancerFlashLoanProvider
@@ -24,6 +25,7 @@ Example:
         ],
     )
     result = selector.select_provider(token="USDC", amount=Decimal("1000000"))
+    ```
 """
 
 from __future__ import annotations

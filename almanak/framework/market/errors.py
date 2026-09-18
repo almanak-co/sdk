@@ -194,7 +194,7 @@ class LendingRateUnavailableError(MarketSnapshotError):
 
 
 class LendingMarketResolutionError(MarketSnapshotError):
-    """Verified lending-market resolution failed (VIB-5985).
+    """Verified lending-market resolution failed.
 
     Raised by ``MarketSnapshot.lending_markets`` / ``lending_market`` for a
     transport failure, an unsupported protocol/chain, a not-found market, or —

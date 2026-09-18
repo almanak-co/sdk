@@ -243,10 +243,12 @@ class GatewayExecutionResult:
         - extracted_data: Flexible dict for protocol-specific data
 
     Example:
+        ```python
         result = await orchestrator.execute(bundle)
         # After enrichment by StrategyRunner:
         if result.position_id:
             strategy.state["position_id"] = result.position_id
+        ```
     """
 
     success: bool
@@ -516,8 +518,10 @@ class GatewayExecutionResult:
             Extracted value or default
 
         Example:
+            ```python
             tick_lower = result.get_extracted("tick_lower", int, 0)
             liquidity = result.get_extracted("liquidity")
+            ```
         """
         value = self.extracted_data.get(key)
         if value is None:
@@ -537,6 +541,7 @@ class GatewayExecutionOrchestrator:
     since the complex signing and submission logic lives in the gateway.
 
     Example:
+        ```python
         from almanak.framework.gateway_client import GatewayClient
         from almanak.framework.execution.gateway_orchestrator import GatewayExecutionOrchestrator
 
@@ -548,6 +553,7 @@ class GatewayExecutionOrchestrator:
             )
             result = await orchestrator.execute(action_bundle)
             print(f"Execution success: {result.success}")
+        ```
     """
 
     def __init__(

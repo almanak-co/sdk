@@ -5,6 +5,7 @@ data using CoinGecko as the data source. It validates data continuity, gap detec
 and overall data quality for historical price analysis.
 
 Example:
+    ```python
     from almanak.framework.data.qa.test_definitions.cex_historical import CEXHistoricalTest
     from almanak.framework.data.qa.config import load_config
 
@@ -14,6 +15,7 @@ Example:
 
     for result in results:
         print(f"{result.token}: {result.total_candles} candles - {'PASS' if result.passed else 'FAIL'}")
+    ```
 """
 
 import logging
@@ -91,12 +93,14 @@ class CEXHistoricalTest:
         ohlcv_provider: CoinGecko OHLCV provider instance
 
     Example:
+        ```python
         config = load_config()
         test = CEXHistoricalTest(config)
         results = await test.run()
 
         passed = all(r.passed for r in results)
         print(f"CEX Historical Test: {'PASSED' if passed else 'FAILED'}")
+        ```
     """
 
     def __init__(

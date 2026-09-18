@@ -9,6 +9,7 @@ This connector provides:
 - KaminoReceiptParser: Balance-delta parser for extracting lending results
 
 Example:
+    ```python
     from almanak.connectors.kamino import KaminoClient, KaminoConfig
 
     config = KaminoConfig(wallet_address="your-solana-pubkey")
@@ -19,6 +20,7 @@ Example:
 
     # Build a deposit transaction
     tx = client.deposit(reserve=reserves[0].address, amount="100.0")
+    ```
 """
 
 from __future__ import annotations

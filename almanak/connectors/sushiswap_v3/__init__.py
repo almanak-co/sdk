@@ -19,6 +19,7 @@ Supported Operations:
 - Pool address computation
 
 Example:
+    ```python
     from almanak.connectors.sushiswap_v3 import (
         SushiSwapV3SDK,
         SushiSwapV3Adapter,
@@ -42,6 +43,7 @@ Example:
     # Parsing receipts
     parser = SushiSwapV3ReceiptParser(chain="arbitrum")
     parse_result = parser.parse_receipt(receipt)
+    ```
 """
 
 from __future__ import annotations

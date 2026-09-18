@@ -16,6 +16,7 @@ Design Philosophy:
     - All results include metadata (staleness, confidence) for informed decisions
 
 Example:
+    ```python
     from almanak.framework.data.interfaces import BasePriceSource, PriceResult, PriceOracle
 
     class CoinGeckoPriceSource(BasePriceSource):
@@ -30,6 +31,7 @@ Example:
     # Use in aggregator
     aggregator = PriceAggregator(sources=[CoinGeckoPriceSource()])
     result = await aggregator.get_aggregated_price("ETH", "USD")
+    ```
 """
 
 from __future__ import annotations
@@ -163,12 +165,12 @@ def data_source_error_from_grpc(
     """Map a gRPC error to a typed ``DataSourceError`` using the VIB-3800 contract.
 
     Looks for the ``grpc-status-details-bin`` trailer (see
-    :mod:`almanak.framework.grpc.error_details`), reads the gRPC status code +
+    `almanak.framework.grpc.error_details`), reads the gRPC status code +
     optional ``RetryInfo`` payload, and returns the matching typed exception:
 
-    - ``RESOURCE_EXHAUSTED`` → :class:`DataSourceRateLimited`
-    - ``DEADLINE_EXCEEDED`` → :class:`DataSourceTimeout`
-    - ``UNAVAILABLE`` → :class:`DataSourceUnavailable`
+    - ``RESOURCE_EXHAUSTED`` → `DataSourceRateLimited`
+    - ``DEADLINE_EXCEEDED`` → `DataSourceTimeout`
+    - ``UNAVAILABLE`` → `DataSourceUnavailable`
 
     Returns ``None`` for any other code (caller decides; usually re-raise as a
     generic error). Returns ``None`` if no typed trailer is present so callers
@@ -425,6 +427,7 @@ class PriceResult:
             contributed to this result. Empty means the result is measured.
 
     Example:
+        ```python
         # Fresh price from live source
         result = PriceResult(
             price=Decimal("2500.50"),
@@ -442,6 +445,7 @@ class PriceResult:
             confidence=0.7,
             stale=True,
         )
+        ```
     """
 
     price: Decimal

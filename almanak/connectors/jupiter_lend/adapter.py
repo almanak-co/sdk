@@ -13,6 +13,7 @@ Key differences from Kamino:
 - API endpoint structure is Jupiter-specific
 
 Example:
+    ```python
     from almanak.connectors.jupiter_lend import JupiterLendAdapter, JupiterLendConfig
 
     config = JupiterLendConfig(wallet_address="your-solana-pubkey")
@@ -20,6 +21,7 @@ Example:
 
     intent = SupplyIntent(protocol="jupiter_lend", token="USDC", amount=Decimal("100"))
     bundle = adapter.compile_supply_intent(intent)
+    ```
 """
 
 import logging
@@ -72,11 +74,13 @@ class JupiterLendAdapter:
     from Jupiter Lend's REST API.
 
     Example:
+        ```python
         config = JupiterLendConfig(wallet_address="your-solana-pubkey")
         adapter = JupiterLendAdapter(config)
 
         intent = SupplyIntent(protocol="jupiter_lend", token="USDC", amount=Decimal("100"))
         bundle = adapter.compile_supply_intent(intent)
+        ```
     """
 
     def __init__(

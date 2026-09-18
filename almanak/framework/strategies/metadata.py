@@ -207,6 +207,7 @@ def almanak_strategy(
         Decorated class with STRATEGY_METADATA attribute
 
     Example:
+        ```python
         @almanak_strategy(
             name="mean_reversion_simple",
             description="RSI-based mean reversion strategy",
@@ -220,6 +221,7 @@ def almanak_strategy(
         )
         class MeanReversionStrategy(IntentStrategy):
             pass
+        ```
     """
     # Import here to avoid circular import
     from . import STRATEGY_REGISTRY

@@ -6,6 +6,7 @@ dataclass so that return interval, risk-free rate, annualization factor,
 and observation count are always explicit and unambiguous.
 
 Example:
+    ```python
     from almanak.framework.data.risk.metrics import PortfolioRiskCalculator
 
     calc = PortfolioRiskCalculator()
@@ -13,6 +14,7 @@ Example:
     print(f"Sharpe: {risk.sharpe_ratio:.2f}")
     print(f"VaR 95%: ${risk.var_95}")
     print(f"Max drawdown: {risk.max_drawdown:.2%}")
+    ```
 """
 
 from __future__ import annotations

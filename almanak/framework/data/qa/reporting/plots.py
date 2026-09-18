@@ -4,12 +4,14 @@ This module provides visualization capabilities for QA test results,
 including price charts and RSI indicator plots using matplotlib.
 
 Example:
+    ```python
     from almanak.framework.data.qa.reporting.plots import PlotGenerator
 
     generator = PlotGenerator(output_dir=Path("reports/qa-data/plots"))
     generator.create_price_plot("ETH", candles, "USD")
     generator.create_rsi_plot("ETH", rsi_history)
     generator.create_summary_grid([plot1, plot2, ...], rows=5, cols=2)
+    ```
 """
 
 import logging
@@ -79,6 +81,7 @@ class PlotGenerator:
         config: Plot styling configuration
 
     Example:
+        ```python
         generator = PlotGenerator(output_dir=Path("reports/qa-data/plots"))
 
         # Create price plot
@@ -88,6 +91,7 @@ class PlotGenerator:
         # Create RSI plot
         result = generator.create_rsi_plot("ETH", rsi_history)
         print(f"Saved to: {result.file_path}")
+        ```
     """
 
     def __init__(

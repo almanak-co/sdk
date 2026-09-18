@@ -7,6 +7,7 @@ Includes retry with exponential backoff and cached fallback for resilience
 against RPC rate limiting (VIB-1712).
 
 Example:
+    ```python
     from almanak.framework.data.balance.gateway_multichain import MultiChainGatewayBalanceProvider
 
     provider = MultiChainGatewayBalanceProvider(
@@ -15,6 +16,7 @@ Example:
         chains=["arbitrum", "base"],
     )
     balance = provider("USDC", "base")
+    ```
 """
 
 import logging

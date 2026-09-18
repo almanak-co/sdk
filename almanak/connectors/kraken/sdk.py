@@ -11,6 +11,7 @@ This is ported from the Enterprise codebase and adapted for stack-v2
 patterns (Pydantic v2, structlog, async-friendly design).
 
 Example:
+    ```python
     from almanak.connectors.kraken import KrakenSDK, KrakenCredentials
 
     credentials = KrakenCredentials.from_env()
@@ -31,6 +32,7 @@ Example:
 
     # Check status
     status = sdk.get_swap_status(txid, userref)
+    ```
 """
 
 import uuid
@@ -75,6 +77,7 @@ class KrakenSDK:
         or implement proper synchronization.
 
     Example:
+        ```python
         sdk = KrakenSDK(KrakenCredentials.from_env())
 
         # Get available balance
@@ -90,6 +93,7 @@ class KrakenSDK:
             decimals_in=6,
             userref=userref,
         )
+        ```
     """
 
     def __init__(

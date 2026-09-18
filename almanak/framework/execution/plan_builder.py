@@ -4,6 +4,7 @@ This module provides utilities for converting Intent objects and IntentSequences
 into PlanBundle/PlanStep structures for execution via PlanExecutor.
 
 Example:
+    ```python
     from almanak.framework.execution.plan_builder import PlanBuilder
 
     builder = PlanBuilder(deployment_id="my-strategy")
@@ -13,6 +14,7 @@ Example:
 
     # Or from an IntentSequence
     plan = builder.build_plan_from_sequence(intent_sequence)
+    ```
 """
 
 import logging
@@ -224,12 +226,14 @@ class PlanBuilder:
     that can be executed by PlanExecutor with proper state tracking.
 
     Example:
+        ```python
         builder = PlanBuilder(deployment_id="leverage-loop")
         plan = builder.build_plan_from_intents([
             Intent.swap(...),
             Intent.supply(...),
             Intent.borrow(...),
         ])
+        ```
     """
 
     def __init__(

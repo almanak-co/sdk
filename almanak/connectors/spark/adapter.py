@@ -12,6 +12,7 @@ Supported chains:
 - Ethereum
 
 Example:
+    ```python
     from almanak.connectors.spark import SparkAdapter, SparkConfig
 
     config = SparkConfig(
@@ -31,6 +32,7 @@ Example:
         asset="DAI",
         amount=Decimal("500"),
     )
+    ```
 """
 
 import logging
@@ -155,6 +157,7 @@ class SparkAdapter:
     Spark is an Aave V3 fork with the same ABI but different contract addresses.
 
     Example:
+        ```python
         config = SparkConfig(
             chain="ethereum",
             wallet_address="0x...",
@@ -166,6 +169,7 @@ class SparkAdapter:
 
         # Borrow WETH
         result = adapter.borrow("WETH", Decimal("0.5"))
+        ```
     """
 
     def __init__(self, config: SparkConfig, token_resolver: "TokenResolverType | None" = None) -> None:

@@ -168,11 +168,13 @@ class TheGraphIntegration(BaseIntegration):
     - query: Execute a GraphQL query on a subgraph
 
     Example:
+        ```python
         integration = TheGraphIntegration()
         result = await integration.query(
             subgraph_id="uniswap-v3-arbitrum",
             query="{ pools(first: 10) { id token0 { symbol } token1 { symbol } } }",
         )
+        ```
     """
 
     name = "thegraph"

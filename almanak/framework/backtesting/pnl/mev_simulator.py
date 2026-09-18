@@ -14,6 +14,7 @@ Key Features:
     - Gas price-based inclusion delay simulation
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.mev_simulator import (
         MEVSimulator,
         MEVSimulatorConfig,
@@ -36,6 +37,7 @@ Example:
     if result.is_sandwiched:
         print(f"MEV cost: ${result.mev_cost_usd}")
         print(f"Additional slippage: {result.additional_slippage_pct * 100:.2f}%")
+    ```
 """
 
 import logging
@@ -333,6 +335,7 @@ class MEVSimulator:
         _rng: Random number generator (seeded if config.random_seed is set)
 
     Example:
+        ```python
         simulator = MEVSimulator()
 
         result = simulator.simulate_mev_cost(
@@ -345,6 +348,7 @@ class MEVSimulator:
         if result.is_sandwiched:
             print(f"Trade was sandwiched!")
             print(f"MEV cost: ${result.mev_cost_usd}")
+        ```
     """
 
     config: MEVSimulatorConfig = field(default_factory=MEVSimulatorConfig)
@@ -706,11 +710,13 @@ def simulate_mev_cost(
         MEVSimulationResult with simulation outcome
 
     Example:
+        ```python
         result = simulate_mev_cost(
             trade_amount_usd=Decimal("50000"),
             token_in="WETH",
             token_out="USDC",
         )
+        ```
     """
     if config is None:
         config = MEVSimulatorConfig()

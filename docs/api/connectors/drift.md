@@ -12,9 +12,7 @@
 |-------|--------|-------------------|
 | [Solana](../../chains/solana.md) | SVM | ``PERP_CLOSE``, ``PERP_OPEN`` |
 
-## API Reference
-
 ::: almanak.connectors.drift
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

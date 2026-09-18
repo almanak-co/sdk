@@ -12,6 +12,7 @@ Supported chains:
 - Ethereum
 
 Example:
+    ```python
     from almanak.connectors.spark import SparkAdapter, SparkConfig
 
     config = SparkConfig(
@@ -37,6 +38,7 @@ Example:
 
     parser = SparkReceiptParser()
     result = parser.parse_receipt(receipt)
+    ```
 """
 
 from __future__ import annotations

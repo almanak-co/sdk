@@ -16,6 +16,7 @@ Supported Operations:
 - estimate_completion_time(): Get typical completion times
 
 Example:
+    ```python
     adapter = StargateBridgeAdapter()
 
     quote = adapter.get_quote(
@@ -26,6 +27,7 @@ Example:
     )
 
     tx = adapter.build_deposit_tx(quote, recipient="0x...")
+    ```
 """
 
 import logging
@@ -284,6 +286,7 @@ class StargateBridgeAdapter(BridgeAdapter):
     - Support for USDC, USDT, ETH across major chains
 
     Example:
+        ```python
         adapter = StargateBridgeAdapter()
 
         # Get quote
@@ -299,6 +302,7 @@ class StargateBridgeAdapter(BridgeAdapter):
 
         # Check status after deposit
         status = adapter.check_status(deposit_tx_hash)
+        ```
     """
 
     def __init__(self, config: StargateConfig | None = None, token_resolver: "TokenResolverType | None" = None) -> None:

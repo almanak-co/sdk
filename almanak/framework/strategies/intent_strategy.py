@@ -10,6 +10,7 @@ a decide() method that returns an Intent, and the framework handles:
 4. Providing market data through MarketSnapshot helper
 
 Example:
+    ```python
     from almanak.framework.market import MarketSnapshot
     from almanak.framework.strategies import IntentStrategy, almanak_strategy
     from almanak.framework.intents import Intent
@@ -25,6 +26,7 @@ Example:
             if market.price("ETH") < Decimal("2000"):
                 return Intent.swap("USDC", "ETH", amount_usd=Decimal("100"))
             return Intent.hold(reason="Price too high")
+    ```
 """
 
 import asyncio
@@ -215,12 +217,14 @@ class IntentStrategy(StrategyBase[ConfigT]):
     Subclasses must implement the abstract decide() method.
 
     Example:
+        ```python
         @almanak_strategy(name="simple_strategy")
         class SimpleStrategy(IntentStrategy):
             def decide(self, market: MarketSnapshot) -> DecideResult:
                 if market.rsi("ETH").is_oversold:
                     return Intent.swap("USDC", "ETH", amount_usd=Decimal("100"))
                 return Intent.hold()
+        ```
 
     Attributes:
         compiler: IntentCompiler for converting intents to action bundles
@@ -500,7 +504,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
     def validate_config(self) -> None:
         """Validate the strategy's configuration.
 
-        Lifecycle hook invoked automatically from :py:meth:`__init__` AFTER the
+        Lifecycle hook invoked automatically from `__init__` AFTER the
         config has been loaded (via ``super().__init__``) and BEFORE any other
         setup that depends on config (chain wiring, providers, state machine,
         etc.).
@@ -508,7 +512,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         Subclasses override this method to enforce preconditions on their
         configuration — required fields, value ranges, cross-field invariants,
         or any other invariant that must hold before the strategy is usable.
-        On failure, raise :py:class:`ConfigValidationError` with a clear
+        On failure, raise `ConfigValidationError` with a clear
         message and the offending ``field`` when applicable.
 
         This hook exists so tooling like the Portfolio Manager's ``strat check``
@@ -524,6 +528,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 applicable; otherwise ``None`` for cross-field errors.
 
         Example:
+            ```python
             from decimal import Decimal
             from almanak.framework.strategies.exceptions import ConfigValidationError
 
@@ -546,6 +551,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                             "rsi_oversold must be < rsi_overbought",
                             field="rsi_oversold",
                         )
+            ```
         """
         return None
 
@@ -660,7 +666,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
     def reconcile_resumed_state(self, market: MarketSnapshot) -> bool | None:
         """Reconcile resumed in-memory side-state against live on-chain truth.
 
-        Optional post-resume guardrail hook (VIB-5155 / ALM-2719). After the
+        Optional post-resume guardrail hook. After the
         runner restores persisted state via ``load_persistent_state`` it calls
         this hook ONCE, before the first ``decide()``, with a live market
         snapshot. A strategy that caches a position-side flag (e.g. "holding
@@ -695,8 +701,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
     def is_lifecycle_complete(self) -> bool:
         """Report whether the RESTORED lifecycle state is terminal.
 
-        Optional boot hook for the resume-into-terminal-state guard
-        (VIB-5887). ``deployment_id = sha256(wallet:chain)`` is deterministic,
+        Optional boot hook for the resume-into-terminal-state guard. ``deployment_id = sha256(wallet:chain)`` is deterministic,
         so redeploying onto the same wallet+chain RESUMES the prior run's
         persisted ``strategy_state``. If that prior state was terminal — a
         lifecycle strategy that finished (``SUPPLY→BORROW→REPAY→WITHDRAW``) or a
@@ -922,6 +927,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             Returning None is equivalent to returning Intent.hold().
 
         Example:
+            ```python
             def decide(self, market: MarketSnapshot) -> DecideResult:
                 # Single intent
                 if market.rsi("ETH").is_oversold:
@@ -943,6 +949,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
                 # No action
                 return Intent.hold(reason="RSI in neutral zone")
+            ```
         """
         pass
 
@@ -1151,21 +1158,21 @@ class IntentStrategy(StrategyBase[ConfigT]):
         VIB-4843 FR-5001: memoizes the snapshot per iteration so pre-warm →
         ``decide()`` → portfolio valuation all share ONE instance (and its
         typed price store). Reuse is keyed by the iteration token the runner
-        stamps via :meth:`begin_market_snapshot_iteration`.
+        stamps via `begin_market_snapshot_iteration`.
 
         Two invalidation regimes, never both:
 
         * **Iteration-token stamped** (the runner's per-iteration ``cycle_id``):
           the token IS the lifetime. The memo survives for the WHOLE iteration —
           pre-warm → decide() → portfolio valuation — regardless of wall-clock,
-          because :meth:`begin_market_snapshot_iteration` invalidates it the
+          because `begin_market_snapshot_iteration` invalidates it the
           moment the next iteration stamps a new token. Applying a TTL here would
           drop the warm typed price store mid-iteration on a slow ``decide()`` and
           defeat the dedup (the Codex VIB-4843 finding).
         * **No token stamped** (direct callers / tests): a short TTL bounds reuse
           so prices are never served stale across loops with no iteration scope.
 
-        Builds via :meth:`_build_market_snapshot`; see its docstring for the
+        Builds via `_build_market_snapshot`; see its docstring for the
         builder-contract details. Override ``_build_market_snapshot`` (not this
         method) to customize how market data is populated, so the memo still
         applies.
@@ -1209,7 +1216,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         VIB-4843: this is the per-iteration mint. The per-strategy OHLCV
         deduper cache is cleared HERE (not in the memoizing wrapper) so it
         resets exactly once per fresh snapshot — matching the per-iteration
-        lifetime of the ``_macd_cache`` / ``_atr_cache`` dicts (VIB-3783) —
+        lifetime of the ``_macd_cache`` / ``_atr_cache`` dicts —
         rather than on every cache-hit reuse within the same iteration.
         """
         # VIB-3783: clear the per-strategy OHLCV deduper cache at the start of
@@ -1624,6 +1631,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             - SadflowAction.skip(reason): Skip intent and mark as completed
 
         Example:
+            ```python
             def on_sadflow_enter(self, error_type, attempt, context):
                 # Abort immediately on insufficient funds
                 if error_type == "INSUFFICIENT_FUNDS":
@@ -1636,6 +1644,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
                 # Use default retry for other errors
                 return None
+            ```
         """
         return None
 
@@ -1683,6 +1692,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             value_confidence=UNAVAILABLE instead of $0.
 
         Example:
+            ```python
             def get_portfolio_snapshot(self, market=None) -> PortfolioSnapshot:
                 if market is None:
                     market = self.create_market_snapshot()
@@ -1693,7 +1703,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 # VIB-3614: total_value_usd is positions-only; idle CEX cash is
                 # uninvested buying power → available_cash_usd. NAV is reconstructed
                 # downstream as total_value_usd + available_cash_usd, so putting
-                # cex_balance in BOTH would double-count it (cf. VIB-5271). Model a
+                # cex_balance in BOTH would double-count it. Model a
                 # CEX holding as a PositionType.CEX position if it should count as
                 # deployed value instead of cash.
                 return PortfolioSnapshot(
@@ -1704,6 +1714,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                     value_confidence=ValueConfidence.ESTIMATED,
                     chain=self.chain,
                 )
+            ```
         """
         from ..portfolio.models import PortfolioSnapshot, PositionValue, TokenBalance, ValueConfidence
 
@@ -2157,6 +2168,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             TeardownPositionSummary with all current positions
 
         Example:
+            ```python
             from almanak.framework.teardown import TeardownPositionSummary, PositionInfo, PositionType
 
             def get_open_positions(self) -> TeardownPositionSummary:
@@ -2178,6 +2190,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                     timestamp=datetime.now(timezone.utc),
                     positions=positions,
                 )
+            ```
         """
         ...
 
@@ -2207,6 +2220,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             List of intents to execute in order
 
         Example:
+            ```python
             from almanak.framework.teardown import TeardownMode
 
             def generate_teardown_intents(self, mode: TeardownMode, market=None) -> list[AnyIntent]:
@@ -2237,6 +2251,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                 ))
 
                 return intents
+            ```
         """
         ...
 
@@ -2248,7 +2263,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         max_slippage: "Decimal | None" = None,
         vault_exit: "VaultExitPolicy | None" = None,
     ) -> "list[AnyIntent]":
-        """Build live-resolving "close fully" intents for KNOWN positions (VIB-5465).
+        """Build live-resolving "close fully" intents for KNOWN positions.
 
         Framework helper that lets a strategy stop hardcoding teardown exit
         sizes. Each KNOWN position (from ``get_open_positions()`` unless
@@ -2262,7 +2277,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         before submission. Resolution is **per-KNOWN-position**, NOT a wallet
         scan (Plan A).
 
-        Delegate from :meth:`generate_teardown_intents`::
+        Delegate from `generate_teardown_intents`::
 
             def generate_teardown_intents(self, mode, market=None):
                 return self.teardown_full_close_intents()
@@ -2312,7 +2327,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
         """Teardown enumeration reconciled against the ``position_registry`` WARM read path.
 
         VIB-5459 / TD-01 — the single WARM read path for cut-over LP. Wraps the
-        strategy's own :meth:`get_open_positions` (its authoritative,
+        strategy's own `get_open_positions` (its authoritative,
         primitive-complete enumeration) and reconciles the cut-over LP slice
         (UniV3 ``primitive='lp'`` + UniV4 ``primitive='lp_v4'``) against
         ``position_registry status='open'`` — the durable WARM source (SQLite
@@ -2345,9 +2360,11 @@ class IntentStrategy(StrategyBase[ConfigT]):
             mode: The teardown mode (SOFT or HARD)
 
         Example:
+            ```python
             def on_teardown_started(self, mode: TeardownMode) -> None:
                 logger.info(f"Teardown starting in {mode.value} mode")
                 self._pause_monitoring()
+            ```
         """
         pass
 
@@ -2361,11 +2378,13 @@ class IntentStrategy(StrategyBase[ConfigT]):
             recovered_usd: Total USD value recovered
 
         Example:
+            ```python
             def on_teardown_completed(self, success: bool, recovered_usd: Decimal) -> None:
                 if success:
                     logger.info(f"Teardown complete. Recovered ${recovered_usd:,.2f}")
                 else:
                     logger.error("Teardown failed - manual intervention required")
+            ```
         """
         pass
 
@@ -2383,6 +2402,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             TeardownProfile with strategy-specific metadata
 
         Example:
+            ```python
             from almanak.framework.teardown import TeardownAssetPolicy, TeardownProfile
 
             def get_teardown_profile(self) -> TeardownProfile:
@@ -2395,6 +2415,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
                     has_lp_positions=True,
                     preferred_asset_policy=TeardownAssetPolicy.KEEP_OUTPUTS,
                 )
+            ```
         """
         from almanak.framework.teardown import TeardownProfile
 
@@ -2585,12 +2606,14 @@ class IntentStrategy(StrategyBase[ConfigT]):
             total_attempts: Total number of attempts made (including the final one).
 
         Example:
+            ```python
             def on_sadflow_exit(self, success, total_attempts):
                 if success:
                     logger.info(f"Recovered after {total_attempts} attempts")
                 else:
                     logger.error(f"Failed after {total_attempts} attempts")
                     self.notify_operator("Intent failed after all retries")
+            ```
         """
         pass
 
@@ -2617,6 +2640,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
             - SadflowAction.skip(reason): Skip and mark as completed
 
         Example:
+            ```python
             def on_retry(self, context, action):
                 # After 2 attempts, try with higher gas
                 if context.attempt_number > 2 and context.action_bundle:
@@ -2629,6 +2653,7 @@ class IntentStrategy(StrategyBase[ConfigT]):
 
                 # Use default retry
                 return action
+            ```
         """
         return action
 

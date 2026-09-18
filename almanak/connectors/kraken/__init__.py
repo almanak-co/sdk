@@ -15,6 +15,7 @@ Key features:
 - Token/chain resolution for stack-v2 compatibility
 
 Example:
+    ```python
     from almanak.connectors.kraken import (
         KrakenAdapter,
         KrakenConfig,
@@ -62,6 +63,7 @@ Example:
 
     # Check status
     status = sdk.get_swap_status(txid, userref)
+    ```
 """
 
 from __future__ import annotations

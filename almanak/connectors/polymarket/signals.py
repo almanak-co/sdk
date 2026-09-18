@@ -12,6 +12,7 @@ Architecture:
     4. Strategies use the aggregated signal to inform trading decisions
 
 Example:
+    ```python
     from almanak.connectors.polymarket.signals import (
         SignalResult,
         SignalDirection,
@@ -31,6 +32,7 @@ Example:
     signal = provider.get_signal("market-123")
     if signal.direction == SignalDirection.BULLISH and signal.confidence > 0.6:
         # Execute buy
+    ```
 
 Implementing Custom Signal Providers:
     To create a custom signal provider, implement the PredictionSignal protocol:
@@ -145,12 +147,14 @@ class SignalResult:
         raw_score: Raw numerical score before directional interpretation
 
     Example:
+        ```python
         result = SignalResult(
             direction=SignalDirection.BULLISH,
             confidence=0.85,
             source="news_sentiment",
             metadata={"headline": "Positive developments..."}
         )
+        ```
     """
 
     direction: SignalDirection
@@ -215,12 +219,14 @@ class PredictionSignal(Protocol):
     The protocol is runtime-checkable, so isinstance() can be used.
 
     Example:
+        ```python
         class MyProvider:
             def get_signal(self, market_id: str, **kwargs) -> SignalResult:
                 return SignalResult(SignalDirection.BULLISH, 0.8)
 
         provider = MyProvider()
         assert isinstance(provider, PredictionSignal)  # True
+        ```
     """
 
     def get_signal(self, market_id: str, **kwargs) -> SignalResult:
@@ -257,11 +263,13 @@ class NewsAPISignalProvider:
         sentiment_threshold: Minimum sentiment score to generate a signal
 
     Example:
+        ```python
         provider = NewsAPISignalProvider(api_key="your-api-key")
         signal = provider.get_signal(
             "market-123",
             question="Will Bitcoin reach $100k by end of 2024?"
         )
+        ```
     """
 
     def __init__(
@@ -387,12 +395,14 @@ class SocialSentimentProvider:
         sentiment_model: Sentiment analysis approach to use
 
     Example:
+        ```python
         provider = SocialSentimentProvider(platforms=["twitter", "reddit"])
         signal = provider.get_signal(
             "market-123",
             topic="Bitcoin ETF approval",
             hashtags=["#Bitcoin", "#ETF"]
         )
+        ```
     """
 
     def __init__(
@@ -616,6 +626,7 @@ def aggregate_signals(
         Aggregated SignalResult
 
     Example:
+        ```python
         signals = [
             SignalResult(SignalDirection.BULLISH, 0.8, source="news"),
             SignalResult(SignalDirection.BULLISH, 0.6, source="social"),
@@ -624,6 +635,7 @@ def aggregate_signals(
         result = aggregate_signals(signals)
         # result.direction = BULLISH (2/3 agreement)
         # result.confidence = weighted average of confidences
+        ```
 
     Note:
         - Empty signals list returns neutral with 0.5 confidence
@@ -730,11 +742,13 @@ def combine_with_market_price(
         Adjusted SignalResult with edge metadata
 
     Example:
+        ```python
         signal = SignalResult(SignalDirection.BULLISH, 0.8)
         current_price = Decimal("0.50")  # Market thinks 50/50
         adjusted = combine_with_market_price(signal, current_price)
         # If signal says bullish with 80% confidence, implied prob ~65-70%
         # Edge = 0.65 - 0.50 = 0.15 (15% edge)
+        ```
     """
     # Convert signal confidence to implied probability
     if signal.direction == SignalDirection.BULLISH:

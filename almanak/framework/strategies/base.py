@@ -444,7 +444,7 @@ class StrategyBase[ConfigT: HotReloadableConfig](ABC):
 
     @property
     def allocation_usd(self) -> Decimal | None:
-        """Strategy's declared starting allocation in USD (VIB-3882).
+        """Strategy's declared starting allocation in USD.
 
         The runner's portfolio-baseline path uses this property to set
         ``portfolio_metrics.initial_value_usd``. When ``None``, the runner

@@ -4,6 +4,7 @@ This module provides a balance provider that can query balances across
 multiple blockchain networks, wrapping per-chain Web3BalanceProviders.
 
 Example:
+    ```python
     from almanak.gateway.data.balance import MultiChainWeb3BalanceProvider
 
     provider = MultiChainWeb3BalanceProvider(
@@ -17,6 +18,7 @@ Example:
     # Query USDC balance on Base
     result = provider.get_balance("USDC", "base")
     print(f"USDC on Base: {result.balance}")
+    ```
 """
 
 import asyncio

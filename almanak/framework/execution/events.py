@@ -12,6 +12,7 @@ All events are compatible with:
 - OperatorCard system from src/models/operator_card.py
 
 Example:
+    ```python
     from almanak.framework.execution.events import (
         ExecutionEventType,
         TransactionSentPayload,
@@ -40,6 +41,7 @@ Example:
         effective_price=Decimal("2000.00"),
         slippage_bps=25,
     )
+    ```
 """
 
 from dataclasses import dataclass, field
@@ -71,9 +73,11 @@ class ExecutionEventType(StrEnum):
     and compatibility with the TimelineEmitter pattern.
 
     Example:
+        ```python
         event_type = ExecutionEventType.TX_SENT
         print(event_type.value)  # "TX_SENT"
         print(event_type == "TX_SENT")  # True (str enum)
+        ```
     """
 
     # Validation phase
@@ -141,6 +145,7 @@ class TransactionSentPayload:
         nonce: Transaction nonce for the sender
 
     Example:
+        ```python
         payload = TransactionSentPayload(
             tx_hash="0x1234567890abcdef...",
             chain="arbitrum",
@@ -150,6 +155,7 @@ class TransactionSentPayload:
             gas_limit=150000,
             nonce=42,
         )
+        ```
     """
 
     tx_hash: str
@@ -201,6 +207,7 @@ class TransactionConfirmedPayload:
         logs: Event logs emitted by the transaction
 
     Example:
+        ```python
         payload = TransactionConfirmedPayload(
             tx_hash="0x1234567890abcdef...",
             block_number=12345678,
@@ -214,6 +221,7 @@ class TransactionConfirmedPayload:
                 }
             ],
         )
+        ```
     """
 
     tx_hash: str
@@ -265,6 +273,7 @@ class SwapResultPayload:
         slippage_bps: Actual slippage in basis points vs quoted price
 
     Example:
+        ```python
         payload = SwapResultPayload(
             token_in="USDC",
             token_out="WETH",
@@ -273,6 +282,7 @@ class SwapResultPayload:
             effective_price=Decimal("2000.00"),
             slippage_bps=25,  # 0.25% slippage
         )
+        ```
     """
 
     token_in: str
@@ -343,12 +353,14 @@ class ExecutionFailedPayload:
         - UNKNOWN_ERROR: Unclassified error
 
     Example:
+        ```python
         payload = ExecutionFailedPayload(
             error_type="NONCE_ERROR",
             error_message="Nonce too low: expected 43, got 42",
             recoverable=True,
             suggested_action="Retry with updated nonce",
         )
+        ```
     """
 
     error_type: str
@@ -504,6 +516,7 @@ class ExecutionEvent:
         metadata: Additional context
 
     Example:
+        ```python
         event = ExecutionEvent(
             event_type=ExecutionEventType.TX_SENT,
             timestamp=datetime.now(timezone.utc),
@@ -524,6 +537,7 @@ class ExecutionEvent:
             details=event.payload.to_dict(),
         )
         add_event(timeline_event)
+        ```
     """
 
     event_type: ExecutionEventType
@@ -599,8 +613,10 @@ def get_recovery_info(error_type: str) -> tuple[bool, str]:
         Tuple of (recoverable, suggested_action)
 
     Example:
+        ```python
         recoverable, action = get_recovery_info("NONCE_ERROR")
         # recoverable = True, action = "Retry with updated nonce"
+        ```
     """
     return ERROR_RECOVERY_MAP.get(error_type, (False, "Investigate error details"))
 

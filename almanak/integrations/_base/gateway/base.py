@@ -6,6 +6,7 @@ This module provides the foundation for third-party data source integrations:
 - IntegrationRegistry: Singleton registry for discovering integrations
 
 Example:
+    ```python
     class MyIntegration(BaseIntegration):
         name = "my_integration"
         rate_limit_requests = 100  # requests per minute
@@ -13,6 +14,7 @@ Example:
         async def health_check(self) -> bool:
             # Check if the integration is healthy
             return True
+    ```
 """
 
 import asyncio
@@ -120,10 +122,12 @@ class RateLimiter:
         bucket_size: Maximum tokens in bucket (defaults to requests_per_minute)
 
     Example:
+        ```python
         limiter = RateLimiter(requests_per_minute=60)
 
         # Before each request:
         await limiter.acquire()  # Blocks if rate limited
+        ```
     """
 
     def __init__(
@@ -244,6 +248,7 @@ class BaseIntegration(ABC):
     - health_check(): Health check method
 
     Example:
+        ```python
         class BinanceIntegration(BaseIntegration):
             name = "binance"
             rate_limit_requests = 1200
@@ -262,6 +267,7 @@ class BaseIntegration(ABC):
                     cache_key=f"ticker:{symbol}",
                     ttl=10,
                 )
+        ```
     """
 
     # Subclasses must define these
@@ -599,6 +605,7 @@ class IntegrationRegistry:
     Implemented as a singleton.
 
     Example:
+        ```python
         registry = IntegrationRegistry.get_instance()
 
         # Register integrations
@@ -610,6 +617,7 @@ class IntegrationRegistry:
 
         # Health check all integrations
         health = await registry.health_check_all()
+        ```
     """
 
     _instance: "IntegrationRegistry | None" = field(default=None, repr=False)

@@ -9,12 +9,12 @@ The streamlit-using ``render_*_section`` helpers are resolved lazily via
 RPC responses — do not transitively pay the cost of loading ``streamlit`` at
 package init. The gateway image strips ``streamlit`` (see
 ``deploy/docker/strip-list-gateway.txt``); an eager re-export here would
-``ModuleNotFoundError`` on every dashboard RPC in production (VIB-4048).
+``ModuleNotFoundError`` on every dashboard RPC in production.
 Regression guard: ``tests/gateway/test_imports_lean.py``.
 
 For strategy authors writing a ``dashboard/ui.py`` for their strategy,
 the recommended convention is to frame ``render_custom_dashboard()``
-with three section helpers (VIB-3969) so accounting is visually QA'able
+with three section helpers so accounting is visually QA'able
 locally and on the hosted platform from the same single-source code
 path:
 

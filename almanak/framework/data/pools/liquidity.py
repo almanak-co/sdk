@@ -7,6 +7,7 @@ All returns are wrapped in DataEnvelope with EXECUTION_GRADE classification
 (fail-closed semantics -- no off-chain fallback).
 
 Example:
+    ```python
     from almanak.framework.data.pools.liquidity import LiquidityDepthReader, SlippageEstimator
 
     reader = LiquidityDepthReader(rpc_call=my_rpc_fn)
@@ -19,6 +20,7 @@ Example:
         "WETH", "USDC", Decimal("10"), "arbitrum", protocol="uniswap_v3"
     )
     print(slip.value.price_impact_bps)
+    ```
 """
 
 from __future__ import annotations
@@ -1441,7 +1443,7 @@ class SlippageEstimator:
         direction on any RPC failure. Direction is only well-defined when
         exactly one of ``token_in`` / ``token_out`` equals token0; when neither
         or both match (unresolvable token, wrong pool, RPC failure) this raises
-        :class:`DataUnavailableError` so the estimate becomes unavailable rather
+        `DataUnavailableError` so the estimate becomes unavailable rather
         than being silently inverted.
         """
         from .reader import decode_address

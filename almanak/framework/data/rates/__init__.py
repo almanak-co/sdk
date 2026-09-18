@@ -12,6 +12,7 @@ Key Features:
     - Caching to minimize RPC calls
 
 Example:
+    ```python
     from almanak.framework.data.rates import RateMonitor, LendingRate, RateSide
 
     # Create rate monitor
@@ -36,6 +37,7 @@ Example:
     from almanak.framework.data.rates import RateHistoryReader
     reader = RateHistoryReader()
     envelope = reader.get_lending_rate_history("aave_v3", "USDC", "arbitrum", days=90)
+    ```
 """
 
 from .history import (

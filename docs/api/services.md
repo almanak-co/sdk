@@ -8,7 +8,7 @@ Detects when a strategy is stuck and unable to make progress.
 
 ::: almanak.framework.services.StuckDetector
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source
 
 ## EmergencyManager
@@ -17,7 +17,7 @@ Handles emergency scenarios like position unwinding.
 
 ::: almanak.framework.services.EmergencyManager
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source
 
 ## OperatorCardGenerator
@@ -26,7 +26,7 @@ Generates operator cards for strategy issues.
 
 ::: almanak.framework.services.OperatorCardGenerator
     options:
-      show_root_heading: true
+      heading_level: 2
 
 ## PredictionPositionMonitor
 
@@ -34,30 +34,22 @@ Monitors prediction market positions for resolution events.
 
 ::: almanak.framework.services.PredictionPositionMonitor
     options:
-      show_root_heading: true
+      heading_level: 2
 
 ## Models
 
-### StuckDetectionResult
-
 ::: almanak.framework.services.StuckDetectionResult
     options:
-      show_root_heading: true
-
-### StrategySnapshot
+      heading_level: 3
 
 ::: almanak.framework.services.StrategySnapshot
     options:
-      show_root_heading: true
-
-### EmergencyResult
+      heading_level: 3
 
 ::: almanak.framework.services.EmergencyResult
     options:
-      show_root_heading: true
-
-### FullPositionSummary
+      heading_level: 3
 
 ::: almanak.framework.services.FullPositionSummary
     options:
-      show_root_heading: true
+      heading_level: 3

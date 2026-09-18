@@ -12,6 +12,7 @@ Key Features:
     - Implements both OHLCVProvider and DataProvider protocols
 
 Example:
+    ```python
     from almanak.gateway.data.ohlcv.coingecko_onchain_provider import CoinGeckoOnchainOHLCVProvider
 
     provider = CoinGeckoOnchainOHLCVProvider()
@@ -20,6 +21,7 @@ Example:
     # Or via DataProvider protocol:
     envelope = provider.fetch(token="WETH", timeframe="1h", limit=100)
     candles = envelope.value
+    ```
 """
 
 from __future__ import annotations

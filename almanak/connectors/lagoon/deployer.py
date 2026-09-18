@@ -9,6 +9,7 @@ Prerequisites:
 - The factory's registry must have a default vault logic address
 
 Example:
+    ```python
     from almanak.connectors.lagoon.deployer import LagoonVaultDeployer, VaultDeployParams
 
     deployer = LagoonVaultDeployer(gateway_client)
@@ -23,6 +24,7 @@ Example:
         deployer_address="0x...",
     )
     tx = deployer.build_deploy_vault_tx(params)
+    ```
 """
 
 import json

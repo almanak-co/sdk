@@ -16,6 +16,7 @@ Each adapter implements four core methods:
     - should_rebalance: Determine if position needs rebalancing
 
 Example:
+    ```python
     from almanak.framework.backtesting.adapters.base import (
         StrategyBacktestAdapter,
         get_adapter,
@@ -32,6 +33,7 @@ Example:
     class CustomAdapter(StrategyBacktestAdapter):
         def execute_intent(self, intent, portfolio, market_state) -> SimulatedFill:
             ...
+    ```
 """
 
 import inspect
@@ -86,6 +88,7 @@ class StrategyBacktestConfig:
             requiring base class changes. Default empty dict.
 
     Example:
+        ```python
         # Create a basic config
         config = StrategyBacktestConfig(
             strategy_type="lp",
@@ -103,6 +106,7 @@ class StrategyBacktestConfig:
             strategy_type="lp",
             il_calculation_method="concentrated",
         )
+        ```
 
     Note:
         Subclasses should call super().__post_init__() if they override
@@ -214,11 +218,13 @@ class StrategyBacktestConfig:
             New configuration instance with updated values.
 
         Example:
+            ```python
             base_config = StrategyBacktestConfig(strategy_type="lp")
             debug_config = base_config.with_updates(
                 fee_tracking_enabled=False,
                 reconcile_on_tick=True,
             )
+            ```
         """
         current = self.to_dict()
         current.update(kwargs)
@@ -245,6 +251,7 @@ class StrategyBacktestAdapter(ABC):
         adapter_name: Unique identifier for this adapter (property)
 
     Example:
+        ```python
         class MyAdapter(StrategyBacktestAdapter):
             @property
             def adapter_name(self) -> str:
@@ -283,6 +290,7 @@ class StrategyBacktestAdapter(ABC):
             ) -> bool:
                 # Custom rebalance trigger logic
                 return False
+        ```
     """
 
     config_class: ClassVar[type[StrategyBacktestConfig]] = StrategyBacktestConfig
@@ -494,6 +502,7 @@ class AdapterRegistry:
     strategy type using `get` or `get_adapter`.
 
     Example:
+        ```python
         # Register via method
         AdapterRegistry.register("my_strategy", MyAdapter)
 
@@ -503,6 +512,7 @@ class AdapterRegistry:
 
         # Get all registered strategy types
         types = AdapterRegistry.list_strategy_types()
+        ```
     """
 
     # Class-level registry storage
@@ -622,9 +632,11 @@ def register_adapter(
         Class decorator
 
     Example:
+        ```python
         @register_adapter("my_strategy", description="My custom adapter")
         class MyAdapter(StrategyBacktestAdapter):
             ...
+        ```
     """
 
     def decorator(cls: type[StrategyBacktestAdapter]) -> type[StrategyBacktestAdapter]:
@@ -647,9 +659,11 @@ def get_adapter(strategy_type: str) -> StrategyBacktestAdapter | None:
         Instantiated adapter or None if not found
 
     Example:
+        ```python
         adapter = get_adapter("lp")
         if adapter:
             fill = adapter.execute_intent(intent, portfolio, market_state)
+        ```
     """
     adapter_class = AdapterRegistry.get(strategy_type)
     if adapter_class:
@@ -683,6 +697,7 @@ def get_adapter_with_config(
         Instantiated adapter or None if not found
 
     Example:
+        ```python
         from almanak.framework.backtesting.config import BacktestDataConfig
 
         data_config = BacktestDataConfig(
@@ -692,6 +707,7 @@ def get_adapter_with_config(
         adapter = get_adapter_with_config("lp", data_config=data_config, chain="ethereum")
         if adapter:
             fill = adapter.execute_intent(intent, portfolio, market_state)
+        ```
     """
     metadata = AdapterRegistry.get_metadata(strategy_type)
     if metadata is None:

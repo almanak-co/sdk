@@ -18,9 +18,7 @@
 | [Optimism](../../chains/optimism.md) | EVM | ``BRIDGE``, ``SWAP`` |
 | [Polygon](../../chains/polygon.md) | EVM | ``BRIDGE``, ``SWAP`` |
 
-## API Reference
-
 ::: almanak.connectors.lifi
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

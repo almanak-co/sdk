@@ -10,6 +10,7 @@ The runner is the main entry point for running strategies in production,
 handling the lifecycle from market data fetching through execution.
 
 Example:
+    ```python
     from almanak.framework.runner import StrategyRunner
     from almanak.framework.strategies import MomentumStrategy
 
@@ -26,6 +27,7 @@ Example:
 
     # Or run continuously
     await runner.run_loop(strategy, interval_seconds=60)
+    ```
 """
 
 import asyncio

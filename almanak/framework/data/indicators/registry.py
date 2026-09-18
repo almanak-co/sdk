@@ -6,6 +6,7 @@ This module provides a registry for technical indicators, enabling:
 - Runtime indicator lookup by name
 
 Example:
+    ```python
     from almanak.framework.data.indicators.registry import IndicatorRegistry
     from almanak.framework.data.indicators.rsi import RSICalculator
 
@@ -18,6 +19,7 @@ Example:
     # Get indicator class
     RSIClass = IndicatorRegistry.get("rsi")
     calculator = RSIClass(ohlcv_provider=provider)
+    ```
 """
 
 import logging
@@ -38,6 +40,7 @@ class IndicatorRegistry:
     acting as a singleton-like pattern for global indicator registration.
 
     Example:
+        ```python
         # Register an indicator
         IndicatorRegistry.register("rsi", RSICalculator)
         IndicatorRegistry.register("bollinger", BollingerBandsCalculator)
@@ -54,6 +57,7 @@ class IndicatorRegistry:
         # Check if an indicator is registered
         if IndicatorRegistry.has("macd"):
             MACDClass = IndicatorRegistry.get("macd")
+        ```
     """
 
     _indicators: dict[str, type] = {}
@@ -77,11 +81,13 @@ class IndicatorRegistry:
             ValueError: If name is already registered
 
         Example:
+            ```python
             IndicatorRegistry.register("rsi", RSICalculator, metadata={
                 "description": "Relative Strength Index",
                 "version": "1.0.0",
                 "category": "momentum",
             })
+            ```
         """
         name_lower = name.lower()
 
@@ -111,9 +117,11 @@ class IndicatorRegistry:
             The indicator class, or None if not found
 
         Example:
+            ```python
             RSIClass = IndicatorRegistry.get("rsi")
             if RSIClass:
                 calculator = RSIClass(ohlcv_provider=provider)
+            ```
         """
         return cls._indicators.get(name.lower())
 
@@ -137,8 +145,10 @@ class IndicatorRegistry:
             Sorted list of registered indicator names
 
         Example:
+            ```python
             indicators = IndicatorRegistry.list_all()
             # ['atr', 'bollinger', 'macd', 'rsi', 'stochastic']
+            ```
         """
         return sorted(cls._indicators.keys())
 
@@ -200,9 +210,11 @@ class IndicatorRegistry:
             Indicator instance, or None if not found
 
         Example:
+            ```python
             calculator = IndicatorRegistry.create("rsi", ohlcv_provider=provider)
             if calculator:
                 rsi = await calculator.calculate("WETH", timeframe="1h", period=14)
+            ```
         """
         indicator_class = cls.get(name)
         if indicator_class is None:

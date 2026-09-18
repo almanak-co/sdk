@@ -12,9 +12,7 @@
 |-------|--------|-------------------|
 | [Hyperevm](../../chains/hyperevm.md) | EVM | ``PERP_CLOSE``, ``PERP_OPEN``, ``PERP_WITHDRAW`` |
 
-## API Reference
-
 ::: almanak.connectors.hyperliquid
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

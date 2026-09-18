@@ -8,61 +8,45 @@ Factory class for creating intents.
 
 ::: almanak.framework.intents.Intent
     options:
-      show_root_heading: true
-
-## IntentType
+      heading_level: 2
+      filters:
+        - "!^_" # keep the generic serialize/deserialize dispatchers; only the per-model copies below are suppressed
 
 ::: almanak.framework.intents.IntentType
     options:
-      show_root_heading: true
-
-## HoldIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.HoldIntent
     options:
-      show_root_heading: true
-
-## SwapIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.SwapIntent
     options:
-      show_root_heading: true
-
-## LPOpenIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.LPOpenIntent
     options:
-      show_root_heading: true
-
-## LPCloseIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.LPCloseIntent
     options:
-      show_root_heading: true
-
-## CollectFeesIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.CollectFeesIntent
     options:
-      show_root_heading: true
-
-## BorrowIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.BorrowIntent
     options:
-      show_root_heading: true
-
-## RepayIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.RepayIntent
     options:
-      show_root_heading: true
-
-## SupplyIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.SupplyIntent
     options:
-      show_root_heading: true
+      heading_level: 2
 
 ### Exact Pool / Comet binding
 
@@ -92,110 +76,74 @@ intent = Intent.supply(
 )
 ```
 
-## WithdrawIntent
-
 ::: almanak.framework.intents.WithdrawIntent
     options:
-      show_root_heading: true
-
-## DeleverageIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.DeleverageIntent
     options:
-      show_root_heading: true
-
-## FlashLoanIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.FlashLoanIntent
     options:
-      show_root_heading: true
-
-## PerpOpenIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.PerpOpenIntent
     options:
-      show_root_heading: true
-
-## PerpCloseIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.PerpCloseIntent
     options:
-      show_root_heading: true
-
-## StakeIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.StakeIntent
     options:
-      show_root_heading: true
-
-## UnstakeIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.UnstakeIntent
     options:
-      show_root_heading: true
-
-## BridgeIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.BridgeIntent
     options:
-      show_root_heading: true
-
-## WrapNativeIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.WrapNativeIntent
     options:
-      show_root_heading: true
-
-## UnwrapNativeIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.UnwrapNativeIntent
     options:
-      show_root_heading: true
-
-## VaultDepositIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.VaultDepositIntent
     options:
-      show_root_heading: true
-
-## VaultRedeemIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.VaultRedeemIntent
     options:
-      show_root_heading: true
-
-## PredictionBuyIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.PredictionBuyIntent
     options:
-      show_root_heading: true
-
-## PredictionSellIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.PredictionSellIntent
     options:
-      show_root_heading: true
-
-## PredictionRedeemIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.PredictionRedeemIntent
     options:
-      show_root_heading: true
-
-## EnsureBalanceIntent
+      heading_level: 2
 
 ::: almanak.framework.intents.EnsureBalanceIntent
     options:
-      show_root_heading: true
-
-## IntentSequence
+      heading_level: 2
 
 ::: almanak.framework.intents.IntentSequence
     options:
-      show_root_heading: true
-
-## ChainedAmount
+      heading_level: 2
 
 ::: almanak.framework.intents.ChainedAmount
     options:
-      show_root_heading: true
+      heading_level: 2

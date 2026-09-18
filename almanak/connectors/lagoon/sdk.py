@@ -12,10 +12,12 @@ Supported operations:
 - Build unsigned transactions for vault write operations (propose, settle)
 
 Example:
+    ```python
     from almanak.connectors.lagoon.sdk import LagoonVaultSDK
 
     sdk = LagoonVaultSDK(gateway_client, chain="ethereum")
     total = sdk.get_total_assets("0xVaultAddress")
+    ```
 """
 
 import json

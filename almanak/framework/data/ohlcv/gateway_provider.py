@@ -86,6 +86,7 @@ class GatewayOHLCVProvider:
     and longer for historical data (1h+).
 
     Example:
+        ```python
         from almanak.framework.gateway_client import GatewayClient
         from almanak.framework.data.ohlcv.gateway_provider import GatewayOHLCVProvider
 
@@ -93,6 +94,7 @@ class GatewayOHLCVProvider:
             provider = GatewayOHLCVProvider(gateway_client=client)
             candles = await provider.get_ohlcv("WETH", timeframe="1h", limit=100)
             print(f"Got {len(candles)} candles")
+        ```
     """
 
     _SUPPORTED_TIMEFRAMES: ClassVar[tuple[OHLCVTimeframe, ...]] = BINANCE_OHLCV_TIMEFRAMES.supported

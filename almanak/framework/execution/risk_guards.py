@@ -12,6 +12,7 @@ intents before execution. It enforces risk limits across chains including:
 - Bridge protocol allowlist enforcement
 
 Example:
+    ```python
     from almanak.framework.execution.risk_guards import CrossChainRiskGuard, CrossChainRiskConfig
 
     config = CrossChainRiskConfig(
@@ -27,6 +28,7 @@ Example:
 
     if not result.passed:
         print(f"Risk check failed: {result.violations}")
+    ```
 """
 
 import logging
@@ -364,6 +366,7 @@ class CrossChainRiskGuard:
     - Total and per-chain exposure limits
 
     Example:
+        ```python
         guard = CrossChainRiskGuard(config)
 
         # Validate a single intent
@@ -375,6 +378,7 @@ class CrossChainRiskGuard:
         if not result.passed:
             for violation in result.violations:
                 print(f"{violation.rule}: {violation.message}")
+        ```
     """
 
     def __init__(self, config: CrossChainRiskConfig | None = None) -> None:

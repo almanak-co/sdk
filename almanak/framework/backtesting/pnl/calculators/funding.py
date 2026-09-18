@@ -15,6 +15,7 @@ How Funding Works:
     - Payment = position_value * (current_funding_index - entry_funding_index)
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.calculators.funding import (
         FundingRateHandler,
         FundingCalculator,
@@ -38,6 +39,7 @@ Example:
         time_delta_hours=Decimal("24"),  # 24 hours
     )
     # result.payment = funding amount (positive = received, negative = paid)
+    ```
 
 References:
     - GMX V2 Funding: https://docs.gmx.io/docs/trading/v2#funding-fees
@@ -114,6 +116,7 @@ class FundingRateHandler:
         max_funding_rate: Maximum absolute funding rate cap (default 0.01 = 1%)
 
     Example:
+        ```python
         handler = FundingRateHandler()
 
         # For a long position when funding rate is positive
@@ -133,6 +136,7 @@ class FundingRateHandler:
             position_value_usd=Decimal("50000"),
         )
         # payment = +50000 * (0.002 - 0.001) = +$50 (received)
+        ```
     """
 
     default_funding_rate: Decimal = DEFAULT_FUNDING_FALLBACK_RATE
@@ -195,6 +199,7 @@ class FundingRateHandler:
             ValueError: If position is not a perpetual position
 
         Example:
+            ```python
             # Long position, funding index increased (longs pay shorts)
             long = SimulatedPosition.perp_long(
                 token="ETH",
@@ -219,6 +224,7 @@ class FundingRateHandler:
                 position_value_usd=Decimal("50000"),
             )
             # payment = +$50 (shorts receive when index increases)
+            ```
         """
         # Validate position type
         if position.position_type not in (PositionType.PERP_LONG, PositionType.PERP_SHORT):
@@ -293,6 +299,7 @@ class FundingRateHandler:
             Estimated funding payment in USD over the period
 
         Example:
+            ```python
             # Estimate 24 hours of funding for a $50,000 long position
             # at 0.01% hourly funding rate
             est = handler.estimate_funding_for_period(
@@ -301,6 +308,7 @@ class FundingRateHandler:
                 funding_rate=Decimal("0.0001"),
             )
             # est = -50000 * 0.0001 * 24 = -$120 (long pays ~$120 over 24h)
+            ```
         """
         # Validate position type
         if position.position_type not in (PositionType.PERP_LONG, PositionType.PERP_SHORT):
@@ -379,6 +387,7 @@ class FundingCalculator:
         max_funding_rate: Maximum funding rate cap
 
     Example:
+        ```python
         calculator = FundingCalculator()
 
         # Calculate funding for a 24-hour period
@@ -391,6 +400,7 @@ class FundingCalculator:
 
         # Apply funding to position and update cumulative fields
         calculator.apply_funding_to_position(position, result)
+        ```
     """
 
     funding_rate_source: FundingRateSource = FundingRateSource.FIXED
@@ -439,6 +449,7 @@ class FundingCalculator:
             ValueError: If position is not a perpetual position
 
         Example:
+            ```python
             # Long position with 0.01% hourly funding rate over 24 hours
             result = calculator.calculate_funding_payment(
                 position=long_position,
@@ -446,6 +457,7 @@ class FundingCalculator:
                 time_delta_hours=Decimal("24"),
             )
             # result.payment = -$120 for a $50,000 position (long pays)
+            ```
         """
         # Validate position type
         if position.position_type not in (PositionType.PERP_LONG, PositionType.PERP_SHORT):
@@ -513,9 +525,11 @@ class FundingCalculator:
             result: The funding payment result from calculate_funding_payment
 
         Example:
+            ```python
             result = calculator.calculate_funding_payment(position, rate, hours)
             calculator.apply_funding_to_position(position, result)
             # Position's funding fields are now updated
+            ```
         """
         # Update accumulated funding (net balance)
         position.accumulated_funding += result.payment

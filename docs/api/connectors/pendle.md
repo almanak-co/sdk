@@ -13,9 +13,7 @@
 | [Arbitrum](../../chains/arbitrum.md) | EVM | ``LP_CLOSE``, ``LP_OPEN``, ``SWAP``, ``WITHDRAW`` |
 | [Ethereum](../../chains/ethereum.md) | EVM | ``LP_CLOSE``, ``LP_OPEN``, ``SWAP``, ``WITHDRAW`` |
 
-## API Reference
-
 ::: almanak.connectors.pendle
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

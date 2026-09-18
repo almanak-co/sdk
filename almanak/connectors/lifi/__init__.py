@@ -13,6 +13,7 @@ Supports both cross-chain bridges and same-chain swaps. Uses standard ERC-20
 approvals (no Permit2 needed).
 
 Example:
+    ```python
     from almanak.connectors.lifi import LiFiClient, LiFiAdapter, LiFiConfig
 
     config = LiFiConfig(chain_id=42161, wallet_address="0x...")
@@ -37,6 +38,7 @@ Example:
         from_amount="1000000000",
         from_address="0x...",
     )
+    ```
 """
 
 from __future__ import annotations

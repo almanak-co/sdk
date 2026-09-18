@@ -18,6 +18,7 @@ Liquidation Price Formulas:
         liq_price = entry_price * (1 + (1 / leverage) - maintenance_margin)
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.calculators.liquidation import (
         LiquidationCalculator,
     )
@@ -32,6 +33,7 @@ Example:
         is_long=True,
     )
     # liq_price = 2000 * (1 - 0.2 + 0.05) = 2000 * 0.85 = $1700
+    ```
 
 References:
     - GMX V2 Liquidation: https://docs.gmx.io/docs/trading/v2#liquidation
@@ -101,6 +103,7 @@ class LiquidationCalculator:
         protocol_margins: Protocol-specific maintenance margin rates
 
     Example:
+        ```python
         calculator = LiquidationCalculator()
 
         # Calculate liquidation price for a 10x long
@@ -119,6 +122,7 @@ class LiquidationCalculator:
         )
         if warning:
             print(warning.message)  # Emits warning if within threshold
+        ```
     """
 
     default_maintenance_margin: Decimal = Decimal("0.05")  # 5%
@@ -170,6 +174,7 @@ class LiquidationCalculator:
             ValueError: If leverage is less than or equal to 0
 
         Example:
+            ```python
             # 5x long position with 5% maintenance margin
             liq_price = calc.calculate_liquidation_price(
                 entry_price=Decimal("2000"),
@@ -187,6 +192,7 @@ class LiquidationCalculator:
                 is_long=False,
             )
             # liq_price = 2000 * (1 + 0.1 - 0.05) = 2000 * 1.05 = $2100
+            ```
         """
         if leverage <= Decimal("0"):
             raise ValueError(f"Leverage must be greater than 0, got {leverage}")
@@ -230,9 +236,11 @@ class LiquidationCalculator:
             The liquidation price, or None if not a perpetual position
 
         Example:
+            ```python
             liq_price = calc.calculate_liquidation_price_for_position(
                 position=perp_long_position,
             )
+            ```
         """
         if position.position_type not in _PERP_POSITION_TYPES:
             return None
@@ -259,9 +267,11 @@ class LiquidationCalculator:
             maintenance_margin: Override maintenance margin (uses protocol default if None)
 
         Example:
+            ```python
             # After position parameters change
             calc.update_position_liquidation_price(position)
             # position.liquidation_price is now updated
+            ```
         """
         liq_price = self.calculate_liquidation_price_for_position(position, maintenance_margin)
         if liq_price is not None:
@@ -292,12 +302,14 @@ class LiquidationCalculator:
             LiquidationWarning if within threshold, None otherwise
 
         Example:
+            ```python
             warning = calc.check_liquidation_proximity(
                 position=long_position,
                 current_price=Decimal("1750"),  # Close to $1700 liquidation
             )
             if warning:
                 print(warning.message)  # "[WARNING] Position ... is 2.9% from liquidation"
+            ```
         """
         liq_price = self._liquidation_price_for_warning(position)
         if liq_price is None:
@@ -403,6 +415,7 @@ class LiquidationCalculator:
             Maximum leverage that keeps liquidation below stop loss
 
         Example:
+            ```python
             # What leverage can I use with a 10% stop loss?
             max_leverage = calc.estimate_safe_leverage(
                 entry_price=Decimal("2000"),
@@ -410,6 +423,7 @@ class LiquidationCalculator:
                 is_long=True,
             )
             # max_leverage ≈ 8x (liquidation at ~$1750, below $1800 stop)
+            ```
         """
         margin = self.default_maintenance_margin if maintenance_margin is None else maintenance_margin
 

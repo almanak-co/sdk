@@ -185,7 +185,7 @@ def _resolve_ltv(session_state: dict[str, Any]) -> float | None:
     it from the USD collateral/borrow values already present. Returns ``None``
     when there is no measured collateral — the render path shows an explicit
     "unavailable" rather than a fabricated ratio. Never substitutes a
-    placeholder such as ``0.5`` (ALM-2789).
+    placeholder such as ``0.5``.
     """
     explicit = _decimal_or_none(session_state.get("ltv"))
     if explicit is not None:
@@ -197,7 +197,7 @@ def _resolve_ltv(session_state: dict[str, Any]) -> float | None:
 
 
 def _resolve_health_factor(session_state: dict[str, Any]) -> float | None:
-    """Authoritative health factor, or ``None`` when unmeasured (ALM-2789).
+    """Authoritative health factor, or ``None`` when unmeasured.
 
     Never substitutes a placeholder ``2.0``. A missing health factor with no
     debt is surfaced by the caller as "no liquidation risk", distinct from a

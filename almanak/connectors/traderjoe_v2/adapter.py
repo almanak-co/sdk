@@ -20,6 +20,7 @@ Supported chains:
 - Ethereum (Chain ID: 1)
 
 Example:
+    ```python
     from almanak.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
 
     config = TraderJoeV2Config(
@@ -45,6 +46,7 @@ Example:
         bin_step=20,
         slippage_bps=50,
     )
+    ```
 """
 
 import logging
@@ -267,6 +269,7 @@ class TraderJoeV2Adapter:
     transaction building internally.
 
     Example:
+        ```python
         config = TraderJoeV2Config(
             chain="avalanche",
             wallet_address="0x...",
@@ -279,6 +282,7 @@ class TraderJoeV2Adapter:
 
         # Execute swap
         result = adapter.swap_exact_input("WAVAX", "USDC", Decimal("1.0"), bin_step=20)
+        ```
     """
 
     def __init__(self, config: TraderJoeV2Config, token_resolver: "TokenResolverType | None" = None) -> None:

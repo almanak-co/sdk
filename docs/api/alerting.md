@@ -2,71 +2,51 @@
 
 Alert management with Slack and Telegram channels, cooldown tracking, and escalation policies.
 
-## AlertManager
-
 ::: almanak.framework.alerting.AlertManager
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source
-
-## GatewayAlertManager
 
 ::: almanak.framework.alerting.GatewayAlertManager
     options:
-      show_root_heading: true
+      heading_level: 2
 
 ## Channels
 
-### SlackChannel
-
 ::: almanak.framework.alerting.SlackChannel
     options:
-      show_root_heading: true
-
-### TelegramChannel
+      heading_level: 3
 
 ::: almanak.framework.alerting.TelegramChannel
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Configuration
 
-### AlertConfig
-
 ::: almanak.framework.alerting.AlertConfig
     options:
-      show_root_heading: true
-
-### AlertRule
+      heading_level: 3
 
 ::: almanak.framework.alerting.AlertRule
     options:
-      show_root_heading: true
-
-### AlertChannel
+      heading_level: 3
 
 ::: almanak.framework.alerting.AlertChannel
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Escalation
 
-### EscalationPolicy
-
 ::: almanak.framework.alerting.EscalationPolicy
     options:
-      show_root_heading: true
-
-### EscalationLevel
+      heading_level: 3
 
 ::: almanak.framework.alerting.EscalationLevel
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Results
 
-### AlertSendResult
-
 ::: almanak.framework.alerting.AlertSendResult
     options:
-      show_root_heading: true
+      heading_level: 3

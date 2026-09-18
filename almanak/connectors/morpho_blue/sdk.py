@@ -10,6 +10,7 @@ The SDK handles direct RPC interactions, allowing the adapter to focus
 on business logic and transaction building.
 
 Example:
+    ```python
     from almanak.connectors.morpho_blue.sdk import MorphoBlueSDK
 
     sdk = MorphoBlueSDK(chain="ethereum")
@@ -22,6 +23,7 @@ Example:
 
     # Discover all markets
     markets = sdk.discover_markets()
+    ```
 """
 
 import logging
@@ -316,6 +318,7 @@ class MorphoBlueSDK:
     It uses raw calldata encoding for efficiency and minimal dependencies.
 
     Example:
+        ```python
         sdk = MorphoBlueSDK(chain="ethereum")
 
         # Get user position
@@ -329,6 +332,7 @@ class MorphoBlueSDK:
 
         # Discover markets
         market_ids = sdk.discover_markets()
+        ```
     """
 
     def __init__(

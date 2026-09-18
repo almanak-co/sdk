@@ -7,6 +7,7 @@ Also provides Instrument, a canonical identifier for trading pairs that avoids
 CEX/DEX symbol confusion across all data methods.
 
 Example:
+    ```python
     from datetime import UTC, datetime
 
     from almanak import DataFinality
@@ -31,6 +32,7 @@ Example:
     from almanak.framework.data.models import Instrument, resolve_instrument
     inst = Instrument(base="WETH", quote="USDC", chain="arbitrum")
     inst = resolve_instrument("WETH/USDC", "arbitrum")
+    ```
 """
 
 from __future__ import annotations
@@ -71,7 +73,7 @@ class DataMeta:
         block_number: On-chain block number (None for off-chain data).
         finality: Typed block/data finality level. Historical exact strings are
             parsed for runtime compatibility; internal callers use
-            :class:`DataFinality`.
+            `DataFinality`.
         staleness_ms: Milliseconds since the value was observed.
         latency_ms: Milliseconds between request and response.
         confidence: 0.0 (unreliable) to 1.0 (fully confident).
@@ -128,6 +130,7 @@ class DataEnvelope[T]:
     doesn't exist on DataEnvelope itself is forwarded to ``self.value``.
 
     Example:
+        ```python
         @dataclass
         class PoolPrice:
             price: Decimal
@@ -136,6 +139,7 @@ class DataEnvelope[T]:
         envelope = DataEnvelope(value=PoolPrice(price=Decimal("1800"), tick=200), meta=meta)
         envelope.price  # -> Decimal("1800")  (delegated to value)
         envelope.meta   # -> DataMeta(...)     (own attribute)
+        ```
     """
 
     value: T

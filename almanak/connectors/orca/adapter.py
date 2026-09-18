@@ -4,6 +4,7 @@ Converts LP intents (LPOpenIntent, LPCloseIntent) to executable Solana
 transactions using the Orca Whirlpools program.
 
 Example:
+    ```python
     config = OrcaConfig(wallet_address="your-solana-pubkey")
     adapter = OrcaAdapter(config)
 
@@ -16,6 +17,7 @@ Example:
         protocol="orca_whirlpools",
     )
     bundle = adapter.compile_lp_open_intent(intent)
+    ```
 """
 
 from __future__ import annotations

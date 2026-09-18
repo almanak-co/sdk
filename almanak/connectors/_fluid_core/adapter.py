@@ -13,6 +13,7 @@ VIB-5028 §V4). LP support returns via SmartLending / smart vaults in
 Phase 4 (VIB-5032).
 
 Example:
+    ```python
     from almanak.connectors._fluid_core import FluidAdapter, FluidConfig
 
     config = FluidConfig(
@@ -21,6 +22,7 @@ Example:
         rpc_url="https://...",
     )
     adapter = FluidAdapter(config)
+    ```
 """
 
 import logging

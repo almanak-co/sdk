@@ -15,6 +15,7 @@ Key Components:
     - PlanBundle: Dataclass representing a complete execution plan
 
 Example:
+    ```python
     from almanak.framework.execution.plan import (
         PlanBundle,
         PlanStep,
@@ -45,6 +46,7 @@ Example:
         plan_id="plan-001",
         steps=[step1, step2],
     )
+    ```
 """
 
 import hashlib

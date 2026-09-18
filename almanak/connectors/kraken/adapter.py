@@ -4,6 +4,7 @@ Converts stack-v2 intents into ActionBundles for CEX execution.
 Integrates with the unified intent system using the `venue` parameter.
 
 Example:
+    ```python
     from almanak.connectors.kraken import KrakenAdapter
     from almanak.framework.intents.vocabulary import SwapIntent
 
@@ -17,6 +18,7 @@ Example:
         venue="kraken",
     )
     bundle = adapter.compile_intent(intent, context)
+    ```
 """
 
 from dataclasses import dataclass, field
@@ -190,6 +192,7 @@ class KrakenAdapter:
     CEX actions with validation.
 
     Example:
+        ```python
         adapter = KrakenAdapter(config, sdk)
 
         # Compile swap intent
@@ -203,6 +206,7 @@ class KrakenAdapter:
 
         # Execute (handled by orchestrator)
         result = await adapter.execute_action(bundle.actions[0], context)
+        ```
     """
 
     def __init__(

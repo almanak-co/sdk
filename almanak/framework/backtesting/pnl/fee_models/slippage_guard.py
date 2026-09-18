@@ -12,6 +12,7 @@ Key Features:
     - Confidence tracking for slippage calculations based on data source
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.fee_models.slippage_guard import (
         SlippageGuard,
         SlippageGuardConfig,
@@ -60,6 +61,7 @@ Example:
         pool_type="v3",
     )
     print(f"Slippage: {slippage_result.slippage_pct}%, Confidence: {slippage_result.confidence}")
+    ```
 """
 
 from __future__ import annotations
@@ -300,6 +302,7 @@ class SlippageGuard:
         config: Configuration for slippage thresholds and behavior
 
     Example:
+        ```python
         guard = SlippageGuard()
 
         # Basic check with just estimated slippage
@@ -320,6 +323,7 @@ class SlippageGuard:
 
         if result.was_capped:
             print(f"Slippage capped from {result.original_slippage} to {result.capped_slippage}")
+        ```
     """
 
     config: SlippageGuardConfig = field(default_factory=SlippageGuardConfig)
@@ -824,6 +828,7 @@ class HistoricalSlippageModel:
         config: Configuration for slippage calculation behavior.
 
     Example:
+        ```python
         from almanak.framework.backtesting.pnl.fee_models.slippage_guard import (
             HistoricalSlippageModel,
             SlippageModelConfig,
@@ -856,6 +861,7 @@ class HistoricalSlippageModel:
             historical_liquidity=None,
             pool_type="v2",
         )
+        ```
     """
 
     def __init__(self, config: SlippageModelConfig | None = None) -> None:
@@ -897,6 +903,7 @@ class HistoricalSlippageModel:
             HistoricalSlippageResult with slippage, confidence, and source info.
 
         Example:
+            ```python
             result = model.calculate_slippage(
                 trade_amount_usd=Decimal("100000"),
                 historical_liquidity=liquidity_result,
@@ -904,6 +911,7 @@ class HistoricalSlippageModel:
             )
             if result.was_fallback:
                 logger.warning("Using fallback slippage calculation")
+            ```
         """
         # Normalize pool type and trade amount
         trade_amount_usd = abs(trade_amount_usd)
@@ -1175,6 +1183,7 @@ def check_trade_slippage(
         SlippageCheckResult with capped slippage and any warnings
 
     Example:
+        ```python
         result = check_trade_slippage(
             trade_amount_usd=Decimal("50000"),
             estimated_slippage=Decimal("0.08"),
@@ -1182,6 +1191,7 @@ def check_trade_slippage(
             token_in="ETH",
             token_out="USDC",
         )
+        ```
     """
     config = SlippageGuardConfig(
         max_slippage_pct=max_slippage_pct,

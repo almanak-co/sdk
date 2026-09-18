@@ -15,6 +15,7 @@ Key Features:
     - Trade sequence tracking for post-execution analysis
 
 Example:
+    ```python
     from almanak.framework.backtesting.adapters.arbitrage_adapter import (
         ArbitrageBacktestAdapter,
         ArbitrageBacktestConfig,
@@ -33,6 +34,7 @@ Example:
 
     # Use in backtesting
     fill = adapter.execute_intent(intent, portfolio, market_state)
+    ```
 """
 
 import logging
@@ -253,6 +255,7 @@ class ArbitrageBacktestConfig(StrategyBacktestConfig):
             Default None (random).
 
     Example:
+        ```python
         config = ArbitrageBacktestConfig(
             strategy_type="arbitrage",
             mev_simulation_enabled=True,
@@ -260,6 +263,7 @@ class ArbitrageBacktestConfig(StrategyBacktestConfig):
             execution_delay_seconds=0.5,
             max_hops=4,
         )
+        ```
     """
 
     mev_simulation_enabled: bool = False
@@ -392,6 +396,7 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
         config: Arbitrage-specific configuration (optional)
 
     Example:
+        ```python
         # With config
         config = ArbitrageBacktestConfig(
             strategy_type="arbitrage",
@@ -412,6 +417,7 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
             ],
             initial_amount=Decimal("10000"),
         )
+        ```
     """
 
     config_class = ArbitrageBacktestConfig
@@ -959,6 +965,7 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
             ArbitrageExecutionResult with detailed breakdown of each step
 
         Example:
+            ```python
             result = adapter.calculate_cumulative_slippage(
                 hops=[
                     ("USDC", "WETH", Decimal("0.003")),  # 0.3% slippage
@@ -968,6 +975,7 @@ class ArbitrageBacktestAdapter(StrategyBacktestAdapter):
                 initial_amount=Decimal("10000"),
                 initial_amount_usd=Decimal("10000"),
             )
+            ```
         """
         if not hops or initial_amount <= 0:
             return self._empty_execution_result(initial_amount)

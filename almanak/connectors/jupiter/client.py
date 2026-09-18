@@ -8,6 +8,7 @@ An API key is required (free keys available at https://portal.jup.ag).
 Set via JUPITER_API_KEY env var or pass to JupiterConfig.
 
 Example:
+    ```python
     from almanak.connectors.jupiter import JupiterClient, JupiterConfig
 
     config = JupiterConfig(
@@ -26,6 +27,7 @@ Example:
 
     # Get a swap transaction
     swap_tx = client.get_swap_transaction(quote, user_public_key="your-pubkey")
+    ```
 """
 
 import logging
@@ -94,6 +96,7 @@ class JupiterClient:
     An API key is required (free keys at https://portal.jup.ag).
 
     Example:
+        ```python
         config = JupiterConfig(
             wallet_address="your-solana-wallet-pubkey",
             api_key="your-jupiter-api-key",
@@ -106,6 +109,7 @@ class JupiterClient:
             amount=1000000000,
             slippage_bps=50,
         )
+        ```
     """
 
     def __init__(self, config: JupiterConfig) -> None:

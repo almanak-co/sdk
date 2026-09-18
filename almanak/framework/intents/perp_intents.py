@@ -81,7 +81,7 @@ class PerpOpenIntent(BaseIntent):
             ``False`` (fail-closed): a connector that cannot enforce leverage
             REJECTS a leverage-carrying open unless this is ``True``. Relevant only
             to venues without a set-leverage action — notably **Hyperliquid via
-            CoreWriter** (VIB-5724); venues that DO set leverage on-venue (e.g.
+            CoreWriter**; venues that DO set leverage on-venue (e.g.
             GMX V2) ignore this flag. When ``True`` the divergence is not silenced —
             it is recorded and warned (compile-time + post-fill venue-truth record).
         max_slippage: Maximum acceptable slippage (e.g., 0.01 = 1%)
@@ -296,7 +296,7 @@ class PerpCancelIntent(BaseIntent):
     wallet). This is a pure risk-reducing, close-side action: **no collateral in, no
     side, no size** — it neither opens nor closes a position, so it carries no PnL.
 
-    It is the *recovery* half of VIB-5116 (VIB-5568): teardown's residual discovery
+    It is the *recovery* half of VIB-5116: teardown's residual discovery
     (``read_pending_orders`` → ``order_keys``) DETECTS the stranded order; this verb
     RECOVERS it, so teardown completeness passes instead of failing loud.
 
@@ -372,7 +372,7 @@ class PerpWithdrawIntent(BaseIntent):
     HyperCore→HyperEVM bridge and credits the SENDER's HyperEVM (L1) wallet with
     the linked ERC-20 (funds appear in ~seconds). This is the programmatic
     HyperCore→L1 withdraw a Safe (which cannot ECDSA-sign an L1 ``withdraw3``)
-    uses to move parked HyperCore funds back on-chain (VIB-5615 / VIB-5617).
+    uses to move parked HyperCore funds back on-chain.
 
     HyperCore charges a small (~$1) withdraw fee, deducted from the credited
     amount by the venue. The fee is a measured venue deduction observable in the

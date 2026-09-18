@@ -5,6 +5,7 @@ through the gateway. Queries are proxied through the gateway, which handles
 rate limiting and restricts access to allowlisted subgraphs.
 
 Example:
+    ```python
     from almanak.framework.integrations import thegraph
 
     # Query Uniswap V3 pools
@@ -32,6 +33,7 @@ Example:
         query="query($first: Int!) { reserves(first: $first) { symbol } }",
         variables={"first": 5},
     )
+    ```
 """
 
 import json
@@ -101,6 +103,7 @@ def query(
         Exception: On network errors
 
     Example:
+        ```python
         result = query(
             subgraph_id="uniswap-v3-arbitrum",
             query='''
@@ -115,6 +118,7 @@ def query(
         )
         if result.success:
             pools = result.get("pools", [])
+        ```
     """
     client = get_gateway_client()
     if not client.is_connected:
@@ -148,8 +152,10 @@ def list_subgraphs() -> list[str]:
         List of subgraph names that can be used with query()
 
     Example:
+        ```python
         for name in list_subgraphs():
             print(name)
+        ```
     """
     return list(SUBGRAPH_ALIASES.keys())
 
@@ -173,9 +179,11 @@ def get_uniswap_pools(
         List of pool dictionaries
 
     Example:
+        ```python
         pools = get_uniswap_pools(chain="arbitrum", first=10)
         for pool in pools:
             print(f"{pool['token0']['symbol']}/{pool['token1']['symbol']}")
+        ```
     """
     subgraph_id = f"uniswap-v3-{chain}"
 
@@ -221,9 +229,11 @@ def get_aave_reserves(
         List of reserve dictionaries
 
     Example:
+        ```python
         reserves = get_aave_reserves(chain="arbitrum")
         for r in reserves:
             print(f"{r['symbol']}: supply APY {r['supplyAPY']}")
+        ```
     """
     subgraph_id = f"aave-v3-{chain}"
 

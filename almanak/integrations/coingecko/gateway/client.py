@@ -59,9 +59,11 @@ class CoinGeckoIntegration(BaseIntegration):
     - get_markets: Get market data with rankings
 
     Example:
+        ```python
         integration = CoinGeckoIntegration(api_key="your-api-key")
         price = await integration.get_price("ethereum", vs_currencies=["usd", "eur"])
         markets = await integration.get_markets(vs_currency="usd", per_page=100)
+        ```
     """
 
     name = "coingecko"

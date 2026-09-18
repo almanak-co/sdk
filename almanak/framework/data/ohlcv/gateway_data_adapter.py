@@ -8,6 +8,7 @@ Uses the same async-to-sync wrapping pattern as
 ``CoinGeckoOnchainOHLCVProvider.fetch()``.
 
 Example:
+    ```python
     from almanak.framework.data.ohlcv.gateway_data_adapter import GatewayOHLCVDataProvider
     from almanak.framework.data.ohlcv.gateway_provider import GatewayOHLCVProvider
 
@@ -16,6 +17,7 @@ Example:
 
     # Now usable as a DataProvider
     router.register_provider(adapter)
+    ```
 """
 
 from __future__ import annotations

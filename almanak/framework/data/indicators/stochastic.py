@@ -14,6 +14,7 @@ Trading Signals:
 - %K crosses below %D: Bearish signal
 
 Example:
+    ```python
     from almanak.framework.data.indicators import StochasticCalculator
 
     stoch_calc = StochasticCalculator(ohlcv_provider=provider)
@@ -21,6 +22,7 @@ Example:
 
     if stoch.k_value < 20 and stoch.k_value > stoch.d_value:
         print("Oversold with bullish crossover - potential buy")
+    ```
 """
 
 import logging
@@ -50,6 +52,7 @@ class StochasticCalculator:
         ohlcv_provider: Provider for OHLCV data (implements OHLCVProvider protocol)
 
     Example:
+        ```python
         provider = CoinGeckoOHLCVProvider()
         stoch_calc = StochasticCalculator(ohlcv_provider=provider)
 
@@ -58,6 +61,7 @@ class StochasticCalculator:
 
         if stoch.k_value < 20:
             print("Oversold territory")
+        ```
     """
 
     def __init__(self, ohlcv_provider: OHLCVProvider) -> None:
@@ -177,6 +181,7 @@ class StochasticCalculator:
             DataSourceError: If data cannot be fetched
 
         Example:
+            ```python
             stoch = await stoch_calc.calculate_stochastic("WETH", k_period=14, d_period=3)
 
             # Trading logic
@@ -188,6 +193,7 @@ class StochasticCalculator:
             # Crossover signals
             if stoch.k_value > stoch.d_value:
                 print("Bullish - %K above %D")
+            ```
         """
         timeframe = parse_ohlcv_timeframe(timeframe, field_name="Stochastic timeframe")
         limit = k_period + d_period + 10  # Buffer

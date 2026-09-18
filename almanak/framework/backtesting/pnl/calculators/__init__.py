@@ -12,6 +12,7 @@ needed during backtesting, including:
 - PnL Attribution: Attribute PnL by protocol, intent type, and asset
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.calculators import (
         ImpermanentLossCalculator,
         FundingRateHandler,
@@ -91,6 +92,7 @@ Example:
         beta=beta,
         risk_free_rate=Decimal("0.05"),
     )
+    ```
 """
 
 from almanak.framework.backtesting.pnl.calculators.attribution import (

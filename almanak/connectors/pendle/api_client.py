@@ -41,6 +41,7 @@ class PendleAPIClient:
     bounded TTL cache, and typed return values.
 
     Example:
+        ```python
         client = PendleAPIClient(chain="ethereum")
         market = client.get_market_data("0x...")
         print(f"Implied APY: {market.implied_apy}")
@@ -52,6 +53,7 @@ class PendleAPIClient:
             swap_type="token_to_pt",
         )
         print(f"Estimated output: {quote.amount_out}")
+        ```
     """
 
     def __init__(

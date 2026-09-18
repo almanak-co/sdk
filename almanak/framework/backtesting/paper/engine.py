@@ -19,6 +19,7 @@ Key Differences from PnL Backtesting:
     - Can test with live market state (recent fork block)
 
 Examples:
+    ```python
     Basic usage for strategy testing:
 
         from almanak.framework.backtesting.paper import PaperTrader, PaperTraderConfig
@@ -61,6 +62,7 @@ Examples:
             portfolio_tracker=portfolio_tracker,
             config=config,
         )
+    ```
 """
 
 import asyncio
@@ -431,7 +433,7 @@ async def get_token_decimals_with_fallback(
 
 
 def _safe_divergence_pct(expected: Any, actual: Any) -> Decimal | None:
-    """Best-effort relative divergence between expected and actual values (VIB-2634).
+    """Best-effort relative divergence between expected and actual values.
 
     Mirrors the semantics of ``compare_positions``: a missing side
     (``None``) is total divergence (1 = 100%), an expected of zero with a
@@ -772,6 +774,7 @@ class PaperTrader:
         event_callback: Optional callback for trading events
 
     Example:
+        ```python
         trader = PaperTrader(
             fork_manager=fork_manager,
             portfolio_tracker=portfolio_tracker,
@@ -785,6 +788,7 @@ class PaperTrader:
         await trader.start(my_strategy)
         # ... later ...
         await trader.stop()
+        ```
     """
 
     fork_manager: RollingForkManager
@@ -1211,9 +1215,11 @@ class PaperTrader:
             RuntimeError: If already running
 
         Example:
+            ```python
             trader = PaperTrader(fork_manager, portfolio_tracker, config)
             summary = await trader.run_loop(my_strategy, max_ticks=100)
             print(summary.summary())
+            ```
         """
         if self._running:
             raise RuntimeError("PaperTrader is already running")
@@ -1429,7 +1435,7 @@ class PaperTrader:
 
         When use_initial=True and no explicit bootstrap/anvil_funding config
         is present, attempts to infer token requirements by calling
-        strategy.decide() with a synthetic MarketSnapshot (VIB-2376).
+        strategy.decide() with a synthetic MarketSnapshot.
 
         Args:
             use_initial: Force using config initial balances (for first startup).
@@ -2059,7 +2065,7 @@ class PaperTrader:
         )
 
     def _resolve_numeraire(self) -> str | None:
-        """Resolve (and memoize) the strategy's numeraire token symbol (VIB-5127).
+        """Resolve (and memoize) the strategy's numeraire token symbol.
 
         Returns the canonical UPPERCASE symbol for a token quote asset, or
         ``None`` for the USD default. Resolved once from
@@ -2249,7 +2255,7 @@ class PaperTrader:
                 logger.warning(f"[{self._backtest_id}] Poke failed for {result.protocol}: {result.error}")
 
     async def _run_position_reconciler(self) -> None:
-        """Run the observe-only divergence detector after a tick (VIB-2634).
+        """Run the observe-only divergence detector after a tick.
 
         Two lanes, both observe-only (nothing outside the detector's own
         baseline bookkeeping is ever mutated; the portfolio tracker is never
@@ -2487,7 +2493,7 @@ class PaperTrader:
             recon.positions.pop(pid, None)
 
     async def _check_balance_divergence(self, wallet: str) -> None:
-        """Compare the portfolio tracker's expected balances vs on-chain (VIB-2634).
+        """Compare the portfolio tracker's expected balances vs on-chain.
 
         The portfolio tracker is the strategy-side source of expected wallet
         state; on a persistent fork the actual wallet balances must match it.
@@ -3670,7 +3676,7 @@ class PaperTrader:
             token: Token symbol (e.g., 'ETH', 'WETH', 'USDC')
             allow_hardcoded_fallback: When False, raise instead of fabricating a
                 hardcoded price when all providers fail (a stablecoin still
-                resolves to $1). Used for the numeraire token (VIB-5127): it
+                resolves to $1). Used for the numeraire token: it
                 rescales the whole portfolio, so a fabricated price would
                 silently corrupt every numeraire-denominated number -- the
                 no-silent-fabrication rule (blueprint 31 section 7) applies with

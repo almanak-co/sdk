@@ -14,6 +14,7 @@ The adapter resolution follows a priority order:
 3. Fallback to generic (None)
 
 Example:
+    ```python
     from almanak.framework.backtesting.adapters.registry import (
         detect_strategy_type,
         get_adapter_for_strategy,
@@ -31,6 +32,7 @@ Example:
     else:
         # Use generic backtesting logic
         ...
+    ```
 """
 
 import functools
@@ -478,10 +480,12 @@ def detect_strategy_type(
         StrategyTypeHint with detected type and confidence
 
     Example:
+        ```python
         hint = detect_strategy_type(my_strategy)
         if hint.strategy_type:
             print(f"Detected {hint.strategy_type} ({hint.confidence})")
             print(f"Source: {hint.source} - {hint.details}")
+        ```
     """
     # 1. Check for explicit strategy_type in config
     if config and "strategy_type" in config:
@@ -561,6 +565,7 @@ def get_adapter_for_strategy(
         Instantiated adapter or None if no adapter matches
 
     Example:
+        ```python
         adapter = get_adapter_for_strategy(my_lp_strategy)
         if adapter:
             # Use adapter-specific backtesting
@@ -568,6 +573,7 @@ def get_adapter_for_strategy(
         else:
             # Use generic backtesting
             ...
+        ```
     """
     hint = detect_strategy_type(strategy, config)
 
@@ -609,6 +615,7 @@ def get_adapter_for_strategy_with_config(
         Instantiated adapter or None if no adapter matches
 
     Example:
+        ```python
         from almanak.framework.backtesting.config import BacktestDataConfig
 
         data_config = BacktestDataConfig(
@@ -621,6 +628,7 @@ def get_adapter_for_strategy_with_config(
         if adapter:
             # Use adapter-specific backtesting with historical data
             fill = adapter.execute_intent(intent, portfolio, market)
+        ```
     """
     hint = detect_strategy_type(strategy, config)
 

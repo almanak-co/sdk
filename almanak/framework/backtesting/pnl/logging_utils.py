@@ -6,6 +6,7 @@ This module provides structured logging utilities for backtesting:
     - BacktestLogger: Enhanced logger with phase timing and JSON support
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.logging_utils import (
         JSONLogFormatter,
         PhaseTimer,
@@ -26,6 +27,7 @@ Example:
     bt_logger = BacktestLogger(backtest_id="abc-123", json_format=True)
     with bt_logger.phase("initialization"):
         initialize_portfolio()
+    ```
 """
 
 import json
@@ -109,9 +111,11 @@ class PhaseTimer:
         duration_seconds: Phase duration in seconds (set on exit)
 
     Example:
+        ```python
         with PhaseTimer("data_loading", backtest_id="abc-123", logger=logger) as timer:
             data = load_historical_data()
         # Logs: "Phase 'data_loading' completed in 5.234s"
+        ```
     """
 
     phase_name: str
@@ -243,6 +247,7 @@ class BacktestLogger:
         phase_timings: List of completed phase timings
 
     Example:
+        ```python
         bt_logger = BacktestLogger(backtest_id="abc-123", json_format=True)
 
         with bt_logger.phase("initialization"):
@@ -254,6 +259,7 @@ class BacktestLogger:
         # Access timing history
         for timing in bt_logger.phase_timings:
             print(f"{timing.phase_name}: {timing.duration_seconds}s")
+        ```
     """
 
     backtest_id: str
@@ -284,8 +290,10 @@ class BacktestLogger:
             PhaseTimer context manager
 
         Example:
+            ```python
             with bt_logger.phase("data_loading"):
                 load_data()
+            ```
         """
         timer = PhaseTimer(
             phase_name=phase_name,
@@ -439,7 +447,9 @@ def configure_json_logging(
         The configured handler
 
     Example:
+        ```python
         configure_json_logging(logging.getLogger("almanak.framework.backtesting"))
+        ```
     """
     if logger is None:
         logger = logging.getLogger()
@@ -469,11 +479,13 @@ def configure_backtest_logging(
         json_format: If True, use JSON formatter for machine-parseable output
 
     Example:
+        ```python
         # At start of CLI command
         configure_backtest_logging(verbose=ctx.verbose)
 
         # Then run backtest - all trade execution will be logged at DEBUG level
         result = await backtester.backtest(strategy, config)
+        ```
     """
     # Get the backtesting logger
     bt_logger = logging.getLogger("almanak.framework.backtesting")

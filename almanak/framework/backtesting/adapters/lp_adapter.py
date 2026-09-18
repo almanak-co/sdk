@@ -17,6 +17,7 @@ Key Features:
     - BacktestDataConfig integration for centralized data provider configuration
 
 Example:
+    ```python
     from almanak.framework.backtesting.adapters.lp_adapter import (
         LPBacktestAdapter,
         LPBacktestConfig,
@@ -39,6 +40,7 @@ Example:
 
     # Use in backtesting
     fill = adapter.execute_intent(intent, portfolio, market_state)
+    ```
 """
 
 import asyncio
@@ -240,6 +242,7 @@ class LPBacktestConfig(StrategyBacktestConfig):
             (VIB-4849).
 
     Example:
+        ```python
         config = LPBacktestConfig(
             strategy_type="lp",
             fee_tracking_enabled=True,
@@ -247,6 +250,7 @@ class LPBacktestConfig(StrategyBacktestConfig):
             rebalance_on_out_of_range=True,
             volume_multiplier=20,  # More active pool
         )
+        ```
     """
 
     il_calculation_method: Literal["standard", "concentrated", "simplified"] = "standard"
@@ -614,6 +618,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
         data_config: BacktestDataConfig for historical data provider settings (optional)
 
     Example:
+        ```python
         # With config and data_config
         from almanak.framework.backtesting.config import BacktestDataConfig
 
@@ -637,6 +642,7 @@ class LPBacktestAdapter(StrategyBacktestAdapter):
 
         # Value position
         value = adapter.value_position(position, market_state)
+        ```
     """
 
     config_class = LPBacktestConfig

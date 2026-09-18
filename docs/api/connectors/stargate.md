@@ -18,9 +18,7 @@
 | [Optimism](../../chains/optimism.md) | EVM | ``BRIDGE`` |
 | [Polygon](../../chains/polygon.md) | EVM | ``BRIDGE`` |
 
-## API Reference
-
 ::: almanak.connectors.stargate
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

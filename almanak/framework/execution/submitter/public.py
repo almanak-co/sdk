@@ -17,6 +17,7 @@ Error Handling:
     - Gas errors: Raise GasEstimationError or SubmissionError with details
 
 Example:
+    ```python
     from almanak.framework.execution.submitter import PublicMempoolSubmitter
 
     submitter = PublicMempoolSubmitter(
@@ -30,6 +31,7 @@ Example:
 
     # Wait for receipts
     receipts = await submitter.get_receipts([r.tx_hash for r in results if r.submitted])
+    ```
 """
 
 from __future__ import annotations
@@ -405,6 +407,7 @@ class PublicMempoolSubmitter(Submitter):
     - Mask sensitive parts of URLs in all log messages
 
     Example:
+        ```python
         submitter = PublicMempoolSubmitter(
             rpc_url="https://arb-mainnet.g.alchemy.com/v2/YOUR_API_KEY",
             max_retries=3,
@@ -417,6 +420,7 @@ class PublicMempoolSubmitter(Submitter):
         # Wait for receipt
         if results[0].submitted:
             receipt = await submitter.get_receipt(results[0].tx_hash)
+        ```
     """
 
     def __init__(

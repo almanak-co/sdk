@@ -30,10 +30,12 @@ CoinGecko OHLC granularity caveats (intentional, documented):
       ``OHLCVCandle.volume`` is ``None`` (unmeasured, never ``0``).
 
 Example:
+    ```python
     from almanak.gateway.data.ohlcv.coingecko_provider import CoinGeckoOHLCVProvider
 
     provider = CoinGeckoOHLCVProvider()
     candles = await provider.get_ohlcv("WETH", timeframe="1h", limit=100)
+    ```
 """
 
 from __future__ import annotations

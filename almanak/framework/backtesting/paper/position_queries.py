@@ -9,6 +9,7 @@ These utilities allow Paper Trader to:
 3. Query position details for accurate P&L calculation
 
 Example:
+    ```python
     from web3 import Web3
     from almanak.framework.backtesting.paper.position_queries import (
         query_uniswap_v3_positions,
@@ -21,6 +22,7 @@ Example:
     positions = await query_uniswap_v3_positions(wallet, web3, chain="arbitrum")
     for pos in positions:
         print(f"Position #{pos.token_id}: {pos.liquidity} liquidity")
+    ```
 """
 
 import logging
@@ -271,6 +273,7 @@ async def query_uniswap_v3_positions(
         ValueError: If chain is not supported and no position_manager provided
 
     Example:
+        ```python
         from web3 import Web3
         web3 = Web3(Web3.HTTPProvider("https://arb1.arbitrum.io/rpc"))
 
@@ -286,6 +289,7 @@ async def query_uniswap_v3_positions(
             print(f"  Fee tier: {pos.fee / 10000}%")
             print(f"  Tick range: [{pos.tick_lower}, {pos.tick_upper}]")
             print(f"  Liquidity: {pos.liquidity}")
+        ```
     """
     # Get position manager address
     if position_manager is None:
@@ -1078,6 +1082,7 @@ async def query_aave_positions(
         ValueError: If chain is not supported
 
     Example:
+        ```python
         from web3 import Web3
         web3 = Web3(Web3.HTTPProvider("https://arb1.arbitrum.io/rpc"))
 
@@ -1092,6 +1097,7 @@ async def query_aave_positions(
             print(f"  Supply: {pos.atoken_balance_decimal:.4f}")
             print(f"  Debt: {pos.total_debt_decimal:.4f}")
             print(f"  Collateral enabled: {pos.usage_as_collateral_enabled}")
+        ```
     """
     data_provider = web3.to_checksum_address(_contract_address("aave_v3", chain, "pool_data_provider"))
     wallet_checksum = web3.to_checksum_address(wallet)

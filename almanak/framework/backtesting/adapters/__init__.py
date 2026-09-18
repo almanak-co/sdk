@@ -12,6 +12,7 @@ different strategy types during backtesting, including:
 - Rebalance triggers (when positions should be adjusted)
 
 Example:
+    ```python
     from almanak.framework.backtesting.adapters import (
         StrategyBacktestAdapter,
         get_adapter,
@@ -33,6 +34,7 @@ Example:
     @register_adapter("custom_strategy")
     class CustomAdapter(StrategyBacktestAdapter):
         ...
+    ```
 """
 
 from almanak.framework.backtesting.adapters.arbitrage_adapter import (

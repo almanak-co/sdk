@@ -123,10 +123,12 @@ class KrakenConfig(BaseModel):
     """Configuration for Kraken connector.
 
     Example:
+        ```python
         config = KrakenConfig(
             credentials=KrakenCredentials.from_env(),
             default_slippage_bps=50,
         )
+        ```
     """
 
     credentials: KrakenCredentials | None = Field(

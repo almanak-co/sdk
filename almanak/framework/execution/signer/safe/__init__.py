@@ -21,6 +21,7 @@ Key Features:
     - Proper gas buffering for Safe overhead
 
 Example:
+    ```python
     from almanak.framework.execution.signer.safe import create_safe_signer, SafeSignerConfig
 
     # Create signer from config
@@ -36,6 +37,7 @@ Example:
 
     # Sign atomic bundle
     signed = await signer.sign_bundle_with_web3(txs, web3, eoa_nonce, chain)
+    ```
 
 Environment Variables:
     ALMANAK_PLATFORM_WALLETS: JSON array of Safe wallet configurations
@@ -123,12 +125,14 @@ def create_safe_signer(config: SafeSignerConfig) -> SafeSigner:
         SigningError: If private key is invalid
 
     Example:
+        ```python
         config = SafeSignerConfig(
             mode="direct",
             wallet_config=wallet_config,
             private_key="0x...",
         )
         signer = create_safe_signer(config)
+        ```
     """
     if config.mode == "direct":
         return DirectSafeSigner(config)
@@ -175,11 +179,13 @@ def create_safe_signer_from_env(
         ALMANAK_SIGNER_SERVICE_JWT: Required for Zodiac mode
 
     Example:
+        ```python
         signer = create_safe_signer_from_env(
             safe_address="0xSafe...",
             private_key="0x...",
             mode="direct",
         )
+        ```
     """
     config = create_signer_config_from_env(
         safe_address=safe_address,

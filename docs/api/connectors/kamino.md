@@ -12,9 +12,7 @@
 |-------|--------|-------------------|
 | [Solana](../../chains/solana.md) | SVM | ``BORROW``, ``REPAY``, ``SUPPLY``, ``WITHDRAW`` |
 
-## API Reference
-
 ::: almanak.connectors.kamino
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

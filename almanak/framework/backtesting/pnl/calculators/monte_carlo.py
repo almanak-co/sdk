@@ -20,6 +20,7 @@ How GBM Works:
     Where Z ~ N(0,1) is a standard normal random variable.
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.calculators.monte_carlo import (
         MonteCarloPathGenerator,
         PricePathConfig,
@@ -45,6 +46,7 @@ Example:
         volatility=Decimal("0.2"),  # 20% annualized volatility
         dt=Decimal("1") / Decimal("252"),  # Daily steps
     )
+    ```
 
 References:
     - Black-Scholes Model: https://en.wikipedia.org/wiki/Black%E2%80%93Scholes_model
@@ -186,6 +188,7 @@ class MonteCarloPathGenerator:
         _rng: Random number generator instance
 
     Example:
+        ```python
         generator = MonteCarloPathGenerator()
 
         # From historical data
@@ -203,6 +206,7 @@ class MonteCarloPathGenerator:
             drift=Decimal("0.05"),
             volatility=Decimal("0.2"),
         )
+        ```
     """
 
     config: PricePathConfig = field(default_factory=PricePathConfig)
@@ -237,9 +241,11 @@ class MonteCarloPathGenerator:
             ValueError: If historical_prices has fewer than 2 elements
 
         Example:
+            ```python
             historical = [Decimal("100"), Decimal("102"), Decimal("99"), ...]
             result = generator.generate_price_paths(historical, n_paths=1000)
             print(f"Generated {result.n_paths} paths with vol={result.volatility}")
+            ```
         """
         if len(historical_prices) < 2:
             raise ValueError("Need at least 2 historical prices to estimate parameters")
@@ -303,6 +309,7 @@ class MonteCarloPathGenerator:
             PricePathResult with generated paths and metadata
 
         Example:
+            ```python
             result = generator.generate_price_paths_from_params(
                 start_price=Decimal("100"),
                 n_steps=252,  # One year of daily data
@@ -310,6 +317,7 @@ class MonteCarloPathGenerator:
                 drift=Decimal("0.05"),
                 volatility=Decimal("0.2"),
             )
+            ```
         """
         # Parse method
         if method is None:
@@ -543,6 +551,7 @@ def generate_price_paths(
         PricePathResult with generated paths and metadata
 
     Example:
+        ```python
         from almanak.framework.backtesting.pnl.calculators.monte_carlo import (
             generate_price_paths,
         )
@@ -558,6 +567,7 @@ def generate_price_paths(
         median_price = result.get_percentile(50)
         p5_price = result.get_percentile(5)
         p95_price = result.get_percentile(95)
+        ```
     """
     config = PricePathConfig(
         method=PathGenerationMethod(method.lower()),

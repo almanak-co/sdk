@@ -2,21 +2,15 @@
 
 Shared base classes and utilities used by all connectors.
 
-## BaseReceiptParser
-
 ::: almanak.connectors._strategy_base.base.BaseReceiptParser
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source
-
-## EventRegistry
 
 ::: almanak.connectors._strategy_base.base.EventRegistry
     options:
-      show_root_heading: true
-
-## HexDecoder
+      heading_level: 2
 
 ::: almanak.connectors._strategy_base.base.HexDecoder
     options:
-      show_root_heading: true
+      heading_level: 2

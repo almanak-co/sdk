@@ -8,8 +8,8 @@ Models:
     - PaperTradeError: Record of a failed paper trade attempt
     - PaperTradeErrorType: Types of errors that can occur during paper trading
     - PaperTradingSummary: Summary of a paper trading session
-    - DivergenceRecord: Per-position/token aggregate of detected divergence (VIB-2634)
-    - ReconciliationSummary: Session-level divergence summary (VIB-2634)
+    - DivergenceRecord: Per-position/token aggregate of detected divergence
+    - ReconciliationSummary: Session-level divergence summary
 """
 
 from dataclasses import dataclass, field
@@ -363,7 +363,7 @@ class PnLBreakdown:
 
 @dataclass
 class DivergenceRecord:
-    """Per-position/token aggregate of divergence observed by the reconciler (VIB-2634).
+    """Per-position/token aggregate of divergence observed by the reconciler.
 
     One record per (kind, divergence_type, key) tuple. Repeated per-tick
     observations of the same divergence fold into the same record so a
@@ -428,7 +428,7 @@ class DivergenceRecord:
 
 @dataclass
 class ReconciliationSummary:
-    """Session-level summary of observe-only divergence detection (VIB-2634).
+    """Session-level summary of observe-only divergence detection.
 
     Attributes:
         checks_run: Number of per-tick reconciliation runs in the session

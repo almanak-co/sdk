@@ -7,6 +7,7 @@ featuring isolated vaults, rehypothecation, and aggressive LTV ratios.
 No authentication is required.
 
 Example:
+    ```python
     from almanak.connectors.jupiter_lend import JupiterLendClient, JupiterLendConfig
 
     config = JupiterLendConfig(wallet_address="your-solana-wallet-pubkey")
@@ -17,6 +18,7 @@ Example:
 
     # Build a deposit transaction
     tx = client.deposit(vault=vaults[0].address, amount="100.0")
+    ```
 """
 
 import logging
@@ -71,11 +73,13 @@ class JupiterLendClient:
     No authentication is required.
 
     Example:
+        ```python
         config = JupiterLendConfig(wallet_address="your-solana-wallet-pubkey")
         client = JupiterLendClient(config)
 
         vaults = client.get_vaults()
         tx = client.deposit(vault=vaults[0].address, amount="100.0")
+        ```
     """
 
     def __init__(self, config: JupiterLendConfig) -> None:

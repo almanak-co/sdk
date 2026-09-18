@@ -97,8 +97,12 @@ plugins:
             merge_init_into_class: true
             members_order: source
             show_root_heading: true
+            show_root_full_path: false
             show_source: false
             heading_level: 2
+            filters:
+              - "!^_"
+              - "!^(serialize|deserialize|to_dict|from_dict|intent_type|is_chained_amount)$"
             show_symbol_type_heading: true
             show_symbol_type_toc: true
 

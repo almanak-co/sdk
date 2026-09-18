@@ -123,7 +123,7 @@ class HexDecoder:
         offset or non-ABI-encoded input, both of which would silently
         corrupt downstream math. Raise rather than truncate — this validates
         callers' offsets and keeps a misaligned decode from looking like a
-        plausible value (VIB-4395).
+        plausible value.
 
         Args:
             hex_str: Hex string to decode (with or without '0x')

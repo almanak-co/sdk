@@ -14,11 +14,13 @@ Key Components:
     - as_decimal: strict Decimal ingress (floats rejected)
 
 Examples:
+    ```python
     weth = TokenIdentity(chain="base", address="0x4200000000000000000000000000000000000006", symbol="WETH")
     held = TokenUnits(token=weth, units=Decimal("0.5"))
     quote = PriceQuote(token=weth, usd_per_unit=Decimal("2500"), source="coingecko")
     held.to_usd(quote)                      # UsdAmount(Decimal("1250"))
     held.to_usd(None)                       # raises PriceUnavailableError
+    ```
 """
 
 from __future__ import annotations

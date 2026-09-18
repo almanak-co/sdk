@@ -91,6 +91,7 @@ class ChainHealth:
         is_available: Whether the data is available for use
 
     Example:
+        ```python
         health = ChainHealth(
             chain="arbitrum",
             status=ChainHealthStatus.HEALTHY,
@@ -101,6 +102,7 @@ class ChainHealth:
 
         if health.is_stale:
             logger.warning(f"Chain {health.chain} data is stale")
+        ```
     """
 
     chain: str

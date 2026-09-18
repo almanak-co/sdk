@@ -10,6 +10,7 @@ Key Components:
     - validate_price_data: Main function to validate price data series
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.providers.data_validation import (
         validate_price_data,
         DataQualityResult,
@@ -35,6 +36,7 @@ Example:
         print(f"Found {len(result.issues)} data quality issues:")
         for issue in result.issues:
             print(f"  - {issue}")
+    ```
 """
 
 import logging
@@ -261,6 +263,7 @@ def validate_price_data(  # noqa: C901
         DataQualityResult containing all issues found and summary statistics
 
     Example:
+        ```python
         price_data = [
             (datetime(2024, 1, 1, 0, 0), Decimal("2500.00")),
             (datetime(2024, 1, 1, 1, 0), Decimal("2505.00")),
@@ -275,6 +278,7 @@ def validate_price_data(  # noqa: C901
 
         if result.gaps_found > 0:
             print(f"Found {result.gaps_found} gaps in data")
+        ```
     """
     if expected_interval_seconds <= 0:
         raise ValueError("expected_interval_seconds must be positive")
@@ -497,6 +501,7 @@ def detect_outliers(  # noqa: C901
         List of DataQualityIssue objects for each outlier detected
 
     Example:
+        ```python
         price_data = [
             (datetime(2024, 1, 1, 0, 0), Decimal("2500.00")),
             (datetime(2024, 1, 1, 1, 0), Decimal("2505.00")),
@@ -507,6 +512,7 @@ def detect_outliers(  # noqa: C901
         outliers = detect_outliers(price_data, token="WETH")
         for outlier in outliers:
             print(f"Outlier: {outlier}")
+        ```
     """
     issues: list[DataQualityIssue] = []
 
@@ -757,6 +763,7 @@ def validate_price_data_with_outliers(
         DataQualityResult containing all issues found including outliers
 
     Example:
+        ```python
         result = validate_price_data_with_outliers(
             price_data,
             expected_interval_seconds=3600,
@@ -765,6 +772,7 @@ def validate_price_data_with_outliers(
 
         if result.outliers_found > 0:
             print(f"Found {result.outliers_found} price outliers")
+        ```
     """
     # First, run standard validation
     result = validate_price_data(
@@ -820,12 +828,14 @@ def validate_ohlcv_data(
         DataQualityResult containing all issues found
 
     Example:
+        ```python
         ohlcv_data = [
             (datetime(2024, 1, 1, 0, 0), Decimal("2500"), Decimal("2510"),
              Decimal("2495"), Decimal("2505")),
             ...
         ]
         result = validate_ohlcv_data(ohlcv_data, 3600, token="WETH")
+        ```
     """
     # Extract (timestamp, close_price) pairs
     price_data = [(ts, close) for ts, _, _, _, close in ohlcv_data]

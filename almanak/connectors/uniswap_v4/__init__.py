@@ -21,6 +21,7 @@ Exact pool selection:
     must agree. Native currency is address zero; WETH is a distinct asset.
 
 Example:
+    ```python
     from decimal import Decimal
     from almanak.connectors.uniswap_v4 import PoolKey
     from almanak.framework.intents import Intent
@@ -35,6 +36,7 @@ Example:
         protocol="uniswap_v4", max_slippage=Decimal("0.005"),
         swap_params={"pool_key": key.to_wire()},
     )
+    ```
 
 LP and hook qualification:
     LP entry accepts a pool ID and ``protocol_params['pool_key']``. Withdrawal

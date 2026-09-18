@@ -11,11 +11,13 @@ Key Features:
     - Graceful degradation on timeout (returns stale data)
 
 Example:
+    ```python
     from almanak.integrations.pyth.gateway.price_source import PythPriceSource
 
     source = PythPriceSource()
     result = await source.get_price("SOL", "USD")
     print(f"Price: {result.price}, Confidence: {result.confidence}")
+    ```
 """
 
 import logging
@@ -65,8 +67,10 @@ class PythPriceSource(BasePriceSource):
     for a configurable TTL (default 15s) to avoid excessive requests.
 
     Example:
+        ```python
         source = PythPriceSource(cache_ttl=30)
         result = await source.get_price("SOL", "USD")
+        ```
     """
 
     def __init__(

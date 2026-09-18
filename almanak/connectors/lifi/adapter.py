@@ -15,6 +15,7 @@ Approval flow: Standard ERC-20 approve (NO Permit2 needed). The approval
 address comes from the quote response `estimate.approval_address`.
 
 Example:
+    ```python
     from almanak.connectors.lifi import LiFiAdapter, LiFiConfig
 
     config = LiFiConfig(chain_id=42161, wallet_address="0x...")
@@ -26,6 +27,7 @@ Example:
         amount=Decimal("1000"),
     )
     bundle = adapter.compile_swap_intent(intent)
+    ```
 """
 
 import logging
@@ -117,6 +119,7 @@ class LiFiAdapter:
     - Deferred transaction pattern (fresh routes at execution)
 
     Example:
+        ```python
         config = LiFiConfig(chain_id=42161, wallet_address="0x...")
         adapter = LiFiAdapter(config)
 
@@ -126,6 +129,7 @@ class LiFiAdapter:
             amount=Decimal("1000"),
         )
         bundle = adapter.compile_swap_intent(intent)
+        ```
     """
 
     def __init__(

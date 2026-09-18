@@ -18,6 +18,7 @@ Supported chains:
 - Avalanche (Chain ID: 43114)
 
 Example:
+    ```python
     from almanak.connectors.traderjoe_v2 import TraderJoeV2SDK
 
     sdk = TraderJoeV2SDK(chain="avalanche", rpc_url="https://api.avax.network/ext/bc/C/rpc")
@@ -33,6 +34,7 @@ Example:
         bin_steps=[20],
         recipient="0x...",
     )
+    ```
 """
 
 import json
@@ -233,6 +235,7 @@ class TraderJoeV2SDK:
         wallet_address: Optional wallet address for transactions
 
     Example:
+        ```python
         sdk = TraderJoeV2SDK(
             chain="avalanche",
             rpc_url="https://api.avax.network/ext/bc/C/rpc",
@@ -249,6 +252,7 @@ class TraderJoeV2SDK:
             bin_steps=[20],
             recipient="0x...",
         )
+        ```
     """
 
     def __init__(

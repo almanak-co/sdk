@@ -11,6 +11,7 @@ Key Exceptions:
     - AmbiguousTokenError: Multiple tokens match the given identifier
 
 Example:
+    ```python
     from almanak.framework.data.tokens.exceptions import (
         TokenResolutionError,
         TokenNotFoundError,
@@ -31,6 +32,7 @@ Example:
         chain="ethereum",
         reason="Address failed checksum validation",
     )
+    ```
 """
 
 
@@ -48,12 +50,14 @@ class TokenResolutionError(Exception):
         suggestions: List of actionable suggestions to fix the issue
 
     Example:
+        ```python
         raise TokenResolutionError(
             token="USDC",
             chain="unknown_chain",
             reason="Chain 'unknown_chain' is not supported",
             suggestions=["Use a supported chain: ethereum, arbitrum, base, optimism"],
         )
+        ```
     """
 
     def __init__(
@@ -124,6 +128,7 @@ class TokenNotFoundError(TokenResolutionError):
     - Gateway on-chain lookup (if enabled) also fails
 
     Example:
+        ```python
         raise TokenNotFoundError(
             token="UNKNOWNTOKEN",
             chain="arbitrum",
@@ -134,6 +139,7 @@ class TokenNotFoundError(TokenResolutionError):
                 "Use register() to add custom tokens to the resolver",
             ],
         )
+        ```
     """
 
     def __init__(
@@ -172,12 +178,14 @@ class TokenResolutionTimeoutError(TokenResolutionError):
         timeout_seconds: The timeout duration that was exceeded
 
     Example:
+        ```python
         raise TokenResolutionTimeoutError(
             token="0x<token_address>",
             chain="ethereum",
             timeout_seconds=10.0,
             reason="On-chain lookup timed out after 10.0 seconds",
         )
+        ```
     """
 
     def __init__(
@@ -222,12 +230,14 @@ class InvalidTokenAddressError(TokenResolutionError):
     - Address fails EIP-55 checksum validation (if checksummed)
 
     Example:
+        ```python
         raise InvalidTokenAddressError(
             token="0xinvalid",
             chain="ethereum",
             reason="Address must be 42 characters (0x + 40 hex chars)",
             suggestions=["Example valid address: 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"],
         )
+        ```
     """
 
     def __init__(
@@ -266,6 +276,7 @@ class AmbiguousTokenError(TokenResolutionError):
         matching_addresses: List of addresses that match the token identifier
 
     Example:
+        ```python
         raise AmbiguousTokenError(
             token="USDC",
             chain="arbitrum",
@@ -280,6 +291,7 @@ class AmbiguousTokenError(TokenResolutionError):
                 "Or specify the full contract address",
             ],
         )
+        ```
     """
 
     def __init__(

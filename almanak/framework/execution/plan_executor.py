@@ -12,6 +12,7 @@ Key Features:
     - Deterministic replay using pinned quotes
 
 Example:
+    ```python
     from almanak.framework.execution.plan_executor import PlanExecutor, PlanExecutorConfig
 
     # Create executor with config
@@ -31,6 +32,7 @@ Example:
 
     # Execute with determinism
     result = await executor.execute_plan(plan)
+    ```
 """
 
 import logging
@@ -452,6 +454,7 @@ class PlanExecutor:
     4. Execution: Executes plans using pinned quotes for determinism
 
     Example:
+        ```python
         executor = PlanExecutor(config, bridge_selector)
 
         # Create plan with pinned quotes
@@ -463,6 +466,7 @@ class PlanExecutor:
 
         if reconciliation.can_resume:
             result = await executor.execute_plan(plan)
+        ```
     """
 
     def __init__(

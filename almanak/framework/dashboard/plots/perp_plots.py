@@ -9,6 +9,7 @@ This module provides visualization components for perpetual trading strategies i
 These plots are designed for perpetual protocols like GMX V2 and Hyperliquid.
 
 Example:
+    ```python
     from almanak.framework.dashboard.plots.perp_plots import (
         plot_perp_position_dashboard,
         plot_funding_rate_history,
@@ -24,6 +25,7 @@ Example:
         size_usd=10000,
     )
     st.plotly_chart(fig)
+    ```
 """
 
 from dataclasses import dataclass

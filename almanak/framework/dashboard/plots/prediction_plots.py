@@ -8,6 +8,7 @@ This module provides visualization components for prediction market strategies i
 These plots are designed for prediction markets like Polymarket.
 
 Example:
+    ```python
     from almanak.framework.dashboard.plots.prediction_plots import (
         plot_prediction_position,
         plot_probability_over_time,
@@ -23,6 +24,7 @@ Example:
         cost_basis=60,
     )
     st.plotly_chart(fig)
+    ```
 """
 
 from dataclasses import dataclass

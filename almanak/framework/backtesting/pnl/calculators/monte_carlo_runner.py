@@ -12,6 +12,7 @@ Key Components:
     - run_monte_carlo: Main function to run Monte Carlo backtests
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.calculators.monte_carlo import (
         MonteCarloPathGenerator,
     )
@@ -30,6 +31,7 @@ Example:
 
     # Analyze results
     print(f"95% CI: [{result.return_percentile_5th}, {result.return_percentile_95th}]")
+    ```
 """
 
 import asyncio
@@ -550,6 +552,7 @@ async def run_monte_carlo(
         MonteCarloSimulationResult with aggregated statistics
 
     Example:
+        ```python
         from almanak.framework.backtesting.pnl.calculators.monte_carlo import (
             MonteCarloPathGenerator,
         )
@@ -565,6 +568,7 @@ async def run_monte_carlo(
 
         print(f"Mean return: {result.return_mean:.2%}")
         print(f"95% CI: [{result.return_percentile_5th:.2%}, {result.return_percentile_95th:.2%}]")
+        ```
     """
     # Import here to avoid circular import
     from almanak.framework.backtesting.pnl.engine import PnLBacktester

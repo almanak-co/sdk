@@ -10,6 +10,7 @@ Key Components:
     - CrisisBacktestConfig: Configuration combining scenario with backtest settings
 
 Example:
+    ```python
     from almanak.framework.backtesting.scenarios import (
         BLACK_THURSDAY,
         run_crisis_backtest,
@@ -32,6 +33,7 @@ Example:
         description="Silicon Valley Bank collapse",
     )
     result = await run_crisis_backtest(strategy, custom, backtester)
+    ```
 """
 
 import asyncio
@@ -88,11 +90,13 @@ class CrisisBacktestConfig:
         extra_config: Additional configuration options passed to PnLBacktestConfig
 
     Example:
+        ```python
         config = CrisisBacktestConfig(
             scenario=BLACK_THURSDAY,
             token_funding=[...],
             tokens=["WETH", "USDC", "WBTC"],
         )
+        ```
     """
 
     scenario: CrisisScenario
@@ -376,6 +380,7 @@ async def run_crisis_backtest(
         CrisisBacktestResult with backtest results and scenario context
 
     Example:
+        ```python
         # Using a predefined scenario
         from almanak.framework.backtesting.scenarios import BLACK_THURSDAY
 
@@ -398,6 +403,7 @@ async def run_crisis_backtest(
             scenario=custom,
             backtester=backtester,
         )
+        ```
     """
     _reject_legacy_funding_fields(extra_config)
 
@@ -516,11 +522,13 @@ def run_crisis_backtest_sync(
         CrisisBacktestResult with backtest results and scenario context
 
     Example:
+        ```python
         result = run_crisis_backtest_sync(
             strategy=my_strategy,
             scenario=TERRA_COLLAPSE,
             backtester=backtester,
         )
+        ```
     """
     return asyncio.run(
         run_crisis_backtest(
@@ -683,9 +691,11 @@ def compare_crisis_to_normal(
             - cost_ratio: Crisis total costs / Normal total costs
 
     Example:
+        ```python
         comparison = compare_crisis_to_normal(crisis_result, normal_result)
         if comparison["return_diff_pct"] < -0.1:
             print("Strategy underperformed by >10% during crisis")
+        ```
     """
     comparison: dict[str, Any] = {}
 
@@ -813,6 +823,7 @@ async def run_multiple_crisis_backtests(
         List of CrisisBacktestResult, one for each scenario
 
     Example:
+        ```python
         from almanak.framework.backtesting.scenarios import (
             BLACK_THURSDAY, TERRA_COLLAPSE, FTX_COLLAPSE
         )
@@ -826,6 +837,7 @@ async def run_multiple_crisis_backtests(
 
         for result in results:
             print(f"{result.scenario_name}: {result.total_return_during_crisis:.1f}%")
+        ```
     """
     results: list[CrisisBacktestResult] = []
 

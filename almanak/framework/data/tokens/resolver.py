@@ -32,6 +32,7 @@ Gateway Connection:
     resolver = get_token_resolver()
 
 Example:
+    ```python
     from almanak.framework.data.tokens.resolver import get_token_resolver
 
     resolver = get_token_resolver()
@@ -52,6 +53,7 @@ Example:
         "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
         "arbitrum",
     )
+    ```
 """
 
 import logging
@@ -392,6 +394,7 @@ class TokenResolver:
         gateway_client: Optional gateway client for on-chain lookups
 
     Example:
+        ```python
         resolver = TokenResolver.get_instance()
 
         # Resolve by symbol
@@ -402,6 +405,7 @@ class TokenResolver:
 
         # Register a custom token
         resolver.register(my_custom_token)
+        ```
     """
 
     _instance: "TokenResolver | None" = None
@@ -742,6 +746,7 @@ class TokenResolver:
             The singleton TokenResolver instance
 
         Example:
+            ```python
             # Without gateway (static resolution only)
             resolver = TokenResolver.get_instance()
             token = resolver.resolve("USDC", "arbitrum")
@@ -750,6 +755,7 @@ class TokenResolver:
             import grpc
             channel = grpc.insecure_channel("localhost:50051")
             resolver = TokenResolver.get_instance(gateway_channel=channel)
+            ```
         """
         if cls._instance is None:
             with cls._instance_lock:
@@ -805,8 +811,8 @@ class TokenResolver:
         Args:
             caip19: A CAIP-19 asset id, e.g. ``"eip155:1/erc20:0x6b17…1d0f"``
                 or ``"eip155:1/slip44:60"``.
-            log_errors: Forwarded to :meth:`resolve`.
-            skip_gateway: Forwarded to :meth:`resolve`.
+            log_errors: Forwarded to `resolve`.
+            skip_gateway: Forwarded to `resolve`.
 
         Returns:
             ResolvedToken with full metadata.
@@ -822,7 +828,9 @@ class TokenResolver:
             TokenResolutionError: the asset cannot be resolved on its chain.
 
         Example:
+            ```python
             resolver.resolve_caip19("eip155:1/erc20:0x6b175474e89094c44da98b954eedeac495271d0f")
+            ```
         """
         identity = AssetIdentity.from_caip19(caip19)
         target = NATIVE_SENTINEL if identity.asset_namespace is AssetNamespace.NATIVE else identity.asset_reference
@@ -860,11 +868,13 @@ class TokenResolver:
             TokenResolutionError: For other resolution errors
 
         Example:
+            ```python
             # By address
             token = resolver.resolve("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum")
 
             # By CAIP-19 asset id (self-describing; ``chain`` arg is ignored)
             token = resolver.resolve("eip155:42161/erc20:0xaf88d065e77c8cC2239327C5EDb3A432268e5831", "arbitrum")
+            ```
         """
         # CAIP-19 asset ids are self-describing (they carry their own chain via
         # the CAIP-2 part), so a "/"-containing token is routed to
@@ -1680,11 +1690,13 @@ class TokenResolver:
             False otherwise.
 
         Example:
+            ```python
             resolver = get_token_resolver(gateway_channel=channel)
             if resolver.is_gateway_connected():
                 print("Gateway available for on-chain token discovery")
             else:
                 print("Static resolution only")
+            ```
         """
         with self._lock:
             return self._check_gateway_available()
@@ -1699,6 +1711,7 @@ class TokenResolver:
             channel: gRPC channel to gateway, or None to disable gateway
 
         Example:
+            ```python
             import grpc
             resolver = get_token_resolver()
 
@@ -1708,6 +1721,7 @@ class TokenResolver:
 
             # Disconnect from gateway
             resolver.set_gateway_channel(None)
+            ```
         """
         with self._lock:
             self._gateway_channel = channel
@@ -1811,7 +1825,9 @@ class TokenResolver:
             TokenResolutionError: For other resolution errors
 
         Example:
+            ```python
             usdc, weth = resolver.resolve_pair("USDC", "WETH", "arbitrum")
+            ```
         """
         resolved_in = self.resolve(token_in, chain)
         resolved_out = self.resolve(token_out, chain)
@@ -1834,11 +1850,13 @@ class TokenResolver:
             TokenNotFoundError: If token cannot be resolved
 
         Example:
+            ```python
             decimals = resolver.get_decimals(
                 "arbitrum",
                 "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
             )
             # Returns 6
+            ```
         """
         resolved = self.resolve(token, chain)
         return resolved.decimals
@@ -1895,11 +1913,13 @@ class TokenResolver:
             TokenNotFoundError: If token cannot be resolved
 
         Example:
+            ```python
             address = resolver.get_address(
                 "arbitrum",
                 "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
             )
             # Returns "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+            ```
         """
         resolved = self.resolve(symbol, chain)
         return resolved.address
@@ -1926,6 +1946,7 @@ class TokenResolver:
             TokenResolutionError: For other resolution errors
 
         Example:
+            ```python
             # ETH on Arbitrum returns WETH
             token = resolver.resolve_for_swap("eip155:42161/slip44:60", "arbitrum")
             assert token.symbol == "WETH"
@@ -1936,6 +1957,7 @@ class TokenResolver:
                 "arbitrum",
             )
             assert token.symbol == "USDC"
+            ```
         """
         resolved = self.resolve(token, chain)
 
@@ -1984,6 +2006,7 @@ class TokenResolver:
             TokenResolutionError: For other resolution errors
 
         Example:
+            ```python
             # DEX protocols get auto-wrapped native tokens
             token = resolver.resolve_for_protocol(
                 "eip155:42161/slip44:60",
@@ -1999,6 +2022,7 @@ class TokenResolver:
                 "aave_v3",
             )
             assert token.symbol == "ETH"
+            ```
         """
         # List of DEX protocols that need native token wrapping
         dex_protocols = {
@@ -2057,7 +2081,7 @@ class TokenResolver:
         """Negative-cache a (chain, key) miss.
 
         ``ttl_seconds`` overrides the default definitive-miss TTL — used for the
-        shorter gateway-timeout cooldown (VIB-5746) so a timed-out lookup fails
+        shorter gateway-timeout cooldown so a timed-out lookup fails
         fast for a window without being locked in for the full 5-minute
         definitive-miss window.
         """
@@ -2124,6 +2148,7 @@ class TokenResolver:
             token: ResolvedToken to register
 
         Example:
+            ```python
             custom_token = ResolvedToken(
                 symbol="CUSTOM",
                 address="0x...",
@@ -2133,6 +2158,7 @@ class TokenResolver:
                 name="Custom Token",
             )
             resolver.register(custom_token)
+            ```
         """
         chain_lower = token.chain
         # One critical section: populate the cache AND clear any pending
@@ -2189,6 +2215,7 @@ class TokenResolver:
             TokenResolutionError: If chain is not recognized
 
         Example:
+            ```python
             resolver = get_token_resolver()
             resolver.register_token(
                 symbol="PT-wstETH-25JUN2026",
@@ -2198,6 +2225,7 @@ class TokenResolver:
             )
             # Now works:
             token = resolver.resolve("PT-wstETH-25JUN2026", "arbitrum")
+            ```
         """
         chain_lower = _normalize_chain(chain)
         _validate_address(address, chain_lower)
@@ -2275,6 +2303,7 @@ def get_token_resolver(
         The singleton TokenResolver instance
 
     Example:
+        ```python
         from almanak.framework.data.tokens import get_token_resolver
 
         # Static resolution only
@@ -2285,6 +2314,7 @@ def get_token_resolver(
         import grpc
         channel = grpc.insecure_channel("localhost:50051")
         resolver = get_token_resolver(gateway_channel=channel)
+        ```
     """
     return TokenResolver.get_instance(
         gateway_client=gateway_client,
@@ -2300,7 +2330,7 @@ def create_token_resolver(
 ) -> TokenResolver:
     """Create a dedicated TokenResolver instance.
 
-    Unlike :func:`get_token_resolver`, this does not touch the process-wide
+    Unlike `get_token_resolver`, this does not touch the process-wide
     singleton. Use it for short-lived CLI commands or isolated runtime scopes
     that need a gateway channel without mutating global resolver state.
 

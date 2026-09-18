@@ -9,6 +9,7 @@ Indicators:
     - WMA (Weighted Moving Average): Linearly weighted average
 
 Example:
+    ```python
     from almanak.framework.data.indicators import MovingAverageCalculator, CoinGeckoOHLCVProvider
 
     provider = CoinGeckoOHLCVProvider()
@@ -22,6 +23,7 @@ Example:
     # Use in strategy
     if current_price > sma_20:
         print("Price above 20-period SMA - bullish")
+    ```
 """
 
 import logging
@@ -49,11 +51,13 @@ class MovingAverageCalculator:
         ohlcv_provider: Provider for OHLCV data (implements OHLCVProvider protocol)
 
     Example:
+        ```python
         provider = CoinGeckoOHLCVProvider()
         ma_calc = MovingAverageCalculator(ohlcv_provider=provider)
 
         sma = await ma_calc.sma("WETH", period=20, timeframe="4h")
         ema = await ma_calc.ema("WETH", period=12, timeframe="1h")
+        ```
     """
 
     def __init__(self, ohlcv_provider: OHLCVProvider) -> None:
@@ -198,8 +202,10 @@ class MovingAverageCalculator:
             DataSourceError: If data cannot be fetched
 
         Example:
+            ```python
             sma_20 = await ma_calc.sma("WETH", period=20, timeframe="1h")
             sma_200 = await ma_calc.sma("WETH", period=200, timeframe="1d")
+            ```
         """
         timeframe = parse_ohlcv_timeframe(timeframe, field_name="SMA timeframe")
         limit = period + 10  # Buffer
@@ -264,8 +270,10 @@ class MovingAverageCalculator:
             DataSourceError: If data cannot be fetched
 
         Example:
+            ```python
             ema_12 = await ma_calc.ema("WETH", period=12, timeframe="1h")
             ema_26 = await ma_calc.ema("WETH", period=26, timeframe="1h")
+            ```
         """
         timeframe = parse_ohlcv_timeframe(timeframe, field_name="EMA timeframe")
         # Request more data for EMA to have stable values
@@ -329,7 +337,9 @@ class MovingAverageCalculator:
             DataSourceError: If data cannot be fetched
 
         Example:
+            ```python
             wma_20 = await ma_calc.wma("WETH", period=20, timeframe="1h")
+            ```
         """
         timeframe = parse_ohlcv_timeframe(timeframe, field_name="WMA timeframe")
         limit = period + 10  # Buffer
@@ -385,8 +395,10 @@ class MovingAverageCalculator:
             Dictionary with calculated value
 
         Example:
+            ```python
             result = await ma_calc.calculate("WETH", type="sma", period=20)
             # {"sma": 2500.0}
+            ```
         """
         ma_type = params.get("type", "sma").lower()
         period = params.get("period", 20)

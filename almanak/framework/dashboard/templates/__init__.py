@@ -12,6 +12,7 @@ Available Templates:
 - PredictionDashboardConfig / render_prediction_dashboard: Prediction market strategies
 
 Example:
+    ```python
     from almanak.framework.dashboard.templates import (
         LPDashboardConfig,
         render_lp_dashboard,
@@ -34,6 +35,7 @@ Example:
         # Pass api_client so the LP template renders the gateway-backed
         # Positions registry + Position Lifecycle sections (PR #2373).
         render_lp_dashboard(deployment_id, strategy_config, session_state, config, api_client=api_client)
+    ```
 """
 
 # Technical Analysis templates

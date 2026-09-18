@@ -14,6 +14,7 @@ Supported chains:
 - Avalanche
 
 Example:
+    ```python
     from almanak.connectors.gmx_v2 import GMXv2Adapter, GMXv2Config
 
     config = GMXv2Config(
@@ -30,6 +31,7 @@ Example:
         size_delta_usd=Decimal("5000"),
         is_long=True,
     )
+    ```
 """
 
 from __future__ import annotations

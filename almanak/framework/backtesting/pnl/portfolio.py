@@ -251,10 +251,12 @@ class SimulatedPortfolio:
         liquidation_penalty: Penalty applied during lending liquidation (default 0.05 = 5%)
 
     Example:
+        ```python
         portfolio = SimulatedPortfolio(initial_capital_usd=Decimal("10000"))
         portfolio.apply_fill(fill)
         value = portfolio.get_total_value_usd(market_state)
         metrics = portfolio.get_metrics()
+        ```
     """
 
     initial_capital_usd: Decimal = Decimal("10000")
@@ -1801,12 +1803,14 @@ class SimulatedPortfolio:
             Tuple of (is_valid: bool, message: str)
 
         Example:
+            ```python
             is_valid, msg = portfolio.validate_margin_for_perp(
                 position_size=Decimal("10000"),
                 collateral=Decimal("1000"),
             )
             if not is_valid:
                 print(f"Cannot open position: {msg}")
+            ```
         """
         # Keep calculator imports lazy to avoid an import cycle.
         from almanak.framework.backtesting.pnl.calculators.margin import MarginValidator
@@ -2084,10 +2088,12 @@ class SimulatedPortfolio:
             Tuple of (can_open: bool, reason: str)
 
         Example:
+            ```python
             can_open, reason = portfolio.check_can_open_perp_position(perp_long)
             if not can_open:
                 # Reject the position
                 return None
+            ```
         """
         if not position.is_perp:
             return True, "Not a perp position, no margin check needed"
@@ -3128,12 +3134,14 @@ class SimulatedPortfolio:
             Total portfolio value in USD at the given timestamp
 
         Example:
+            ```python
             # Without adapter (uses internal valuation)
             value = portfolio.mark_to_market(market_state, datetime.now(timezone.utc))
 
             # With adapter (uses adapter valuation)
             value = portfolio.mark_to_market(market_state, timestamp, adapter=lp_adapter)
             print(f"Portfolio value: ${value}")
+            ```
         """
         total_value = self.cash_usd + self._token_holdings_value(market_state)
         for position in self.positions:

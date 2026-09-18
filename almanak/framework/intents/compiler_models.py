@@ -82,7 +82,7 @@ class IntentCompilerConfig:
             consequence on Aave V3 Mantle after governance zeroed ``ltv`` — the
             gateway emitted ``approve + supply + setUserUseReserveAsCollateral``
             and the toggle leg reverted ``0x21e5c4ae UserHasAssetWithZeroLtv()``
-            on-chain (VIB-6111).
+            on-chain.
 
             When True, those pre-flights may issue their reads through the
             framework ``eth_call`` service instead. This is NOT a strategy-
@@ -92,7 +92,7 @@ class IntentCompilerConfig:
             open exactly as before.
 
         managed_fork: Tri-state declaration of "this compile targets a managed
-            Anvil fork" (ALM-3184). Swap compilers relax the oracle
+            Anvil fork". Swap compilers relax the oracle
             price-impact guard — the only independent cross-check that an
             on-chain quote has not been manipulated or drained — when this
             resolves True, because fork block state and live oracle prices are
@@ -201,13 +201,12 @@ class CompilationResult:
         error: Error message (if failed)
         is_transient: Whether the failure is retryable orchestration-level I/O
         is_safety_refusal: Whether a ``FAILED`` status is a pre-execution
-            SAFETY-GUARD refusal rather than an execution/compile fault
-            (VIB-5746). Set by compile-time guards that refuse to build a
+            SAFETY-GUARD refusal rather than an execution/compile fault. Set by compile-time guards that refuse to build a
             transaction because acting would be unsafe — e.g. price impact above
             the configured max, or the on-chain quoter returned no amount so pool
             liquidity could not be verified. When True, ZERO transactions were
             built and the on-chain position is untouched: the guard did its job.
-            The runner maps this to :class:`FailureKind.GUARD_REFUSED` so it does
+            The runner maps this to `FailureKind.GUARD_REFUSED` so it does
             NOT count toward the circuit breaker's consecutive-failure trip
             thresholds (a correct refusal is a safety success, not a fault). Only
             meaningful when ``status is CompilationStatus.FAILED``.

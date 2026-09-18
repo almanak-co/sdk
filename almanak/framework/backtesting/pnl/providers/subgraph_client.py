@@ -14,6 +14,7 @@ Key Features:
     - Support for multiple subgraph endpoints via subgraph_id
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.providers.subgraph_client import (
         SubgraphClient,
     )
@@ -34,6 +35,7 @@ Example:
         query=query,
         variables={"poolAddress": "0x..."},
     )
+    ```
 """
 
 import logging
@@ -628,6 +630,7 @@ class SubgraphClient:
         rate_limiter: TokenBucketRateLimiter for rate limiting
 
     Example:
+        ```python
         client = SubgraphClient()
 
         # Query Uniswap V3 subgraph on Ethereum
@@ -638,6 +641,7 @@ class SubgraphClient:
 
         # Close when done
         await client.close()
+        ```
     """
 
     def __init__(
@@ -926,6 +930,7 @@ class SubgraphClient:
             SubgraphConnectionError: If connection fails after retries
 
         Example:
+            ```python
             result = await client.query(
                 subgraph_id="5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV",
                 query='''
@@ -938,6 +943,7 @@ class SubgraphClient:
                 ''',
                 variables={"id": "0x..."},
             )
+            ```
         """
         self._stats.total_queries += 1
 
@@ -1050,6 +1056,7 @@ class SubgraphClient:
             Combined list of all items from all pages
 
         Example:
+            ```python
             results = await client.query_with_pagination(
                 subgraph_id="...",
                 query='''
@@ -1067,6 +1074,7 @@ class SubgraphClient:
                 cursor_field="timestamp",
                 cursor_variable="startTimestamp",
             )
+            ```
         """
 
         async def execute(q: str, v: dict[str, Any]) -> dict[str, Any]:
@@ -1132,9 +1140,11 @@ def create_subgraph_client(
         Configured SubgraphClient instance
 
     Example:
+        ```python
         client = create_subgraph_client(requests_per_minute=50)
         async with client:
             result = await client.query(...)
+        ```
     """
     config = SubgraphClientConfig(
         api_key=api_key,

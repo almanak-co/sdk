@@ -119,11 +119,13 @@ class DriftSDK:
     - Build remaining accounts lists for order placement
 
     Example:
+        ```python
         sdk = DriftSDK(wallet_address="your-pubkey", rpc_url="https://...")
         ix = sdk.build_place_perp_order_ix(
             order_params=OrderParams(direction=DIRECTION_LONG, ...),
             remaining_accounts=[...],
         )
+        ```
     """
 
     def __init__(

@@ -15,6 +15,7 @@ Key Components:
 Examples:
     Creating a volume result from subgraph data:
 
+        ```python
         from datetime import datetime, UTC
         from decimal import Decimal
         from almanak.framework.backtesting.pnl.types import (
@@ -30,9 +31,10 @@ Examples:
             value=Decimal("1500000"),
             source_info=source_info,
         )
-
+        ```
     Creating a fallback result with low confidence:
 
+        ```python
         source_info = DataSourceInfo(
             source="fallback_multiplier",
             confidence=DataConfidence.LOW,
@@ -42,6 +44,7 @@ Examples:
             value=Decimal("100000"),
             source_info=source_info,
         )
+        ```
 """
 
 from dataclasses import dataclass
@@ -86,11 +89,13 @@ class DataSourceInfo:
         timestamp: When the data was fetched or the timestamp it represents.
 
     Example:
+        ```python
         source_info = DataSourceInfo(
             source="aave_v3_subgraph",
             confidence=DataConfidence.HIGH,
             timestamp=datetime.now(UTC),
         )
+        ```
     """
 
     source: str
@@ -110,6 +115,7 @@ class VolumeResult:
         source_info: Metadata about data source and confidence.
 
     Example:
+        ```python
         result = VolumeResult(
             value=Decimal("1500000"),
             source_info=DataSourceInfo(
@@ -118,6 +124,7 @@ class VolumeResult:
                 timestamp=datetime(2024, 1, 15, tzinfo=UTC),
             ),
         )
+        ```
     """
 
     value: Decimal
@@ -137,6 +144,7 @@ class FundingResult:
         source_info: Metadata about data source and confidence.
 
     Example:
+        ```python
         result = FundingResult(
             rate=Decimal("0.0001"),
             source_info=DataSourceInfo(
@@ -145,6 +153,7 @@ class FundingResult:
                 timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
             ),
         )
+        ```
     """
 
     rate: Decimal
@@ -166,6 +175,7 @@ class APYResult:
         source_info: Metadata about data source and confidence.
 
     Example:
+        ```python
         result = APYResult(
             supply_apy=Decimal("0.03"),
             borrow_apy=Decimal("0.05"),
@@ -175,6 +185,7 @@ class APYResult:
                 timestamp=datetime(2024, 1, 15, tzinfo=UTC),
             ),
         )
+        ```
     """
 
     supply_apy: Decimal
@@ -196,6 +207,7 @@ class LiquidityResult:
         source_info: Metadata about data source and confidence.
 
     Example:
+        ```python
         result = LiquidityResult(
             depth=Decimal("50000000"),
             source_info=DataSourceInfo(
@@ -204,6 +216,7 @@ class LiquidityResult:
                 timestamp=datetime(2024, 1, 15, tzinfo=UTC),
             ),
         )
+        ```
     """
 
     depth: Decimal

@@ -10,37 +10,27 @@ Core enumeration types used throughout the SDK.
     `ChainRegistry.resolve("bnb").name == "bsc"`,
     `ChainRegistry.get("arbitrum").chain_id == 42161`.
 
-## Network
-
 ::: almanak.core.enums.Network
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source
-
-## ActionType
 
 ::: almanak.core.enums.ActionType
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source
-
-## ExecutionStatus
 
 ::: almanak.core.enums.ExecutionStatus
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source
-
-## SwapSide
 
 ::: almanak.core.enums.SwapSide
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source
-
-## TransactionType
 
 ::: almanak.core.enums.TransactionType
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

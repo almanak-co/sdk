@@ -12,6 +12,7 @@ Supports both same-chain and cross-chain swaps via Enso's bridge aggregation
 (Stargate, LayerZero).
 
 Example:
+    ```python
     from almanak.connectors.enso import EnsoClient, EnsoAdapter, EnsoConfig
 
     # Create client
@@ -21,8 +22,9 @@ Example:
         wallet_address="0x...",
     )
     client = EnsoClient(config)
+    ```
 
-Lazy attribute access (VIB-4835)
+Lazy attribute access
 --------------------------------
 The strategy-facing surface (``EnsoClient``, ``EnsoAdapter``, …) is
 exposed via PEP 562 lazy ``__getattr__``. This keeps the package's

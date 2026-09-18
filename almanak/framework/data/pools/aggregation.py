@@ -8,6 +8,7 @@ All returns are wrapped in DataEnvelope[AggregatedPrice] with EXECUTION_GRADE
 classification (fail-closed, no off-chain fallback).
 
 Example:
+    ```python
     from almanak.framework.data.pools.aggregation import PriceAggregator
 
     aggregator = PriceAggregator(
@@ -20,6 +21,7 @@ Example:
     envelope = aggregator.lwap("WETH", "USDC", "arbitrum")
     print(envelope.price)       # Liquidity-weighted average price
     print(envelope.sources)     # List of PoolContribution
+    ```
 """
 
 from __future__ import annotations

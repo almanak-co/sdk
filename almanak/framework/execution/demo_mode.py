@@ -13,6 +13,7 @@ This is a quality-of-life feature to prevent expensive mistakes during
 development and testing.
 
 Example:
+    ```python
     from almanak.framework.execution.demo_mode import DemoModeGuard, DemoModeError
 
     guard = DemoModeGuard()
@@ -23,6 +24,7 @@ Example:
 
     # Or raise on execution attempt
     guard.validate_not_demo()  # Raises DemoModeError if in demo mode
+    ```
 
 Environment Variables:
     ALMANAK_DEMO_MODE: Set to "true" to enable demo mode
@@ -116,6 +118,7 @@ class DemoModeGuard:
                 submitter.submit(tx)
 
     Example:
+        ```python
         guard = DemoModeGuard()
 
         # Before submitting a transaction
@@ -129,6 +132,7 @@ class DemoModeGuard:
             result = await submitter.submit(tx)
         except DemoModeError as e:
             logger.warning(f"Blocked by demo mode: {e}")
+        ```
     """
 
     # Environment variable names

@@ -24,6 +24,7 @@ Key Components:
     - CompoundV3Market: Enum of supported Compound V3 markets
 
 Example:
+    ```python
     from almanak.connectors.compound_v3.fee_model import (
         CompoundV3FeeModel,
         CompoundV3Market,
@@ -44,6 +45,7 @@ Example:
         is_liquidation=True,
         asset="WETH",
     )
+    ```
 """
 
 from dataclasses import dataclass, field
@@ -145,6 +147,7 @@ class CompoundV3FeeModel(FeeModel):
             (default 0 - typically 0 but can be set by governance)
 
     Example:
+        ```python
         # Standard model
         model = CompoundV3FeeModel()
 
@@ -156,6 +159,7 @@ class CompoundV3FeeModel(FeeModel):
                 "WBTC": Decimal("0.05"),
             },
         )
+        ```
     """
 
     default_liquidation_discount: Decimal = Decimal("0.08")  # 8% default

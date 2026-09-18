@@ -15,6 +15,7 @@ Key differences from EVM lending adapters (Aave):
   units. This differs from Jupiter (lamports) and Raydium (raw amounts).
 
 Example:
+    ```python
     from almanak.connectors.kamino import KaminoAdapter, KaminoConfig
 
     config = KaminoConfig(wallet_address="your-solana-pubkey")
@@ -22,6 +23,7 @@ Example:
 
     intent = SupplyIntent(protocol="kamino", token="USDC", amount=Decimal("100"))
     bundle = adapter.compile_supply_intent(intent)
+    ```
 """
 
 import logging
@@ -54,11 +56,13 @@ class KaminoAdapter:
     from Kamino's REST API.
 
     Example:
+        ```python
         config = KaminoConfig(wallet_address="your-solana-pubkey")
         adapter = KaminoAdapter(config)
 
         intent = SupplyIntent(protocol="kamino", token="USDC", amount=Decimal("100"))
         bundle = adapter.compile_supply_intent(intent)
+        ```
     """
 
     def __init__(

@@ -13,6 +13,7 @@ Key differences from EVM adapters (Enso):
 - Token addresses are Solana mint addresses (Base58), not EVM addresses (hex)
 
 Example:
+    ```python
     from almanak.connectors.jupiter import JupiterAdapter, JupiterConfig
 
     config = JupiterConfig(wallet_address="your-solana-pubkey")
@@ -24,6 +25,7 @@ Example:
         amount=Decimal("100"),
     )
     bundle = adapter.compile_swap_intent(intent)
+    ```
 """
 
 import logging
@@ -63,11 +65,13 @@ class JupiterAdapter:
     - Route freshness is managed via get_fresh_swap_transaction()
 
     Example:
+        ```python
         config = JupiterConfig(wallet_address="your-solana-pubkey")
         adapter = JupiterAdapter(config)
 
         intent = SwapIntent(from_token="USDC", to_token="SOL", amount=Decimal("100"))
         bundle = adapter.compile_swap_intent(intent)
+        ```
     """
 
     def __init__(

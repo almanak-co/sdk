@@ -15,6 +15,7 @@ Health Factor Formula:
     health_factor = (collateral_value * liquidation_threshold) / debt_value
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.calculators.health_factor import (
         HealthFactorCalculator,
         HealthFactorResult,
@@ -30,6 +31,7 @@ Example:
     )
     print(f"Health Factor: {result.health_factor}")  # ~1.375
     print(f"Safe: {result.is_safe}")  # True
+    ```
 
 References:
     - Aave V3 Health Factor: https://docs.aave.com/developers/guides/liquidations
@@ -124,6 +126,7 @@ class HealthFactorCalculator:
         warning_count: Number of warnings emitted
 
     Example:
+        ```python
         calculator = HealthFactorCalculator()
 
         result = calculator.calculate_health_factor(
@@ -133,6 +136,7 @@ class HealthFactorCalculator:
         )
         # result.health_factor = 1.375
         # result.is_safe = True
+        ```
     """
 
     warning_threshold: Decimal = Decimal("1.2")
@@ -175,6 +179,7 @@ class HealthFactorCalculator:
             HealthFactorResult with health factor and safety status
 
         Example:
+            ```python
             # Position with $10,000 collateral and $6,000 debt at 82.5% LTV
             result = calculator.calculate_health_factor(
                 collateral_value_usd=Decimal("10000"),
@@ -182,6 +187,7 @@ class HealthFactorCalculator:
                 liquidation_threshold=Decimal("0.825"),
             )
             # result.health_factor = 1.375
+            ```
         """
         # Handle edge cases
         if debt_value_usd <= Decimal("0"):
@@ -248,12 +254,14 @@ class HealthFactorCalculator:
             HealthFactorWarning if below threshold, None otherwise
 
         Example:
+            ```python
             warning = calculator.check_health_factor_warning(
                 health_factor=Decimal("1.15"),
                 position_id="BORROW_aave_v3_USDC_123456",
             )
             if warning:
                 print(f"Warning: {warning.message}")
+            ```
         """
         if health_factor >= self.warning_threshold:
             return None
@@ -326,6 +334,7 @@ class HealthFactorCalculator:
             Maximum debt value in USD that maintains the target health factor
 
         Example:
+            ```python
             # How much can I borrow with $10,000 collateral at 82.5% LTV
             # while maintaining 1.5 HF?
             max_borrow = calculator.calculate_max_borrow(
@@ -334,6 +343,7 @@ class HealthFactorCalculator:
                 target_health_factor=Decimal("1.5"),
             )
             # max_borrow = $5,500
+            ```
         """
         if target_health_factor <= Decimal("0"):
             return Decimal("0")
@@ -361,6 +371,7 @@ class HealthFactorCalculator:
             Required collateral value in USD
 
         Example:
+            ```python
             # How much collateral do I need for $5,000 debt to have 1.5 HF?
             required = calculator.calculate_required_collateral(
                 debt_value_usd=Decimal("5000"),
@@ -368,6 +379,7 @@ class HealthFactorCalculator:
                 target_health_factor=Decimal("1.5"),
             )
             # required = ~$9,091
+            ```
         """
         if liquidation_threshold <= Decimal("0"):
             return Decimal("999999999")  # Infinite collateral needed

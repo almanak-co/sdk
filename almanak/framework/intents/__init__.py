@@ -5,6 +5,7 @@ developers to express trading actions at a semantic level without worrying
 about low-level transaction details.
 
 Example:
+    ```python
     from almanak.framework.intents import Intent, IntentCompiler
 
     # In your strategy's decide() method:
@@ -20,6 +21,7 @@ Example:
     # Compile intent to ActionBundle:
     compiler = IntentCompiler(chain="arbitrum")
     result = compiler.compile(intent)
+    ```
 """
 
 from typing import TYPE_CHECKING

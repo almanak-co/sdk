@@ -11,6 +11,7 @@ The ExecutionSession tracks:
 - ActionBundle snapshot for replay
 
 Example:
+    ```python
     from almanak.framework.execution.session import ExecutionSession, ExecutionPhase, TransactionState
 
     # Create a new session
@@ -28,6 +29,7 @@ Example:
         nonce=42,
         status=TransactionStatus.PENDING,
     ))
+    ```
 """
 
 import json

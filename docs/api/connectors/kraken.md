@@ -12,9 +12,7 @@
 |-------|--------|-------------------|
 | N/A (off-chain) | N/A | ``SWAP`` |
 
-## API Reference
-
 ::: almanak.connectors.kraken
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

@@ -19,9 +19,7 @@
 | [Polygon](../../chains/polygon.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 | [Robinhood](../../chains/robinhood.md) | EVM | ``LP_CLOSE``, ``LP_COLLECT_FEES``, ``LP_OPEN``, ``SWAP`` |
 
-## API Reference
-
 ::: almanak.connectors.uniswap_v4
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

@@ -28,9 +28,11 @@ class BinanceIntegration(BaseIntegration):
     - get_order_book: Order book depth
 
     Example:
+        ```python
         integration = BinanceIntegration()
         ticker = await integration.get_ticker("BTCUSDT")
         klines = await integration.get_klines("ETHUSDT", interval="1h", limit=100)
+        ```
     """
 
     name = "binance"

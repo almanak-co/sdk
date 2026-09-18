@@ -5,6 +5,7 @@ Tracks exchange rates, staking APY, and metadata for Solana LSTs
 price API as data sources.
 
 Example:
+    ```python
     from almanak.framework.data.staking import SolanaLSTProvider
 
     provider = SolanaLSTProvider()
@@ -14,6 +15,7 @@ Example:
 
     all_rates = await provider.get_all_rates()
     # Returns dict of all tracked LST rates
+    ```
 """
 
 from __future__ import annotations

@@ -28,8 +28,10 @@ class SolanaSigner:
     must provide a fresh transaction (via Jupiter's deferred_swap pattern).
 
     Example:
+        ```python
         signer = SolanaSigner.from_base58(private_key_base58)
         signed_b64 = signer.sign_serialized_transaction(tx_base64)
+        ```
     """
 
     def __init__(self, keypair: Keypair) -> None:

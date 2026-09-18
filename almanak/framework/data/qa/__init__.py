@@ -11,6 +11,7 @@ Key Components:
     - QAReport: Complete QA report with all test results
 
 Example:
+    ```python
     from almanak.framework.data.qa import load_config, QARunner
     from pathlib import Path
 
@@ -21,6 +22,7 @@ Example:
 
     print(f"Overall: {'PASSED' if report.passed else 'FAILED'}")
     print(f"Report: {report.report_path}")
+    ```
 """
 
 from .config import QAConfig, QAThresholds, load_config

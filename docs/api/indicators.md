@@ -2,80 +2,56 @@
 
 Technical analysis indicator calculators available through the data layer.
 
-## RSICalculator
-
 ::: almanak.framework.data.indicators.RSICalculator
     options:
-      show_root_heading: true
-
-## BollingerBandsCalculator
+      heading_level: 2
 
 ::: almanak.framework.data.indicators.BollingerBandsCalculator
     options:
-      show_root_heading: true
-
-## MACDCalculator
+      heading_level: 2
 
 ::: almanak.framework.data.indicators.MACDCalculator
     options:
-      show_root_heading: true
-
-## StochasticCalculator
+      heading_level: 2
 
 ::: almanak.framework.data.indicators.StochasticCalculator
     options:
-      show_root_heading: true
-
-## ATRCalculator
+      heading_level: 2
 
 ::: almanak.framework.data.indicators.ATRCalculator
     options:
-      show_root_heading: true
-
-## MovingAverageCalculator
+      heading_level: 2
 
 ::: almanak.framework.data.indicators.MovingAverageCalculator
     options:
-      show_root_heading: true
+      heading_level: 2
 
 ## Result Types
 
-### BollingerBandsResult
-
 ::: almanak.framework.data.indicators.BollingerBandsResult
     options:
-      show_root_heading: true
-
-### MACDResult
+      heading_level: 3
 
 ::: almanak.framework.data.indicators.MACDResult
     options:
-      show_root_heading: true
-
-### StochasticResult
+      heading_level: 3
 
 ::: almanak.framework.data.indicators.StochasticResult
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## OHLCV Data
 
-### OHLCVData
-
 ::: almanak.framework.data.indicators.OHLCVData
     options:
-      show_root_heading: true
-
-### CoinGeckoOHLCVProvider
+      heading_level: 3
 
 ::: almanak.framework.data.indicators.CoinGeckoOHLCVProvider
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Registry
 
-### IndicatorRegistry
-
 ::: almanak.framework.data.indicators.IndicatorRegistry
     options:
-      show_root_heading: true
+      heading_level: 3

@@ -23,6 +23,7 @@ Supported chains:
 - Polygon
 
 Example:
+    ```python
     from almanak.connectors.compound_v3 import CompoundV3Adapter, CompoundV3Config
 
     config = CompoundV3Config(
@@ -47,6 +48,7 @@ Example:
     result = adapter.borrow(
         amount=Decimal("500"),
     )
+    ```
 """
 
 import logging
@@ -347,6 +349,7 @@ class CompoundV3Adapter:
     interest - only base asset suppliers earn yield.
 
     Example:
+        ```python
         config = CompoundV3Config(
             chain="ethereum",
             wallet_address="0x...",
@@ -362,6 +365,7 @@ class CompoundV3Adapter:
 
         # Borrow against collateral
         result = adapter.borrow(amount=Decimal("500"))
+        ```
     """
 
     def __init__(

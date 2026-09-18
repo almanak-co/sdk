@@ -5,6 +5,7 @@ developers to express "ensure I have at least X tokens on chain Y" so the
 system handles sourcing automatically.
 
 Example:
+    ```python
     from almanak.framework.intents import Intent
 
     # Ensure at least 1000 USDC on Arbitrum
@@ -19,6 +20,7 @@ Example:
     # 2. If >= 1000, return HoldIntent (no action needed)
     # 3. If < 1000, find a source chain with sufficient balance
     # 4. Generate a BridgeIntent to move tokens to arbitrum
+    ```
 """
 
 from collections.abc import Sequence
@@ -135,6 +137,7 @@ class EnsureBalanceIntent(BaseIntent):
         created_at: Timestamp when the intent was created
 
     Example:
+        ```python
         # Ensure at least 1000 USDC on Arbitrum before opening a position
         intent = EnsureBalanceIntent(
             token="USDC",
@@ -149,6 +152,7 @@ class EnsureBalanceIntent(BaseIntent):
             target_chain="base",
             max_slippage=Decimal("0.01"),  # 1% max slippage
         )
+        ```
     """
 
     token: str

@@ -13,6 +13,7 @@ Supported operations:
 - LP_CLOSE: Remove liquidity from Curve pools
 
 Example:
+    ```python
     from almanak.connectors.curve import CurveAdapter, CurveConfig
 
     config = CurveConfig(
@@ -34,6 +35,7 @@ Example:
         pool_address="0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7",
         amounts=[Decimal("1000"), Decimal("1000"), Decimal("1000")],  # DAI, USDC, USDT
     )
+    ```
 """
 
 from __future__ import annotations

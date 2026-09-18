@@ -13,6 +13,7 @@ The interface allows future implementations (e.g., TenderlySimulator) to be
 swapped in without changes to calling code.
 
 Example:
+    ```python
     from almanak.framework.execution.simulator import DirectSimulator
     from almanak.framework.execution.interfaces import UnsignedTransaction
 
@@ -31,6 +32,7 @@ Example:
     result = await simulator.simulate([unsigned_tx], chain="arbitrum")
     assert result.success is True
     assert result.simulated is False  # No actual simulation performed
+    ```
 """
 
 import logging
@@ -73,6 +75,7 @@ class DirectSimulator(Simulator):
         name: Identifier for this simulator (for logging and metrics)
 
     Example:
+        ```python
         simulator = DirectSimulator()
 
         # Simulate a single transaction
@@ -84,6 +87,7 @@ class DirectSimulator(Simulator):
         else:
             # Handle simulation failure (won't happen with DirectSimulator)
             ...
+        ```
     """
 
     def __init__(self, name: str = "direct") -> None:

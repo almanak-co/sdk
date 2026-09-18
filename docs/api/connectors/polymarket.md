@@ -12,9 +12,7 @@
 |-------|--------|-------------------|
 | [Polygon](../../chains/polygon.md) | EVM | ``PREDICTION_BUY``, ``PREDICTION_REDEEM``, ``PREDICTION_SELL`` |
 
-## API Reference
-
 ::: almanak.connectors.polymarket
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

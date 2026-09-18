@@ -17,6 +17,7 @@ Remediation Options:
     - OPERATOR_INTERVENTION: Escalate to operator for manual handling
 
 Example:
+    ```python
     from almanak.framework.execution.remediation import (
         RemediationStateMachine,
         OperatorCard,
@@ -35,6 +36,7 @@ Example:
     if result.requires_operator:
         card = state_machine.generate_operator_card(failed_step)
         alert_operator(card)
+    ```
 """
 
 import logging
@@ -390,6 +392,7 @@ class RemediationStateMachine:
         ESCALATED -> ABANDONED (operator abandons)
 
     Example:
+        ```python
         state_machine = RemediationStateMachine(plan, risk_guard)
 
         # Handle failure
@@ -397,6 +400,7 @@ class RemediationStateMachine:
 
         if result.requires_operator:
             card = state_machine.generate_operator_card(failed_step)
+        ```
     """
 
     # Valid state transitions

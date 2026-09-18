@@ -9,6 +9,7 @@ client and CTF SDK:
 - Redeem intents -> CTF transactions (on-chain redemption)
 
 Example:
+    ```python
     from almanak.connectors.polymarket import GatewayPolymarketClient, PolymarketAdapter
     from almanak.framework.gateway_client import GatewayClient
     from almanak.framework.intents import Intent
@@ -27,6 +28,7 @@ Example:
         amount_usd=Decimal("100"),
     )
     bundle = adapter.compile_intent(intent, market_snapshot)
+    ```
 """
 
 import logging

@@ -1,10 +1,11 @@
 """Gateway-backed funding rate provider.
 
 Routes all funding rate requests through the gateway sidecar's
-:class:`FundingRateService` (see ``almanak/gateway/services/funding_rate_service.py``)
+`FundingRateService` (see ``almanak/gateway/services/funding_rate_service.py``)
 so the strategy container has zero network egress for funding data.
 
 Example:
+    ```python
     from almanak.framework.data.funding import GatewayFundingRateProvider, Venue
     from almanak.framework.gateway_client import GatewayClient
 
@@ -15,6 +16,7 @@ Example:
         spread = await provider.get_funding_rate_spread(
             "ETH-USD", Venue.GMX_V2, Venue.HYPERLIQUID,
         )
+    ```
 """
 
 from __future__ import annotations
@@ -69,7 +71,7 @@ def _validate_market(venue: str, market: str) -> str:
     Funding manifests use venue transport keys (``"ETH-USD"``), while public
     perp intents and GMX execution registries use ``"ETH/USD"``. Both must
     enter the funding lane through the shared canonicalization seam; otherwise
-    a strategy needs two identifiers for one market (ALM-3094).
+    a strategy needs two identifiers for one market.
     """
     # ``perp_market_funding_key`` derives "<BASE>-USD" and DISCARDS the quote,
     # so on its own it maps ETH/EUR, ETH-WHATEVER and ETH-EUR-PERP all onto
@@ -149,7 +151,7 @@ class GatewayFundingRateProvider:
         self._cache.setdefault(venue, {})[market_identity] = (rate, time.monotonic())
 
     def _response_to_funding_rate(self, response) -> FundingRate:
-        """Convert a gRPC FundingRateResponse to :class:`FundingRate`."""
+        """Convert a gRPC FundingRateResponse to `FundingRate`."""
         rate_hourly = Decimal(response.rate_hourly)
         next_funding = (
             datetime.fromtimestamp(response.next_funding_time, tz=UTC) if response.next_funding_time else None

@@ -17,6 +17,7 @@ Finalized candles (>24h old) are cached to disk; recent candles are
 tagged provisional and refreshed on next access.
 
 Example:
+    ```python
     from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
 
     router = OHLCVRouter()
@@ -31,6 +32,7 @@ Example:
     )
     candles = envelope.value
     print(envelope.meta.source)  # e.g. "coingecko_onchain"
+    ```
 """
 
 from __future__ import annotations

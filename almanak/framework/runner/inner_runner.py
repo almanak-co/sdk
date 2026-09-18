@@ -13,6 +13,7 @@ StrategyRunner already has these features built into _execute_single_chain().
 ToolExecutor previously bypassed all of them. This service closes that gap.
 
 Example:
+    ```python
     service = IntentExecutionService(
         gateway_client=client,
         chain="arbitrum",
@@ -25,6 +26,7 @@ Example:
         intent_params={"from_token": "USDC", "to_token": "ETH", "amount": "1000"},
     )
     # result.enriched_data contains position_id, swap_amounts, etc.
+    ```
 """
 
 from __future__ import annotations

@@ -10,7 +10,7 @@ Key classes:
 - DriftReceiptParser: Parses transaction receipts for fill data
 - DriftConfig: Adapter configuration
 
-Lazy attribute access (VIB-4835): the strategy-side public surface is
+Lazy attribute access: the strategy-side public surface is
 exposed via PEP 562 ``__getattr__`` so importing
 ``almanak.connectors.drift.gateway.provider`` at gateway boot does not
 eagerly pull adapter / SDK / client modules. The pre-existing

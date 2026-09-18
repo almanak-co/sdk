@@ -12,6 +12,7 @@ Supported chains:
 sUSDe is an ERC4626 vault token that accrues yield from delta-neutral strategies.
 
 Example:
+    ```python
     from almanak.connectors.ethena import EthenaAdapter, EthenaConfig
 
     config = EthenaConfig(
@@ -25,6 +26,7 @@ Example:
 
     # Start cooldown to unstake sUSDe
     result = adapter.unstake_susde(amount=Decimal("1000.0"))
+    ```
 """
 
 from __future__ import annotations
@@ -140,6 +142,7 @@ class EthenaAdapter:
     (typically 7 days) before assets can be withdrawn.
 
     Example:
+        ```python
         config = EthenaConfig(
             chain="ethereum",
             wallet_address="0x...",
@@ -151,6 +154,7 @@ class EthenaAdapter:
 
         # Start cooldown for unstaking
         result = adapter.unstake_susde(Decimal("1000.0"))
+        ```
     """
 
     def __init__(self, config: EthenaConfig, token_resolver: TokenResolverType | None = None) -> None:

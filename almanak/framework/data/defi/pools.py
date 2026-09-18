@@ -9,6 +9,7 @@ Key Components:
     - DexType: Connector protocol identifier used by the observation
 
 Example:
+    ```python
     from almanak.framework.data.defi.pools import PoolReserves, DexType
     from almanak.framework.data.tokens import ChainToken, Token
 
@@ -57,6 +58,7 @@ Example:
         tvl_usd=Decimal("100000000"),
         last_updated=datetime.now(timezone.utc),
     )
+    ```
 """
 
 from dataclasses import dataclass
@@ -450,6 +452,7 @@ class UniswapV3PoolReader:
         - Calculate TVL in USD using price oracle
 
     Example:
+        ```python
         from almanak.framework.data.defi.pools import UniswapV3PoolReader
 
         reader = UniswapV3PoolReader(
@@ -469,6 +472,7 @@ class UniswapV3PoolReader:
         print(f"Reserve0: {reserves.reserve0} {reserves.token0.symbol}")
         print(f"Reserve1: {reserves.reserve1} {reserves.token1.symbol}")
         print(f"TVL: ${reserves.tvl_usd}")
+        ```
 
     Attributes:
         rpc_urls: Mapping of chain names to RPC endpoint URLs

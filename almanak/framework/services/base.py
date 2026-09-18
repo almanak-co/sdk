@@ -168,6 +168,7 @@ class Service(ABC):
         - get_metrics() - Export service metrics
 
     Example:
+        ```python
         class MyService(Service):
             def __init__(self, config):
                 super().__init__(service_name="MyService")
@@ -183,6 +184,7 @@ class Service(ABC):
                 self._status = ServiceStatus.STOPPING
                 # Cleanup resources
                 self._status = ServiceStatus.STOPPED
+        ```
 
     Thread Safety:
         Base class is NOT thread-safe. Subclasses should implement
@@ -243,6 +245,7 @@ class Service(ABC):
             HealthCheckResult with current health status
 
         Example:
+            ```python
             def health_check(self) -> HealthCheckResult:
                 base_health = super().health_check()
 
@@ -254,6 +257,7 @@ class Service(ABC):
                     base_health.message = "Database connection failed"
 
                 return base_health
+            ```
         """
         now = datetime.now(UTC)
         uptime = None
@@ -312,11 +316,13 @@ class Service(ABC):
             Dictionary of metric name -> value
 
         Example:
+            ```python
             def get_metrics(self) -> dict[str, Any]:
                 metrics = super().get_metrics()
                 metrics["requests_processed"] = self.request_count
                 metrics["avg_latency_ms"] = self.avg_latency
                 return metrics
+            ```
         """
         uptime = 0.0
         if self._start_time:

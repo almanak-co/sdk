@@ -15,6 +15,7 @@ Key Concepts:
     - sqrt(P): Uniswap V3 uses sqrt(price) internally for calculations
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.calculators.impermanent_loss import ImpermanentLossCalculator
 
     calc = ImpermanentLossCalculator()
@@ -34,6 +35,7 @@ Example:
         position_value_usd=Decimal("10000"),
         duration_days=Decimal("30"),
     )
+    ```
 
 References:
     - Uniswap V3 Whitepaper: https://uniswap.org/whitepaper-v3.pdf
@@ -68,6 +70,7 @@ class ImpermanentLossCalculator:
         precision: Number of decimal places for calculations (default 28)
 
     Example:
+        ```python
         calc = ImpermanentLossCalculator()
 
         # Full range position (like V2)
@@ -79,6 +82,7 @@ class ImpermanentLossCalculator:
             liquidity=Decimal("1000000"),
         )
         print(f"IL: {il:.2%}, Token0: {t0}, Token1: {t1}")
+        ```
     """
 
     precision: int = 28
@@ -406,6 +410,7 @@ class ImpermanentLossCalculator:
             Annualized APR as a decimal (0.10 = 10% APR)
 
         Example:
+            ```python
             # $500 earned on $10,000 over 30 days
             apr = calc.calculate_fee_apr(
                 fees_earned_usd=Decimal("500"),
@@ -413,6 +418,7 @@ class ImpermanentLossCalculator:
                 duration_days=Decimal("30"),
             )
             # apr = 0.05 * (365/30) = 0.608 = 60.8% APR
+            ```
         """
         if position_value_usd <= 0 or duration_days <= 0:
             return Decimal("0")

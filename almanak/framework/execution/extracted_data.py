@@ -8,11 +8,13 @@ The design follows "UX First, Safety Always" - providing strongly typed
 data that strategy authors can access directly without manual parsing.
 
 Example:
+    ```python
     result = await orchestrator.execute(intent)
     if result.swap_amounts:
         print(f"Swapped: {result.swap_amounts.amount_in_decimal}")
     if result.position_id:
         print(f"Position: {result.position_id}")
+    ```
 """
 
 from dataclasses import dataclass
@@ -68,8 +70,7 @@ class SwapAmounts:
             silently corrupt slippage / lot-pricing reconciliation.
         slippage_bps: Actual slippage in basis points (None if unknown)
         expected_out_decimal: Pre-slippage-discount expected output in human
-            units, sourced from the compiler's ActionBundle metadata
-            (VIB-3203). Persisting this alongside ``slippage_bps`` gives
+            units, sourced from the compiler's ActionBundle metadata. Persisting this alongside ``slippage_bps`` gives
             downstream consumers the source-of-truth used to compute the
             realized slippage. ``None`` when the compile path did not supply
             a quote.
@@ -89,9 +90,11 @@ class SwapAmounts:
             ``amount_out_decimal``. See ``amount_in_decimal_resolved``.
 
     Example:
+        ```python
         if result.swap_amounts:
             price = result.swap_amounts.effective_price
             slippage = result.swap_amounts.slippage_bps
+        ```
     """
 
     amount_in: int | None
@@ -162,8 +165,7 @@ class LPCloseData:
             ``None`` = UNMEASURED (Empty ≠ Zero): a NATIVE-ETH leg credited via
             an internal call emits no ERC-20 Transfer, so a log-based parser
             cannot measure it from the receipt and leaves it ``None`` for the
-            runner's native-balance-bracket capture to fill at ledger-build time
-            (VIB-5121). A numeric value — including ``0`` — is a measured leg.
+            runner's native-balance-bracket capture to fill at ledger-build time. A numeric value — including ``0`` — is a measured leg.
         amount1_collected: Total amount of token1 collected (principal + fees).
             ``None`` = UNMEASURED native leg (see ``amount0_collected``).
         fees0: Fees earned in token0 (if separately tracked)
@@ -173,14 +175,14 @@ class LPCloseData:
             Maps coin index to raw amount: {2: 50000000, 3: 91000000000000000000}.
         additional_fees: Fees for coins beyond token0/token1.
             Maps coin index to fee amount: {2: 100000, 3: 0}.
-        current_tick: Pool's current tick at the moment of close (VIB-3940).
+        current_tick: Pool's current tick at the moment of close.
             Mirrors ``LPOpenData.current_tick`` so the framework can derive
             ``in_range`` at close-time and stamp it on the LP_CLOSE event,
             closing the lane-symmetry gap with LP_OPEN. Sourced from a Swap
             event in the close receipt when present, with a slot0() RPC
             fallback in the runner. None when no Swap event is in the
             receipt and the slot0 fallback could not run.
-        pool_address: V3 pool address that emitted the Burn event (VIB-3940).
+        pool_address: V3 pool address that emitted the Burn event.
             Required input for the framework's slot0 fallback. Empty when the
             parser couldn't identify the pool. Mirrors ``LPOpenData.pool_address``.
         source: Provenance tag for the on-chain event the close amounts were
@@ -192,16 +194,18 @@ class LPCloseData:
             (Aerodrome Slipstream: ``decreaseLiquidity`` then ``collect``),
             ResultEnricher uses this tag to prefer the ``Collect``-sourced
             extraction across receipts so accrued fees on chain are not
-            silently dropped from the registry payload (VIB-4310). Optional
+            silently dropped from the registry payload. Optional
             for backward compatibility: single-tx parsers may leave it
             ``None``; the enricher then falls back to first-match semantics.
 
     Example:
+        ```python
         if result.lp_close_data:
             total_0 = result.lp_close_data.amount0_collected
             fees_0 = result.lp_close_data.fees0
             # For 4-coin pools (e.g., Curve NG):
             all_amounts = result.lp_close_data.all_amounts  # [amt0, amt1, amt2, amt3]
+        ```
     """
 
     # VIB-5117 — Empty ≠ Zero on the close PRINCIPAL legs. ``None`` means the
@@ -305,11 +309,11 @@ class LPCloseData:
     def all_amounts(self) -> list[int | None]:
         """Return all coin amounts as a list, including additional coins.
 
-        Per Empty ≠ Zero (VIB-5117 / VIB-5121): ``None`` slots stand for
+        Per Empty ≠ Zero: ``None`` slots stand for
         "unmeasured by this parser" — e.g. a native principal leg the receipt
         could not observe (filled later from the V4 pre-burn position-state read
         or the Fluid balance bracket). A numeric ``0`` is a measured zero.
-        Mirrors :attr:`all_fees`.
+        Mirrors `all_fees`.
         """
         result: list[int | None] = [self.amount0_collected, self.amount1_collected]
         if self.additional_amounts:
@@ -388,13 +392,13 @@ class LPOpenData:
         liquidity: Amount of liquidity minted
         amount0: Actual amount of token0 deposited
         amount1: Actual amount of token1 deposited
-        current_tick: Pool's current tick at the moment of mint (VIB-3887).
+        current_tick: Pool's current tick at the moment of mint.
             Used to derive ``in_range`` on ``position_events``. Sourced
             from the gateway-side receipt parser (which has authority to
             call ``slot0().tick`` after the mint receipt). Framework code
             consumes this field — it never populates it via direct RPC.
             None when the gateway didn't (yet) carry the field.
-        pool_address: V3 pool address for the position (VIB-3893). Populated
+        pool_address: V3 pool address for the position. Populated
             by the receipt parser from the Pool Mint event. Used by the
             framework to fall back to a ``slot0()`` lookup when the receipt
             had no Swap event (pure NPM.mint LP_OPEN — the canonical
@@ -404,11 +408,13 @@ class LPOpenData:
             see VIB-4473.
 
     Example:
+        ```python
         if result.position_id:  # Core field
             # Access additional data via extracted_data
             lp_data = result.get_extracted("lp_open_data", LPOpenData)
             if lp_data:
                 print(f"Range: {lp_data.tick_lower} - {lp_data.tick_upper}")
+        ```
     """
 
     position_id: int
@@ -442,9 +448,9 @@ class LPOpenData:
 
     @property
     def all_amounts(self) -> list[int | None]:
-        """Return all coin deposit amounts in pool-coin index order (VIB-5429).
+        """Return all coin deposit amounts in pool-coin index order.
 
-        Mirrors :attr:`LPCloseData.all_amounts`. Per Empty ≠ Zero, a ``None`` slot
+        Mirrors `all_amounts`. Per Empty ≠ Zero, a ``None`` slot
         is "unmeasured by this parser"; a numeric ``0`` is a measured zero (an
         unfunded coin of a single-sided deposit).
         """
@@ -556,20 +562,20 @@ class PerpData:
         leverage: Position leverage
         realized_pnl: Realized PnL (for closes)
         fees_paid: Total fees paid
-        funding_fee_usd: Accumulated funding fees in USD at close (VIB-3497).
+        funding_fee_usd: Accumulated funding fees in USD at close.
             None = unavailable (parser has not yet implemented extraction).
             Decimal("0") = measured zero funding (position held for <1 funding period).
         venue_leverage: The leverage the VENUE actually applied to the position,
-            observed on-venue after the fill (VIB-5724). Distinct from
+            observed on-venue after the fill. Distinct from
             ``leverage_requested``: a venue that cannot honour the requested
             leverage (e.g. Hyperliquid CoreWriter has no set-leverage action, so
             it opens at the account's existing per-asset leverage) records the
             truth here. ``None`` = unmeasured (Empty≠Zero — never defaulted to
             the requested value, never ``0``).
         venue_margin_mode: The margin mode the VENUE actually used —
-            ``"isolated"`` or ``"cross"`` (VIB-5724), observed on-venue after the
+            ``"isolated"`` or ``"cross"``, observed on-venue after the
             fill. ``None`` = unmeasured.
-        leverage_requested: The leverage the INTENT asked for (VIB-5724). Pure
+        leverage_requested: The leverage the INTENT asked for. Pure
             metadata for divergence forensics; it is NEVER the venue truth. Kept
             separate so no field that reads as venue truth ever carries the
             requested value.
@@ -640,14 +646,14 @@ class StakeData:
 
 @dataclass(frozen=True)
 class PredictionSetupTx:
-    """Per-tx record of a Polymarket V2 on-chain setup transaction (VIB-3710).
+    """Per-tx record of a Polymarket V2 on-chain setup transaction.
 
-    Mirrors :class:`almanak.connectors.polymarket.models.SetupTxInfo`
+    Mirrors `almanak.connectors.polymarket.models.SetupTxInfo`
     but lives in the framework execution layer so consumers downstream of the
     enricher (strategy callbacks, accounting handler) do not need to import
     from the connector. The connector-side struct is the wire model; this
     struct is the framework-side projection that flows on
-    :class:`PredictionFill`.
+    `PredictionFill`.
 
     Attributes:
         tx_hash: 0x-prefixed Polygon tx hash for the approval / wrap.
@@ -675,7 +681,7 @@ class PredictionSetupTx:
 
 @dataclass(frozen=True)
 class PredictionFill:
-    """Extracted Polymarket CLOB fill data (VIB-3218).
+    """Extracted Polymarket CLOB fill data.
 
     Polymarket orders submit off-chain; the CLOB API returns "order accepted"
     before the order is matched. A ``PREDICTION_BUY`` strategy that flips its
@@ -702,14 +708,14 @@ class PredictionFill:
         order_id: CLOB-assigned order identifier for follow-up queries.
         status: Lowercase CLOB order lifecycle state as a free-form string
             ("matched", "live", "unmatched", "delayed", …). The typed status
-            is on :class:`ClobExecutionResult`; this field is a hint for
+            is on `ClobExecutionResult`; this field is a hint for
             logging / diagnostics without reaching into extracted_data.
         setup_txs: On-chain setup transactions submitted by the gateway
             before this order. Empty list when allowances were already in
-            place AND no wrap was needed. (VIB-3710)
+            place AND no wrap was needed.
         fee_pusd: pUSD operator fee charged at match time, in human units.
             None when the order did not match (no fee yet) or when the CLOB
-            response did not carry a fee field. (VIB-3710)
+            response did not carry a fee field.
 
     Example::
 
@@ -787,7 +793,7 @@ class AsyncOrderData:
 
     ``order_id`` is the protocol-issued identifier measured from the execution
     receipt. It must not contain a compiler-side placeholder. Connectors may
-    expose a venue-specific alias, such as :attr:`order_key` for GMX V2, while
+    expose a venue-specific alias, such as `order_key` for GMX V2, while
     settlement orchestration consumes the protocol-neutral field. The optional
     perp target fields carry receipt-measured market, collateral, direction, and
     requested size delta so a settlement observer can prove the submitted
@@ -824,16 +830,16 @@ class AsyncOrderData:
 
 @dataclass(frozen=True)
 class BridgeData:
-    """Extracted bridge execution data (VIB-3226).
+    """Extracted bridge execution data.
 
     Typed view of what happened on the *source* chain when a BRIDGE intent
-    executed. Populated by :class:`ResultEnricher` after a bridge adapter's
+    executed. Populated by `ResultEnricher` after a bridge adapter's
     receipt parser (Across / Stargate / LiFi) extracts the deposit event.
 
     Semantics:
         - All fields describe the **source-chain** transaction (the deposit).
           The destination-chain settlement is observed asynchronously by
-          :class:`EnsoStateProvider` and is NOT guaranteed to be present at
+          `EnsoStateProvider` and is NOT guaranteed to be present at
           enrichment time. ``destination_tx_hash`` is a forward-looking hook
           and will be ``None`` on first enrichment for nearly every bridge.
         - ``amount_sent_raw`` is the raw on-chain integer in the token's

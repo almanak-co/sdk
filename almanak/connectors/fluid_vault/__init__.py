@@ -14,6 +14,7 @@ Scope (Checkpoint-1): arbitrum + base, type-1 vaults only. Position keys:
 the nftId is metadata in ``extracted_data_json``, never a key segment).
 
 Example:
+    ```python
     from decimal import Decimal
 
     from almanak.framework.intents import BorrowIntent
@@ -27,6 +28,7 @@ Example:
         borrow_amount=Decimal("500"),
         chain="arbitrum",
     )
+    ```
 """
 
 from __future__ import annotations

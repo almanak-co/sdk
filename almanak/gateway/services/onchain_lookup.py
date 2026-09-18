@@ -15,6 +15,7 @@ IMPORTANT: This module is GATEWAY-SIDE ONLY. Framework code must NOT use Web3
 directly - it should call the gateway's TokenService instead.
 
 Example:
+    ```python
     from almanak.gateway.services.onchain_lookup import OnChainLookup
     from almanak.gateway.utils import get_rpc_url
 
@@ -26,6 +27,7 @@ Example:
     metadata = await lookup.lookup("arbitrum", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
     if metadata:
         print(f"Token: {metadata.symbol} ({metadata.decimals} decimals)")
+    ```
 """
 
 import asyncio
@@ -175,10 +177,12 @@ class OnChainLookup:
     - Timeout and retry logic
 
     Example:
+        ```python
         lookup = OnChainLookup(rpc_url)
         metadata = await lookup.lookup("arbitrum", "0x...")
         if metadata:
             print(f"{metadata.symbol}: {metadata.decimals} decimals")
+        ```
     """
 
     def __init__(

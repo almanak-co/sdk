@@ -4,6 +4,7 @@ This module provides the main test runner that orchestrates all QA tests,
 generates plots, and produces the final Markdown report.
 
 Example:
+    ```python
     from almanak.framework.data.qa.runner import QARunner
     from almanak.framework.data.qa.config import load_config
 
@@ -13,6 +14,7 @@ Example:
 
     print(f"Overall: {'PASSED' if result.passed else 'FAILED'}")
     print(f"Report: {result.report_path}")
+    ```
 """
 
 import logging
@@ -126,6 +128,7 @@ class QARunner:
         skip_plots: If True, skip plot generation for faster runs
 
     Example:
+        ```python
         config = load_config()
         runner = QARunner(config, output_dir=Path("reports/qa-data"))
 
@@ -138,6 +141,7 @@ class QARunner:
             print(f"Failed: {result.failed_tests}/{result.total_tests}")
 
         print(f"Report: {result.report_path}")
+        ```
     """
 
     def __init__(

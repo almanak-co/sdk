@@ -4,6 +4,7 @@ This module provides charting and visualization capabilities for backtest result
 including equity curves, drawdown highlighting, and trade markers.
 
 Example:
+    ```python
     from almanak.framework.backtesting.visualization import plot_equity_curve, save_chart
 
     # Generate equity curve plot
@@ -28,6 +29,7 @@ Example:
 
     # Save chart in different formats (PNG or interactive HTML)
     save_chart(backtest_result, format="html", path="report.html")
+    ```
 """
 
 import logging
@@ -433,11 +435,13 @@ def calculate_distribution_stats(pnl_values: list[float]) -> DistributionStats |
         DistributionStats with computed statistics, or None if insufficient data
 
     Example:
+        ```python
         pnl_values = [100.0, -50.0, 200.0, -25.0, 150.0]
         stats = calculate_distribution_stats(pnl_values)
         if stats:
             print(f"Skewness: {stats.skewness:.2f}")
             print(f"Kurtosis: {stats.kurtosis:.2f}")
+        ```
     """
     if len(pnl_values) < 3:
         # Need at least 3 values for meaningful statistics
@@ -823,6 +827,7 @@ def plot_equity_curve(
         ChartResult with file path, success status, detected drawdown periods, and trade markers
 
     Example:
+        ```python
         result = await backtester.backtest(strategy, config)
         chart = plot_equity_curve(result, output_path=Path("charts/equity.png"))
         if chart.success:
@@ -842,6 +847,7 @@ def plot_equity_curve(
             show_trades=True,
             color_by_pnl=True,  # Green for profit, red for loss
         )
+        ```
     """
     plt, failure = _load_matplotlib("equity_curve")
     if failure is not None:
@@ -1148,6 +1154,7 @@ def plot_equity_curve_interactive(
         ChartResult with file path and success status
 
     Example:
+        ```python
         chart = plot_equity_curve_interactive(
             backtest_result,
             show_trades=True,
@@ -1155,6 +1162,7 @@ def plot_equity_curve_interactive(
         )
         if chart.success:
             print(f"Interactive chart saved to: {chart.file_path}")
+        ```
     """
     try:
         import plotly.graph_objects as go
@@ -1255,10 +1263,12 @@ def plot_pnl_histogram(
         ChartResult with file path and success status
 
     Example:
+        ```python
         result = await backtester.backtest(strategy, config)
         chart = plot_pnl_histogram(result, output_path=Path("charts/pnl.png"), show_stats=True)
         if chart.success:
             print(f"Saved to: {chart.file_path}")
+        ```
     """
     plt, failure = _load_matplotlib("pnl_histogram")
     if failure is not None:
@@ -1490,9 +1500,11 @@ def plot_pnl_histogram_interactive(
         ChartResult with file path and success status
 
     Example:
+        ```python
         chart = plot_pnl_histogram_interactive(result, show_stats=True)
         if chart.success:
             print(f"Interactive histogram saved to: {chart.file_path}")
+        ```
     """
     try:
         import plotly.graph_objects as go
@@ -1561,9 +1573,11 @@ def plot_duration_scatter(
         ChartResult with file path and success status
 
     Example:
+        ```python
         chart = plot_duration_scatter(result, output_path=Path("charts/duration.png"))
         if chart.success:
             print(f"Saved to: {chart.file_path}")
+        ```
     """
     plt, failure = _load_matplotlib("duration_scatter")
     if failure is not None:
@@ -1635,9 +1649,11 @@ def plot_intent_pie(
         ChartResult with file path and success status
 
     Example:
+        ```python
         chart = plot_intent_pie(result, output_path=Path("charts/intents.png"))
         if chart.success:
             print(f"Saved to: {chart.file_path}")
+        ```
     """
     plt, failure = _load_matplotlib("intent_pie")
     if failure is not None:
@@ -1880,8 +1896,10 @@ def generate_equity_chart_html(
         HTML string containing the embedded Plotly chart, or empty string on error
 
     Example:
+        ```python
         chart_html = generate_equity_chart_html(result)
         # Use in Jinja2 template: {{ chart_html | safe }}
+        ```
     """
     go = _load_equity_chart_plotly()
     if go is None:
@@ -2078,8 +2096,10 @@ def generate_pnl_distribution_html(
         HTML string containing the embedded Plotly chart, or empty string on error
 
     Example:
+        ```python
         chart_html = generate_pnl_distribution_html(result)
         # Use in Jinja2 template: {{ chart_html | safe }}
+        ```
     """
     go = _load_pnl_distribution_plotly()
     if go is None:
@@ -2172,8 +2192,10 @@ def generate_drawdown_chart_html(
         HTML string containing the embedded Plotly chart, or empty string on error
 
     Example:
+        ```python
         chart_html = generate_drawdown_chart_html(result)
         # Use in Jinja2 template: {{ chart_html | safe }}
+        ```
     """
     go = _load_plotly_graph_objects("drawdown chart")
     if go is None:
@@ -2228,11 +2250,13 @@ def save_chart(
         ChartResult with file path and success status
 
     Example:
+        ```python
         # Save as PNG
         save_chart(result, format="png", path="charts/equity.png")
 
         # Save as interactive HTML
         save_chart(result, format="html", path="charts/equity.html", show_trades=True)
+        ```
     """
     format_lower = format.lower()
 
@@ -2290,11 +2314,13 @@ def generate_attribution_pie_chart_html(
         HTML string containing the embedded Plotly chart, or empty string on error
 
     Example:
+        ```python
         chart_html = generate_attribution_pie_chart_html(
             {"uniswap_v3": Decimal("100"), "aave_v3": Decimal("-50")},
             title="PnL by Protocol"
         )
         # Use in Jinja2 template: {{ chart_html | safe }}
+        ```
     """
     try:
         import plotly.graph_objects as go
@@ -2369,11 +2395,13 @@ def generate_attribution_bar_chart_html(
         HTML string containing the embedded Plotly chart, or empty string on error
 
     Example:
+        ```python
         chart_html = generate_attribution_bar_chart_html(
             {"uniswap_v3": Decimal("100"), "aave_v3": Decimal("-50")},
             title="PnL by Protocol"
         )
         # Use in Jinja2 template: {{ chart_html | safe }}
+        ```
     """
     try:
         import plotly.graph_objects as go
@@ -2470,8 +2498,10 @@ def generate_attribution_charts_html(
             - "by_asset": Chart showing PnL by asset
 
     Example:
+        ```python
         charts = generate_attribution_charts_html(result)
         # Use in template: {{ charts.by_protocol | safe }}
+        ```
     """
     generator = generate_attribution_bar_chart_html if chart_type == "bar" else generate_attribution_pie_chart_html
 

@@ -12,6 +12,7 @@ Supported chains:
 - Arbitrum, Optimism, Polygon (wstETH only)
 
 Example:
+    ```python
     from almanak.connectors.lido import LidoAdapter, LidoConfig
 
     config = LidoConfig(
@@ -25,6 +26,7 @@ Example:
 
     # Wrap stETH to wstETH
     result = adapter.wrap(amount=Decimal("1.0"))
+    ```
 """
 
 from __future__ import annotations
@@ -148,6 +150,7 @@ class LidoAdapter:
     wstETH is non-rebasing and preferred for DeFi integrations.
 
     Example:
+        ```python
         config = LidoConfig(
             chain="ethereum",
             wallet_address="0x...",
@@ -162,6 +165,7 @@ class LidoAdapter:
 
         # Unwrap wstETH back to stETH
         result = adapter.unwrap(Decimal("1.0"))
+        ```
     """
 
     def __init__(self, config: LidoConfig, token_resolver: TokenResolverType | None = None) -> None:

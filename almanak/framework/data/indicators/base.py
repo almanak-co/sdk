@@ -9,6 +9,7 @@ Key Features:
     - Standardized error types for indicator-specific failures
 
 Example:
+    ```python
     from almanak.framework.data.indicators.base import BaseIndicator
 
     @runtime_checkable
@@ -29,6 +30,7 @@ Example:
         ) -> dict[str, float]:
             # Implementation
             return {"value": 50.0}
+    ```
 """
 
 from dataclasses import dataclass

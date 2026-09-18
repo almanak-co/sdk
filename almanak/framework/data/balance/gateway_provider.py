@@ -59,6 +59,7 @@ class GatewayBalanceProvider(BalanceProvider):
       with ``stale=True``. If no cached value exists, raises as before.
 
     Example:
+        ```python
         from almanak.framework.gateway_client import GatewayClient
         from almanak.framework.data.balance.gateway_provider import GatewayBalanceProvider
 
@@ -70,6 +71,7 @@ class GatewayBalanceProvider(BalanceProvider):
             )
             result = await provider.get_balance("WETH")
             print(f"WETH balance: {result.balance}")
+        ```
     """
 
     def __init__(

@@ -18,6 +18,7 @@ Design Philosophy:
     - Configurable: Thresholds are customizable per strategy
 
 Example:
+    ```python
     from almanak.framework.execution.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 
     config = CircuitBreakerConfig(
@@ -43,6 +44,7 @@ Example:
     # Manual controls
     breaker.pause(reason="Manual pause for investigation", operator="alice@company.com")
     breaker.resume(operator_key="alice@company.com")
+    ```
 """
 
 import logging
@@ -223,6 +225,7 @@ class CircuitBreaker:
         PAUSED -> CLOSED (manual resume with confirmation)
 
     Example:
+        ```python
         breaker = CircuitBreaker("my_strategy")
 
         # Check before each execution
@@ -237,6 +240,7 @@ class CircuitBreaker:
             breaker.record_success()
         except Exception as e:
             breaker.record_failure(str(e), loss_usd=Decimal("100"))
+        ```
     """
 
     def __init__(
@@ -843,6 +847,7 @@ class CircuitBreakerRegistry:
     Provides centralized access to circuit breakers and global pause capability.
 
     Example:
+        ```python
         registry = CircuitBreakerRegistry()
 
         # Get or create circuit breaker for a strategy
@@ -854,6 +859,7 @@ class CircuitBreakerRegistry:
         # Check if any are tripped
         if registry.any_tripped():
             print("Some circuit breakers are open!")
+        ```
     """
 
     def __init__(self, default_config: CircuitBreakerConfig | None = None) -> None:

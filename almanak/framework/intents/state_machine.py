@@ -11,6 +11,7 @@ The state machine pattern ensures:
 4. Metrics emission for monitoring
 
 Example:
+    ```python
     from almanak.framework.intents import Intent, IntentCompiler
     from almanak.framework.intents.state_machine import IntentStateMachine
 
@@ -26,6 +27,7 @@ Example:
             # Execute the action bundle
             receipt = execute(result.action_bundle)
             state_machine.set_receipt(receipt)
+    ```
 """
 
 import logging
@@ -621,6 +623,7 @@ class SadflowAction:
         custom_delay: Optional custom delay in seconds (overrides exponential backoff)
 
     Example:
+        ```python
         # Continue with default retry
         return SadflowAction(SadflowActionType.RETRY)
 
@@ -631,6 +634,7 @@ class SadflowAction:
         # Modify and retry with adjusted parameters
         modified = modify_gas(context.action_bundle)
         return SadflowAction(SadflowActionType.MODIFY, modified_bundle=modified)
+        ```
     """
 
     action_type: SadflowActionType = SadflowActionType.RETRY
@@ -695,6 +699,7 @@ class SadflowContext:
         metadata: Additional context-specific metadata
 
     Example:
+        ```python
         def on_sadflow_enter(self, error_type, attempt, context):
             if context.error_type == "INSUFFICIENT_GAS":
                 # Modify gas and retry
@@ -706,6 +711,7 @@ class SadflowContext:
                 return SadflowAction.abort("Too many timeouts")
 
             return None  # Use default retry behavior
+        ```
     """
 
     intent_id: str
@@ -868,6 +874,7 @@ class IntentStateMachine:
     the intent type and handles state transitions.
 
     Example:
+        ```python
         # Create state machine
         intent = Intent.swap("USDC", "ETH", amount_usd=Decimal("1000"))
         compiler = IntentCompiler(chain="arbitrum")
@@ -885,6 +892,7 @@ class IntentStateMachine:
             print("Intent executed successfully!")
         else:
             print(f"Intent failed: {sm.error}")
+        ```
     """
 
     def __init__(

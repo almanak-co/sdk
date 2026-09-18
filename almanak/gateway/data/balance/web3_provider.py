@@ -13,6 +13,7 @@ Key Features:
     - RPC error handling with retry and clear error messages
 
 Example:
+    ```python
     from almanak.framework.data.balance import Web3BalanceProvider
 
     provider = Web3BalanceProvider(
@@ -31,6 +32,7 @@ Example:
 
     # Invalidate cache after transaction
     provider.invalidate_cache()
+    ```
 """
 
 import asyncio
@@ -368,6 +370,7 @@ class Web3BalanceProvider:
     - Handle RPC errors with retry and clear error messages
 
     Example:
+        ```python
         provider = Web3BalanceProvider(
             rpc_url="https://arb1.arbitrum.io/rpc",
             wallet_address="0x1234...",
@@ -383,6 +386,7 @@ class Web3BalanceProvider:
 
         # Or invalidate specific token
         provider.invalidate_cache("WETH")
+        ```
     """
 
     def __init__(
@@ -813,12 +817,14 @@ class Web3BalanceProvider:
             is_native: Whether this is the native token
 
         Example:
+            ```python
             provider.add_token(
                 symbol="CUSTOM",
                 address="0x1234...",
                 decimals=18,
             )
             result = await provider.get_balance("CUSTOM")
+            ```
         """
         from almanak.core.chains import ChainRegistry
         from almanak.framework.data.tokens.models import CHAIN_ID_MAP, ResolvedToken

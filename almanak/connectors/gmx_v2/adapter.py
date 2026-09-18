@@ -519,6 +519,7 @@ class GMXv2Adapter:
     - Parsing transaction receipts
 
     Example:
+        ```python
         config = GMXv2Config(
             chain="arbitrum",
             wallet_address="0x...",
@@ -548,6 +549,7 @@ class GMXv2Adapter:
             is_long=True,
             size_delta_usd=position.size_in_usd,
         )
+        ```
     """
 
     def __init__(self, config: GMXv2Config, token_resolver: "TokenResolverType | None" = None) -> None:

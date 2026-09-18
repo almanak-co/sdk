@@ -446,6 +446,7 @@ class MarketSnapshot:
     allowing strategies to make decisions based on current market conditions.
 
     Example:
+        ```python
         def decide(self, market: MarketSnapshot) -> Optional[Intent]:
             # Get ETH price
             eth_price = market.price("ETH")
@@ -461,6 +462,7 @@ class MarketSnapshot:
                 return Intent.hold(reason="Insufficient balance")
 
             return Intent.hold()
+        ```
     """
 
     # =========================================================================
@@ -1733,9 +1735,11 @@ class MarketSnapshot:
             ValueError: If MACD data is not available
 
         Example:
+            ```python
             macd = market.macd("WETH")
             if macd.is_bullish_crossover:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
+            ```
         """
         token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
@@ -1807,9 +1811,11 @@ class MarketSnapshot:
             ValueError: If Bollinger Bands data is not available
 
         Example:
+            ```python
             bb = market.bollinger_bands("WETH")
             if bb.is_oversold:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
+            ```
         """
         token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
@@ -1876,9 +1882,11 @@ class MarketSnapshot:
             ValueError: If Stochastic data is not available
 
         Example:
+            ```python
             stoch = market.stochastic("WETH")
             if stoch.is_oversold and stoch.k_value > stoch.d_value:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
+            ```
         """
         token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
@@ -1941,10 +1949,12 @@ class MarketSnapshot:
             ValueError: If ATR data is not available
 
         Example:
+            ```python
             atr = market.atr("WETH")
             if atr.is_low_volatility:
                 # Safe to trade
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
+            ```
         """
         token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
@@ -2007,9 +2017,11 @@ class MarketSnapshot:
             ValueError: If SMA data is not available
 
         Example:
+            ```python
             sma = market.sma("WETH", period=50)
             if sma.is_price_above:
                 print("Bullish - price above 50 SMA")
+            ```
         """
         token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
@@ -2067,10 +2079,12 @@ class MarketSnapshot:
             ValueError: If EMA data is not available
 
         Example:
+            ```python
             ema_12 = market.ema("WETH", period=12)
             ema_26 = market.ema("WETH", period=26)
             if ema_12.value > ema_26.value:
                 print("Golden cross - bullish")
+            ```
         """
         token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
@@ -2128,9 +2142,11 @@ class MarketSnapshot:
             ValueError: If ADX data is not available
 
         Example:
+            ```python
             adx = market.adx("WETH")
             if adx.is_uptrend:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
+            ```
         """
         token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
@@ -2182,9 +2198,11 @@ class MarketSnapshot:
             ValueError: If OBV data is not available
 
         Example:
+            ```python
             obv = market.obv("WETH")
             if obv.is_bullish:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
+            ```
         """
         token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
@@ -2245,9 +2263,11 @@ class MarketSnapshot:
             ValueError: If CCI data is not available
 
         Example:
+            ```python
             cci = market.cci("WETH")
             if cci.is_oversold:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
+            ```
         """
         token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
@@ -2303,9 +2323,11 @@ class MarketSnapshot:
             ValueError: If Ichimoku data is not available
 
         Example:
+            ```python
             ich = market.ichimoku("WETH")
             if ich.is_bullish_crossover and ich.is_above_cloud:
                 return Intent.swap("USDC", "WETH", amount_usd=Decimal("100"))
+            ```
         """
         token = self._token_cache_key(token, warn_on_symbol=True)
         timeframe = self._resolve_timeframe(timeframe)
@@ -3356,11 +3378,13 @@ class MarketSnapshot:
             timeframe: OHLCV timeframe this data was computed from (None matches any)
 
         Example:
+            ```python
             market.set_macd("WETH", MACDData(
                 macd_line=Decimal("0.5"),
                 signal_line=Decimal("0.3"),
                 histogram=Decimal("0.2"),
             ))
+            ```
         """
         timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
@@ -3380,12 +3404,14 @@ class MarketSnapshot:
             timeframe: OHLCV timeframe this data was computed from (None matches any)
 
         Example:
+            ```python
             market.set_bollinger_bands("WETH", BollingerBandsData(
                 upper_band=Decimal("3100"),
                 middle_band=Decimal("3000"),
                 lower_band=Decimal("2900"),
                 percent_b=Decimal("0.5"),
             ))
+            ```
         """
         timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
@@ -3405,10 +3431,12 @@ class MarketSnapshot:
             timeframe: OHLCV timeframe this data was computed from (None matches any)
 
         Example:
+            ```python
             market.set_stochastic("WETH", StochasticData(
                 k_value=Decimal("25"),
                 d_value=Decimal("30"),
             ))
+            ```
         """
         timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
@@ -3428,10 +3456,12 @@ class MarketSnapshot:
             timeframe: OHLCV timeframe this data was computed from (None matches any)
 
         Example:
+            ```python
             market.set_atr("WETH", ATRData(
                 value=Decimal("50"),
                 value_percent=Decimal("2.5"),
             ))
+            ```
         """
         timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
@@ -3455,12 +3485,14 @@ class MarketSnapshot:
             timeframe: OHLCV timeframe this data was computed from (None matches any)
 
         Example:
+            ```python
             market.set_ma("WETH", MAData(
                 value=Decimal("3000"),
                 ma_type="SMA",
                 period=20,
                 current_price=Decimal("3050"),
             ), ma_type="SMA", period=20)
+            ```
         """
         timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
@@ -3484,11 +3516,13 @@ class MarketSnapshot:
             timeframe: Optional timeframe (None matches any query)
 
         Example:
+            ```python
             market.set_adx("WETH", ADXData(
                 adx=Decimal("30"),
                 plus_di=Decimal("25"),
                 minus_di=Decimal("15"),
             ))
+            ```
         """
         timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
@@ -3508,10 +3542,12 @@ class MarketSnapshot:
             timeframe: Optional timeframe (None matches any query)
 
         Example:
+            ```python
             market.set_obv("WETH", OBVData(
                 obv=Decimal("1000000"),
                 signal_line=Decimal("950000"),
             ))
+            ```
         """
         timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
@@ -3531,9 +3567,11 @@ class MarketSnapshot:
             timeframe: Optional timeframe (None matches any query)
 
         Example:
+            ```python
             market.set_cci("WETH", CCIData(
                 value=Decimal("-120"),
             ))
+            ```
         """
         timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
@@ -3553,6 +3591,7 @@ class MarketSnapshot:
             timeframe: Optional timeframe (None matches any query)
 
         Example:
+            ```python
             market.set_ichimoku("WETH", IchimokuData(
                 tenkan_sen=Decimal("3050"),
                 kijun_sen=Decimal("3000"),
@@ -3560,6 +3599,7 @@ class MarketSnapshot:
                 senkou_span_b=Decimal("2950"),
                 current_price=Decimal("3100"),
             ))
+            ```
         """
         timeframe = self._parse_optional_timeframe(timeframe)
         token = self._token_cache_key(token)
@@ -3902,8 +3942,10 @@ class MarketSnapshot:
             ValueError: If the gateway returns no rate and no fallback is configured.
 
         Example:
+            ```python
             rate = market.lending_rate("aave_v3", "USDC", "supply")
             print(f"Aave USDC Supply APY: {rate.apy_percent:.2f}%")
+            ```
         """
         from almanak.framework.data.rates import RateSide
 
@@ -4044,9 +4086,11 @@ class MarketSnapshot:
                 unavailable, or if the best-rate lookup otherwise fails.
 
         Example:
+            ```python
             result = market.best_lending_rate("USDC", "supply")
             if result.best_rate:
                 print(f"Best: {result.best_rate.protocol} at {result.best_rate.apy_percent:.2f}%")
+            ```
         """
         from almanak.framework.data.rates import RateSide
 
@@ -4179,11 +4223,13 @@ class MarketSnapshot:
                 through to the monitor / gateway (CodeRabbit, PR #3287).
 
         Example:
+            ```python
             from almanak.framework.data.rates import LendingRate
             market.set_lending_rate("aave_v3", "USDC", "supply", LendingRate(
                 protocol="aave_v3", token="USDC", side="supply",
                 apy_ray=Decimal("0"), apy_percent=Decimal("4.25"),
             ))
+            ```
         """
         cache_key = self._lending_cache_key(protocol, token, side, market_id)
         self._lending_rate_cache[cache_key] = rate
@@ -4925,9 +4971,11 @@ class MarketSnapshot:
             Current price as Decimal (0.01 to 0.99), or None if unavailable
 
         Example:
+            ```python
             yes_price = market.prediction_price("btc-100k", "YES")
             if yes_price is not None and yes_price < Decimal("0.3"):
                 return BuyIntent(...)
+            ```
         """
         if self._prediction_provider is None:
             # Backtest: record once per run WHY the prediction lane is silent

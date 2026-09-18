@@ -14,6 +14,7 @@ history; missing coverage fails closed unless a caller explicitly opts into a
 fallback rate for legacy simulations.
 
 Example:
+    ```python
     from almanak.connectors.gmx_v2.backtest_funding import GMXFundingProvider
     from datetime import datetime, UTC
 
@@ -27,6 +28,7 @@ Example:
         )
         for rate in rates:
             print(f"{rate.source_info.timestamp}: {rate.rate}")
+    ```
 """
 
 import logging
@@ -130,6 +132,7 @@ class GMXFundingProvider(HistoricalFundingProvider):
         rate_limiter: Client-side RPC throttle
 
     Example:
+        ```python
         provider = GMXFundingProvider()
 
         async with provider:
@@ -138,6 +141,7 @@ class GMXFundingProvider(HistoricalFundingProvider):
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
             )
+        ```
     """
 
     def __init__(
@@ -407,11 +411,13 @@ class GMXFundingProvider(HistoricalFundingProvider):
             configured.
 
         Example:
+            ```python
             rates = await provider.get_funding_rates(
                 market="ETH-USD",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 7, tzinfo=UTC),
             )
+            ```
         """
         logger.info(
             "Fetching GMX funding rates: market=%s, start=%s, end=%s",

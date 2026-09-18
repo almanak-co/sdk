@@ -81,6 +81,7 @@ class StablecoinConfig:
             Default: {'USDC', 'USDT', 'DAI'}
 
     Example:
+        ```python
         # Default: use market prices (safest)
         config = StablecoinConfig()
 
@@ -92,6 +93,7 @@ class StablecoinConfig:
 
         # Add custom stablecoins
         config = StablecoinConfig(stablecoins={'USDC', 'USDT', 'DAI', 'FRAX', 'LUSD'})
+        ```
     """
 
     mode: StablecoinMode = "market"
@@ -189,6 +191,7 @@ class FreshnessConfig:
         enabled: Whether freshness checking is enabled (default True)
 
     Example:
+        ```python
         # Default configuration
         config = FreshnessConfig()
 
@@ -202,6 +205,7 @@ class FreshnessConfig:
 
         # Disable freshness checking (not recommended for production)
         config = FreshnessConfig(enabled=False)
+        ```
     """
 
     price_warn_sec: float = 30.0

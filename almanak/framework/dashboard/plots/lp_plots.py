@@ -11,6 +11,7 @@ These plots are designed for concentrated liquidity protocols like
 Uniswap V3, PancakeSwap V3, TraderJoe V2, and Aerodrome.
 
 Example:
+    ```python
     from almanak.framework.dashboard.plots.lp_plots import (
         plot_liquidity_distribution,
         plot_positions_over_time,
@@ -32,6 +33,7 @@ Example:
         invert_prices=False,
     )
     st.plotly_chart(fig)
+    ```
 """
 
 from dataclasses import dataclass

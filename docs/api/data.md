@@ -12,37 +12,27 @@ payload. Fields that could not be measured are `None` **and** named in the
 payload's `unmeasured_fields` (Empty != Zero contract); see the
 [Market Snapshot HOLD contract](market.md#hold-contract-for-data-unavailable-errors).
 
-### DataEnvelope
-
 ::: almanak.framework.data.DataEnvelope
     options:
-      show_root_heading: true
-
-### DataMeta
+      heading_level: 3
 
 ::: almanak.framework.data.DataMeta
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Price Data
 
-### PriceOracle
-
 ::: almanak.framework.data.PriceOracle
     options:
-      show_root_heading: true
-
-### AggregatedPrice
+      heading_level: 3
 
 ::: almanak.framework.data.AggregatedPrice
     options:
-      show_root_heading: true
-
-### PriceAggregator
+      heading_level: 3
 
 ::: almanak.framework.data.PriceAggregator
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ### PoolPrice
 
@@ -51,43 +41,33 @@ The exact-pool price DTO returned by `MarketSnapshot.pool_price(...)` /
 
 ::: almanak.framework.data.PoolPrice
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Balance Data
 
-### BalanceProvider
-
 ::: almanak.framework.data.BalanceProvider
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## OHLCV Data
 
-### OHLCVProvider
-
 ::: almanak.framework.data.OHLCVProvider
     options:
-      show_root_heading: true
-
-### OHLCVData
+      heading_level: 3
 
 ::: almanak.framework.data.OHLCVData
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Pool Analytics
 
-### PoolAnalytics
-
 ::: almanak.framework.data.PoolAnalytics
     options:
-      show_root_heading: true
-
-### PoolAnalyticsResult
+      heading_level: 3
 
 ::: almanak.framework.data.PoolAnalyticsResult
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ### TokenPools
 
@@ -95,7 +75,7 @@ The result of `MarketSnapshot.token_pools(...)` (as `DataEnvelope[TokenPools]`).
 
 ::: almanak.framework.data.pools.analytics.TokenPools
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ### PoolAnalyticsReader
 
@@ -107,7 +87,7 @@ for the propagation rule strategy authors must follow.
 
 ::: almanak.framework.data.pools.analytics.PoolAnalyticsReader
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ### NullPoolAnalyticsReader
 
@@ -119,7 +99,7 @@ or HOLD).
 
 ::: almanak.framework.data.pools.analytics.NullPoolAnalyticsReader
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Pool History
 
@@ -139,7 +119,7 @@ contract](market.md#hold-contract-for-data-unavailable-errors) for the
 
 ::: almanak.framework.data.pools.history.PoolHistoryReader
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ### PoolSnapshot
 
@@ -150,7 +130,7 @@ contract — a `None` field is named in `unmeasured_fields`.
 
 ::: almanak.framework.data.pools.history.PoolSnapshot
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ### NullPoolHistoryReader
 
@@ -165,13 +145,11 @@ high-level child-spawn, low-level spawn syscalls, FFI).
 
 ::: almanak.framework.data.null_readers.NullPoolHistoryReader
     options:
-      show_root_heading: true
-
-### LiquidityDepth
+      heading_level: 3
 
 ::: almanak.framework.data.LiquidityDepth
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ### SlippageEstimate
 
@@ -183,59 +161,43 @@ return a payload with missing attributes.
 
 ::: almanak.framework.data.SlippageEstimate
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Volatility and Risk
 
-### RealizedVolatilityCalculator
-
 ::: almanak.framework.data.RealizedVolatilityCalculator
     options:
-      show_root_heading: true
-
-### VolatilityResult
+      heading_level: 3
 
 ::: almanak.framework.data.VolatilityResult
     options:
-      show_root_heading: true
-
-### VolConeResult
+      heading_level: 3
 
 ::: almanak.framework.data.VolConeResult
     options:
-      show_root_heading: true
-
-### PortfolioRiskCalculator
+      heading_level: 3
 
 ::: almanak.framework.data.PortfolioRiskCalculator
     options:
-      show_root_heading: true
-
-### PortfolioRisk
+      heading_level: 3
 
 ::: almanak.framework.data.PortfolioRisk
     options:
-      show_root_heading: true
-
-### RollingSharpeResult
+      heading_level: 3
 
 ::: almanak.framework.data.RollingSharpeResult
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Yield and Rates
 
-### YieldAggregator
-
 ::: almanak.framework.data.YieldAggregator
     options:
-      show_root_heading: true
-
-### YieldOpportunity
+      heading_level: 3
 
 ::: almanak.framework.data.YieldOpportunity
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ### Lending rates
 
@@ -253,13 +215,11 @@ The per-row DTO returned by `MarketSnapshot.lending_rate_history(...)`
 
 ::: almanak.framework.data.LendingRateSnapshot
     options:
-      show_root_heading: true
-
-### GatewayFundingRateProvider
+      heading_level: 3
 
 ::: almanak.framework.data.GatewayFundingRateProvider
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ### FundingRateSnapshot
 
@@ -268,61 +228,45 @@ The per-row DTO returned by `MarketSnapshot.funding_rate_history(...)`
 
 ::: almanak.framework.data.FundingRateSnapshot
     options:
-      show_root_heading: true
-
-### FundingRateSpread
+      heading_level: 3
 
 ::: almanak.framework.data.FundingRateSpread
     options:
-      show_root_heading: true
-
-### LSTExchangeRate
+      heading_level: 3
 
 ::: almanak.framework.data.LSTExchangeRate
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Impermanent Loss
 
-### ILCalculator
-
 ::: almanak.framework.data.ILCalculator
     options:
-      show_root_heading: true
-
-### ILExposure
+      heading_level: 3
 
 ::: almanak.framework.data.ILExposure
     options:
-      show_root_heading: true
-
-### ProjectedILResult
+      heading_level: 3
 
 ::: almanak.framework.data.ProjectedILResult
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Prediction Markets
 
 DTOs returned by the `MarketSnapshot` prediction-market accessors.
 
-### PredictionMarket
-
 ::: almanak.framework.data.PredictionMarket
     options:
-      show_root_heading: true
-
-### PredictionPosition
+      heading_level: 3
 
 ::: almanak.framework.data.PredictionPosition
     options:
-      show_root_heading: true
-
-### PredictionOrder
+      heading_level: 3
 
 ::: almanak.framework.data.PredictionOrder
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Health
 
@@ -332,28 +276,24 @@ The report returned by `MarketSnapshot.health()`.
 
 ::: almanak.framework.data.HealthReport
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Data Routing
 
-### DataRouter
-
 ::: almanak.framework.data.DataRouter
     options:
-      show_root_heading: true
-
-### CircuitBreaker
+      heading_level: 3
 
 ::: almanak.framework.data.CircuitBreaker
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ## Exceptions
 
 ::: almanak.framework.data.DataUnavailableError
     options:
-      show_root_heading: true
+      heading_level: 3
 
 ::: almanak.framework.data.MarketSnapshotError
     options:
-      show_root_heading: true
+      heading_level: 3

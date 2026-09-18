@@ -11,7 +11,7 @@ accounting by default.
 
 - **Single indicator** — pass one ``TADashboardConfig``.
 - **Multiple indicators (multi-signal, VIB-4897)** — compose with
-  :func:`multi_ta_config`. The template stacks one panel per indicator under a
+  `multi_ta_config`. The template stacks one panel per indicator under a
   shared price chart (all on one time axis). Useful for confluence strategies
   (e.g. RSI + MACD + Bollinger).
 
@@ -31,7 +31,7 @@ Usage (single indicator):
 
     def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
         # Pass deployment_id so the price chart follows the operator-selected
-        # NAV range (24h/7d/30d) when one is picked (VIB-5114); omitting it
+        # NAV range (24h/7d/30d) when one is picked; omitting it
         # keeps the legacy recent-window fetch.
         session_state = prepare_ta_session_state(
             api_client, session_state, config, deployment_id=deployment_id
@@ -114,9 +114,8 @@ def _resolve_chart_window(
 
     Reads the operator's selected NAV range from ``session_state`` (the shared
     ``nav_range_{deployment_id}`` key) and delegates the timeframe/limit/from_ts
-    decision to the pure :func:`build_chart_window`. When the operator has
-    selected a *bounded* range (24h/7d/30d), the price chart follows it
-    (VIB-5114): finer-or-coarser candle granularity for the span and markers
+    decision to the pure `build_chart_window`. When the operator has
+    selected a *bounded* range (24h/7d/30d), the price chart follows it: finer-or-coarser candle granularity for the span and markers
     fetched from the window start, so a marker never floats outside the plotted
     candles (``_clip_signals_to_price_window`` is then a no-op backstop).
 
@@ -155,31 +154,31 @@ class TADashboardConfig:
             default ``market.rsi()`` / ``market.macd()`` etc. apply when a strategy
             leaves ``data_granularity`` unset, so an unconfigured demo's dashboard
             line matches the strategy's decision series instead of silently reading
-            a different ("1h") window (VIB-5737). **Must match the strategy's own
+            a different ("1h") window. **Must match the strategy's own
             ``data_granularity``**: otherwise the dashboard RSI/MACD/etc. line is a
             *different* series from the one the strategy decides on, so buy/sell
-            markers won't align with the indicator band (VIB-4969). For the
+            markers won't align with the indicator band. For the
             multi-signal layout the primary config's ``timeframe`` is authoritative
             (one shared OHLCV fetch); extras' timeframes are ignored, mirroring how
             their pair/chain are ignored.
         extra_indicators: Additional indicator configs to render as stacked
             panels (multi-signal layout, VIB-4897). Empty by default — the
             single-indicator path is unchanged. Compose via
-            :func:`multi_ta_config`. Each extra contributes one more panel
+            `multi_ta_config`. Each extra contributes one more panel
             beneath the price chart; the extras' pair/chain/timeframe are ignored
             (the primary config drives the shared OHLCV fetch).
         display_window_seconds: Default *visible* span of the price/indicator
-            x-axis, in seconds (VIB-5345). **Decoupled from the FETCH span**: the
+            x-axis, in seconds. **Decoupled from the FETCH span**: the
             dashboard still fetches the wide candle window (``timeframe`` cap +
             signal backfill) and computes the indicator over that full series —
             this only bounds how much is *plotted* by default so a freshly
             deployed strategy's recent action is not crowded into a multi-day
             axis. Anchored to the strategy's own timeline (see
-            :func:`~almanak.framework.dashboard.templates._ohlcv_window.display_window_bounds`):
+            `almanak.framework.dashboard.templates._ohlcv_window.display_window_bounds`):
             the window never extends before the strategy start, and a hard floor
             of ``now - display_window_seconds`` guards against an unreliable
-            reported start (VIB-5343). Defaults to one day
-            (:data:`~almanak.framework.dashboard.templates._ohlcv_window.DEFAULT_DISPLAY_WINDOW_SECONDS`);
+            reported start. Defaults to one day
+            (`almanak.framework.dashboard.templates._ohlcv_window.DEFAULT_DISPLAY_WINDOW_SECONDS`);
             set ``<= 0`` to disable the cap and plot the full fetched span.
     """
 
@@ -251,7 +250,7 @@ def _rsi_series_from_closes(closes: pd.Series, period: int) -> pd.Series:
 
     To make the displayed RSI equal the decision RSI at every candle (and thus
     at every trade timestamp), we recompute RSI exactly as the strategy does:
-    for each candle ``i`` we run :func:`_wilder_rsi_window` over the trailing
+    for each candle ``i`` we run `_wilder_rsi_window` over the trailing
     ``period + _RSI_DECISION_BUFFER`` closes ending at ``i`` (capped by available
     history, mirroring the runner when the provider returns fewer candles than
     requested). NaN until the first candle with at least ``period + 1`` closes —
@@ -605,13 +604,13 @@ def _trade_rows_to_signals(
 
 
 def _earliest_signal_ts(buy_signals: pd.DataFrame, sell_signals: pd.DataFrame) -> datetime | None:
-    """Earliest timestamp across the buy/sell marker frames (VIB-5156).
+    """Earliest timestamp across the buy/sell marker frames.
 
     Anchors the OHLCV backfill window on the oldest marker that would actually
-    plot — i.e. the output of :func:`_trade_rows_to_signals`, already parsed to
+    plot — i.e. the output of `_trade_rows_to_signals`, already parsed to
     UTC-aware ``time`` and filtered to this pair's SWAPs — so the price line is
     grown to cover precisely the signals being rendered, no more. Returns a
-    native UTC :class:`datetime.datetime` (not a ``pd.Timestamp``) so the pure
+    native UTC `datetime.datetime` (not a ``pd.Timestamp``) so the pure
     ``_ohlcv_window`` arithmetic stays pandas-free; ``None`` when there are no
     plottable markers.
     """
@@ -640,7 +639,7 @@ def _anchored_start_time(
 
     A "Start" line drawn to the right of a genuine buy/sell marker is impossible
     — the strategy cannot trade before it deployed — but
-    :func:`_strategy_start_time` can report a too-late start two ways:
+    `_strategy_start_time` can report a too-late start two ways:
 
     * ``get_timeline(limit=200)`` truncates, so on a long run the original
       ``STRATEGY_STARTED`` event ages out of the window and the fallback picks the
@@ -713,7 +712,7 @@ def _decimal_or_none(value: Any) -> Decimal | None:
 def _trade_tape_rows(api_client: Any, *, from_ts: datetime | None = None) -> list[dict[str, Any]]:
     """Extract trade-tape rows from whatever shape the api_client exposes.
 
-    ``from_ts`` (VIB-5114) bounds the markers to the selected NAV window. It is
+    ``from_ts`` bounds the markers to the selected NAV window. It is
     forwarded only when set, and only if the client accepts it — a duck-typed
     mock with a no-kwarg ``get_trade_tape()`` falls back to the unbounded call
     rather than raising, so existing custom dashboards keep working.
@@ -941,7 +940,7 @@ def _apply_indicator_series(result: dict[str, Any], price_df: pd.DataFrame, conf
 
     No-op when the caller already supplied the series, when there's no price
     data, or when the indicator isn't one we compute client-side. Dispatches to
-    a per-indicator handler (see :data:`_INDICATOR_HANDLERS`) which emits a
+    a per-indicator handler (see `_INDICATOR_HANDLERS`) which emits a
     time-indexed ``<key>_history`` Series or ``<key>_data`` frame plus a latest
     scalar. Degrades silently on error so the dashboard still renders price +
     signals.
@@ -967,7 +966,7 @@ def prepare_ta_session_state(
 ) -> dict[str, Any]:
     """Enrich session state for ``render_ta_dashboard`` (chart subplot).
 
-    Mirrors :func:`prepare_lp_session_state`: fetches OHLCV via the
+    Mirrors `prepare_lp_session_state`: fetches OHLCV via the
     api_client, computes the indicator series client-side, reads the trade
     tape for buy/sell markers, and loads wallet balances for the Current
     Position section — strategy authors don't write any of that plumbing.
@@ -985,7 +984,7 @@ def prepare_ta_session_state(
         config: ``TADashboardConfig`` describing the indicator, pair, and
             chain. Required to know which token to fetch OHLCV for.
         deployment_id: Optional deployment id used to read the operator's
-            selected NAV range from ``session_state`` (VIB-5114). When supplied
+            selected NAV range from ``session_state``. When supplied
             AND the operator has picked a bounded range (24h/7d/30d) on the
             shared NAV chart, the candle granularity + the marker window follow
             that range. When ``None`` (the default, every legacy call site) or
@@ -1066,7 +1065,7 @@ def prepare_ta_session_state(
 
 
 def _signals_already_supplied(result: dict[str, Any]) -> bool:
-    """True when the caller pre-populated both marker frames (VIB-5156).
+    """True when the caller pre-populated both marker frames.
 
     The OHLCV signal-backfill anchors on the markers it would otherwise compute
     from the tape; when the caller already supplied ``buy_signals`` /
@@ -1093,7 +1092,7 @@ def _populate_trade_tape_derived(
     very high-frequency strategies), but far better than the previous
     hardcoded ``0`` shown while a strategy was actively trading.
 
-    ``from_ts`` (VIB-5114) bounds the tape to the selected NAV window so the
+    ``from_ts`` bounds the tape to the selected NAV window so the
     chart markers follow the plotted candles; ``None`` keeps the legacy
     newest-N fetch byte-for-byte.
 
@@ -1122,7 +1121,7 @@ def _populate_position_balances(
     """Fill ``base_balance`` / ``quote_balance`` / ``base_price`` for the
     Current Position section from the gateway position snapshot.
 
-    Mirrors the token-amount block in :func:`prepare_lp_session_state`: the
+    Mirrors the token-amount block in `prepare_lp_session_state`: the
     snapshot is the same source of truth the strategy itself trades against,
     so the dashboard reads balances from there rather than asking the author
     to wire ``api_client.get_balance()`` by hand. ``base_price`` prefers the
@@ -1182,7 +1181,7 @@ def render_ta_dashboard(
     """Render a technical analysis dashboard using the provided configuration.
 
     Single-position template. Renders one indicator panel by default; pass a
-    :func:`multi_ta_config` (``config.extra_indicators`` set) to stack one panel
+    `multi_ta_config` (``config.extra_indicators`` set) to stack one panel
     per indicator under a shared price chart (multi-signal, VIB-4897). Bakes in
     the 3 accounting sections (PnL → chart content → Cost Stack → Trade Tape).
     For multi-*position* layouts, compose a custom dashboard from the section
@@ -1263,11 +1262,11 @@ def _series_as_utc(series: pd.Series) -> pd.Series:
 
 
 def _clip_signals_to_price_window(signals: pd.DataFrame | None, price_df: pd.DataFrame) -> pd.DataFrame | None:
-    """Drop buy/sell markers that fall outside the plotted price window (VIB-5058).
+    """Drop buy/sell markers that fall outside the plotted price window.
 
     Markers come from the trade tape (newest N intents, reaching arbitrarily
     far back) while the price/indicator series is capped to a recent candle
-    window (VIB-4969). A marker with no price line near it floats in empty
+    window. A marker with no price line near it floats in empty
     space, so it is clipped here — one site, ahead of every render path (RSI
     subplot, dedicated renderers, generic, multi-indicator).
 
@@ -1316,10 +1315,10 @@ def _resolve_display_window(
     strategy_start_time: Any,
     config: TADashboardConfig,
 ) -> DisplayBounds | None:
-    """Resolve the default visible x-axis range for the chart paths (VIB-5345).
+    """Resolve the default visible x-axis range for the chart paths.
 
     Bridges the pandas price frame to the pure
-    :func:`~almanak.framework.dashboard.templates._ohlcv_window.display_window_bounds`
+    `almanak.framework.dashboard.templates._ohlcv_window.display_window_bounds`
     policy: anchors the right edge to the latest plotted candle (the strategy's
     own "now") and threads the (possibly unreliable, VIB-5343) reported strategy
     start as the *tightening* lower bound, with the policy's ``now - window``
@@ -1368,7 +1367,7 @@ def _apply_display_window(fig: Any, bounds: DisplayBounds | None) -> None:
     panels. Only the *visible* range is bounded — the underlying full-fetched
     series stays in the figure, so an operator zoom/pan reveals the rest. Bounds
     are applied in the tz-naive UTC basis plotly uses for the trace data
-    (:func:`_naive_utc`) so the range matches the axis and the chart is never
+    (`_naive_utc`) so the range matches the axis and the chart is never
     blanked by a tz mismatch."""
     if bounds is None:
         return
@@ -1710,7 +1709,7 @@ def _finalize_panel(fig: Any, target: "SubplotTarget | None", display_bounds: Di
     """Render a standalone indicator panel, capping its x-axis to the display window.
 
     No-op when ``target`` is supplied — the panel's traces were added to a shared
-    composite figure that its owner renders (and windows) once (VIB-5345)."""
+    composite figure that its owner renders (and windows) once."""
     if target is None:
         _apply_display_window(fig, display_bounds)
         st.plotly_chart(fig, use_container_width=True)
@@ -2029,8 +2028,7 @@ def _render_indicator_with_price(
 
     Shares the per-indicator panel builders with the multi-signal layout so the
     two paths can never drift in how a given indicator is drawn. Both the price
-    chart and the indicator panel are capped to the default visible window
-    (VIB-5345).
+    chart and the indicator panel are capped to the default visible window.
     """
     _render_price_signals(price_df, buy_df, sell_df, display_bounds)
     panel = _INDICATOR_PANELS.get(config.indicator_name.upper(), _panel_generic)
@@ -2079,7 +2077,7 @@ def _render_signal_status(
 
     When ``is_terminal`` (the deployment is torn down / archived), the live
     BUY/SELL/NEUTRAL badge is suppressed in favour of a neutral notice — a
-    strategy that no longer trades must not advertise a live signal (VIB-5787).
+    strategy that no longer trades must not advertise a live signal.
     """
     st.subheader("Signal Status")
 
@@ -2183,10 +2181,9 @@ def get_rsi_config(
     """Get pre-configured RSI dashboard config.
 
     ``timeframe`` must match the strategy's ``data_granularity`` so the
-    dashboard RSI is computed from the same candles the strategy decides on
-    (VIB-4969). Defaults to ``market.snapshot.DEFAULT_TIMEFRAME`` ("4h") — the
+    dashboard RSI is computed from the same candles the strategy decides on. Defaults to ``market.snapshot.DEFAULT_TIMEFRAME`` ("4h") — the
     same default ``market.rsi()`` applies for an unset ``data_granularity`` —
-    so an unconfigured demo can't drift to a different ("1h") series (VIB-5737).
+    so an unconfigured demo can't drift to a different ("1h") series.
     """
     return TADashboardConfig(
         indicator_name="RSI",
@@ -2219,7 +2216,7 @@ def get_macd_config(
 ) -> TADashboardConfig:
     """Get pre-configured MACD dashboard config.
 
-    ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
+    ``timeframe`` must match the strategy's ``data_granularity``.
     """
     return TADashboardConfig(
         indicator_name="MACD",
@@ -2240,7 +2237,7 @@ def get_cci_config(
 ) -> TADashboardConfig:
     """Get pre-configured CCI dashboard config.
 
-    ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
+    ``timeframe`` must match the strategy's ``data_granularity``.
     """
     return TADashboardConfig(
         indicator_name="CCI",
@@ -2263,7 +2260,7 @@ def get_stochastic_config(
 ) -> TADashboardConfig:
     """Get pre-configured Stochastic dashboard config.
 
-    ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
+    ``timeframe`` must match the strategy's ``data_granularity``.
     """
     return TADashboardConfig(
         indicator_name="Stochastic",
@@ -2283,7 +2280,7 @@ def get_atr_config(
 ) -> TADashboardConfig:
     """Get pre-configured ATR dashboard config.
 
-    ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
+    ``timeframe`` must match the strategy's ``data_granularity``.
     """
     return TADashboardConfig(
         indicator_name="ATR",
@@ -2301,7 +2298,7 @@ def get_adx_config(
 ) -> TADashboardConfig:
     """Get pre-configured ADX dashboard config.
 
-    ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
+    ``timeframe`` must match the strategy's ``data_granularity``.
     """
     return TADashboardConfig(
         indicator_name="ADX",
@@ -2319,7 +2316,7 @@ def get_bollinger_config(
 ) -> TADashboardConfig:
     """Get pre-configured Bollinger Bands dashboard config.
 
-    ``timeframe`` must match the strategy's ``data_granularity`` (VIB-4969).
+    ``timeframe`` must match the strategy's ``data_granularity``.
     """
     return TADashboardConfig(
         indicator_name="Bollinger",

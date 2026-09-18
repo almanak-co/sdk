@@ -11,6 +11,7 @@ Core Components:
 - BaseReceiptParser: Abstract base class with template method pattern
 
 Example:
+    ```python
     from almanak.connectors._strategy_base.base import (
         BaseEvent,
         EventRegistry,
@@ -31,6 +32,7 @@ Example:
         def _build_result(self, events, receipt, **kwargs):
             # Build protocol-specific result
             ...
+    ```
 """
 
 from almanak.connectors._strategy_base.base.compiler import (

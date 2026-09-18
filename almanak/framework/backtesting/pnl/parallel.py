@@ -12,6 +12,7 @@ Key Components:
     - generate_random_configs: Generate configs using random sampling of parameter ranges
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.parallel import (
         run_parallel_backtests,
         generate_grid_configs,
@@ -46,6 +47,7 @@ Example:
             print(f"Config {result.config_index}: Sharpe = {result.result.metrics.sharpe_ratio}")
         else:
             print(f"Config {result.config_index}: Failed - {result.error}")
+    ```
 """
 
 from __future__ import annotations
@@ -375,12 +377,14 @@ def run_parallel_backtests_sync(
         Same as run_parallel_backtests
 
     Example:
+        ```python
         results = run_parallel_backtests_sync(
             configs=[config1, config2],
             strategy_factory=create_strategy,
             data_provider_factory=create_data_provider,
             backtester_factory=create_backtester,
         )
+        ```
     """
     return asyncio.run(
         run_parallel_backtests(
@@ -584,10 +588,12 @@ def aggregate_results(results: list[ParallelBacktestResult]) -> AggregatedSweepR
         AggregatedSweepResults with summary statistics and best performers
 
     Example:
+        ```python
         results = await run_parallel_backtests(...)
         aggregated = aggregate_results(results)
         print(f"Success rate: {aggregated.success_count}/{aggregated.total_count}")
         print(f"Best Sharpe: {aggregated.best_sharpe_result.result.metrics.sharpe_ratio}")
+        ```
     """
     if not results:
         return AggregatedSweepResults(results=[])

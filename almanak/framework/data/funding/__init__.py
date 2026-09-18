@@ -5,12 +5,14 @@ Provides funding rate data for perpetual positions across DeFi venues
 sidecar — there is no direct HTTP egress from the strategy container.
 
 Example:
+    ```python
     from almanak.framework.data.funding import GatewayFundingRateProvider, Venue
     from almanak.framework.gateway_client import GatewayClient
 
     with GatewayClient() as gateway:
         provider = GatewayFundingRateProvider(gateway_client=gateway)
         rate = await provider.get_funding_rate(Venue.GMX_V2, "ETH-USD")
+    ```
 
 ``SUPPORTED_MARKETS`` is derived lazily from connector manifests via
 ``FundingHistoryRegistry.all_markets()`` (plan 023).  Importing this package

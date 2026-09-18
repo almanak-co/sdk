@@ -1,6 +1,6 @@
 """Fluid DEX LP (SmartLending) — thin third manifest over the fluid package.
 
-Phase 4 (VIB-5032): Fluid SmartLending wrappers are fungible ERC-20-share,
+Phase 4: Fluid SmartLending wrappers are fungible ERC-20-share,
 two-token DEX-LP positions (no NFT, no tick range). Direct pool LP is
 whitelist-gated (``DexT1__UserSupplyInNotOn`` 51013, Phase-0 §V4) — the wrapper
 IS the whitelisted supplier, so an EOA/Safe LPs through it. Valued resolver-side
@@ -12,6 +12,7 @@ lending (``fluid``) and vault borrow (``fluid_vault``) surfaces. One codebase
 (all implementation in ``almanak.connectors.fluid``), three manifests.
 
 Example:
+    ```python
     from decimal import Decimal
 
     from almanak.framework.intents import LPOpenIntent
@@ -25,6 +26,7 @@ Example:
         range_upper=Decimal("2"),
         chain="arbitrum",
     )
+    ```
 """
 
 from __future__ import annotations

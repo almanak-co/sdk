@@ -11,6 +11,7 @@ Key Features:
     - Return LiquidityResult with appropriate confidence based on data source
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.providers.liquidity_depth import (
         LiquidityDepthProvider,
     )
@@ -26,6 +27,7 @@ Example:
             protocol="uniswap_v3",
         )
         print(f"Liquidity depth: ${liquidity.depth}")
+    ```
 """
 
 from __future__ import annotations
@@ -279,6 +281,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
         twap_window_hours: Window size for TWAP calculation
 
     Example:
+        ```python
         provider = LiquidityDepthProvider()
 
         # Use as async context manager
@@ -296,6 +299,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             liquidity = await provider.get_liquidity_depth(...)
         finally:
             await provider.close()
+        ```
     """
 
     def __init__(
@@ -1143,6 +1147,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
             data, LOW confidence for fallback.
 
         Example:
+            ```python
             # With explicit protocol
             liquidity = await provider.get_liquidity_depth(
                 pool_address="0xC31E54c7a869B9FcBEcc14363CF510d1c41fa443",
@@ -1157,6 +1162,7 @@ class LiquidityDepthProvider(HistoricalLiquidityProvider):
                 chain="base",
                 timestamp=datetime(2024, 1, 15, 12, 0, tzinfo=UTC),
             )  # Will use Aerodrome for Base chain
+            ```
         """
         timestamp = self._ensure_utc_timestamp(timestamp)
         protocol_id = self._resolve_protocol_id(protocol, chain, pool_address)

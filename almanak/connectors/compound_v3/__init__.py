@@ -18,6 +18,7 @@ Supported Chains:
 - Polygon
 
 Example:
+    ```python
     from almanak.connectors.compound_v3 import (
         CompoundV3Adapter,
         CompoundV3Config,
@@ -44,6 +45,7 @@ Example:
     # Parse transaction receipts
     parser = CompoundV3ReceiptParser()
     events = parser.parse_receipt(receipt)
+    ```
 """
 
 from __future__ import annotations

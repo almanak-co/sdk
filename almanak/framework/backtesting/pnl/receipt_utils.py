@@ -9,6 +9,7 @@ The primary use case is for swap transactions where we want to compare:
 - Actual token amounts (from the on-chain receipt)
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.receipt_utils import (
         parse_transfer_events,
         extract_token_flows,
@@ -22,6 +23,7 @@ Example:
 
     print(f"Tokens in: {flows.tokens_in}")
     print(f"Tokens out: {flows.tokens_out}")
+    ```
 """
 
 import logging
@@ -284,9 +286,11 @@ def parse_transfer_events(receipt: dict[str, Any] | None) -> list[TransferEvent]
         Returns empty list if receipt is None, has no logs, or failed (status != 1).
 
     Example:
+        ```python
         transfers = parse_transfer_events(receipt)
         for t in transfers:
             print(f"{t.from_addr} -> {t.to_addr}: {t.value} of {t.token_address}")
+        ```
     """
     if receipt is None:
         return []
@@ -334,6 +338,7 @@ def extract_token_flows(
         Returns TokenFlows with empty dicts if receipt is None or has no relevant transfers.
 
     Example:
+        ```python
         flows = extract_token_flows(receipt, wallet_address="0x123...")
 
         for token, amount in flows.tokens_in.items():
@@ -341,6 +346,7 @@ def extract_token_flows(
 
         for token, amount in flows.tokens_out.items():
             print(f"Sent {amount} of {token}")
+        ```
     """
     wallet_lower = wallet_address.lower()
     result = TokenFlows(wallet_address=wallet_lower)
@@ -443,6 +449,7 @@ def calculate_discrepancy(
         percentage, and whether it exceeds the threshold.
 
     Example:
+        ```python
         # Check if actual differs from expected by more than 1%
         result = calculate_discrepancy(expected=1000, actual=985)
         if result.exceeds_threshold:
@@ -455,6 +462,7 @@ def calculate_discrepancy(
             threshold=0.02,  # 2%
             context="USDC swap"
         )
+        ```
     """
     # Calculate absolute difference
     difference = actual - expected

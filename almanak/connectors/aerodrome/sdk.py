@@ -13,6 +13,7 @@ Contract Architecture:
 - Pool: Individual AMM pools with reserves
 
 Example:
+    ```python
     from almanak.connectors.aerodrome import AerodromeSDK
 
     sdk = AerodromeSDK(chain="base", rpc_url="https://mainnet.base.org")
@@ -25,6 +26,7 @@ Example:
 
     # Build swap transaction
     tx = sdk.build_swap_tx(amount_in, amount_out_min, routes, recipient, deadline, sender)
+    ```
 """
 
 import json
@@ -426,6 +428,7 @@ class AerodromeSDK:
     - ABI encoding for all operations
 
     Example:
+        ```python
         sdk = AerodromeSDK(chain="base")
 
         # Get quote for swap
@@ -445,6 +448,7 @@ class AerodromeSDK:
             deadline=int(time.time()) + 300,
             sender="0x...",
         )
+        ```
     """
 
     def __init__(

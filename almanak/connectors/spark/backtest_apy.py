@@ -28,6 +28,7 @@ Subgraph Source:
     https://thegraph.com/explorer/subgraphs/GbKdmBe4ycCYCQLQSjqGg6UHYoYfbyJyq5WrG35pv1si
 
 Example:
+    ```python
     from almanak.connectors.spark.backtest_apy import SparkAPYProvider
     from datetime import datetime, UTC
 
@@ -43,6 +44,7 @@ Example:
         )
         for apy in apys:
             print(f"{apy.source_info.timestamp}: supply={apy.supply_apy:.4f}, borrow={apy.borrow_apy:.4f}")
+    ```
 """
 
 import logging
@@ -206,6 +208,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
         client: SubgraphClient for querying The Graph
 
     Example:
+        ```python
         provider = SparkAPYProvider()
 
         # Use as async context manager
@@ -223,6 +226,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
             apys = await provider.get_apy(...)
         finally:
             await provider.close()
+        ```
     """
 
     def __init__(
@@ -545,6 +549,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
             Returns LOW confidence fallback results if subgraph unavailable.
 
         Example:
+            ```python
             apys = await provider.get_apy(
                 protocol="spark",
                 market="DAI",
@@ -553,6 +558,7 @@ class SparkAPYProvider(HistoricalAPYProvider):
             )
             for apy in apys:
                 print(f"Supply: {apy.supply_apy:.4f}, Borrow: {apy.borrow_apy:.4f}")
+            ```
         """
         chain = _canonical_chain(_chain_override if _chain_override is not None else self._config.chain)
         start_date, end_date = self._normalize_date_range(start_date, end_date)
@@ -743,12 +749,14 @@ class SparkAPYProvider(HistoricalAPYProvider):
             List of APYResult objects
 
         Example:
+            ```python
             apys = await provider.get_apy_for_chain(
                 chain="ethereum",
                 market="DAI",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
             )
+            ```
         """
         # Use chain override parameter for thread-safe chain switching
         return await self.get_apy(
@@ -777,8 +785,10 @@ class SparkAPYProvider(HistoricalAPYProvider):
             APYResult with current rates
 
         Example:
+            ```python
             apy = await provider.get_current_apy("DAI")
             print(f"Current DAI supply APY: {apy.supply_apy:.4f}")
+            ```
         """
         chain = _canonical_chain(chain or self._config.chain)
         now = datetime.now(UTC)

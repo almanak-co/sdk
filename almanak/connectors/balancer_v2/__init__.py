@@ -18,6 +18,7 @@ Supported chains:
 - Avalanche
 
 Example:
+    ```python
     from almanak.connectors.balancer_v2 import BalancerFlashLoanAdapter, BalancerFlashLoanConfig
 
     config = BalancerFlashLoanConfig(
@@ -32,6 +33,7 @@ Example:
         tokens=["USDC"],
         amounts=[Decimal("100000")],
     )
+    ```
 """
 
 from __future__ import annotations

@@ -29,13 +29,13 @@ Usage:
 
     def render_custom_dashboard(deployment_id, strategy_config, api_client, session_state):
         # Pass session_state + deployment_id so the pool price chart follows the
-        # operator-selected NAV range (24h/7d/30d) when one is picked (VIB-5114);
+        # operator-selected NAV range (24h/7d/30d) when one is picked;
         # omitting them keeps the legacy recent-window fetch.
         session_state = prepare_lp_session_state(
             api_client, session_state, config=config, deployment_id=deployment_id
         )
         # Pass api_client so the template renders the gateway-backed
-        # Positions registry + Position Lifecycle sections (PR #2373).
+        # Positions registry + Position Lifecycle sections.
         render_lp_dashboard(deployment_id, strategy_config, session_state, config, api_client=api_client)
 """
 
@@ -92,8 +92,7 @@ class LPDashboardConfig:
         timeframe: OHLCV candle interval for the price-history chart — one of
             ``1m``/``5m``/``15m``/``1h``/``4h``/``1d``. Defaults to ``"1h"`` for
             back-compat. Set it to the strategy's ``data_granularity`` so the
-            price chart matches the cadence the strategy actually trades on
-            (VIB-4969); the recent-window candle count scales per timeframe.
+            price chart matches the cadence the strategy actually trades on; the recent-window candle count scales per timeframe.
     """
 
     protocol: str = "uniswap_v3"
@@ -140,7 +139,7 @@ class LPSessionState(TypedDict, total=False):
         tick_data, lower_tick, upper_tick, current_tick: Liquidity distribution.
         position_history, price_history, fee_history, il_history: Chart data.
 
-    IGNORED (VIB-6283): ``total_fees_usd`` / ``impermanent_loss_pct`` /
+    IGNORED: ``total_fees_usd`` / ``impermanent_loss_pct`` /
     ``net_pnl_usd`` are MONEY and are no longer read from here. They are
     sourced from the accounting tables via the gateway; a caller-supplied
     value is stripped and logged (blueprint 22 §"Money ownership contract").
@@ -243,10 +242,9 @@ def prepare_lp_session_state(
     A caller-supplied ``session_state`` contributes **custom / non-live keys
     only** (custom chart data such as ``position_history`` / ``price_history``,
     fixture/display extras). The LP-critical live-state keys
-    (:data:`LP_LIVE_STATE_KEYS`) are owned by the live reads and are never
+    (`LP_LIVE_STATE_KEYS`) are owned by the live reads and are never
     seeded from the caller ahead of them — this prevents a stale, preserved
-    dashboard state from masking fresh on-chain state after a rebalance
-    (VIB-5025). A caller value for a live key is used only as a last-resort
+    dashboard state from masking fresh on-chain state after a rebalance. A caller value for a live key is used only as a last-resort
     fallback when the live path produced nothing (Empty != Zero), or when the
     caller explicitly pins the key via ``preserve_keys``.
 
@@ -262,7 +260,7 @@ def prepare_lp_session_state(
             dashboard that intentionally renders a historical state rather than
             live state). The safe default (``None``) refreshes every live key.
         deployment_id: Optional deployment id used to read the operator's
-            selected NAV range from ``session_state`` (VIB-5114). When supplied
+            selected NAV range from ``session_state``. When supplied
             AND a bounded range (24h/7d/30d) is selected on the shared NAV chart,
             the pool price-history candles follow that range's granularity. When
             ``None`` (the default, every legacy call site) or no range is
@@ -271,7 +269,7 @@ def prepare_lp_session_state(
             candle granularity follows the range.)
 
     Returns:
-        Enriched dict containing all :data:`LP_CRITICAL_KEYS`.
+        Enriched dict containing all `LP_CRITICAL_KEYS`.
     """
     caller_state: dict[str, Any] = dict(session_state) if session_state else {}
 
@@ -364,17 +362,17 @@ def _merge_live_and_caller_state(
 
     The live ``get_state()`` read is the source of truth and is built first so
     a stale, caller-preserved ``session_state`` can never mask fresh on-chain
-    state (VIB-5025). On top of it:
+    state. On top of it:
 
     - ``preserve_keys`` pins win over the live read (explicit opt-in only).
       Setting the key here also short-circuits the live fetch gates downstream.
     - Custom / non-live caller keys pass through as a base layer for the
-      chart-population helpers. Live-state keys (:data:`LP_LIVE_STATE_KEYS`) are
+      chart-population helpers. Live-state keys (`LP_LIVE_STATE_KEYS`) are
       intentionally NOT seeded from the caller here so the live reads own them.
 
     VIB-6283: that live-ownership rule was applied to ``caller_state`` only, so
     ``get_state()`` — the STRATEGY runner's state, not the valuer's — could still
-    seed the composition keys, and :func:`_load_token_amounts` short-circuits the
+    seed the composition keys, and `_load_token_amounts` short-circuits the
     moment both are present. A strategy that mirrors its mint amounts into state
     for its own UI (a normal thing to do) would therefore pin the Position Status
     card at entry amounts forever: the same frozen-composition bug as the
@@ -668,7 +666,7 @@ def _collect_pool_keys(result: dict[str, Any]) -> list[tuple[str, str]]:
     """Collect distinct ``(chain, pool_address)`` tuples from session_state.
 
     Positions may live under either ``positions`` (custom payload) or
-    ``position_history`` (populated by :func:`_populate_position_history`).
+    ``position_history`` (populated by `_populate_position_history`).
     Output order is deterministic (first-seen wins).
     """
     seen: set[tuple[str, str]] = set()
@@ -698,11 +696,11 @@ def _resolve_lp_chart_window(
     session_state: dict[str, Any] | None,
     config: LPDashboardConfig | None,
 ) -> ChartWindow:
-    """Resolve the pool-candle :class:`ChartWindow` for this LP render (VIB-5114).
+    """Resolve the pool-candle `ChartWindow` for this LP render.
 
     Reads the operator's selected NAV range from ``session_state`` (the shared
     ``nav_range_{deployment_id}`` key) and delegates to the pure
-    :func:`build_chart_window`. ``deployment_id=None``, no selection, an unknown
+    `build_chart_window`. ``deployment_id=None``, no selection, an unknown
     value, or ``"All"`` all yield the legacy configured-timeframe recent window.
     The LP chart has no markers, so only ``timeframe`` / ``limit`` are consumed
     (``from_ts`` is carried for parity but unused by the LP path).
@@ -726,8 +724,8 @@ def _fetch_pool_candles(
     """Best-effort OHLCV fetch for a single pool. Empty list on any failure.
 
     ``timeframe`` defaults to ``"1h"`` for back-compat; the recent-window candle
-    count scales per timeframe via :func:`ohlcv_limit_for_timeframe` (VIB-4969).
-    ``limit`` overrides that count for the windowed path (VIB-5114) — when
+    count scales per timeframe via `ohlcv_limit_for_timeframe`.
+    ``limit`` overrides that count for the windowed path — when
     ``None`` (legacy callers) the per-timeframe recent-window cap is used,
     byte-for-byte the prior behaviour.
     """
@@ -890,7 +888,7 @@ def render_lp_dashboard(
         deployment_id: The deployment identifier
         strategy_config: Strategy configuration dictionary
         session_state: Current session state with position data.
-            Use :func:`prepare_lp_session_state` to populate this from the
+            Use `prepare_lp_session_state` to populate this from the
             gateway before calling this function.
         config: LPDashboardConfig for this dashboard
         api_client: Optional ``DashboardAPIClient`` (the same one passed
@@ -1288,7 +1286,7 @@ def _fmt_token_amount(value: Any) -> str:
     significant figures for sub-1 values and 2dp thousands-separated for
     ≥1, matching the trade-tape headline convention.
 
-    Empty ≠ Zero (VIB-6283): ``None`` means the valuer produced no measured
+    Empty ≠ Zero: ``None`` means the valuer produced no measured
     composition for this position, which is NOT a holding of zero — render the
     unmeasured em-dash. A real ``Decimal("0")`` still renders ``"0"``.
     """
@@ -1335,7 +1333,7 @@ def _render_performance_summary(
     session_state: dict[str, Any],
     deployment_id: str | None = None,
 ) -> None:
-    """Render the LP performance decomposition (VIB-6283).
+    """Render the LP performance decomposition.
 
     **Money is never sourced from ``session_state``** (blueprint 22 §"Money
     ownership contract"). Fees / IL / Net PnL come from the accounting-backed
@@ -1438,7 +1436,7 @@ def _money_metric(
     help_text: str = "",
     partial: bool = False,
 ) -> None:
-    """Render one money tile, honouring Empty ≠ Zero (VIB-6283).
+    """Render one money tile, honouring Empty ≠ Zero.
 
     ``None`` is UNMEASURED and renders ``—``. ``Decimal("0")`` is a measured
     zero and renders ``$0.00``. The two must stay visually distinct — conflating
@@ -1501,7 +1499,7 @@ def get_uniswap_v3_config(
 ) -> LPDashboardConfig:
     """Get pre-configured Uniswap V3 LP dashboard config.
 
-    ``timeframe`` sets the price-chart candle interval (VIB-4969); defaults to ``"1h"``.
+    ``timeframe`` sets the price-chart candle interval; defaults to ``"1h"``.
     """
     return LPDashboardConfig(
         protocol="uniswap_v3",
@@ -1522,7 +1520,7 @@ def get_aerodrome_config(
 ) -> LPDashboardConfig:
     """Get pre-configured Aerodrome LP dashboard config.
 
-    ``timeframe`` sets the price-chart candle interval (VIB-4969); defaults to ``"1h"``.
+    ``timeframe`` sets the price-chart candle interval; defaults to ``"1h"``.
     """
     return LPDashboardConfig(
         protocol="aerodrome",
@@ -1543,7 +1541,7 @@ def get_traderjoe_v2_config(
 ) -> LPDashboardConfig:
     """Get pre-configured TraderJoe V2 LP dashboard config.
 
-    ``timeframe`` sets the price-chart candle interval (VIB-4969); defaults to ``"1h"``.
+    ``timeframe`` sets the price-chart candle interval; defaults to ``"1h"``.
     """
     return LPDashboardConfig(
         protocol="traderjoe_v2",
@@ -1564,7 +1562,7 @@ def get_pancakeswap_v3_config(
 ) -> LPDashboardConfig:
     """Get pre-configured PancakeSwap V3 LP dashboard config.
 
-    ``timeframe`` sets the price-chart candle interval (VIB-4969); defaults to ``"1h"``.
+    ``timeframe`` sets the price-chart candle interval; defaults to ``"1h"``.
     """
     return LPDashboardConfig(
         protocol="pancakeswap_v3",

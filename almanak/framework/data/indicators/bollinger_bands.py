@@ -12,6 +12,7 @@ Trading Signals:
 - Band expansion: High volatility, strong trend
 
 Example:
+    ```python
     from almanak.framework.data.indicators import BollingerBandsCalculator
 
     bb_calc = BollingerBandsCalculator(ohlcv_provider=provider)
@@ -21,6 +22,7 @@ Example:
         print("Price below lower band - oversold!")
     elif bb.percent_b > 1:
         print("Price above upper band - overbought!")
+    ```
 """
 
 import logging
@@ -51,6 +53,7 @@ class BollingerBandsCalculator:
         ohlcv_provider: Provider for OHLCV data (implements OHLCVProvider protocol)
 
     Example:
+        ```python
         provider = CoinGeckoOHLCVProvider()
         bb_calc = BollingerBandsCalculator(ohlcv_provider=provider)
 
@@ -60,6 +63,7 @@ class BollingerBandsCalculator:
         # Check price position
         if bb.percent_b < 0.2:
             print("Near lower band - potential buy")
+        ```
     """
 
     def __init__(self, ohlcv_provider: OHLCVProvider) -> None:
@@ -166,6 +170,7 @@ class BollingerBandsCalculator:
             DataSourceError: If data cannot be fetched
 
         Example:
+            ```python
             bb = await bb_calc.calculate_bollinger_bands("WETH", period=20, std_dev=2.0)
 
             # Trading logic
@@ -179,6 +184,7 @@ class BollingerBandsCalculator:
             # Volatility check
             if bb.bandwidth < 0.05:
                 print("Low volatility - squeeze detected")
+            ```
         """
         timeframe = parse_ohlcv_timeframe(timeframe, field_name="Bollinger Bands timeframe")
         limit = period + 10  # Buffer

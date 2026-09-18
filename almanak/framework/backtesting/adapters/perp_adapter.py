@@ -17,6 +17,7 @@ Key Features:
     - Support for connector-declared historical funding providers
 
 Example:
+    ```python
     from almanak.framework.backtesting.adapters.perp_adapter import (
         PerpBacktestAdapter,
         PerpBacktestConfig,
@@ -39,6 +40,7 @@ Example:
 
     # Use in backtesting
     fill = adapter.execute_intent(intent, portfolio, market_state)
+    ```
 """
 
 import asyncio
@@ -151,6 +153,7 @@ class PerpBacktestConfig(StrategyBacktestConfig):
         protocol: Default protocol for margin/funding lookups (e.g., "gmx", "hyperliquid")
 
     Example:
+        ```python
         config = PerpBacktestConfig(
             strategy_type="perp",
             funding_application_frequency="hourly",
@@ -158,6 +161,7 @@ class PerpBacktestConfig(StrategyBacktestConfig):
             initial_margin_ratio=Decimal("0.05"),  # 20x max leverage
             default_funding_rate=Decimal("0.0001"),
         )
+        ```
     """
 
     funding_application_frequency: Literal["continuous", "hourly", "8h"] = "hourly"
@@ -331,6 +335,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         data_config: BacktestDataConfig for historical data provider settings (optional)
 
     Example:
+        ```python
         # With config and data_config
         from almanak.framework.backtesting.config import BacktestDataConfig
 
@@ -357,6 +362,7 @@ class PerpBacktestAdapter(StrategyBacktestAdapter):
         if adapter.should_rebalance(position, market_state):
             # Strategy should consider adjusting position
             pass
+        ```
     """
 
     config_class = PerpBacktestConfig

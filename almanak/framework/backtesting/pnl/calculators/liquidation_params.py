@@ -13,6 +13,7 @@ Key Concepts:
     - Liquidation Penalty: Fee charged during liquidation (e.g., 0.05 = 5%)
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.calculators.liquidation_params import (
         LiquidationParamRegistry,
         LiquidationParams,
@@ -28,6 +29,7 @@ Example:
     )
     print(f"Liquidation threshold: {params.liquidation_threshold}")
     print(f"Source: {params.source}")  # ASSET_SPECIFIC or PROTOCOL_DEFAULT
+    ```
 
 References:
     - Aave V3 Risk Parameters: https://docs.aave.com/developers/v/2.0/the-core-protocol/lendingpool
@@ -187,6 +189,7 @@ class LiquidationParamRegistry:
         global_default_penalty: Global fallback liquidation penalty
 
     Example:
+        ```python
         registry = LiquidationParamRegistry()
 
         # Add custom asset-specific params
@@ -201,6 +204,7 @@ class LiquidationParamRegistry:
         # Look up params (will use asset-specific if registered)
         params = registry.get_params("aave_v3", "WBTC")
         assert params.source == LiquidationParamSource.ASSET_SPECIFIC
+        ```
     """
 
     # Protocol-level default parameters
@@ -300,9 +304,11 @@ class LiquidationParamRegistry:
             LiquidationParams with source indicating where values came from
 
         Example:
+            ```python
             params = registry.get_params("aave_v3", "ETH")
             print(f"Threshold: {params.liquidation_threshold}")  # 0.86
             print(f"Source: {params.source}")  # ASSET_SPECIFIC
+            ```
         """
         protocol_key = protocol.lower()
         asset_key = asset.upper() if asset else None
@@ -413,6 +419,7 @@ class LiquidationParamRegistry:
             The registered LiquidationParams
 
         Example:
+            ```python
             # Register on-chain fetched params
             registry.register_asset_params(
                 protocol="aave_v3",
@@ -423,6 +430,7 @@ class LiquidationParamRegistry:
                 source=LiquidationParamSource.HISTORICAL,
                 source_timestamp="2024-01-15T00:00:00Z",
             )
+            ```
         """
         protocol_key = protocol.lower()
         asset_key = asset.upper()

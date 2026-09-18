@@ -12,6 +12,7 @@ fills only when no data comes back at all (preserving the pre-cutover
 graceful-degradation contract).
 
 Example:
+    ```python
     from almanak.connectors.hyperliquid.backtest_funding import HyperliquidFundingProvider
     from datetime import datetime, UTC
 
@@ -23,6 +24,7 @@ Example:
             start_date=datetime(2024, 1, 1, tzinfo=UTC),
             end_date=datetime(2024, 1, 7, tzinfo=UTC),
         )
+    ```
 """
 
 import logging
@@ -145,6 +147,7 @@ class HyperliquidFundingProvider(HistoricalFundingProvider):
         rate_limiter: Client-side RPC throttle
 
     Example:
+        ```python
         provider = HyperliquidFundingProvider()
 
         async with provider:
@@ -153,6 +156,7 @@ class HyperliquidFundingProvider(HistoricalFundingProvider):
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 7, tzinfo=UTC),
             )
+        ```
     """
 
     def __init__(
@@ -380,11 +384,13 @@ class HyperliquidFundingProvider(HistoricalFundingProvider):
             the range if no data is available. Never raises.
 
         Example:
+            ```python
             rates = await provider.get_funding_rates(
                 market="ETH-USD",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 7, tzinfo=UTC),
             )
+            ```
         """
         logger.info(
             "Fetching Hyperliquid funding rates: market=%s, start=%s, end=%s",
@@ -484,8 +490,10 @@ class HyperliquidFundingProvider(HistoricalFundingProvider):
             FundingResult with current rate
 
         Example:
+            ```python
             rate = await provider.get_current_funding_rate("ETH-USD")
             print(f"Current ETH funding rate: {rate.rate:.6f}")
+            ```
         """
         now = datetime.now(UTC)
         # Fetch last 2 hours to ensure we get at least one data point

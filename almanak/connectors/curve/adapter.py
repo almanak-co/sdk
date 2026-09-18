@@ -519,6 +519,7 @@ class CurveAdapter:
     - Managing slippage protection
 
     Example:
+        ```python
         config = CurveConfig(
             chain="ethereum",
             wallet_address="0x...",
@@ -532,6 +533,7 @@ class CurveAdapter:
             token_out="DAI",
             amount_in=Decimal("1000"),
         )
+        ```
     """
 
     def __init__(self, config: CurveConfig, token_resolver: "TokenResolverType | None" = None) -> None:

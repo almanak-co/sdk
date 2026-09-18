@@ -16,6 +16,7 @@ Key Features:
     - Caches calculated TWAP values for efficiency
 
 Example:
+    ```python
     from almanak.framework.data.price.dex_twap import DEXTWAPDataProvider
     from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig
     from datetime import datetime
@@ -38,6 +39,7 @@ Example:
     )
     async for timestamp, market_state in provider.iterate(config):
         eth_price = market_state.get_price("ETH")
+    ```
 """
 
 from __future__ import annotations
@@ -319,6 +321,7 @@ class DEXTWAPDataProvider:
         twap_window_seconds: TWAP calculation window (default 1800 = 30 minutes)
 
     Example:
+        ```python
         provider = DEXTWAPDataProvider(
             rpc_url="https://arb-mainnet.g.alchemy.com/v2/...",
             chain="arbitrum",
@@ -327,6 +330,7 @@ class DEXTWAPDataProvider:
 
         # Get a single TWAP price
         price = await provider.get_price("ETH", datetime.now())
+        ```
     """
 
     # Supported chains

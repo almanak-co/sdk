@@ -14,6 +14,7 @@ Reference:
     StaFi EVM LSD Architecture: https://docs.stafi.io/lsaas/architecture_evm_lsd/
 
 Example:
+    ```python
     from almanak.connectors.gimo import GimoAdapter, GimoConfig
 
     config = GimoConfig(chain="zerog", wallet_address="0x...")
@@ -21,6 +22,7 @@ Example:
 
     # Stake A0GI to receive st0G
     result = adapter.stake(amount=Decimal("100.0"))
+    ```
 """
 
 from __future__ import annotations
@@ -117,9 +119,11 @@ class GimoAdapter:
     - Unstake st0G to initiate A0GI withdrawal
 
     Example:
+        ```python
         config = GimoConfig(chain="zerog", wallet_address="0x...")
         adapter = GimoAdapter(config)
         result = adapter.stake(Decimal("100.0"))
+        ```
     """
 
     def __init__(self, config: GimoConfig, token_resolver: TokenResolverType | None = None) -> None:

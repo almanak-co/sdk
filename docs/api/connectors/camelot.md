@@ -12,9 +12,7 @@
 |-------|--------|-------------------|
 | [Arbitrum](../../chains/arbitrum.md) | EVM | ``SWAP`` |
 
-## API Reference
-
 ::: almanak.connectors.camelot
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

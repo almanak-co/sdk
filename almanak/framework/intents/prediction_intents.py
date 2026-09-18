@@ -64,6 +64,7 @@ class PredictionBuyIntent(BaseIntent):
         - FOK (Fill or Kill) must fill entirely or is cancelled
 
     Example:
+        ```python
         # Buy $100 worth of YES shares at market price
         intent = Intent.prediction_buy(
             market_id="will-bitcoin-exceed-100000",
@@ -79,6 +80,7 @@ class PredictionBuyIntent(BaseIntent):
             max_price=Decimal("0.65"),
             order_type="limit",
         )
+        ```
     """
 
     market_id: str
@@ -187,6 +189,7 @@ class PredictionSellIntent(BaseIntent):
         - Limit orders only execute at min_price or better
 
     Example:
+        ```python
         # Sell all YES shares at market price
         intent = Intent.prediction_sell(
             market_id="will-bitcoin-exceed-100000",
@@ -202,6 +205,7 @@ class PredictionSellIntent(BaseIntent):
             min_price=Decimal("0.40"),
             order_type="limit",
         )
+        ```
     """
 
     market_id: str
@@ -288,6 +292,7 @@ class PredictionRedeemIntent(BaseIntent):
         - Use outcome=None to redeem all winning positions
 
     Example:
+        ```python
         # Redeem all winning positions from a market
         intent = Intent.prediction_redeem(
             market_id="will-bitcoin-exceed-100000",
@@ -299,6 +304,7 @@ class PredictionRedeemIntent(BaseIntent):
             outcome="YES",
             shares="all",
         )
+        ```
     """
 
     market_id: str

@@ -15,6 +15,7 @@ Trading Signals:
 - Histogram contracting: Trend weakening
 
 Example:
+    ```python
     from almanak.framework.data.indicators import MACDCalculator
 
     macd_calc = MACDCalculator(ohlcv_provider=provider)
@@ -22,6 +23,7 @@ Example:
 
     if macd.histogram > 0 and macd.macd_line > macd.signal_line:
         print("Bullish momentum - MACD above signal")
+    ```
 """
 
 import logging
@@ -53,6 +55,7 @@ class MACDCalculator:
         ohlcv_provider: Provider for OHLCV data (implements OHLCVProvider protocol)
 
     Example:
+        ```python
         provider = CoinGeckoOHLCVProvider()
         macd_calc = MACDCalculator(ohlcv_provider=provider)
 
@@ -62,6 +65,7 @@ class MACDCalculator:
         # Check for bullish crossover
         if macd.histogram > 0:
             print("MACD above signal - bullish")
+        ```
     """
 
     def __init__(self, ohlcv_provider: OHLCVProvider) -> None:
@@ -210,6 +214,7 @@ class MACDCalculator:
             DataSourceError: If data cannot be fetched
 
         Example:
+            ```python
             macd = await macd_calc.calculate_macd("WETH", fast=12, slow=26, signal=9)
 
             # Trading logic
@@ -219,6 +224,7 @@ class MACDCalculator:
             elif macd.histogram < 0:
                 # MACD below signal - bearish momentum
                 print("Bearish crossover")
+            ```
         """
         timeframe = parse_ohlcv_timeframe(timeframe, field_name="MACD timeframe")
         # Request enough data for stable calculations

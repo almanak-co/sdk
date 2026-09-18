@@ -24,6 +24,7 @@ Early Stopping:
     When early stopping triggers, the optimization terminates gracefully.
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.optuna_tuner import (
         OptunaTuner,
         continuous,
@@ -58,6 +59,7 @@ Example:
     history = tuner.export_history()
     with open("optimization_history.json", "w") as f:
         json.dump(history, f, indent=2)
+    ```
 """
 
 from __future__ import annotations
@@ -147,8 +149,10 @@ class EarlyStoppingCallback:
         verbose: If True, log when early stopping triggers
 
     Example:
+        ```python
         callback = EarlyStoppingCallback(patience=10, verbose=True)
         study.optimize(objective, n_trials=100, callbacks=[callback])
+        ```
     """
 
     def __init__(
@@ -539,6 +543,7 @@ class ParamRange:
         is_decimal: If True, convert suggested float back to Decimal
 
     Example:
+        ```python
         # Continuous float range
         ParamRange(ParamType.CONTINUOUS, low=0.001, high=0.1)
 
@@ -553,6 +558,7 @@ class ParamRange:
 
         # Decimal range (auto-converted)
         ParamRange(ParamType.CONTINUOUS, low=Decimal("1000"), high=Decimal("10000"))
+        ```
     """
 
     param_type: ParamType
@@ -626,6 +632,7 @@ def continuous(
         ParamRange configured for continuous optimization
 
     Examples:
+        ```python
         # Simple float range
         continuous(0.0, 1.0)
 
@@ -637,6 +644,7 @@ def continuous(
 
         # Stepped range
         continuous(0.0, 1.0, step=0.1)
+        ```
     """
     return ParamRange(
         param_type=ParamType.CONTINUOUS,
@@ -663,6 +671,7 @@ def discrete(
         ParamRange configured for discrete optimization
 
     Examples:
+        ```python
         # Simple integer range
         discrete(1, 100)
 
@@ -671,6 +680,7 @@ def discrete(
 
         # Number of layers
         discrete(1, 10)
+        ```
     """
     return ParamRange(
         param_type=ParamType.DISCRETE,
@@ -690,6 +700,7 @@ def categorical(choices: list[Any]) -> ParamRange:
         ParamRange configured for categorical optimization
 
     Examples:
+        ```python
         # String choices
         categorical(["low", "medium", "high"])
 
@@ -698,6 +709,7 @@ def categorical(choices: list[Any]) -> ParamRange:
 
         # Mixed types (not recommended but supported)
         categorical([True, False, "auto"])
+        ```
     """
     return ParamRange(
         param_type=ParamType.CATEGORICAL,
@@ -719,11 +731,13 @@ def log_uniform(low: float | Decimal, high: float | Decimal) -> ParamRange:
         ParamRange configured for log-uniform distribution
 
     Examples:
+        ```python
         # Learning rate
         log_uniform(0.0001, 0.1)
 
         # Regularization coefficient
         log_uniform(1e-6, 1e-2)
+        ```
     """
     return continuous(low, high, log=True)
 
@@ -1089,6 +1103,7 @@ class OptunaTuner:
         study: Underlying Optuna study object
 
     Example:
+        ```python
         tuner = OptunaTuner(objective_metric="sharpe_ratio")
 
         result = await tuner.optimize(
@@ -1105,6 +1120,7 @@ class OptunaTuner:
 
         print(f"Best Sharpe: {result.best_value}")
         print(f"Best params: {result.best_params}")
+        ```
     """
 
     def __init__(
@@ -1570,6 +1586,7 @@ class OptunaTuner:
             OptimizationResult with best parameters and value
 
         Example:
+            ```python
             result = await tuner.optimize(
                 strategy_factory=create_strategy,
                 data_provider_factory=create_provider,
@@ -1582,6 +1599,7 @@ class OptunaTuner:
                 n_trials=100,
                 patience=10,  # Stop if no improvement for 10 trials
             )
+            ```
         """
         prepared_ranges = self._prepare_param_ranges(base_config, param_ranges)
         self._store_objective_state(prepared_ranges, base_config, strategy_config)
@@ -1693,6 +1711,7 @@ class OptunaTuner:
             OptimizationHistory with all trial data and metadata
 
         Example:
+            ```python
             history = tuner.export_history()
 
             # Save to file
@@ -1703,6 +1722,7 @@ class OptunaTuner:
 
             # Or get as dict
             data = history.to_dict()
+            ```
         """
         study_trials = list(self.study.trials)
         trials = [_trial_history_entry(trial, self._param_ranges) for trial in study_trials]
@@ -1735,7 +1755,9 @@ class OptunaTuner:
             path: File path for the JSON output
 
         Example:
+            ```python
             tuner.save_history("results/optimization_history.json")
+            ```
         """
         history = self.export_history()
         history.save(path)

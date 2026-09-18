@@ -15,6 +15,7 @@ RSI Interpretation:
     - RSI 30-70: Neutral zone
 
 Example:
+    ```python
     from almanak.framework.data.indicators.rsi import RSICalculator, CoinGeckoOHLCVProvider
 
     # Create provider and calculator
@@ -24,6 +25,7 @@ Example:
     # Calculate RSI
     rsi = await calculator.calculate_rsi("WETH", period=14)
     print(f"WETH RSI(14): {rsi:.2f}")
+    ```
 """
 
 import logging
@@ -145,11 +147,13 @@ class CoinGeckoOHLCVProvider:
         request_timeout: HTTP request timeout in seconds (default 30)
 
     Example:
+        ```python
         provider = CoinGeckoOHLCVProvider(api_key="optional-key")
         candles = await provider.get_ohlcv("WETH", timeframe="1h", limit=100)
         print(f"Got {len(candles)} candles")
         for candle in candles[-3:]:
             print(f"  {candle.timestamp}: close={candle.close}")
+        ```
     """
 
     _FREE_API_BASE = "https://api.coingecko.com/api/v3"
@@ -491,6 +495,7 @@ class RSICalculator:
         default_period: Default RSI period (default 14)
 
     Example:
+        ```python
         provider = CoinGeckoOHLCVProvider()
         calculator = RSICalculator(ohlcv_provider=provider)
 
@@ -503,6 +508,7 @@ class RSICalculator:
             print("Oversold - potential buy signal")
         elif rsi > 70:
             print("Overbought - potential sell signal")
+        ```
     """
 
     def __init__(
@@ -611,6 +617,7 @@ class RSICalculator:
             DataSourceError: If data cannot be fetched
 
         Example:
+            ```python
             # Default 4-hour candles
             rsi = await calculator.calculate_rsi("WETH", period=14)
 
@@ -619,6 +626,7 @@ class RSICalculator:
 
             # Daily candles for longer-term analysis
             rsi_1d = await calculator.calculate_rsi("WETH", period=14, timeframe="1d")
+            ```
         """
         timeframe = parse_ohlcv_timeframe(timeframe, field_name="RSI timeframe")
         # Need at least period + 1 data points for RSI calculation.

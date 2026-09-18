@@ -20,6 +20,7 @@ Key Features:
     - Request queue for handling burst requests
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.providers.rate_limiter import (
         TokenBucketRateLimiter,
     )
@@ -49,6 +50,7 @@ Example:
         make_api_request,
         max_retries=3,
     )
+    ```
 """
 
 import asyncio
@@ -161,6 +163,7 @@ class TokenBucketRateLimiter:
         min_interval_seconds: Minimum interval between requests
 
     Example:
+        ```python
         # CoinGecko free tier: 50 requests per minute
         limiter = TokenBucketRateLimiter(requests_per_minute=50)
 
@@ -175,6 +178,7 @@ class TokenBucketRateLimiter:
         # Check stats
         stats = limiter.get_stats()
         print(f"Wait rate: {stats.wait_rate:.1f}%")
+        ```
     """
 
     # Rate reduction factor when 429 response is received (20% reduction)
@@ -376,12 +380,14 @@ class TokenBucketRateLimiter:
         The rate will never go below MIN_REQUESTS_PER_MINUTE (1 req/min).
 
         Example:
+            ```python
             response = await make_api_request()
             if response.status == 429:
                 await limiter.on_rate_limit_response()
                 # Retry after a delay
                 await asyncio.sleep(1)
                 response = await make_api_request()
+            ```
         """
         async with self._lock:
             old_rate = self._requests_per_minute
@@ -440,6 +446,7 @@ class TokenBucketRateLimiter:
             Exception: The last exception if all retries are exhausted.
 
         Example:
+            ```python
             async def fetch_data():
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url) as resp:
@@ -448,6 +455,7 @@ class TokenBucketRateLimiter:
                         return await resp.json()
 
             result = await limiter.retry_with_backoff(fetch_data)
+            ```
         """
         config = self._retry_backoff_config(
             max_retries=max_retries,
@@ -560,6 +568,7 @@ class TokenBucketRateLimiter:
         concurrent requests should be executed in order.
 
         Example:
+            ```python
             # Multiple concurrent requests will be processed in order
             async def make_requests():
                 tasks = [
@@ -568,6 +577,7 @@ class TokenBucketRateLimiter:
                 ]
                 await asyncio.gather(*tasks)
                 # All 10 requests have been rate-limited in order
+            ```
         """
         event = asyncio.Event()
         await self._request_queue.put(event)

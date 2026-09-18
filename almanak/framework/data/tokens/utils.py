@@ -8,6 +8,7 @@ Key Functions:
     - denormalize: Convert human-readable Decimal to raw int
 
 Example:
+    ```python
     from decimal import Decimal
     from almanak.framework.data.tokens.utils import normalize, denormalize
 
@@ -17,6 +18,7 @@ Example:
 
     # Convert back to raw
     raw_again = denormalize(amount, 6)  # 1000000
+    ```
 """
 
 from decimal import Decimal
@@ -39,6 +41,7 @@ def normalize(raw_amount: int, decimals: int) -> Decimal:
         ValueError: If decimals is negative or exceeds 77
 
     Example:
+        ```python
         # 1 ETH = 10^18 wei
         normalize(1_000_000_000_000_000_000, 18)  # Decimal("1")
 
@@ -47,6 +50,7 @@ def normalize(raw_amount: int, decimals: int) -> Decimal:
 
         # 0.5 WBTC = 0.5 * 10^8 = 50_000_000 satoshis
         normalize(50_000_000, 8)  # Decimal("0.5")
+        ```
     """
     if decimals < 0:
         raise ValueError(f"Decimals cannot be negative: {decimals}")
@@ -77,6 +81,7 @@ def denormalize(amount: Decimal, decimals: int) -> int:
         ValueError: If decimals is negative or exceeds 77
 
     Example:
+        ```python
         # 1 ETH to wei
         denormalize(Decimal("1"), 18)  # 1_000_000_000_000_000_000
 
@@ -85,6 +90,7 @@ def denormalize(amount: Decimal, decimals: int) -> int:
 
         # 0.00000001 BTC to satoshis
         denormalize(Decimal("0.00000001"), 8)  # 1
+        ```
     """
     if decimals < 0:
         raise ValueError(f"Decimals cannot be negative: {decimals}")

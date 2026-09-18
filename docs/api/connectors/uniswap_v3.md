@@ -23,9 +23,7 @@
 | [X-Layer](../../chains/xlayer.md) | EVM | ``SWAP`` |
 | [0G](../../chains/zerog.md) | EVM | ``SWAP`` |
 
-## API Reference
-
 ::: almanak.connectors.uniswap_v3
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source

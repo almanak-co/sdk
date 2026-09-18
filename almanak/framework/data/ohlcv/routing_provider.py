@@ -5,6 +5,7 @@ Binds chain and pool_address context at construction so that the chainless
 multi-provider routing infrastructure.
 
 Example:
+    ```python
     from almanak.framework.data.ohlcv.routing_provider import RoutingOHLCVProvider
     from almanak.framework.data.ohlcv.ohlcv_router import OHLCVRouter
 
@@ -13,6 +14,7 @@ Example:
 
     # OHLCVProvider protocol -- indicators call this directly
     candles = await provider.get_ohlcv("ALMANAK", timeframe="1h", limit=100)
+    ```
 """
 
 from __future__ import annotations

@@ -9,6 +9,7 @@ Key Components:
     - GasOracle: Protocol for gas price providers
 
 Example:
+    ```python
     from almanak.framework.data.defi.gas import GasPrice, GasOracle
 
     # Create gas price data
@@ -32,6 +33,7 @@ Example:
         estimated_cost_usd=Decimal("0.25"),
         timestamp=datetime.now(timezone.utc),
     )
+    ```
 """
 
 from dataclasses import dataclass
@@ -338,6 +340,7 @@ class Web3GasOracle:
         - Optimism/Base: Uses OP Stack GasPriceOracle
 
     Example:
+        ```python
         from almanak.framework.data.defi.gas import Web3GasOracle
         from almanak.framework.data.price.aggregator import PriceAggregator
 
@@ -357,6 +360,7 @@ class Web3GasOracle:
         gas_price = await gas_oracle.get_gas_price("arbitrum")
         print(f"Base fee: {gas_price.base_fee_gwei} gwei")
         print(f"Estimated cost: ${gas_price.estimated_cost_usd}")
+        ```
 
     Attributes:
         rpc_urls: Mapping of chain names to RPC endpoint URLs

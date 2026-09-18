@@ -11,6 +11,7 @@ These metrics help evaluate whether a strategy adds value compared to
 passive investment alternatives.
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.calculators.benchmark import (
         BenchmarkCalculator,
         calculate_information_ratio,
@@ -40,6 +41,7 @@ Example:
         beta=Decimal("1.2"),
         risk_free_rate=Decimal("0.05"),  # 5% risk-free rate
     )
+    ```
 
 References:
     - Information Ratio: https://www.investopedia.com/terms/i/informationratio.asp
@@ -66,6 +68,7 @@ class BenchmarkCalculator:
             weekends, 52 for weekly, 12 for monthly.
 
     Example:
+        ```python
         calc = BenchmarkCalculator(annualization_factor=252)
 
         # Calculate all benchmark metrics
@@ -77,6 +80,7 @@ class BenchmarkCalculator:
             beta,
             risk_free_rate,
         )
+        ```
     """
 
     annualization_factor: int = 252
@@ -114,12 +118,14 @@ class BenchmarkCalculator:
             - Zero tracking error
 
         Example:
+            ```python
             # Daily returns for 5 days
             strategy = [Decimal("0.01"), Decimal("0.02"), Decimal("-0.01"),
                        Decimal("0.005"), Decimal("0.015")]
             benchmark = [Decimal("0.005"), Decimal("0.015"), Decimal("-0.005"),
                         Decimal("0.003"), Decimal("0.010")]
             ir = calc.calculate_information_ratio(strategy, benchmark)
+            ```
         """
         # Validate inputs
         if len(strategy_returns) != len(benchmark_returns):
@@ -178,10 +184,12 @@ class BenchmarkCalculator:
             - Zero benchmark variance
 
         Example:
+            ```python
             strategy = [Decimal("0.02"), Decimal("-0.01"), Decimal("0.03")]
             benchmark = [Decimal("0.01"), Decimal("-0.005"), Decimal("0.015")]
             beta = calc.calculate_beta(strategy, benchmark)
             # If strategy moves 2x as much as benchmark, beta ≈ 2.0
+            ```
         """
         # Validate inputs
         if len(strategy_returns) != len(benchmark_returns):
@@ -247,6 +255,7 @@ class BenchmarkCalculator:
             Alpha as a decimal representing excess return.
 
         Example:
+            ```python
             # Strategy returned 20%, benchmark 12%, beta 1.5, risk-free 5%
             alpha = calc.calculate_alpha(
                 strategy_return=Decimal("0.20"),
@@ -256,6 +265,7 @@ class BenchmarkCalculator:
             )
             # Expected return = 0.05 + 1.5 * (0.12 - 0.05) = 0.155
             # Alpha = 0.20 - 0.155 = 0.045 (4.5% excess return)
+            ```
         """
         # Expected return based on CAPM
         # E[R] = Rf + Beta * (Rm - Rf)

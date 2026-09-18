@@ -20,6 +20,7 @@ Supported chains:
 - Ethereum (Chain ID: 1)
 
 Example:
+    ```python
     from almanak.connectors.traderjoe_v2 import TraderJoeV2Adapter, TraderJoeV2Config
 
     config = TraderJoeV2Config(
@@ -42,6 +43,7 @@ Example:
 
     sdk = TraderJoeV2SDK(chain="avalanche", rpc_url="https://api.avax.network/ext/bc/C/rpc")
     pool = sdk.get_pool_address(wavax_addr, usdc_addr, bin_step=20)
+    ```
 """
 
 from __future__ import annotations

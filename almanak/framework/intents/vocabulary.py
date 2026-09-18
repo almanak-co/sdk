@@ -193,6 +193,7 @@ class SwapIntent(BaseIntent):
         Cross-chain swaps require protocol="enso" as Enso handles the bridging.
 
     Example:
+        ```python
         # Same-chain swap
         Intent.swap("USDC", "WETH", amount_usd=1000, chain="arbitrum")
 
@@ -203,6 +204,7 @@ class SwapIntent(BaseIntent):
         # Cross-chain swap: Base USDC -> Arbitrum WETH
         Intent.swap("USDC", "WETH", amount_usd=1000,
                     chain="base", destination_chain="arbitrum", protocol="enso")
+        ```
     """
 
     from_token: str
@@ -285,7 +287,7 @@ class SwapIntent(BaseIntent):
         """Shape-only validation of the optional ``swap_params`` escape hatch.
 
         Only invoked when ``swap_params`` is not None. Mirrors the
-        ``protocol_params`` precedent on :class:`LPOpenIntent`: the central
+        ``protocol_params`` precedent on `LPOpenIntent`: the central
         validator rejects structurally malformed values (wrong container type,
         non-bool booleans, non-positive ints) so a typo fails loudly at
         construction; the *meaning* of each key stays owned by the connector
@@ -369,7 +371,7 @@ class PriceBand(AlmanakImmutableModel):
 
     This is the canonical, protocol-agnostic LP-range form (the default UX).
     ``lower``/``upper`` are prices in the same denomination as the legacy
-    :attr:`LPOpenIntent.range_lower`/:attr:`~LPOpenIntent.range_upper` (token1
+    `range_lower`/`range_upper` (token1
     per token0); every concentrated-liquidity connector converts the band to
     ticks internally. Use this to express "open a ±band around the current
     price" portably across Uniswap V3/V4, Aerodrome Slipstream, etc.
@@ -414,7 +416,7 @@ RangeSpec = Annotated[PriceBand | TickBand, Field(discriminator="kind")]
 def _range_spec_bounds(spec: Any) -> tuple[Decimal, Decimal]:
     """Return ``(lower, upper)`` as ``Decimal`` from a RangeSpec instance or dict.
 
-    Accepts a :class:`PriceBand`/:class:`TickBand` instance or its serialized
+    Accepts a `PriceBand`/`TickBand` instance or its serialized
     ``{"kind": ..., "lower": ..., "upper": ...}`` form (the deserialize path).
     """
     if isinstance(spec, PriceBand):
@@ -439,10 +441,10 @@ def _classify_legacy_bounds(protocol: str, lower: Decimal, upper: Decimal) -> Li
     """Classify a bare legacy ``range_lower``/``range_upper`` pair (design §Migration Step 1).
 
     **The single source of truth** for "are these bounds ticks or prices?" — both
-    :func:`_bridge_legacy_range` (which raises on ``ambiguous``) and
-    :func:`lp_range_is_ticks` (which treats ``ambiguous`` as *not* ticks) route
+    `_bridge_legacy_range` (which raises on ``ambiguous``) and
+    `lp_range_is_ticks` (which treats ``ambiguous`` as *not* ticks) route
     through here so they can never disagree. Having two copies of this decision is
-    exactly how the ALM-2901 class re-enters through a side door (VIB-5867).
+    exactly how the ALM-2901 class re-enters through a side door.
 
     - Non-tick-based protocol -> always ``prices`` (Slipstream's tick ambiguity
       does not exist there).
@@ -465,7 +467,7 @@ def lp_range_bounds(intent: Any) -> tuple[Decimal, Decimal] | None:
     """Return an LP intent's ``(lower, upper)`` range bounds, or ``None`` if absent.
 
     **The single source of truth** for *where the bounds live*. A canonical
-    intent carries a typed :data:`RangeSpec`; a validated one ALSO mirrors it onto
+    intent carries a typed `RangeSpec`; a validated one ALSO mirrors it onto
     the legacy ``range_lower``/``range_upper`` fields — but a ``model_construct``
     or duck-typed intent (the paths the backtest extractor and compilers must
     tolerate) can carry only one of the two. Preferring ``range_spec`` and falling
@@ -506,10 +508,10 @@ def lp_range_is_ticks(intent: Any) -> bool:
 
     Resolution order:
 
-    1. The typed :data:`RangeSpec` when present (a :class:`TickBand` is raw
-       ticks, a :class:`PriceBand` is prices) — including its serialized dict
+    1. The typed `RangeSpec` when present (a `TickBand` is raw
+       ticks, a `PriceBand` is prices) — including its serialized dict
        form, so the deserialize path agrees with the in-memory one.
-    2. Otherwise :func:`_classify_legacy_bounds` — the SAME classifier the legacy
+    2. Otherwise `_classify_legacy_bounds` — the SAME classifier the legacy
        bridge uses. This branch only runs for intents that never went through the
        validator (``model_construct`` / duck-typed), since the validator always
        synthesises a ``range_spec``. Crucially an **ambiguous** positive-integer
@@ -519,7 +521,7 @@ def lp_range_is_ticks(intent: Any) -> bool:
        guess "ticks" for the unvalidated ones.
 
     Args:
-        intent: An :class:`LPOpenIntent` or any object exposing ``range_spec`` /
+        intent: An `LPOpenIntent` or any object exposing ``range_spec`` /
             ``protocol`` / ``range_lower`` / ``range_upper``.
 
     Returns:
@@ -549,12 +551,12 @@ def lp_range_is_ticks(intent: Any) -> bool:
 
 
 def _bridge_legacy_range(protocol: str, lower: Decimal, upper: Decimal) -> PriceBand | TickBand:
-    """Map legacy ``range_lower``/``range_upper`` onto a typed :data:`RangeSpec`.
+    """Map legacy ``range_lower``/``range_upper`` onto a typed `RangeSpec`.
 
     Preserves on-chain semantics exactly: price-based protocols get a
-    :class:`PriceBand`; a tick-based protocol (Slipstream) with unambiguously
-    tick-shaped bounds gets a :class:`TickBand` plus a :class:`DeprecationWarning`.
-    Built via ``model_construct`` (unvalidated) so the :class:`LPOpenIntent`
+    `PriceBand`; a tick-based protocol (Slipstream) with unambiguously
+    tick-shaped bounds gets a `TickBand` plus a `DeprecationWarning`.
+    Built via ``model_construct`` (unvalidated) so the `LPOpenIntent`
     validator stays the single source of the legacy error messages.
 
     On a tick-based protocol the bare legacy pair is genuinely ambiguous, and the
@@ -570,8 +572,8 @@ def _bridge_legacy_range(protocol: str, lower: Decimal, upper: Decimal) -> Price
       Reading it either way silently is a money bug, so the caller must say which
       they meant via an explicit ``PriceBand``/``TickBand``.
 
-    Classification is delegated to :func:`_classify_legacy_bounds` so this bridge
-    and :func:`lp_range_is_ticks` can never disagree about the same pair.
+    Classification is delegated to `_classify_legacy_bounds` so this bridge
+    and `lp_range_is_ticks` can never disagree about the same pair.
     """
     classification = _classify_legacy_bounds(protocol, lower, upper)
 
@@ -609,7 +611,7 @@ class LPOpenIntent(BaseIntent):
         amount0: Amount of token0 to provide
         amount1: Amount of token1 to provide
         range_spec: Canonical typed concentrated-liquidity range — a
-            :class:`PriceBand` (prices, the default UX) or :class:`TickBand` (raw
+            `PriceBand` (prices, the default UX) or `TickBand` (raw
             ticks, native escape hatch). When supplied it is the source of truth
             and the legacy ``range_lower``/``range_upper`` are derived from it.
             When omitted, a ``range_spec`` is synthesised from
@@ -644,7 +646,7 @@ class LPOpenIntent(BaseIntent):
             ``amount0``/``amount1``. When ``None`` (the default), behaviour is unchanged.
         max_slippage: Optional maximum acceptable slippage applied to the deposit's
             min-amount floor (e.g. ``0.005`` = 0.5%), in the same units as
-            :attr:`SwapIntent.max_slippage`. Consumed by Curve (sizes the
+            `max_slippage`. Consumed by Curve (sizes the
             ``add_liquidity`` ``min_mint`` calldata), the Uniswap V3 family and
             ``aerodrome_slipstream`` (size the ``amount0Min``/``amount1Min`` pair
             via ``cl_math.compute_lp_slippage_mins``), and Uniswap **V4** (by a
@@ -652,7 +654,7 @@ class LPOpenIntent(BaseIntent):
             than calling ``cl_math.compute_lp_slippage_mins``). When ``None`` (the
             default), each connector falls back to its OWN built-in default:
             Curve 50 bps, V3-family / Slipstream
-            :data:`~almanak.framework.intents.compiler.LP_SLIPPAGE_DEFAULT`
+            `almanak.framework.intents.compiler.LP_SLIPPAGE_DEFAULT`
             (``0.01`` = 1%, read as a PRICE band), and Uniswap V4 ``0.005``
             (0.5%) — V4 does NOT inherit the V3-family default, so do not
             generalise "V3 family" to "all Uniswap LP".
@@ -662,7 +664,7 @@ class LPOpenIntent(BaseIntent):
             result, haircut by this tolerance. Flooring the REQUESTED amounts
             would revert with ``InsufficientAmountB()`` because Solidly rebalances
             a deposit to the pool ratio and refunds the excess, so the floor is
-            derived from the quote instead (ALM-3367). If the quote is
+            derived from the quote instead. If the quote is
             unavailable the compile is REFUSED rather than submitting an
             unfloored mint.
 
@@ -896,7 +898,7 @@ class LPCloseIntent(BaseIntent):
         protocol_params: Optional protocol-specific parameters (e.g., V4 requires
             ``{"liquidity": <int>, "currency0": "<addr>", "currency1": "<addr>"}``
             from an on-chain position query)
-        amount: Pure opt-in MARKER for WEI-denominated chaining (VIB-5346). The
+        amount: Pure opt-in MARKER for WEI-denominated chaining. The
             only accepted value is the literal ``"all"``; a numeric Decimal is
             rejected (close-all is the only meaningful chained semantic for a
             fungible LP position, and a numeric ``amount`` would be a second
@@ -915,7 +917,7 @@ class LPCloseIntent(BaseIntent):
             defense-in-depth for the direct-compile path only.
         max_slippage: Optional maximum acceptable slippage applied to the
             withdrawal's min-amounts floor (e.g. ``0.005`` = 0.5%), in the same
-            units as :attr:`SwapIntent.max_slippage`. Consumed on CLOSE by the
+            units as `max_slippage`. Consumed on CLOSE by the
             Curve compiler (sizes ``remove_liquidity`` ``min_amounts``) and by
             plain ``aerodrome`` (v2 ``removeLiquidity`` floors derived from
             the router's ``quoteRemoveLiquidity`` haircut by this tolerance).
@@ -940,7 +942,7 @@ class LPCloseIntent(BaseIntent):
             time rather than burned unfloored. Decision record:
             ``docs/internal/plans/vib-6269-cl-lp-protective-minimum-decision.md``;
             mint-side doctrine in ``framework/intents/compiler.py``.
-        coin_index: Optional single-sided exit selector (VIB-5437). When set to a
+        coin_index: Optional single-sided exit selector. When set to a
             non-negative pool-coin index, the close withdraws the ENTIRE position
             into that one coin via Curve's ``remove_liquidity_one_coin`` (min-out
             sized from the pool's on-chain ``calc_withdraw_one_coin``). When
@@ -948,7 +950,7 @@ class LPCloseIntent(BaseIntent):
             (``remove_liquidity`` across all coins) — byte-for-byte unchanged for
             existing callers. Consumed only by the Curve compiler; other LP
             connectors ignore it.
-        imbalanced_amounts: Optional imbalanced exit selector (VIB-5438). When set
+        imbalanced_amounts: Optional imbalanced exit selector. When set
             to a per-coin vector of EXACT amounts to withdraw (positional by
             pool-coin index, human units), the close uses Curve's
             ``remove_liquidity_imbalance``: the pool burns however much LP is needed
@@ -1092,11 +1094,13 @@ class CollectFeesIntent(BaseIntent):
         created_at: Timestamp when the intent was created
 
     Example:
+        ```python
         # Collect fees from a TraderJoe V2 LP position
         intent = Intent.collect_fees(
             pool="WAVAX/USDC/20",
             protocol="traderjoe_v2",
         )
+        ```
     """
 
     pool: str
@@ -1258,6 +1262,7 @@ class IntentSequence:
         description: Optional description of the sequence purpose
 
     Example:
+        ```python
         # Create a sequence of dependent actions
         sequence = Intent.sequence([
             Intent.swap("USDC", "ETH", amount=Decimal("1000"), chain="base"),
@@ -1267,6 +1272,7 @@ class IntentSequence:
 
         # Return from decide() - will execute sequentially
         return sequence
+        ```
     """
 
     intents: list[AnyIntent]
@@ -1344,11 +1350,13 @@ class Intent:
     making strategy code more readable and ergonomic.
 
     Example:
+        ```python
         # Instead of:
         intent = SwapIntent(from_token="USDC", to_token="ETH", amount_usd=Decimal("1000"))
 
         # You can write:
         intent = Intent.swap(from_token="USDC", to_token="ETH", amount_usd=Decimal("1000"))
+        ```
     """
 
     @staticmethod
@@ -1386,7 +1394,7 @@ class Intent:
             destination_chain: Destination chain for cross-chain swaps (None for same-chain)
             swap_params: Optional connector-specific routing/escape-hatch params
                 (e.g. Aerodrome ``{"classic": True}`` / ``{"tick_spacing": 200}``;
-                Curve ``{"pool": "0x..."}``). See :class:`SwapIntent.swap_params`.
+                Curve ``{"pool": "0x..."}``). See `SwapIntent.swap_params`.
             max_slippage_bps: Maximum acceptable slippage in basis points.
                 Mutually exclusive with ``max_slippage``; ``50`` means 0.5%.
             max_price_impact_bps: Maximum acceptable price impact in basis points.
@@ -1396,6 +1404,7 @@ class Intent:
             SwapIntent: The created swap intent
 
         Example:
+            ```python
             # Swap $1000 worth of USDC to ETH
             intent = Intent.swap("USDC", "ETH", amount_usd=Decimal("1000"))
 
@@ -1408,6 +1417,7 @@ class Intent:
             # Cross-chain swap: Base USDC -> Arbitrum WETH via Enso
             intent = Intent.swap("USDC", "WETH", amount_usd=Decimal("1000"),
                                  chain="base", destination_chain="arbitrum", protocol="enso")
+            ```
         """
         if not isinstance(max_slippage, _Omitted) and max_slippage_bps is not None:
             raise ValueError("max_slippage and max_slippage_bps are mutually exclusive")
@@ -1480,8 +1490,8 @@ class Intent:
                 unless the two agree.
             range_upper: Upper price bound for concentrated liquidity (legacy).
                 Defaults to ``Decimal("2")``; see ``range_lower``.
-            range_spec: Canonical typed range — :class:`PriceBand` or
-                :class:`TickBand`. When supplied, ``range_lower``/``range_upper``
+            range_spec: Canonical typed range — `PriceBand` or
+                `TickBand`. When supplied, ``range_lower``/``range_upper``
                 are derived from it (do not pass conflicting legacy bounds).
             protocol: LP protocol (default "uniswap_v3")
             chain: Target chain for execution (defaults to strategy's primary chain)
@@ -1542,6 +1552,7 @@ class Intent:
             LPOpenIntent: The created LP open intent
 
         Example:
+            ```python
             # Open an ETH/USDC LP position around the current price
             intent = Intent.lp_open(
                 pool="0x8ad...",
@@ -1559,6 +1570,7 @@ class Intent:
                 protocol="curve",
                 chain="polygon",
             )
+            ```
         """
         # Do not inject legacy defaults when a typed spec must derive the bounds.
         if range_spec is None:
@@ -1614,7 +1626,7 @@ class Intent:
             chain: Target chain for execution (defaults to strategy's primary chain)
             protocol_params: Optional protocol-specific parameters (e.g., V4 requires
                 liquidity, currency0, currency1 from an on-chain position query)
-            amount: WEI-denominated chaining marker (VIB-5346). The only accepted
+            amount: WEI-denominated chaining marker. The only accepted
                 value is the literal ``"all"``. When set, the runner resolves the
                 prior LP_OPEN minted-LP wei into ``position_id`` at execution time.
                 Only fungible-LP connectors on the fail-closed allowlist (e.g.
@@ -1627,7 +1639,7 @@ class Intent:
                 each consuming connector uses its own built-in 50 bps. Consumed on
                 CLOSE by the Curve compiler and by plain ``aerodrome``, whose v2
                 ``removeLiquidity`` floors are derived from the router's
-                ``quoteRemoveLiquidity`` haircut by this tolerance (ALM-3367).
+                ``quoteRemoveLiquidity`` haircut by this tolerance.
                 The Uniswap V3 family still submits a literal zero floor and
                 ignores this field, so setting it THERE does NOT tighten the exit
                 (``amount0Min``/``amount1Min`` on the V3-shaped
@@ -1648,6 +1660,7 @@ class Intent:
             LPCloseIntent: The created LP close intent
 
         Example:
+            ```python
             # Close an LP position and collect fees
             intent = Intent.lp_close(position_id="12345")
 
@@ -1657,6 +1670,7 @@ class Intent:
             # Chain a fungible-LP close off the prior LP_OPEN's minted liquidity
             # (Pendle): the runner resolves the minted wei into position_id.
             intent = Intent.lp_close(position_id="0", protocol="pendle", amount="all")
+            ```
         """
         return LPCloseIntent(
             position_id=position_id,
@@ -1720,6 +1734,7 @@ class Intent:
             CollectFeesIntent: The created collect fees intent
 
         Example:
+            ```python
             # TraderJoe V2 — symbolic pool identifier is sufficient
             intent = Intent.collect_fees(pool="WAVAX/USDC/20", protocol="traderjoe_v2")
 
@@ -1730,6 +1745,7 @@ class Intent:
                 chain="base",
                 protocol_params={"position_id": "12345"},
             )
+            ```
         """
         return CollectFeesIntent(
             pool=pool,
@@ -1770,6 +1786,7 @@ class Intent:
             BorrowIntent: The created borrow intent
 
         Example:
+            ```python
             # Supply ETH as collateral and borrow USDC on Arbitrum with variable rate
             intent = Intent.borrow(
                 protocol="aave_v3",
@@ -1791,6 +1808,7 @@ class Intent:
                 market_id="0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
                 chain="ethereum",
             )
+            ```
         """
         return BorrowIntent(
             protocol=protocol,
@@ -1836,6 +1854,7 @@ class Intent:
             RepayIntent: The created repay intent
 
         Example:
+            ```python
             # Repay 500 USDC on Aave (variable rate)
             intent = Intent.repay(
                 protocol="aave_v3",
@@ -1858,6 +1877,7 @@ class Intent:
                 repay_full=True,
                 market_id="0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
             )
+            ```
         """
         if amount is None:
             if repay_full:
@@ -1918,6 +1938,7 @@ class Intent:
             DeleverageIntent: The created deleverage intent
 
         Example:
+            ```python
             # Full emergency deleverage on Aave when HF drops below threshold
             intent = Intent.deleverage(
                 protocol="aave_v3",
@@ -1927,6 +1948,7 @@ class Intent:
                 observed_hf=Decimal("1.08"),
                 target_hf=Decimal("2.0"),
             )
+            ```
         """
         if amount is None:
             if repay_full:
@@ -1977,6 +1999,7 @@ class Intent:
             SupplyIntent: The created supply intent
 
         Example:
+            ```python
             # Supply 1 ETH to Aave V3 on Arbitrum
             intent = Intent.supply(
                 protocol="aave_v3",
@@ -1993,6 +2016,7 @@ class Intent:
                 market_id="0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
                 chain="ethereum",
             )
+            ```
         """
         return SupplyIntent(
             protocol=protocol,
@@ -2039,6 +2063,7 @@ class Intent:
             WithdrawIntent: The created withdraw intent
 
         Example:
+            ```python
             # Withdraw 0.5 ETH from Aave V3
             intent = Intent.withdraw(
                 protocol="aave_v3",
@@ -2054,6 +2079,7 @@ class Intent:
                 withdraw_all=True,
                 market_id="0xb323495f7e4148be5643a4ea4a8221eef163e4bccfdedc2a6f4696baacbc86cc",
             )
+            ```
         """
         return WithdrawIntent(
             protocol=protocol,
@@ -2110,6 +2136,7 @@ class Intent:
             PerpOpenIntent: The created perp open intent
 
         Example:
+            ```python
             # Open a 5x long ETH position with 0.1 ETH collateral on Arbitrum
             intent = Intent.perp_open(
                 market="ETH/USD",
@@ -2130,6 +2157,7 @@ class Intent:
                 is_long=True,
                 chain="arbitrum",
             )
+            ```
         """
         return PerpOpenIntent(
             market=market,
@@ -2178,6 +2206,7 @@ class Intent:
             PerpCloseIntent: The created perp close intent
 
         Example:
+            ```python
             # Close entire long ETH position on GMX V2 (no position_id needed)
             intent = Intent.perp_close(
                 market="ETH/USD",
@@ -2193,6 +2222,7 @@ class Intent:
                 protocol="pancakeswap_perps",
                 position_id="0xabcd...",  # bytes32 tradeHash from open receipt
             )
+            ```
         """
         return PerpCloseIntent(
             market=market,
@@ -2230,12 +2260,14 @@ class Intent:
             PerpCancelIntent: The created perp cancel intent.
 
         Example:
+            ```python
             # Cancel a stranded GMX V2 pending order and recover its collateral
             intent = Intent.perp_cancel_order(
                 order_key="0x1234...cdef",  # bytes32 from read_pending_orders
                 protocol="gmx_v2",
                 chain="arbitrum",
             )
+            ```
         """
         return PerpCancelIntent(
             order_key=order_key,
@@ -2260,7 +2292,7 @@ class Intent:
 
         On Hyperliquid this compiles to a TWO-action CoreWriter bundle — a
         ``usdClassTransfer`` (perp→spot) followed by a ``spotSend`` HyperCore→HyperEVM
-        USDC bridge (VIB-5617); a Safe uses it to recover parked HyperCore funds
+        USDC bridge; a Safe uses it to recover parked HyperCore funds
         without an ECDSA L1 withdraw signature.
 
         Args:
@@ -2284,8 +2316,10 @@ class Intent:
             PerpWithdrawIntent: The created perp withdraw intent.
 
         Example:
+            ```python
             # Sweep parked HyperCore USDC back to the Safe's HyperEVM wallet
             intent = Intent.perp_withdraw(amount=Decimal("6.99"), chain="hyperevm")
+            ```
         """
         fields: dict[str, Any] = {
             "amount": amount,
@@ -2333,6 +2367,7 @@ class Intent:
             BridgeIntent: The created bridge intent
 
         Example:
+            ```python
             # Bridge 1000 USDC from Base to Arbitrum
             intent = Intent.bridge(
                 token="USDC",
@@ -2361,6 +2396,7 @@ class Intent:
                 to_chain="optimism",
                 preferred_bridge="across",  # Prefer Across for fast finality
             )
+            ```
         """
         # Local import avoids the vocabulary/bridge cycle.
         from .bridge import BridgeIntent
@@ -2405,6 +2441,7 @@ class Intent:
             FlashLoanIntent: The created flash loan intent
 
         Example:
+            ```python
             # Flash loan arbitrage: borrow USDC, swap through two DEXs
             intent = Intent.flash_loan(
                 provider="aave",
@@ -2416,6 +2453,7 @@ class Intent:
                 ],
                 chain="ethereum"
             )
+            ```
         """
         return FlashLoanIntent(
             provider=provider,
@@ -2447,6 +2485,7 @@ class Intent:
             HoldIntent: The created hold intent
 
         Example:
+            ```python
             # Hold with no reason
             intent = Intent.hold()
 
@@ -2459,6 +2498,7 @@ class Intent:
                 reason_code="RSI_NEUTRAL",
                 reason_details={"rsi": 52.3, "oversold": 30, "overbought": 70},
             )
+            ```
         """
         return HoldIntent(
             reason=reason,
@@ -2492,6 +2532,7 @@ class Intent:
             StakeIntent: The created stake intent
 
         Example:
+            ```python
             # Stake 1 ETH with Lido on Ethereum, receive wstETH
             intent = Intent.stake(
                 protocol="lido",
@@ -2516,6 +2557,7 @@ class Intent:
                 amount="all",
                 chain="ethereum",
             )
+            ```
         """
         return StakeIntent(
             protocol=protocol,
@@ -2548,6 +2590,7 @@ class Intent:
             UnstakeIntent: The created unstake intent
 
         Example:
+            ```python
             # Unstake 1 wstETH with Lido on Ethereum
             intent = Intent.unstake(
                 protocol="lido",
@@ -2571,6 +2614,7 @@ class Intent:
                 amount="all",
                 chain="ethereum",
             )
+            ```
         """
         return UnstakeIntent(
             protocol=protocol,
@@ -2602,7 +2646,9 @@ class Intent:
             WrapNativeIntent: The created wrap intent
 
         Example:
+            ```python
             intent = Intent.wrap(token="WETH", amount=Decimal("0.01"), chain="arbitrum")
+            ```
         """
         return WrapNativeIntent(token=token, amount=amount, chain=chain, registry_handle=registry_handle)
 
@@ -2627,11 +2673,13 @@ class Intent:
             UnwrapNativeIntent: The created unwrap intent
 
         Example:
+            ```python
             # Unwrap 0.01 WETH to ETH on Arbitrum
             intent = Intent.unwrap(token="WETH", amount=Decimal("0.01"), chain="arbitrum")
 
             # Unwrap all WETH from previous step in a sequence
             intent = Intent.unwrap(token="WETH", amount="all", chain="arbitrum")
+            ```
         """
         return UnwrapNativeIntent(token=token, amount=amount, chain=chain, registry_handle=registry_handle)
 
@@ -2668,6 +2716,7 @@ class Intent:
             EnsureBalanceIntent: The created ensure_balance intent
 
         Example:
+            ```python
             # Ensure at least 1000 USDC on Arbitrum before opening a position
             intent = Intent.ensure_balance(
                 token="USDC",
@@ -2705,6 +2754,7 @@ class Intent:
                 # If resolved to HoldIntent, we can proceed with other actions
                 # If resolved to BridgeIntent, execute the bridge first
                 return resolved_intent
+            ```
         """
         # Local import avoids the vocabulary/ensure_balance cycle.
         from .ensure_balance import EnsureBalanceIntent
@@ -2757,6 +2807,7 @@ class Intent:
             PredictionBuyIntent: The created prediction buy intent
 
         Example:
+            ```python
             # Buy $100 worth of YES shares at market price
             intent = Intent.prediction_buy(
                 market_id="will-bitcoin-exceed-100000",
@@ -2780,6 +2831,7 @@ class Intent:
                 amount_usd=Decimal("200"),
                 time_in_force="IOC",
             )
+            ```
         """
         return PredictionBuyIntent(
             market_id=market_id,
@@ -2828,6 +2880,7 @@ class Intent:
             PredictionSellIntent: The created prediction sell intent
 
         Example:
+            ```python
             # Sell all YES shares at market price
             intent = Intent.prediction_sell(
                 market_id="will-bitcoin-exceed-100000",
@@ -2843,6 +2896,7 @@ class Intent:
                 min_price=Decimal("0.40"),
                 order_type="limit",
             )
+            ```
         """
         return PredictionSellIntent(
             market_id=market_id,
@@ -2886,6 +2940,7 @@ class Intent:
             Losing positions are worthless and cannot be redeemed.
 
         Example:
+            ```python
             # Redeem all winning positions from a resolved market
             intent = Intent.prediction_redeem(
                 market_id="will-bitcoin-exceed-100000",
@@ -2903,6 +2958,7 @@ class Intent:
                 outcome="YES",
                 shares=Decimal("50"),
             )
+            ```
         """
         return PredictionRedeemIntent(
             market_id=market_id,
@@ -2938,6 +2994,7 @@ class Intent:
             VaultDepositIntent: The created vault deposit intent
 
         Example:
+            ```python
             # Deposit 1000 USDC into Steakhouse vault
             intent = Intent.vault_deposit(
                 protocol="metamorpho",
@@ -2946,6 +3003,7 @@ class Intent:
                 deposit_token="USDC",
                 chain="ethereum",
             )
+            ```
         """
         return VaultDepositIntent(
             protocol=protocol,
@@ -2998,6 +3056,7 @@ class Intent:
             VaultRedeemIntent: The created vault redeem intent
 
         Example:
+            ```python
             # Redeem all shares from Steakhouse vault
             intent = Intent.vault_redeem(
                 protocol="metamorpho",
@@ -3006,6 +3065,7 @@ class Intent:
                 deposit_token="USDC",
                 chain="ethereum",
             )
+            ```
         """
         return VaultRedeemIntent(
             protocol=protocol,
@@ -3044,6 +3104,7 @@ class Intent:
             InvalidSequenceError: If the intents list is empty
 
         Example:
+            ```python
             # Create a sequence: swap -> bridge -> supply
             return Intent.sequence([
                 Intent.swap("USDC", "ETH", amount=Decimal("1000"), chain="base"),
@@ -3055,6 +3116,7 @@ class Intent:
                 Intent.sequence([swap1, supply1]),  # Execute as sequence
                 Intent.sequence([swap2, supply2]),  # Execute in parallel with above
             ]
+            ```
         """
         return IntentSequence(intents=intents, description=description)
 
@@ -3168,12 +3230,14 @@ class Intent:
             ValueError: If no default chain can be determined
 
         Example:
+            ```python
             # Validate an intent against strategy's configured chains
             resolved_chain = Intent.validate_chain(
                 intent,
                 configured_chains=["arbitrum", "optimism"],
                 default_chain="arbitrum",
             )
+            ```
         """
         if not configured_chains:
             raise ValueError("No chains configured for strategy")
@@ -3277,10 +3341,10 @@ class Intent:
 
         VIB-4192 / T06 — defense-in-depth check at the documented decide-result
         emission chokepoint. The construction-side ``model_validator`` on
-        :class:`BaseIntent` rejects bad handles when an intent is built
+        `BaseIntent` rejects bad handles when an intent is built
         normally, but Pydantic v2 exposes ``model_construct`` and
         ``model_copy(update=..., validate=False)`` as documented bypass
-        paths that skip validators. Re-running :func:`record_for` on every
+        paths that skip validators. Re-running `record_for` on every
         emitted intent closes those paths at the framework boundary.
 
         Walks the entire result tree — ``None``, single intent,
@@ -3331,7 +3395,7 @@ class Intent:
                 carries a ``registry_handle`` whose intent type is not in
                 TAXONOMY. This is the emission-side strict guard
                 complementing the construction-side ``model_validator`` on
-                :class:`BaseIntent`. Together they close Pydantic v2's
+                `BaseIntent`. Together they close Pydantic v2's
                 documented ``model_construct`` / ``model_copy(validate=False)``
                 bypass paths at the framework boundary.
         """
@@ -3470,8 +3534,7 @@ class Intent:
             intent: The intent to update
             resolved_amount: The concrete amount to use. For most intents this is
                 a human-unit token amount that lands on the ``amount`` /
-                ``collateral_amount`` field. For LP_CLOSE ``amount="all"``
-                (VIB-5346) the units contract widens: the caller passes an
+                ``collateral_amount`` field. For LP_CLOSE ``amount="all"`` the units contract widens: the caller passes an
                 integer-valued Decimal (the prior LP_OPEN minted-LP **wei**) and
                 it lands on ``position_id`` as a clean integer string (no
                 exponent / decimal point) that ``int(position_id)`` parses.

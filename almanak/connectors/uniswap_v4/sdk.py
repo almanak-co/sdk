@@ -20,10 +20,12 @@ LP flow (mint):
   3. PositionManager.modifyLiquidities([MINT_POSITION, SETTLE_PAIR], deadline)
 
 Example:
+    ```python
     from almanak.connectors.uniswap_v4.sdk import UniswapV4SDK
 
     sdk = UniswapV4SDK(chain="arbitrum")
     pool_key = sdk.compute_pool_key(token0, token1, fee=3000)
+    ```
 """
 
 import logging

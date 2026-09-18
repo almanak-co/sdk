@@ -16,6 +16,7 @@ Architecture:
     3. Signed transaction is returned for submission
 
 Example:
+    ```python
     from almanak.framework.execution.signer.safe import ZodiacSigner, SafeSignerConfig
 
     config = SafeSignerConfig(
@@ -26,6 +27,7 @@ Example:
     signer = ZodiacSigner(config)
 
     signed = await signer.sign_with_web3(tx, web3, eoa_nonce)
+    ```
 """
 
 import logging
@@ -72,6 +74,7 @@ class ZodiacSigner(SafeSigner):
         role_key: Role key for authorization (default: "AlmanakAgentRole")
 
     Example:
+        ```python
         config = SafeSignerConfig(
             mode="zodiac",
             wallet_config=SafeWalletConfig(
@@ -84,6 +87,7 @@ class ZodiacSigner(SafeSigner):
         signer = ZodiacSigner(config)
 
         signed = await signer.sign_with_web3(tx, web3, eoa_nonce)
+        ```
     """
 
     def __init__(self, config: SafeSignerConfig) -> None:

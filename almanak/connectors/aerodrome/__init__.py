@@ -11,6 +11,7 @@ Key Features:
 - Fungible LP tokens (not NFT positions like Uniswap V3)
 
 Example:
+    ```python
     from almanak.connectors.aerodrome import AerodromeAdapter, AerodromeConfig
 
     config = AerodromeConfig(
@@ -34,6 +35,7 @@ Example:
         amount_in=Decimal("1000"),
         stable=True,
     )
+    ```
 """
 
 from __future__ import annotations

@@ -10,6 +10,7 @@ Key Features:
     - Supports the iterate() method for backtesting engine integration
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.providers.coingecko import CoinGeckoDataProvider
     from almanak.framework.backtesting.pnl.data_provider import HistoricalDataConfig
     from datetime import datetime
@@ -25,6 +26,7 @@ Example:
     async for timestamp, market_state in provider.iterate(config):
         eth_price = market_state.get_price("WETH")
         # ... process market state
+    ```
 """
 
 import asyncio
@@ -346,11 +348,13 @@ class HistoricalPriceCache:
         - Cache warming support for pre-fetching date ranges
 
     Example:
+        ```python
         cache = HistoricalPriceCache(ttl_seconds=3600)
         cache.set("WETH", datetime(2024, 1, 15), Decimal("2500.00"))
         price = cache.get("WETH", datetime(2024, 1, 15))
         stats = cache.get_stats()
         print(f"Cache hit rate: {stats.hit_rate:.1f}%")
+        ```
 
     Persistent mode:
         cache = HistoricalPriceCache(ttl_seconds=0, persistent=True)
@@ -706,6 +710,7 @@ class CoinGeckoDataProvider:
         min_request_interval: Minimum interval between API requests in seconds
 
     Example:
+        ```python
         provider = CoinGeckoDataProvider(api_key="your-key")
 
         # Get a single historical price
@@ -722,6 +727,7 @@ class CoinGeckoDataProvider:
         # Iterate for backtesting
         async for ts, market_state in provider.iterate(config):
             price = market_state.get_price("WETH")
+        ```
     """
 
     # API endpoints
@@ -2065,9 +2071,11 @@ class CoinGeckoDataProvider:
             Tuples of (timestamp, MarketState) for each time point
 
         Example:
+            ```python
             async for timestamp, market_state in provider.iterate(config):
                 eth_price = market_state.get_price("WETH")
                 # Process market state
+            ```
         """
         logger.info(
             f"Starting iteration from {config.start_time} to {config.end_time} "
@@ -2194,8 +2202,10 @@ class CoinGeckoDataProvider:
             - initial_rate_limit: Initially configured rate limit
 
         Example:
+            ```python
             stats = provider.get_rate_limiter_stats()
             print(f"Rate limit wait rate: {stats['wait_rate_percent']:.1f}%")
+            ```
         """
         stats = self._rate_limiter.get_stats().to_dict()
         # Add current and initial rate limits for monitoring
@@ -2213,9 +2223,11 @@ class CoinGeckoDataProvider:
         - Requests made and wait statistics
 
         Example:
+            ```python
             provider.log_rate_limit_status()
             # Output: INFO: CoinGecko rate limit status: 10 req/min (initial: 10),
             #         tokens=8.5, reductions=0, requests=15, waits=2 (13.3%)
+            ```
         """
         stats = self._rate_limiter.get_stats()
         logger.info(
@@ -2242,8 +2254,10 @@ class CoinGeckoDataProvider:
             - hit_rate_percent: Cache hit rate as percentage
 
         Example:
+            ```python
             stats = provider.get_historical_cache_stats()
             print(f"Cache hit rate: {stats['hit_rate_percent']:.1f}%")
+            ```
         """
         return self._historical_cache.get_stats().to_dict()
 
@@ -2268,6 +2282,7 @@ class CoinGeckoDataProvider:
             Dictionary mapping token to number of prices cached
 
         Example:
+            ```python
             from datetime import datetime
 
             provider = CoinGeckoDataProvider()
@@ -2278,6 +2293,7 @@ class CoinGeckoDataProvider:
             )
             print(f"Cached {sum(cached.values())} prices")
             # Subsequent backtests will have >90% cache hit rate
+            ```
         """
         logger.info(
             f"Warming historical cache for {len(tokens)} tokens "

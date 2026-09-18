@@ -7,10 +7,12 @@ Available Submitters:
     - PublicMempoolSubmitter: Submits transactions to public mempool via eth_sendRawTransaction
 
 Example:
+    ```python
     from almanak.framework.execution.submitter import PublicMempoolSubmitter
 
     submitter = PublicMempoolSubmitter(rpc_url="https://arb-mainnet.g.alchemy.com/v2/...")
     results = await submitter.submit([signed_tx])
+    ```
 """
 
 from almanak.framework.execution.submitter.private import PrivateRelaySubmitter

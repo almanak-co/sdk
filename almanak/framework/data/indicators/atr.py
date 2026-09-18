@@ -17,6 +17,7 @@ Common Uses:
 - Trend confirmation: Rising ATR confirms trend strength
 
 Example:
+    ```python
     from almanak.framework.data.indicators import ATRCalculator
 
     atr_calc = ATRCalculator(ohlcv_provider=provider)
@@ -24,6 +25,7 @@ Example:
 
     # Use for position sizing (e.g., risk 2 ATR per trade)
     stop_loss = current_price - (2 * atr)
+    ```
 """
 
 import logging
@@ -51,6 +53,7 @@ class ATRCalculator:
         ohlcv_provider: Provider for OHLCV data (implements OHLCVProvider protocol)
 
     Example:
+        ```python
         provider = CoinGeckoOHLCVProvider()
         atr_calc = ATRCalculator(ohlcv_provider=provider)
 
@@ -60,6 +63,7 @@ class ATRCalculator:
         # Position sizing
         if atr > 100:
             print("High volatility - reduce position size")
+        ```
     """
 
     def __init__(self, ohlcv_provider: OHLCVProvider) -> None:
@@ -222,6 +226,7 @@ class ATRCalculator:
             DataSourceError: If data cannot be fetched
 
         Example:
+            ```python
             atr = await atr_calc.calculate_atr("WETH", period=14, timeframe="4h")
 
             # Stop-loss calculation
@@ -233,6 +238,7 @@ class ATRCalculator:
             risk_per_trade = 10000 * 0.01  # $100
             position_size = risk_per_trade / atr
             print(f"Position size: {position_size:.2f} units")
+            ```
         """
         timeframe = parse_ohlcv_timeframe(timeframe, field_name="ATR timeframe")
         limit = period + 20  # Buffer

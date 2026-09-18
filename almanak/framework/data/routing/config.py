@@ -4,6 +4,7 @@ Defines the DataProvider protocol that all data providers must implement,
 plus configuration models for routing, quotas, and strategy-level overrides.
 
 Example:
+    ```python
     from almanak.framework.data.routing.config import (
         DataProvider, ProviderConfig, QuotaConfig, DataRoutingConfig,
     )
@@ -24,6 +25,7 @@ Example:
             return {"status": "healthy"}
 
     config = DataRoutingConfig.from_strategy_config({"data_overrides": {"ohlcv": {"primary": "coingecko_onchain"}}})
+    ```
 """
 
 from __future__ import annotations
@@ -297,10 +299,12 @@ class DataRoutingConfig:
         Accepts both full ProviderConfig dicts and shorthand string values.
 
         Examples:
+            ```python
             # Full form
             {"ohlcv": {"primary": "coingecko_onchain", "fallback": ["defillama"], "timeout_ms": 3000}}
             # Shorthand: just a primary provider name
             {"ohlcv": "coingecko_onchain"}
+            ```
         """
         routes: dict[str, ProviderConfig] = {}
         for data_type, value in overrides.items():

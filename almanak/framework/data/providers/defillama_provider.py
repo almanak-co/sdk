@@ -15,6 +15,7 @@ DeFi Llama Coin ID Format:
     - "{chain}:{token_address}" (e.g., "arbitrum:0xaf88d065e77c8cC2239327C5EDb3A432268e5831")
 
 Example:
+    ```python
     from almanak.framework.data.providers.defillama_provider import DefiLlamaProvider
 
     provider = DefiLlamaProvider()
@@ -32,6 +33,7 @@ Example:
 
     # TVL
     envelope = provider.fetch(endpoint="tvl", protocol="uniswap")
+    ```
 """
 
 from __future__ import annotations

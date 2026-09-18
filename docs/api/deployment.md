@@ -2,45 +2,31 @@
 
 Canary deployment support for safe strategy rollouts.
 
-## CanaryDeployment
-
 ::: almanak.framework.deployment.CanaryDeployment
     options:
-      show_root_heading: true
+      heading_level: 2
       members_order: source
-
-## CanaryConfig
 
 ::: almanak.framework.deployment.CanaryConfig
     options:
-      show_root_heading: true
-
-## CanaryState
+      heading_level: 2
 
 ::: almanak.framework.deployment.CanaryState
     options:
-      show_root_heading: true
-
-## CanaryStatus
+      heading_level: 2
 
 ::: almanak.framework.deployment.CanaryStatus
     options:
-      show_root_heading: true
-
-## CanaryMetrics
+      heading_level: 2
 
 ::: almanak.framework.deployment.CanaryMetrics
     options:
-      show_root_heading: true
-
-## CanaryResult
+      heading_level: 2
 
 ::: almanak.framework.deployment.CanaryResult
     options:
-      show_root_heading: true
-
-## CanaryDecision
+      heading_level: 2
 
 ::: almanak.framework.deployment.CanaryDecision
     options:
-      show_root_heading: true
+      heading_level: 2

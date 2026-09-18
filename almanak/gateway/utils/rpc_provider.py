@@ -242,6 +242,7 @@ def get_rpc_url(
         ValueError: If chain is unsupported and no RPC source is available.
 
     Example:
+        ```python
         # Custom RPC URL from env (RPC_URL, ARBITRUM_RPC_URL, etc.):
         url = get_rpc_url("arbitrum")
 
@@ -254,6 +255,7 @@ def get_rpc_url(
         # Explicit custom URL (parameter takes precedence)
         url = get_rpc_url("arbitrum", provider=NodeProvider.CUSTOM,
                           custom_url="https://my-rpc.example.com")
+        ```
     """
     chain_lower = chain.lower()
     # Normalize chain alias (e.g., "bnb" -> "bsc")

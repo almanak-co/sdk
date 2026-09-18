@@ -4,6 +4,7 @@ This module provides Markdown report generation capabilities for QA test results
 including executive summaries, detailed test results, and plot references.
 
 Example:
+    ```python
     from almanak.framework.data.qa.reporting.generator import ReportGenerator
 
     generator = ReportGenerator(output_dir=Path("reports/qa-data"))
@@ -16,6 +17,7 @@ Example:
         config=config,
         duration_seconds=elapsed,
     )
+    ```
 """
 
 import logging
@@ -99,6 +101,7 @@ class ReportGenerator:
         plots_dir: Subdirectory for plot images
 
     Example:
+        ```python
         generator = ReportGenerator(output_dir=Path("reports/qa-data"))
         report_path = generator.generate_report(
             cex_spot_results=cex_spot,
@@ -110,6 +113,7 @@ class ReportGenerator:
             duration_seconds=123.45,
         )
         print(f"Report saved to: {report_path}")
+        ```
     """
 
     def __init__(

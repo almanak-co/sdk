@@ -11,6 +11,7 @@ Supported chains:
 - Base
 
 Example:
+    ```python
     from almanak.connectors.morpho_vault import MetaMorphoAdapter, MetaMorphoConfig
 
     config = MetaMorphoConfig(chain="ethereum", wallet_address="0x...")
@@ -21,6 +22,7 @@ Example:
         vault_address="0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB",
         amount=Decimal("1000"),
     )
+    ```
 """
 
 import logging
@@ -121,6 +123,7 @@ class MetaMorphoAdapter:
     MetaMorpho ERC-4626 vaults, with token resolution and validation.
 
     Example:
+        ```python
         config = MetaMorphoConfig(chain="ethereum", wallet_address="0x...")
         adapter = MetaMorphoAdapter(config, gateway_client=client)
 
@@ -129,6 +132,7 @@ class MetaMorphoAdapter:
 
         # Deposit
         result = adapter.deposit("0xBEEF...", Decimal("1000"))
+        ```
     """
 
     def __init__(

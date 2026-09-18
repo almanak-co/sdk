@@ -17,6 +17,7 @@ Supported chains:
 - Monad
 
 Example:
+    ```python
     from almanak.connectors.morpho_blue import MorphoBlueAdapter, MorphoBlueConfig
 
     config = MorphoBlueConfig(
@@ -36,6 +37,7 @@ Example:
         market_id="0x...",
         amount=Decimal("500"),
     )
+    ```
 """
 
 import logging
@@ -390,6 +392,7 @@ class MorphoBlueAdapter:
     - On-chain position and market state reading (via SDK)
 
     Example:
+        ```python
         # Production usage with real prices
         config = MorphoBlueConfig(
             chain="ethereum",
@@ -416,6 +419,7 @@ class MorphoBlueAdapter:
             enable_sdk=False,  # Disable SDK for unit tests
         )
         adapter = MorphoBlueAdapter(config)
+        ```
     """
 
     def __init__(
@@ -1818,6 +1822,7 @@ def create_adapter_with_prices(
         MorphoBlueAdapter configured with real prices
 
     Example:
+        ```python
         prices = {
             "USDC": Decimal("1.00"),
             "USDT": Decimal("1.00"),
@@ -1830,6 +1835,7 @@ def create_adapter_with_prices(
             wallet_address="0x...",
         )
         adapter = create_adapter_with_prices(config, prices)
+        ```
     """
 
     def price_oracle(asset: str) -> Decimal:

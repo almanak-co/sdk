@@ -17,6 +17,7 @@ API Documentation:
     https://docs.alchemy.com/reference/alchemy-simulateexecutionbundle
 
 Example:
+    ```python
     simulator = AlchemySimulator(api_key="xxx")
 
     result = await simulator.simulate(
@@ -26,6 +27,7 @@ Example:
 
     if result.success:
         print(f"Gas estimates: {result.gas_estimates}")
+    ```
 """
 
 import json
@@ -72,6 +74,7 @@ class AlchemySimulator(Simulator):
         timeout_seconds: Request timeout
 
     Example:
+        ```python
         simulator = AlchemySimulator(api_key="xxx")
 
         # Simple simulation
@@ -80,6 +83,7 @@ class AlchemySimulator(Simulator):
         # Check limits before simulating
         if len(txs) <= 3 and chain in ALCHEMY_SUPPORTED_CHAINS:
             result = await simulator.simulate(txs, chain)
+        ```
     """
 
     def __init__(

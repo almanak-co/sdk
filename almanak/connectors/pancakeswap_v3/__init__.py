@@ -15,6 +15,7 @@ Supported chains:
 - Base
 
 Example:
+    ```python
     from almanak.connectors.pancakeswap_v3 import (
         PancakeSwapV3Adapter,
         PancakeSwapV3Config,
@@ -32,6 +33,7 @@ Example:
         token_out="WBNB",
         amount_in=Decimal("100"),
     )
+    ```
 """
 
 from __future__ import annotations

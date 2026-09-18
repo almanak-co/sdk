@@ -17,6 +17,7 @@ Design Philosophy:
     - Track all errors for post-analysis and debugging
 
 Example:
+    ```python
     from almanak.framework.backtesting.pnl.error_handling import (
         BacktestErrorHandler,
         BacktestErrorConfig,
@@ -34,6 +35,7 @@ Example:
             raise BacktestFatalError(f"Fatal error: {e}")
         # Continue with fallback/cached value
         price = handler.get_fallback_price(token)
+    ```
 """
 
 from __future__ import annotations
@@ -221,12 +223,14 @@ class PreflightValidationError(Exception):
         details: Structured failure details for API/readiness consumers
 
     Example:
+        ```python
         try:
             result = await backtester.run(config, strategy)
         except PreflightValidationError as e:
             print(f"Preflight failed: {e}")
             print(f"Failed checks: {e.failed_checks}")
             print(f"To fix: {e.recommendations}")
+        ```
     """
 
     def __init__(
@@ -476,6 +480,7 @@ class BacktestCircuitBreaker:
     Thread-safe for concurrent access.
 
     Example:
+        ```python
         breaker = BacktestCircuitBreaker(threshold=5)
 
         if not breaker.can_proceed():
@@ -486,6 +491,7 @@ class BacktestCircuitBreaker:
             breaker.record_success()
         except Exception as e:
             breaker.record_failure(e)
+        ```
     """
 
     def __init__(
@@ -630,6 +636,7 @@ class BacktestErrorHandler:
     and provides detailed error tracking.
 
     Example:
+        ```python
         handler = BacktestErrorHandler()
 
         try:
@@ -644,6 +651,7 @@ class BacktestErrorHandler:
             else:
                 # Continue with warning
                 logger.warning(result.warning_message)
+        ```
     """
 
     def __init__(self, config: BacktestErrorConfig | None = None) -> None:

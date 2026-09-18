@@ -23,6 +23,7 @@ Subgraph Source:
     https://github.com/morpho-org/morpho-blue-subgraph
 
 Example:
+    ```python
     from almanak.connectors.morpho_blue.backtest_apy import MorphoBlueAPYProvider
     from datetime import datetime, UTC
 
@@ -38,6 +39,7 @@ Example:
         )
         for apy in apys:
             print(f"{apy.source_info.timestamp}: supply={apy.supply_apy:.4f}, borrow={apy.borrow_apy:.4f}")
+    ```
 """
 
 import logging
@@ -201,6 +203,7 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
         client: SubgraphClient for querying The Graph
 
     Example:
+        ```python
         provider = MorphoBlueAPYProvider()
 
         # Use as async context manager
@@ -218,6 +221,7 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
             apys = await provider.get_apy(...)
         finally:
             await provider.close()
+        ```
     """
 
     def __init__(
@@ -523,6 +527,7 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
             Returns LOW confidence fallback results if subgraph unavailable.
 
         Example:
+            ```python
             apys = await provider.get_apy(
                 protocol="morpho_blue",
                 market="0x...",
@@ -531,6 +536,7 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
             )
             for apy in apys:
                 print(f"Supply: {apy.supply_apy:.4f}, Borrow: {apy.borrow_apy:.4f}")
+            ```
         """
         chain = _canonical_chain(_chain_override if _chain_override is not None else self._config.chain)
         start_date, end_date = self._normalize_date_range(start_date, end_date)
@@ -721,12 +727,14 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
             List of APYResult objects
 
         Example:
+            ```python
             apys = await provider.get_apy_for_chain(
                 chain="base",
                 market="0x...",
                 start_date=datetime(2024, 1, 1, tzinfo=UTC),
                 end_date=datetime(2024, 1, 31, tzinfo=UTC),
             )
+            ```
         """
         return await self.get_apy(
             protocol="morpho_blue",
@@ -754,8 +762,10 @@ class MorphoBlueAPYProvider(HistoricalAPYProvider):
             APYResult with current rates
 
         Example:
+            ```python
             apy = await provider.get_current_apy("0x...")
             print(f"Current supply APY: {apy.supply_apy:.4f}")
+            ```
         """
         chain = _canonical_chain(chain or self._config.chain)
         now = datetime.now(UTC)

@@ -13,6 +13,7 @@ Plot Categories:
 - Prediction Plots: Binary outcome charts, probability over time
 
 Example:
+    ```python
     from almanak.framework.dashboard.plots import (
         plot_liquidity_distribution,
         plot_positions_over_time,
@@ -27,6 +28,7 @@ Example:
         position_bounds=(lower_tick, upper_tick),
     )
     st.plotly_chart(fig)
+    ```
 """
 
 # Base utilities and configuration

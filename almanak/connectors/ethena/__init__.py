@@ -12,6 +12,7 @@ Supported chains:
 sUSDe is an ERC4626 vault token that accrues yield from delta-neutral strategies.
 
 Example:
+    ```python
     from almanak.connectors.ethena import EthenaAdapter, EthenaConfig
 
     config = EthenaConfig(
@@ -22,6 +23,7 @@ Example:
 
     # Stake USDe to receive sUSDe
     result = adapter.stake_usde(amount=Decimal("1000.0"))
+    ```
 """
 
 from __future__ import annotations

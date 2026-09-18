@@ -15,6 +15,7 @@ Requirements:
     - NOT for production use - use ZodiacSigner instead
 
 Example:
+    ```python
     from almanak.framework.execution.signer.safe import DirectSafeSigner, SafeSignerConfig
 
     config = SafeSignerConfig(
@@ -29,6 +30,7 @@ Example:
 
     # Sign atomic bundle
     signed = await signer.sign_bundle_with_web3(txs, web3, eoa_nonce, chain)
+    ```
 """
 
 import logging
@@ -80,6 +82,7 @@ class DirectSafeSigner(SafeSigner):
         gas_buffer_multiplier: Gas buffer for Safe overhead (default 2.0)
 
     Example:
+        ```python
         config = SafeSignerConfig(
             mode="direct",
             wallet_config=SafeWalletConfig(
@@ -94,6 +97,7 @@ class DirectSafeSigner(SafeSigner):
         signed = await signer.sign_with_web3(
             tx, web3, eoa_nonce=5, pos_in_bundle=0
         )
+        ```
     """
 
     def __init__(self, config: SafeSignerConfig) -> None:

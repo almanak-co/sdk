@@ -19,6 +19,7 @@ Supported Chains:
 - BSC (BNB Smart Chain)
 
 Example:
+    ```python
     from almanak.connectors.sushiswap_v3.sdk import SushiSwapV3SDK
 
     sdk = SushiSwapV3SDK(chain="arbitrum", rpc_url="https://arb1.arbitrum.io/rpc")
@@ -41,6 +42,7 @@ Example:
         slippage_bps=50,
         deadline=int(time.time()) + 300,
     )
+    ```
 """
 
 import logging
@@ -659,6 +661,7 @@ class SushiSwapV3SDK:
     - Tick math utilities
 
     Example:
+        ```python
         sdk = SushiSwapV3SDK(chain="arbitrum", rpc_url="https://arb1.arbitrum.io/rpc")
 
         # Compute pool address (no RPC needed)
@@ -675,6 +678,7 @@ class SushiSwapV3SDK:
             amount_in=10**18,  # 1 WETH
             fee_tier=3000,
         )
+        ```
     """
 
     def __init__(

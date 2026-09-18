@@ -2,7 +2,7 @@
 
 Pure data classes, exceptions, and constants shared by the gateway-backed
 funding rate provider. No network egress lives in this module — the only
-provider implementation is :class:`GatewayFundingRateProvider`, which routes
+provider implementation is `GatewayFundingRateProvider`, which routes
 all venue calls through the gateway sidecar.
 
 Venue registry contract

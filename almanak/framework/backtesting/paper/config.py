@@ -10,6 +10,7 @@ Key Components:
 Examples:
     Basic configuration with minimal settings:
 
+        ```python
         from almanak.framework.backtesting.paper.config import PaperTraderConfig
         from decimal import Decimal
 
@@ -18,9 +19,10 @@ Examples:
             rpc_url="https://arb1.arbitrum.io/rpc",
             deployment_id="my_strategy",
         )
-
+        ```
     Custom configuration with initial balances and tick settings:
 
+        ```python
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
@@ -30,9 +32,10 @@ Examples:
             tick_interval_seconds=30,
             max_ticks=1000,
         )
-
+        ```
     Production-grade configuration with strict price validation:
 
+        ```python
         # When strict_price_mode=True, the paper trader will fail
         # if it cannot get prices from real data sources (Chainlink, TWAP,
         # or CoinGecko). This ensures accurate valuations for institutional use.
@@ -44,6 +47,7 @@ Examples:
             price_source="auto",  # Use Chainlink -> TWAP -> CoinGecko fallback
             strict_price_mode=True,  # Fail if no real price available
         )
+        ```
 """
 
 from dataclasses import dataclass, field
@@ -255,6 +259,7 @@ class PaperTraderConfig:
         price_source: Price source to use ('coingecko', 'chainlink', 'twap', 'auto')
 
     Example:
+        ```python
         config = PaperTraderConfig(
             chain="arbitrum",
             rpc_url="https://arb1.arbitrum.io/rpc",
@@ -264,6 +269,7 @@ class PaperTraderConfig:
         )
         print(f"Chain: {config.chain} (ID: {config.chain_id})")
         print(f"Max duration: {config.max_duration_seconds}s")
+        ```
     """
 
     # Required fields
