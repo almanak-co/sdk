@@ -94,7 +94,11 @@ TEMPLATE_CONFIG_DOCS: dict[str, list[tuple[str, str, str]]] = {
         ("protocol", "string", "LP protocol (uniswap_v3, aerodrome, etc.)"),
         ("base_token", "string", "Pool base token"),
         ("quote_token", "string", "Pool quote token"),
-        ("range_width_pct", "int", "LP range width as % of current price"),
+        (
+            "range_width_pct",
+            "int",
+            "LP range half-width as % of the pool's own spot price (read on-chain, not the USD oracle)",
+        ),
         (
             "rebalance_threshold_pct",
             "int",
@@ -164,7 +168,11 @@ TEMPLATE_CONFIG_DOCS: dict[str, list[tuple[str, str, str]]] = {
         ("protocol", "string", "LP protocol (uniswap_v3, aerodrome, etc.)"),
         ("base_token", "string", "Pool base token"),
         ("quote_token", "string", "Pool quote token"),
-        ("range_width_pct", "int", "LP range width as % of current price"),
+        (
+            "range_width_pct",
+            "int",
+            "LP range half-width as % of the pool's own spot price (read on-chain, not the USD oracle)",
+        ),
         ("rebalance_drift_pct", "int", "Price drift % from center to trigger rebalance (3 = 3% drift)"),
         ("min_position_usd", "int", "Minimum USD value to open a position"),
     ],

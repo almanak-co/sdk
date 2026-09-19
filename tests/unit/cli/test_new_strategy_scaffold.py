@@ -2934,18 +2934,50 @@ class _LpBalance:
         self.balance_usd = balance_usd
 
 
-class _LpMarket:
-    """Balanced-inventory market: WETH=$<base_price>, USDC=$1, $3000 per side."""
+class _PoolPrice:
+    def __init__(self, price, tick, token0_decimals=18, token1_decimals=6):
+        self.price = price
+        self.tick = tick
+        self.token0_decimals = token0_decimals
+        self.token1_decimals = token1_decimals
 
-    def __init__(self, base_price: str = "3000"):
+
+class _LpMarket:
+    """Balanced-inventory market: pool WETH/USDC at <pool_price>, $3000 per side.
+
+    ``pool_price_by_pair`` answers in ON-CHAIN token order, like the real reader.
+    On base and arbitrum WETH sorts below USDC, so the reading is already
+    USDC-per-WETH; ``inverted=True`` mimics a chain (ethereum) where USDC is
+    token0 and the reader returns WETH-per-USDC. ``oracle_price`` is what
+    ``market.price("WETH")`` says -- deliberately independent of the pool so a
+    range centred on the oracle is detectable.
+    """
+
+    def __init__(self, pool_price: str = "3000", oracle_price: str | None = None, inverted: bool = False):
         from decimal import Decimal
 
-        self._base_price = Decimal(base_price)
+        self._pool_price = Decimal(pool_price)
+        self._oracle_price = Decimal(oracle_price) if oracle_price is not None else self._pool_price
+        self._inverted = inverted
+        self.pool_price_calls: list[tuple] = []
 
     def price(self, token):
         from decimal import Decimal
 
-        return self._base_price if token == "WETH" else Decimal("1")
+        return self._oracle_price if token == "WETH" else Decimal("1")
+
+    def pool_price_by_pair(self, token_a, token_b, chain=None, protocol=None, fee_tier=3000):
+        from decimal import Decimal
+
+        from almanak.framework.intents import price_to_tick
+
+        self.pool_price_calls.append((token_a, token_b, chain, protocol, fee_tier))
+        # WETH(18)/USDC(6): the tick is always on the on-chain pair.
+        tick = price_to_tick(self._pool_price, decimals0=18, decimals1=6)
+        if self._inverted:
+            inverted = Decimal("1") / self._pool_price
+            return _PoolPrice(inverted, price_to_tick(inverted, decimals0=6, decimals1=18), 6, 18)
+        return _PoolPrice(self._pool_price, tick)
 
     def balance(self, token):
         from decimal import Decimal
@@ -3012,9 +3044,9 @@ def test_dynamic_lp_slipstream_open_emits_spacing_aligned_integer_ticks() -> Non
     assert int(intent.range_lower) % 200 == 0
     assert int(intent.range_upper) % 200 == 0
     assert intent.range_lower < intent.range_upper
-    # Straddle: WETH(18)/USDC(6) on base -> current tick from the same public helper.
+    # Straddle: the band must bracket the pool's own tick.
     current_tick = price_to_tick(Decimal("3000"), decimals0=18, decimals1=6)
-    assert int(intent.range_lower) <= current_tick < int(intent.range_upper), (
+    assert int(intent.range_lower) < current_tick < int(intent.range_upper), (
         f"band [{intent.range_lower}, {intent.range_upper}] does not straddle tick {current_tick}"
     )
 
@@ -3049,7 +3081,7 @@ def test_dynamic_lp_slipstream_in_range_holds_and_out_of_range_closes() -> None:
     held = strat.decide(_LpMarket())
     assert held.intent_type.value == "HOLD", f"in-range position must HOLD, got {held}"
 
-    moved = strat.decide(_LpMarket(base_price="4000"))
+    moved = strat.decide(_LpMarket(pool_price="4000"))
     assert moved.intent_type.value == "LP_CLOSE", f"out-of-range position must LP_CLOSE, got {moved}"
 
 
@@ -3543,51 +3575,198 @@ def test_anyintent_is_publicly_importable() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _BadQuoteMarket:
-    """Market whose quote-token price is non-positive / missing (base stays valid)."""
+class _NoPoolMarket(_LpMarket):
+    """Pool reader has nothing for this pair; the oracle still answers."""
 
-    def __init__(self, quote_price):
-        self._quote_price = quote_price
+    def pool_price_by_pair(self, token_a, token_b, chain=None, protocol=None, fee_tier=3000):
+        from almanak.framework.market import PoolPriceUnavailableError
 
-    def price(self, token):
+        raise PoolPriceUnavailableError(f"{token_a}/{token_b}", "no pool")
+
+
+class _ZeroPoolMarket(_LpMarket):
+    def pool_price_by_pair(self, token_a, token_b, chain=None, protocol=None, fee_tier=3000):
         from decimal import Decimal
 
-        return Decimal("3000") if token == "WETH" else self._quote_price
+        return _PoolPrice(Decimal("0"), 0)
 
 
-def test_slipstream_pool_tick_rejects_nonpositive_base_price() -> None:
-    """_pool_tick_for_price must fail loud when the base USD price is non-positive.
+def _make_uniswap_lp_strategy(template=StrategyTemplate.DYNAMIC_LP, chain: str = "base"):
+    from decimal import Decimal
 
-    A zero/negative ``price_usd`` would either divide to zero or feed
-    ``price_to_tick`` a non-positive ratio (log domain error -> garbage tick).
-    The generated guard raises ValueError instead (PR #3216 review).
+    code = generate_strategy_file(name="Pool Spot Probe", template=template, chain=chain, output_dir=Path("/tmp"))
+    cls = _exec_scaffold_class(code)
+    strat = cls.__new__(cls)
+    strat._chain = chain
+    strat.pool = "WETH/USDC/3000"
+    strat.protocol = "uniswap_v3"
+    strat.range_width_pct = 5.0
+    strat.rebalance_threshold_pct = 80.0
+    strat.rebalance_drift_pct = Decimal("0.03")
+    strat.min_position_usd = Decimal("500")
+    strat.max_slippage = Decimal("0.005")
+    strat.base_token = "WETH"
+    strat.quote_token = "USDC"
+    strat._position_id = None
+    strat._range_lower = None
+    strat._range_upper = None
+    return strat
+
+
+@pytest.mark.parametrize("template", [StrategyTemplate.DYNAMIC_LP, StrategyTemplate.MULTI_STEP])
+def test_lp_scaffold_centres_range_on_pool_price_not_oracle(template) -> None:
+    """The range is centred on the pool's own price even when the oracle disagrees.
+
+    Oracle says $3300, the pool trades at $3000: a band built from the oracle
+    would sit entirely above spot and mint one-sided.
     """
     from decimal import Decimal
 
-    strat = _make_slipstream_lp_strategy()
-    with pytest.raises(ValueError, match="Non-positive price"):
-        strat._pool_tick_for_price(_LpMarket(), Decimal("0"))
+    strat = _make_uniswap_lp_strategy(template)
+    market = _LpMarket(pool_price="3000", oracle_price="3300")
+    result = strat.decide(market)
+    emitted = list(getattr(result, "intents", None) or [result])
+    (opened,) = [i for i in emitted if i.intent_type.value == "LP_OPEN"]
+
+    assert opened.range_lower == Decimal("3000") * Decimal("0.95")
+    assert opened.range_upper == Decimal("3000") * Decimal("1.05")
+    assert market.pool_price_calls == [("WETH", "USDC", "base", "uniswap_v3", 3000)]
 
 
-@pytest.mark.parametrize("quote_price", ["0", "-1"], ids=["zero", "negative"])
-def test_slipstream_pool_tick_rejects_nonpositive_quote_price(quote_price: str) -> None:
-    """A non-positive quote price (the divisor for a base=token0 pool) must raise
-    ValueError, not ZeroDivisionError (PR #3216 review)."""
+@pytest.mark.parametrize("template", [StrategyTemplate.DYNAMIC_LP, StrategyTemplate.MULTI_STEP])
+def test_lp_scaffold_drift_test_uses_pool_price_not_oracle(template) -> None:
+    """A stored band is tested against the pool price: an oracle-only move must not close."""
+    strat = _make_uniswap_lp_strategy(template)
     from decimal import Decimal
 
-    strat = _make_slipstream_lp_strategy()
-    with pytest.raises(ValueError, match="Non-positive price"):
-        strat._pool_tick_for_price(_BadQuoteMarket(Decimal(quote_price)), Decimal("3000"))
+    strat._position_id = "7"
+    strat._range_lower = Decimal("2850")
+    strat._range_upper = Decimal("3150")
+
+    held = strat.decide(_LpMarket(pool_price="3000", oracle_price="4000"))
+    assert held.intent_type.value == "HOLD", f"oracle drift alone must not close, got {held}"
+
+    moved = strat.decide(_LpMarket(pool_price="3400", oracle_price="3000"))
+    # dynamic_lp closes directly; multi_step closes through an IntentSequence.
+    emitted = list(getattr(moved, "intents", None) or [moved])
+    assert [i.intent_type.value for i in emitted][0] == "LP_CLOSE", f"pool drift must close the LP, got {moved}"
 
 
-def test_slipstream_pool_tick_rejects_missing_quote_price() -> None:
-    """A ``None`` quote price (oracle returned nothing) must raise ValueError, not
-    TypeError from the division (PR #3216 review)."""
+@pytest.mark.parametrize("template", [StrategyTemplate.DYNAMIC_LP, StrategyTemplate.MULTI_STEP])
+def test_lp_scaffold_holds_when_pool_price_unavailable(template) -> None:
+    """No pool reading means no LP action -- never fall back to the oracle for a mint."""
+    strat = _make_uniswap_lp_strategy(template)
+    result = strat.decide(_NoPoolMarket())
+    assert result.intent_type.value == "HOLD"
+    assert "Pool price unavailable" in result.reason
+
+
+def test_lp_scaffold_rejects_nonpositive_pool_price() -> None:
+    strat = _make_uniswap_lp_strategy()
+    with pytest.raises(ValueError, match="Non-positive pool price"):
+        strat._pool_spot(_ZeroPoolMarket())
+    assert strat.decide(_ZeroPoolMarket()).intent_type.value == "HOLD"
+
+
+def test_lp_scaffold_inverts_pool_price_for_non_canonical_pool_string() -> None:
+    """On ethereum USDC is token0, so the reader returns WETH-per-USDC; the
+    strategy's WETH/USDC band still has to be quoted USDC-per-WETH."""
     from decimal import Decimal
 
+    strat = _make_uniswap_lp_strategy(chain="ethereum")
+    spot, tick = strat._pool_spot(_LpMarket(pool_price="3000", inverted=True))
+    assert spot.quantize(Decimal("0.01")) == Decimal("3000.00")
+
+    canonical_spot, _ = _make_uniswap_lp_strategy(chain="base")._pool_spot(_LpMarket(pool_price="3000"))
+    assert canonical_spot == Decimal("3000")
+
+
+def test_lp_scaffold_orients_address_legs_without_the_resolver(monkeypatch) -> None:
+    """A pool written as 0xA/0xB/fee is oriented by comparing the addresses directly."""
+    from decimal import Decimal
+
+    import almanak.framework.data.tokens as tokens_mod
+
+    def _unexpected_resolver():
+        raise AssertionError("address legs must not be resolved")
+
+    monkeypatch.setattr(tokens_mod, "get_token_resolver", _unexpected_resolver)
+
+    strat = _make_uniswap_lp_strategy(chain="base")
+    weth, usdc = "0x4200000000000000000000000000000000000006", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+    strat.pool = f"{weth}/{usdc}/3000"
+    spot, _ = strat._pool_spot(_LpMarket(pool_price="3000"))
+    assert spot == Decimal("3000")
+
+    strat.pool = f"{usdc}/{weth}/3000"
+    spot, _ = strat._pool_spot(_LpMarket(pool_price="3000"))
+    assert spot.quantize(Decimal("0.000001")) == (Decimal("1") / Decimal("3000")).quantize(Decimal("0.000001"))
+
+
+def test_lp_scaffold_holds_when_a_symbol_leg_does_not_resolve() -> None:
+    """An unresolvable symbol leg is a ValueError at the seam, so decide() holds instead of raising."""
+    strat = _make_uniswap_lp_strategy(chain="base")
+    strat.pool = "NOSUCHTOKEN/USDC/3000"
+    with pytest.raises(ValueError, match="did not resolve"):
+        strat._pool_spot(_LpMarket())
+    assert strat.decide(_LpMarket()).intent_type.value == "HOLD"
+
+
+def test_lp_scaffold_slipstream_tick_band_brackets_pool_tick() -> None:
+    """The Slipstream band is built from the pool's tick, not a converted oracle price."""
+    from almanak.framework.intents import price_to_tick
+
     strat = _make_slipstream_lp_strategy()
-    with pytest.raises(ValueError, match="Non-positive price"):
-        strat._pool_tick_for_price(_BadQuoteMarket(None), Decimal("3000"))
+    market = _LpMarket(pool_price="3000", oracle_price="9000")
+    opened = strat.decide(market)
+    from decimal import Decimal
+
+    pool_tick = price_to_tick(Decimal("3000"), decimals0=18, decimals1=6)
+    assert int(opened.range_lower) < pool_tick < int(opened.range_upper)
+    assert market.pool_price_calls == [("WETH", "USDC", "base", "aerodrome_slipstream", 200)]
+
+
+def test_lp_scaffold_derives_tick_from_pool_price_when_reader_has_none() -> None:
+    """Backtests serve a pair-ratio proxy with ``tick=None``; the band is still pool-based."""
+    from decimal import Decimal
+
+    from almanak.framework.intents import TickBand, price_to_tick
+
+    class _NoTickMarket(_LpMarket):
+        def pool_price_by_pair(self, token_a, token_b, chain=None, protocol=None, fee_tier=3000):
+            return _PoolPrice(Decimal("3000"), None)
+
+    strat = _make_slipstream_lp_strategy()
+    opened = strat.decide(_NoTickMarket())
+    assert isinstance(opened.range_spec, TickBand)
+    derived = price_to_tick(Decimal("3000"), decimals0=18, decimals1=6)
+    assert int(opened.range_lower) < derived < int(opened.range_upper)
+
+
+@pytest.mark.parametrize("template", [StrategyTemplate.DYNAMIC_LP, StrategyTemplate.MULTI_STEP])
+def test_lp_scaffold_does_not_build_range_from_market_price(template) -> None:
+    """Source-level guard: the emitted decide() never feeds market.price() into a range."""
+    import ast
+
+    code = generate_strategy_file(name="Guard", template=template, chain="base", output_dir=Path("/tmp"))
+    decide = next(
+        node for node in ast.walk(ast.parse(code)) if isinstance(node, ast.FunctionDef) and node.name == "decide"
+    )
+    called = {
+        node.func.attr
+        for node in ast.walk(decide)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "market"
+    }
+    assert "price" not in called, "LP scaffold decide() must not read the USD oracle for its range"
+    assert "_pool_spot" in {
+        node.func.attr
+        for node in ast.walk(decide)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
 
 
 def test_default_token_funding_does_not_construct_symbol_resolver(monkeypatch) -> None:

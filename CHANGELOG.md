@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **`strat new --template dynamic_lp` / `multi_step` no longer centre the LP
+  range on the USD oracle.** Both scaffolds read `market.price()` for the
+  range, the drift test and (for Slipstream) the tick band, which is the
+  pattern the builder skill forbids: the oracle is hardcoded to `1.0` for
+  stablecoins and can drift from the pool for any pair, so a range built from
+  it can mint out of range without error. Generated strategies now emit a
+  `_pool_spot()` that reads `pool_price_by_pair()` in the pool string's
+  orientation, derive Slipstream ticks from the pool's own tick, and hold
+  when the pool is unreadable instead of falling back to the oracle.
+  `market.price()` remains the right call for valuation, sizing and signals.
 - **A managed Robinhood Anvil fork no longer starts against a state-pruned
   RPC.** The measured-retention table recorded Robinhood's public endpoint as
   archive-capable, which left the chain out of the `fork_requires_archive` set

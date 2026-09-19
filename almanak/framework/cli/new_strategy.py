@@ -729,10 +729,17 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
 
     elif template == StrategyTemplate.DYNAMIC_LP:
         return """
-            base_price = market.price(self.base_token)
+            # The range and its drift test are execution-facing, so they read the
+            # pool's own price. market.price() is a USD valuation oracle: it is
+            # hardcoded to 1.0 for stablecoins and can drift from the pool for any
+            # pair, so a range centred on it can mint out of range without error.
+            try:
+                spot, pool_tick = self._pool_spot(market)
+            except (PoolPriceUnavailableError, ValueError) as exc:
+                return Intent.hold(reason=f"Pool price unavailable: {exc}")
             range_pct = Decimal(str(self.range_width_pct)) / Decimal("100")
-            lower_price = base_price * (Decimal("1") - range_pct)
-            upper_price = base_price * (Decimal("1") + range_pct)
+            lower_price = spot * (Decimal("1") - range_pct)
+            upper_price = spot * (Decimal("1") + range_pct)
 
             # If we have an open position, check if rebalance needed
             if self._position_id is not None:
@@ -741,17 +748,14 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                     # Tick-ranged protocols (Aerodrome Slipstream) store the band
                     # in raw ticks -- measure the current position in tick space
                     # so the in-range math compares like units.
-                    if self._uses_tick_ranges():
-                        current = Decimal(self._pool_tick_for_price(market, base_price))
-                    else:
-                        current = base_price
+                    current = Decimal(pool_tick) if self._uses_tick_ranges() else spot
                     range_size = self._range_upper - self._range_lower
                     dist_from_lower = current - self._range_lower
                     position_in_range = dist_from_lower / range_size if range_size > 0 else Decimal("0.5")
                     lower_bound = (Decimal("1") - rebalance_pct) / Decimal("2")
                     upper_bound = (Decimal("1") + rebalance_pct) / Decimal("2")
                     if position_in_range < lower_bound or position_in_range > upper_bound:
-                        logger.info(f"Rebalance needed: price {base_price} at {position_in_range:.1%} of range")
+                        logger.info(f"Rebalance needed: price {spot} at {position_in_range:.1%} of range")
                         return Intent.lp_close(
                             position_id=self._position_id,
                             pool=self.pool,
@@ -851,7 +855,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 # pool string's first token.
                 from almanak.framework.intents import TickBand
 
-                tick_lower, tick_upper = self._tick_band_for_prices(market, lower_price, upper_price)
+                tick_lower, tick_upper = self._tick_band(pool_tick)
                 logger.info(f"Tick band for {self.protocol}: [{tick_lower}, {tick_upper}]")
                 if self.pool.split("/")[0].upper() == self.quote_token.upper():
                     amount0, amount1 = amount_quote, amount_base
@@ -1397,7 +1401,14 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
 
     elif template == StrategyTemplate.MULTI_STEP:
         return """
-            base_price = market.price(self.base_token)
+            # The range and its drift test are execution-facing, so they read the
+            # pool's own price. market.price() is a USD valuation oracle: it is
+            # hardcoded to 1.0 for stablecoins and can drift from the pool for any
+            # pair, so a range centred on it can mint out of range without error.
+            try:
+                spot, _pool_tick = self._pool_spot(market)
+            except (PoolPriceUnavailableError, ValueError) as exc:
+                return Intent.hold(reason=f"Pool price unavailable: {exc}")
             range_pct = Decimal(str(self.range_width_pct)) / Decimal("100")
 
             # If we have a position, check for rebalance
@@ -1405,7 +1416,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 # Check if price moved enough to rebalance
                 if self._range_lower and self._range_upper:
                     mid = (self._range_lower + self._range_upper) / Decimal("2")
-                    drift = abs(base_price - mid) / mid
+                    drift = abs(spot - mid) / mid
                     if drift < self.rebalance_drift_pct:
                         return Intent.hold(reason=f"Position in range, drift={drift:.2%}")
 
@@ -1413,7 +1424,7 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
                 # into quote token. The next iteration will open a fresh LP.
                 # Intent.sequence() ensures close happens before swap, and
                 # amount="all" chains the swap to use whatever the close released.
-                logger.info(f"Rebalancing LP around {base_price} via IntentSequence")
+                logger.info(f"Rebalancing LP around {spot} via IntentSequence")
                 return Intent.sequence(
                     [
                         Intent.lp_close(
@@ -1449,15 +1460,11 @@ def _get_template_decide_logic(template: StrategyTemplate, config: TemplateConfi
             # The compiler handles partial fills gracefully.
             half_quote = quote_balance.balance * Decimal("0.5")
             # Estimate how much base token we'll receive after swapping half_quote.
-            # Fetch quote price so this works for non-stablecoin pairs (e.g. WETH/WBTC).
-            quote_price = market.price(self.quote_token)
-            half_base_est = (
-                (half_quote * quote_price / base_price * Decimal("0.95"))
-                if base_price > 0 and quote_price > 0
-                else Decimal("0")
-            )
-            lower_price = base_price * (Decimal("1") - range_pct)
-            upper_price = base_price * (Decimal("1") + range_pct)
+            # `spot` is quote-per-base in the pool string's order, so this holds for
+            # non-stablecoin pairs (e.g. WETH/WBTC) without a second price lookup.
+            half_base_est = half_quote / spot * Decimal("0.95")
+            lower_price = spot * (Decimal("1") - range_pct)
+            upper_price = spot * (Decimal("1") + range_pct)
             logger.info(f"Opening LP via IntentSequence: {lower_price:.2f} - {upper_price:.2f}")
             return Intent.sequence(
                 [
@@ -3519,6 +3526,53 @@ def _get_template_get_status(template: StrategyTemplate, strategy_name: str) -> 
     return base + "        return status\n\n"
 
 
+# Emitted verbatim into every LP scaffold: the range, its drift test and the
+# LP_OPEN amounts are execution-facing, so they read the pool's own price rather
+# than the market.price() USD oracle.
+_POOL_SPOT_HELPER = (
+    "    def _pool_spot(self, market):\n"
+    '        """Live pool price in this strategy\'s pool-string orientation, plus the raw pool tick.\n'
+    "\n"
+    "        ``PoolPrice.price`` is token0-in-token1 in the pool's ON-CHAIN order\n"
+    "        (lower address first). The price band, the drift test and the LP_OPEN\n"
+    "        amounts all use the pool string's order, so the reading is inverted when\n"
+    "        the string is non-canonical. Legs written as 0x addresses are compared\n"
+    "        directly; only symbol legs go through the token resolver. Ticks are\n"
+    "        always on-chain and returned as read (or derived from the pool price when\n"
+    "        the reader has none). Raises PoolPriceUnavailableError / ValueError rather\n"
+    "        than falling back to the oracle: an unreadable pool must hold, not mint\n"
+    "        blind.\n"
+    '        """\n'
+    "        from almanak.framework.data.tokens import TokenResolutionError, get_token_resolver\n"
+    "\n"
+    "        def leg_address(leg: str) -> str:\n"
+    '            if leg.startswith("0x"):\n'
+    "                return leg.lower()\n"
+    "            try:\n"
+    "                return get_token_resolver().get_address(self.chain, leg).lower()\n"
+    "            except TokenResolutionError as exc:\n"
+    '                raise ValueError(f"Cannot orient pool {self.pool}: {leg!r} did not resolve on {self.chain}") from exc\n'
+    "\n"
+    '        first, second, pool_key = self.pool.split("/")\n'
+    "        pool = market.pool_price_by_pair(\n"
+    "            first, second, chain=self.chain, protocol=self.protocol, fee_tier=int(pool_key)\n"
+    "        )\n"
+    "        price = Decimal(str(pool.price))\n"
+    "        if price <= 0:\n"
+    '            raise ValueError(f"Non-positive pool price for {self.pool}: {price}")\n'
+    "        tick = pool.tick\n"
+    "        if tick is None:\n"
+    "            # Backtests serve a pair-ratio proxy with no slot0 tick; derive it\n"
+    "            # from the same pool-oriented price so the band stays pool-based.\n"
+    "            from almanak.framework.intents import price_to_tick\n"
+    "\n"
+    "            tick = price_to_tick(price, decimals0=pool.token0_decimals, decimals1=pool.token1_decimals)\n"
+    "        canonical = leg_address(first) < leg_address(second)\n"
+    '        return (price if canonical else Decimal("1") / price), tick\n'
+    "\n"
+)
+
+
 def _get_template_callbacks(template: StrategyTemplate) -> str:
     """Generate on_intent_executed and persistence callbacks for stateful templates."""
     if template == StrategyTemplate.DYNAMIC_LP:
@@ -3566,65 +3620,33 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             '            self._range_lower = Decimal(rl) if rl not in (None, "") else None\n'
             '            self._range_upper = Decimal(ru) if ru not in (None, "") else None\n'
             "\n"
-            "    # ------------------------------------------------------------------\n"
-            "    # Aerodrome Slipstream tick helpers (VIB-5557)\n"
-            "    # ------------------------------------------------------------------\n"
-            "    # Slipstream's compiler consumes raw integer ticks aligned to the\n"
-            '    # pool\'s tick spacing (pool format "TOKEN0/TOKEN1/<tick_spacing>").\n'
-            "    # The price->tick conversion lives here so a config-only switch to\n"
-            "    # protocol=aerodrome_slipstream keeps this scaffold compiling.\n"
-            "\n"
-            "    def _uses_tick_ranges(self) -> bool:\n"
-            '        """True when the configured protocol addresses LP ranges in raw ticks."""\n'
-            '        return self.protocol == "aerodrome_slipstream"\n'
-            "\n"
-            "    def _pool_tick_for_price(self, market, price_usd):\n"
-            '        """Convert a USD price of ``base_token`` into the pool\'s native tick.\n'
-            "\n"
-            "        Ticks are defined on the pool's canonical token0/token1 pair\n"
-            "        (ordered by address; the compiler silently REORDERS a\n"
-            "        non-canonical pool string to that order -- it does NOT reject\n"
-            '        it), so the USD price is rebased to "token1 per token0"\n'
-            "        before conversion. Token decimals come from the token registry --\n"
-            "        never guessed (a wrong decimals pair shifts the tick by ~276k).\n"
-            '        """\n'
-            "        from almanak.framework.data.tokens import get_token_resolver\n"
-            "        from almanak.framework.intents import price_to_tick\n"
-            "\n"
-            '        token0, token1 = self.pool.split("/")[0], self.pool.split("/")[1]\n'
-            "        resolver = get_token_resolver()\n"
-            "        decimals0 = resolver.get_decimals(self.chain, token0)\n"
-            "        decimals1 = resolver.get_decimals(self.chain, token1)\n"
-            "        quote_price = market.price(self.quote_token)\n"
-            "        # Both prices divide below; a None / zero / negative price would\n"
-            "        # raise TypeError / ZeroDivisionError or feed price_to_tick a\n"
-            "        # non-positive ratio (log domain error -> garbage tick). Fail loud.\n"
-            "        if not quote_price or quote_price <= 0 or not price_usd or price_usd <= 0:\n"
-            "            raise ValueError(\n"
-            "                f'Non-positive price for tick conversion: '\n"
-            "                f'base={price_usd}, quote={quote_price}'\n"
-            "            )\n"
-            "        if token0.upper() == self.base_token.upper():\n"
-            "            pool_price = price_usd / quote_price  # token1 per token0\n"
-            "        else:\n"
-            "            pool_price = quote_price / price_usd  # base is token1 -> invert\n"
-            "        return price_to_tick(pool_price, decimals0=decimals0, decimals1=decimals1)\n"
-            "\n"
-            "    def _tick_band_for_prices(self, market, lower_price, upper_price):\n"
-            '        """Convert a USD price band into a spacing-aligned (tick_lower, tick_upper)."""\n'
-            "        import math\n"
-            "\n"
-            '        tick_spacing = int(self.pool.split("/")[2])\n'
-            "        tick_a = self._pool_tick_for_price(market, lower_price)\n"
-            "        tick_b = self._pool_tick_for_price(market, upper_price)\n"
-            "        # Inverted pairs (base token is pool token1) flip the band direction.\n"
-            "        tick_lower, tick_upper = min(tick_a, tick_b), max(tick_a, tick_b)\n"
-            "        tick_lower = math.floor(tick_lower / tick_spacing) * tick_spacing\n"
-            "        tick_upper = math.floor(tick_upper / tick_spacing) * tick_spacing\n"
-            "        if tick_upper <= tick_lower:\n"
-            "            tick_upper = tick_lower + tick_spacing\n"
-            "        return tick_lower, tick_upper\n"
-            "\n"
+            + _POOL_SPOT_HELPER
+            + "    def _uses_tick_ranges(self) -> bool:\n"
+            + '        """True when the configured protocol addresses LP ranges in raw ticks."""\n'
+            + '        return self.protocol == "aerodrome_slipstream"\n'
+            + "\n"
+            + "    def _tick_band(self, pool_tick):\n"
+            + '        """Spacing-aligned (tick_lower, tick_upper) bracketing the live tick by range_width_pct.\n'
+            + "\n"
+            + "        Slipstream's compiler consumes raw integer ticks aligned to the pool's\n"
+            + '        tick spacing (pool format "TOKEN0/TOKEN1/<tick_spacing>"). The band is\n'
+            + "        built in tick space from the pool's own tick, so it is exact for either\n"
+            + "        token orientation: floor/ceil on the two edges keeps the live tick\n"
+            + "        strictly inside it.\n"
+            + '        """\n'
+            + "        import math\n"
+            + "\n"
+            + '        tick_spacing = int(self.pool.split("/")[2])\n'
+            + "        range_frac = float(self.range_width_pct) / 100.0\n"
+            + "        log_per_tick = math.log(1.0001)\n"
+            + "        tick_lower = pool_tick + math.log(1.0 - range_frac) / log_per_tick\n"
+            + "        tick_upper = pool_tick + math.log(1.0 + range_frac) / log_per_tick\n"
+            + "        tick_lower = math.floor(tick_lower / tick_spacing) * tick_spacing\n"
+            + "        tick_upper = math.ceil(tick_upper / tick_spacing) * tick_spacing\n"
+            + "        if tick_upper <= tick_lower:\n"
+            + "            tick_upper = tick_lower + tick_spacing\n"
+            + "        return tick_lower, tick_upper\n"
+            + "\n"
         )
 
     elif template == StrategyTemplate.LENDING_LOOP:
@@ -3956,7 +3978,7 @@ def _get_template_callbacks(template: StrategyTemplate) -> str:
             '            ru = state.get("range_upper")\n'
             "            self._range_lower = Decimal(rl) if rl else None\n"
             "            self._range_upper = Decimal(ru) if ru else None\n"
-            "\n"
+            "\n" + _POOL_SPOT_HELPER
         )
 
     elif template == StrategyTemplate.TA_SWAP:
@@ -4154,11 +4176,13 @@ def _build_strategy_content(
     enum_import = "from enum import Enum, StrEnum\n" if state_enum_block else "from enum import Enum\n"
     # Only the two LP templates emit the boot-time tolerance guard, so only they
     # import it — an unused import would be an F401 in every other scaffold.
+    is_lp_template = template in (StrategyTemplate.DYNAMIC_LP, StrategyTemplate.MULTI_STEP)
     lp_range_guard_import = (
         "from almanak.connectors._strategy_base.cl_range import require_lp_tolerance_fits_range\n"
-        if template in (StrategyTemplate.DYNAMIC_LP, StrategyTemplate.MULTI_STEP)
+        if is_lp_template
         else ""
     )
+    pool_price_error_import = ", PoolPriceUnavailableError" if is_lp_template else ""
     # Blank line + block when we have an enum; empty string otherwise so the
     # resulting file has no awkward trailing blank lines.
     state_enum_section = f"\n\n{state_enum_block}" if state_enum_block else ""
@@ -4209,7 +4233,7 @@ from decimal import ROUND_DOWN, Decimal  # noqa: F401 - ROUND_DOWN used by lendi
 
 # Core strategy framework imports
 {lp_range_guard_import}from almanak.framework.intents import AnyIntent, Intent
-from almanak.framework.market import MarketSnapshot
+from almanak.framework.market import MarketSnapshot{pool_price_error_import}
 from almanak.framework.strategies import (
     DecideResult,
     IntentStrategy,
