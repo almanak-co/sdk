@@ -75,7 +75,7 @@ docker-compose exec strategy \
 3. **网络配置错误**
    ```bash
    # 验证两个容器在同一网络上
-   docker network inspect deploy_internal
+   docker network inspect almanak_internal
    ```
 
 ### 问题：RPC 调用出现 "Method Not Allowed"
@@ -89,11 +89,15 @@ docker-compose exec strategy \
 **解决方案：**
 
 只允许以下方法：
-- `eth_call`、`eth_getBalance`、`eth_getTransactionCount`
-- `eth_getTransactionReceipt`、`eth_getBlockByNumber`、`eth_getBlockByHash`
-- `eth_blockNumber`、`eth_chainId`、`eth_gasPrice`、`eth_estimateGas`
-- `eth_getLogs`、`eth_getCode`、`eth_getStorageAt`
-- `eth_sendRawTransaction`、`net_version`
+- `eth_call`、`eth_simulateV1`、`eth_getBalance`、`eth_getTransactionCount`
+- `eth_getCode`、`eth_getStorageAt`、`eth_getTransactionByHash`、`eth_getTransactionReceipt`
+- `eth_getTransactionByBlockHashAndIndex`、`eth_getTransactionByBlockNumberAndIndex`
+- `eth_blockNumber`、`eth_getBlockByNumber`、`eth_getBlockByHash`
+- `eth_getBlockTransactionCountByHash`、`eth_getBlockTransactionCountByNumber`
+- `eth_getLogs`、`eth_newFilter`、`eth_newBlockFilter`、`eth_getFilterChanges`、`eth_getFilterLogs`、`eth_uninstallFilter`
+- `eth_gasPrice`、`eth_estimateGas`、`eth_feeHistory`、`eth_maxPriorityFeePerGas`
+- `eth_chainId`、`net_version`、`net_listening`、`web3_clientVersion`
+- `eth_sendRawTransaction`
 
 如果您需要被阻止的方法，请联系支持讨论替代方案。
 
@@ -159,10 +163,10 @@ docker-compose exec gateway env | grep -E 'RPC_URL|ALCHEMY'
    state = GatewayStateManager(gateway_client)
 
    # 保存
-   await state.save(deployment_id="my-strategy", data=data)
+   await state.save_state(data)  # data.deployment_id set on the StateData
 
    # 使用相同 ID 加载
-   data = await state.load(deployment_id="my-strategy")  # 相同的 ID！
+   data = await state.load_state(deployment_id="my-strategy")  # 相同的 ID！
    ```
 
 2. **超出状态大小限制**
@@ -174,7 +178,7 @@ docker-compose exec gateway env | grep -E 'RPC_URL|ALCHEMY'
 
 3. **数据库未配置**
    ```bash
-   # 验证网关中的 DATABASE_URL
+   # 验证网关中已设置 ALMANAK_GATEWAY_DATABASE_URL
    docker-compose exec gateway env | grep DATABASE_URL
    ```
 
@@ -197,7 +201,7 @@ docker-compose exec gateway env | grep -E 'RPC_URL|ALCHEMY'
 
 # 使用网关集成
 from almanak.framework.integrations import coingecko
-prices = await coingecko.get_price("ethereum")
+prices = coingecko.get_price("ethereum")
 ```
 
 ### 问题：容器安全错误
@@ -266,11 +270,11 @@ prices = await coingecko.get_price("ethereum")
 grpcurl -plaintext localhost:50051 list
 
 # 描述服务
-grpcurl -plaintext localhost:50051 describe almanak.gateway.MarketService
+grpcurl -plaintext localhost:50051 describe almanak.gateway.proto.MarketService
 
 # 调用方法
 grpcurl -plaintext -d '{"chain": "arbitrum", "token": "ETH"}' \
-  localhost:50051 almanak.gateway.MarketService/GetPrice
+  localhost:50051 almanak.gateway.proto.MarketService/GetPrice
 ```
 
 ### 审计日志

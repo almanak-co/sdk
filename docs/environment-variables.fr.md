@@ -41,8 +41,8 @@ Définissez-les selon les protocoles et fonctionnalités utilisés par votre str
 | Variable | Quand c'est nécessaire | Obtenir une clé |
 |----------|-------------|-----------|
 | `ENSO_API_KEY` | Routage de swaps via l'agrégateur Enso Finance | [enso.finance](https://enso.finance/) |
-| `COINGECKO_API_KEY` | Améliore les limites de débit pour les données de prix (fonctionne sans clé) | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
-| `ALMANAK_API_KEY` | Authentification de la plateforme Almanak | [app.almanak.co](https://app.almanak.co/) |
+| `COINGECKO_API_KEY` | Clé API CoinGecko pour les prix du marché. Également requise pour les données de pools/OHLCV CoinGecko Onchain lors de l'exécution d'un gateway local. | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
+| `ALMANAK_API_KEYS` | Liste de clés (séparées par des virgules) acceptées par le serveur API operator local pour l'authentification des requêtes entrantes | `key1,key2` |
 | `THEGRAPH_API_KEY` | Backtesting avec données de subgraphs (volumes DEX, APYs de prêt) | [thegraph.com/studio](https://thegraph.com/studio/) |
 
 ---

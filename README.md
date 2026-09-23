@@ -13,7 +13,7 @@
   <a href="https://pypi.org/project/almanak/"><img src="https://img.shields.io/pypi/pyversions/almanak?style=flat-square" alt="Python 3.12+"></a>
   <a href="https://github.com/almanak-co/almanak-sdk/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square" alt="License: Apache-2.0"></a>
   <a href="https://sdk.docs.almanak.co/"><img src="https://img.shields.io/badge/docs-sdk.docs.almanak.co-purple?style=flat-square" alt="Docs"></a>
-  <a href="https://discord.gg/c4jY28WrEB"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://discord.gg/yuCMvQv3rN"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://x.com/almanak"><img src="https://img.shields.io/badge/Twitter-follow-1DA1F2?style=flat-square&logo=x&logoColor=white" alt="Twitter"></a>
 </p>
 
@@ -44,7 +44,7 @@ Almanak is an intent-based Python framework for developing, testing, and deployi
 - **Multi-Chain Support**: 19 chains across EVM and SVM — Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Mantle, X-Layer, Monad, 0G, Solana, HyperEVM, Linea, Robinhood, plus Sonic, Blast, Berachain, Plasma (chain configs present; protocol coverage pending).
 - **Protocol Integration**: Uniswap V3, Aave V3, Morpho Blue, GMX V2, Lido, Ethena, Polymarket, Kraken, and more
 - **Non-Custodial Design**: Full control over your funds through Safe smart accounts
-- **Agentic DeFAI Trading**: Build autonomous LLM-driven agents with 39 built-in tools and policy-enforced safety (BYO LLM API key)
+- **Agentic DeFAI Trading**: Build autonomous LLM-driven agents with 41 built-in tools and policy-enforced safety (BYO LLM API key)
 - **Production-Ready**: Built-in alerting, stuck detection, emergency management, and canary deployments
 
 ## Installation

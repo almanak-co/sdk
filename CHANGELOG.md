@@ -6,32 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed
-- **`strat new --template dynamic_lp` / `multi_step` no longer centre the LP
-  range on the USD oracle.** Both scaffolds read `market.price()` for the
-  range, the drift test and (for Slipstream) the tick band, which is the
-  pattern the builder skill forbids: the oracle is hardcoded to `1.0` for
-  stablecoins and can drift from the pool for any pair, so a range built from
-  it can mint out of range without error. Generated strategies now emit a
-  `_pool_spot()` that reads `pool_price_by_pair()` in the pool string's
-  orientation, derive Slipstream ticks from the pool's own tick, and hold
-  when the pool is unreadable instead of falling back to the oracle.
-  `market.price()` remains the right call for valuation, sizing and signals.
-- **A managed Robinhood Anvil fork no longer starts against a state-pruned
-  RPC.** The measured-retention table recorded Robinhood's public endpoint as
-  archive-capable, which left the chain out of the `fork_requires_archive` set
-  and let a fork start and then die minutes later on an uncached read
-  (`metadata is not found`) — surfacing as an unrelated-looking fixture error.
-  Re-measuring shows the endpoint serves head-1024 and fails head-8192, so the
-  fork now refuses at start, naming the endpoint and the measured window.
-  Configure an archive RPC (`ALCHEMY_API_KEY`, or `ROBINHOOD_RPC_URL`) to fork
-  this chain; `ALMANAK_ALLOW_PRUNED_FORK_RPC=1` remains the escape hatch for
-  deliberately short-lived forks. No other chain's gating changes.
-- **`market_session()` is now cheap enough for backtests.** The calendar
-  instance is cached per exchange and the four-day session frame per
-  calendar-day, so a call costs ~3 ms instead of ~200 ms (the library expands
-  holiday rules on every fresh instance). A one-year hourly backtest spends
-  ~25 s on session gating instead of ~30 min. Behaviour is unchanged.
+## [2.29.0] - 2026-09-23
 
 ### Added
 - **`MarketSnapshot.market_session("NYSE")`** — strategy-facing regular-session
@@ -42,6 +17,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   gateway, or chain read, so it behaves identically on live chain, Anvil, and
   backtests. This is the supported way to gate on market hours; do not call
   `reference_price()` for that.
+- **`almanak ax vault <address>`** — the vault counterpart of `ax lending-market`:
+  on-chain verification, listing status, MetaMorpho v1 market enumeration and
+  Vault V2 adapter listing, with deployability guidance. (#3943)
+- **`almanak ax pool <address>` now returns state and analytics**, not just
+  identity — price, tick, active liquidity, TVL, volume and fee APR for the
+  exact pool, with unmeasured metrics reported explicitly rather than as zero. (#4023)
+- **`dex-pools` / `list_token_pools` now mark which discovered pools are
+  supported execution venues** (`supported` / `unsupported` / `unknown`),
+  declared per connector on the `CONNECTOR` manifest. (#3999)
+- **Uniswap V4: full pool-key and dynamic-fee lifecycle support.** Swaps, LP
+  open/close/collect and teardown now bind to the complete `PoolKey` (custom
+  fee, tick spacing, hook address) instead of assuming fixed fee tiers, with
+  hook admission fail-closed by default. (#3953)
+- **Uniswap V4 on Robinhood Chain** promoted to a supported production
+  lifecycle — exact swaps, and full LP open/close/collect execution and
+  accounting bound to deployed pool/router identities. (#3965, #3969)
+- **BSC equity reference feeds** — `reference_price("GOOGL"/"TSLA", chain="bsc")`
+  now resolve via verified Chainlink consumer proxies. (#3948)
+- **Two reusable bStocks example strategies** — a bounded buy-and-hold
+  allocation and a concentrated LP allocation for GOOGLB/USDT on BSC
+  PancakeSwap V3. (#4012)
 
 ### Changed
 - **`reference_price()` docs now carry a usage warning.** Coverage is a curated
@@ -75,6 +71,162 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   V2 performance/management fees, adapters and the liquidity adapter instead of
   the v1 `fee()`/`timelock()`/queue selectors that revert on V2. The penalised
   `forceDeallocate` exit is opt-in only (see the entry above).
+- **`reference_price("GOOGLB")` now composes an address-bound raw-token price**
+  (`multiplier × GOOGL/USD`) instead of only serving the underlying share
+  price. (#3950)
+- **`strat test` deployment-readiness now requires actual execution by
+  default.** A forced lifecycle action that only HOLDs no longer counts as a
+  passed action; `deployment_ready` requires requested actions to execute and
+  requested teardown to prove a position unwind. Strategy-declared
+  `test_action_expectations` are validated before lifecycle setup. This
+  changes the meaning of `all_passed` / `deployment_ready` in `strat test`
+  JSON output — downstream consumers pinned to the old semantics should
+  update before adopting this release. (#3951)
+- Cleaned up the generated API reference (`llms-full.txt`, `docs/api/`):
+  removed duplicate class headings, per-class serialization boilerplate, and
+  unfenced code examples, shrinking the generated reference from ~862k to
+  ~596k tokens. (#4031)
+- Documented risk-baseline persistence across position reopen/restart and
+  clarified decision-time vs. fill-time in backtest callbacks. (#4020)
+
+### Fixed
+- **`strat new --template dynamic_lp` / `multi_step` no longer centre the LP
+  range on the USD oracle.** Both scaffolds read `market.price()` for the
+  range, the drift test and (for Slipstream) the tick band, which is the
+  pattern the builder skill forbids: the oracle is hardcoded to `1.0` for
+  stablecoins and can drift from the pool for any pair, so a range built from
+  it can mint out of range without error. Generated strategies now emit a
+  `_pool_spot()` that reads `pool_price_by_pair()` in the pool string's
+  orientation, derive Slipstream ticks from the pool's own tick, and hold
+  when the pool is unreadable instead of falling back to the oracle.
+  `market.price()` remains the right call for valuation, sizing and signals. (#4035)
+- **A managed Robinhood Anvil fork no longer starts against a state-pruned
+  RPC.** The measured-retention table recorded Robinhood's public endpoint as
+  archive-capable, which left the chain out of the `fork_requires_archive` set
+  and let a fork start and then die minutes later on an uncached read
+  (`metadata is not found`) — surfacing as an unrelated-looking fixture error.
+  Re-measuring shows the endpoint serves head-1024 and fails head-8192, so the
+  fork now refuses at start, naming the endpoint and the measured window.
+  Configure an archive RPC (`ALCHEMY_API_KEY`, or `ROBINHOOD_RPC_URL`) to fork
+  this chain; `ALMANAK_ALLOW_PRUNED_FORK_RPC=1` remains the escape hatch for
+  deliberately short-lived forks. No other chain's gating changes. (#4017)
+- **`market_session()` is now cheap enough for backtests.** The calendar
+  instance is cached per exchange and the four-day session frame per
+  calendar-day, so a call costs ~3 ms instead of ~200 ms (the library expands
+  holiday rules on every fresh instance). A one-year hourly backtest spends
+  ~25 s on session gating instead of ~30 min. Behaviour is unchanged. (#3992)
+- Generated TA strategies now reuse the configured slippage tolerance and
+  routing instead of ignoring it. (#4027)
+- Generated basis-trade strategies now expose configurable `perp_leverage`
+  and derive collateral from spot notional × hedge ratio ÷ leverage, instead
+  of hardcoding 10x leverage and a fixed 10% allocation. (#4024)
+- `almanak ax` commands resolve unregistered token addresses on-chain again;
+  the CLI executor was not wiring its gateway channel into the shared token
+  resolver. (#3959)
+- The bundled strategy-builder skill now documents `market_session()`, not
+  `reference_price()`, as the market-hours gate. (#3997)
+- A plain ERC-20 address resolved through pool lookup no longer reports a
+  `pool_address` that made it look like a pool target. (#3974)
+- Teardown simulation failures now preserve their underlying cause instead of
+  escalating slippage tolerance (0.5% → 2%) on unrelated infrastructure
+  failures. (#4026)
+- Teardown swaps now require an explicit chain before reading or spending
+  inventory, and scope balance/inventory reads to that chain. (#4025)
+- Teardown verification for held Pendle PT positions now checks the PT
+  balance instead of retained underlying, fixing false FAILED reports after a
+  successful PT sale. (#3986)
+- A successful teardown close no longer loses its enriched execution result
+  to the slippage-ladder summary. (#3956)
+- The Lido demo's teardown now requests WETH — what the connector actually
+  delivers — instead of ETH, fixing a spurious reconciliation incident. (#3955)
+- GMX keeper receipt verification on managed Anvil now receives the execution
+  chain explicitly, fixing unavailable normalized collateral amounts. (#4021)
+- DexScreener pricing now requires a pair to clear a 24h trading-volume floor
+  as well as a liquidity floor, preventing a deep but untraded pool from
+  pricing a token off a stale ratio. (#4013)
+- Gateway operational stores (registry, timeline, lifecycle) are now bound to
+  the owning `GatewayServer` instead of shared process-globally, so two
+  gateways in one process no longer cross-write each other's SQLite files. (#4010)
+- Canonical receipt confirmation on PoA chains (BSC, etc.) now routes through
+  one descriptor-driven async client with the correct middleware, fixing
+  landed transactions reported as retryable failures. (#3994)
+- The gateway's bStocks execution timeline now persists through a native sink
+  instead of an RPC call back into its own event loop, fixing durable
+  timeline rows going missing under load. (#3989)
+- Local gateways now bind registry/lifecycle/timeline stores to the locked
+  state DB instead of a shared default, so a second local gateway can no
+  longer reconcile a different deployment's state; a boot-breaking regression
+  this introduced against pre-existing local databases was fixed in the same
+  slice. (#3982, #3988)
+- `GetTransactionStatus` on PoA chains (BSC) now constructs its client with
+  the required PoA middleware, fixing successful transactions reported as
+  `unknown`. (#3980)
+- Snapshots now persist the wallet/request identity behind each balance, so
+  historical inventory revaluation (G6) requires matching observed endpoint
+  scope instead of silently joining same-symbol holdings across different
+  chains, wallets or contracts. (#3983, #3984)
+- Gateway-owned token/balance discovery (Chainlink, DexScreener, Morpho,
+  MultiDEX) now stays on owned async paths instead of sharing the strategy's
+  synchronous gRPC channel, fixing a self-call deadlock on an uncached
+  request. (#3949)
+- Unregistered-token swaps (e.g. Robinhood USDG → HOOD) now preserve exact
+  contract identity through discovery, pricing and compilation instead of
+  collapsing to a symbol that fails compilation. (#3947)
+- A successful native-input Enso swap no longer reports an unobserved input
+  amount as measured zero; missing swap-input evidence is preserved as
+  unmeasured through receipts, ledger and AX responses. (#4009)
+- Per-transaction native/USD gas cost caps are now enforced through to
+  gateway signing (CLI, multichain and teardown construction), instead of
+  stopping at the gateway boundary. (#4005)
+- The runner now preserves the circuit breaker's error budget for a genuinely
+  unresolved execution (no receipt observed) on every lane, not just
+  single-chain. (#4004)
+- An unresolved submission (accepted by the chain but with no observable
+  receipt) no longer trips the circuit breaker, preventing an unwarranted
+  emergency stop while the original transaction may still be minable. (#4000)
+- A confirmed LP_OPEN whose receipt was unavailable now recovers through the
+  same durable path as SWAP after a cold restart. (#3976)
+- Dependent transactions in a multi-tx bundle (e.g. approve → swap) are now
+  gas-estimated against the post-setup fork state instead of the compiler's
+  static limit, fixing underpriced swaps that revert on-chain. (#3946)
+- Hosted backtests no longer silently drop declared address-first token
+  universes or disable the priceability preflight by default. (#3978)
+- Backtest indicators now reserve the history they actually need
+  (period × timeframe) instead of sharing one 200-tick buffer, fixing daily
+  indicators that could never warm up on hourly data. (#3977)
+- Backtests starved of required input on every eligible entry tick now return
+  `NOT_EVALUABLE` instead of a misleadingly successful passive result. (#3975)
+- Historical PnL backtests now validate declared historical-guard
+  capabilities (e.g. tick-level liquidity depth) before simulating, instead
+  of degrading silently mid-run. (#3963)
+- Funding-rate history reads now preserve the requested chain and forward
+  addresses correctly instead of uppercasing them, fixing failed GMX
+  address-based requests. (#4022)
+- `BSC-USD` pool quotes now resolve to the canonical BSC USDT contract
+  instead of failing SDK resolution. (#3993)
+- Pool TVL is now valued using exact per-token contract addresses instead of
+  a display symbol, so dynamically-resolved tokens are no longer silently
+  unpriced. (#3981)
+- Reference-price requests for an uncatalogued instrument now return a
+  distinct "unsupported instrument" reason instead of the same error as a
+  provider outage. (#3973)
+- Curve pool discovery no longer logs spurious "execution reverted"
+  diagnostics for expected MetaRegistry probe misses, on both required and
+  optional registry reads. (#3996, #3998)
+- Uniswap V4 compilation and execution now retain block-bound allowance
+  evidence (owner/spender/observed amount) through gateway-to-ledger
+  transport, including refusals on insufficient live allowance. (#3967)
+- The shipped `uniswap_v4_hooks` demo now emits `hook_data` in the adapter's
+  required `0x`-prefixed wire format, fixing LP open/close/teardown refusing
+  on every chain. (#4014)
+- bStocks execution now retains a pending transaction instead of recording a
+  false failure when receipt observation is incomplete, and recovers
+  eligible single-chain swaps from a fresh canonical receipt after restart. (#3966)
+
+### Security
+- Managed Anvil per-token funding failure diagnostics no longer leak provider
+  URLs or API keys into gateway logs; failures now report the exception
+  class and attempted-stage list instead of the raw exception/traceback. (#3979)
 
 ## [2.28.0] - 2026-09-08
 

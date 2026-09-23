@@ -41,8 +41,8 @@ Configura estas según los protocolos y funcionalidades que use tu estrategia.
 | Variable | Cuándo se necesita | Obtener clave |
 |----------|-------------|-----------|
 | `ENSO_API_KEY` | Enrutamiento de swaps vía el agregador Enso Finance | [enso.finance](https://enso.finance/) |
-| `COINGECKO_API_KEY` | Mejora los límites de velocidad para datos de precios (funciona sin clave) | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
-| `ALMANAK_API_KEY` | Autenticación de la plataforma Almanak | [app.almanak.co](https://app.almanak.co/) |
+| `COINGECKO_API_KEY` | Clave API de CoinGecko para precios de mercado. También requerida para los datos de pools/OHLCV de CoinGecko Onchain al ejecutar un gateway local. | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
+| `ALMANAK_API_KEYS` | Lista de claves (separadas por comas) aceptadas por el servidor API operator local para autenticar solicitudes entrantes | `key1,key2` |
 | `THEGRAPH_API_KEY` | Backtesting con datos de subgraphs (volúmenes DEX, APYs de préstamo) | [thegraph.com/studio](https://thegraph.com/studio/) |
 
 ---

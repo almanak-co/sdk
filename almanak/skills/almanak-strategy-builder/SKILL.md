@@ -12,7 +12,7 @@ description: >-
   debugging strategy execution on Anvil forks. Do NOT use for general
   smart contract development, Solidity code, or non-strategy SDK internals.
 metadata:
-  version: "2.28.0"
+  version: "2.29.0"
   author: Almanak
   license: Apache-2.0
   type: documentation
@@ -1850,37 +1850,37 @@ class MyStrategy(IntentStrategy):
 
 ### Protocols
 
-| Protocol | Enum Value | Type | Config Name |
-|----------|-----------|------|-------------|
-| Uniswap V3 | `UNISWAP_V3` | DEX / LP | `uniswap_v3` |
-| Uniswap V4 | `UNISWAP_V4` | DEX / LP | `uniswap_v4` |
-| PancakeSwap V3 | `PANCAKESWAP_V3` | DEX / LP | `pancakeswap_v3` |
-| SushiSwap V3 | `SUSHISWAP_V3` | DEX / LP | `sushiswap_v3` |
-| TraderJoe V2 | `TRADERJOE_V2` | DEX / LP | `traderjoe_v2` |
-| Aerodrome | `AERODROME` | DEX / LP | `aerodrome` |
-| Agni Finance | `AGNI_FINANCE` | DEX / LP | `agni_finance` |
-| Enso | `ENSO` | Aggregator | `enso` |
-| Pendle | `PENDLE` | Yield | `pendle` |
-| MetaMorpho | `METAMORPHO` | Lending | `metamorpho` |
-| LiFi | `LIFI` | Bridge | `lifi` |
-| BenQi | `BENQI` | Lending | `benqi` |
-| Joe Lend (DORMANT) | `JOE_LEND` | Lending — wound down on-chain (VIB-3960); compiler short-circuits. Do NOT use. | `joelend` |
-| Silo V2 | `SILO_V2` | Lending | `silo_v2` |
-| Euler V2 | `EULER_V2` | Lending | `euler_v2` |
-| Vault | `VAULT` | ERC-4626 | `vault` |
-| Curve | `CURVE` | DEX / LP | `curve` |
-| Balancer V2 | `BALANCER` | DEX / LP | `balancer_v2` |
-| Aave V3 | * | Lending | `aave_v3` |
-| Morpho Blue | * | Lending | `morpho_blue` |
-| Compound V3 | * | Lending | `compound_v3` |
-| GMX V2 | * | Perps | `gmx_v2` |
-| Hyperliquid | * | Perps | `hyperliquid` |
-| Polymarket | * | Prediction | `polymarket` |
-| Kraken | * | CEX | `kraken` |
-| Lido | * | Staking | `lido` |
-| Lagoon | * | Vault | `lagoon` |
+| Protocol | Type | Config Name |
+|----------|------|-------------|
+| Uniswap V3 | DEX / LP | `uniswap_v3` |
+| Uniswap V4 | DEX / LP | `uniswap_v4` |
+| PancakeSwap V3 | DEX / LP | `pancakeswap_v3` |
+| SushiSwap V3 | DEX / LP | `sushiswap_v3` |
+| TraderJoe V2 | DEX / LP | `traderjoe_v2` |
+| Aerodrome | DEX / LP | `aerodrome` |
+| Agni Finance | DEX / LP | `agni_finance` |
+| Enso | Aggregator | `enso` |
+| Pendle | Yield | `pendle` |
+| MetaMorpho | Lending | `metamorpho` |
+| LiFi | Bridge | `lifi` |
+| BenQi | Lending | `benqi` |
+| Joe Lend (DORMANT) | Lending — wound down on-chain (VIB-3960); compiler short-circuits. Do NOT use. | `joelend` |
+| Silo V2 | Lending | `silo_v2` |
+| Euler V2 | Lending | `euler_v2` |
+| Vault | ERC-4626 | `vault` |
+| Curve | DEX / LP | `curve` |
+| Balancer V2 | DEX / LP | `balancer_v2` |
+| Aave V3 | Lending | `aave_v3` |
+| Morpho Blue | Lending | `morpho_blue` |
+| Compound V3 | Lending | `compound_v3` |
+| GMX V2 | Perps | `gmx_v2` |
+| Hyperliquid | Perps | `hyperliquid` |
+| Polymarket | Prediction | `polymarket` |
+| Kraken | CEX | `kraken` |
+| Lido | Staking | `lido` |
+| Lagoon | Vault | `lagoon` |
 
-\* These protocols do not have a `Protocol` enum value. Use the string config name (e.g., `protocol="aave_v3"`) in intents. They are resolved by the intent compiler and transaction builder directly.
+Protocols are identified by string config name (e.g., `protocol="aave_v3"`) in intents — there is no `Protocol` enum class. Config names are resolved via the connector descriptor registry (`CONNECTOR_REGISTRY` in `almanak/connectors/_connector_descriptor.py`).
 
 ### Additional Connectors
 

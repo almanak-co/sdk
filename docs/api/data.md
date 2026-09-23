@@ -110,10 +110,14 @@ framework reader owns NO HTTP / GraphQL egress — all upstream provider
 calls (The Graph subgraphs → DefiLlama → CoinGecko Onchain) happen inside
 the gateway sidecar; the strategy container holds zero API keys.
 Returns a `DataEnvelope[list[PoolSnapshot]]` covering the requested
-window, with chain-aware canonical address normalization,
-`unmeasured_fields`-tagged Empty != Zero semantics on every snapshot,
-and explicit `TruncationReason` enum carrying soft-cap / page-cap /
-provider-retention semantics. See the [Market Snapshot HOLD
+window, with chain-aware canonical address normalization and
+`unmeasured_fields`-tagged Empty != Zero semantics on every snapshot.
+Internally the reader cursors through the gateway's `TruncationReason`
+enum (soft-cap / page-cap / provider-retention) to re-chunk requests
+that exceed a single call's cap, so callers always get the full
+requested window in one `get_pool_history(...)` call — truncation
+state is not exposed on the returned envelope or snapshots. See the
+[Market Snapshot HOLD
 contract](market.md#hold-contract-for-data-unavailable-errors) for the
 ``DataSourceUnavailable`` propagation rule strategy authors must follow.
 
@@ -137,11 +141,10 @@ contract — a `None` field is named in `unmeasured_fields`.
 VIB-4728: the backtest-deterministic stub. `MarketSnapshotBuilder.for_pnl_backtest_state`
 and `for_paper_fork` inject this reader, which always raises
 `DataSourceUnavailable("backtest")` so a strategy run inside a backtest
-cannot make a history-driven decision implicitly. Verified — via three
-armed monkeypatches on `socket.socket.connect`, `aiohttp.ClientSession`,
-and `grpc.aio.{insecure,secure}_channel` — to construct ZERO network
-primitives across the four-class enumeration (in-process network,
-high-level child-spawn, low-level spawn syscalls, FFI).
+cannot make a history-driven decision implicitly. Verified via exhaustive
+monkeypatching across ~38 network, subprocess, and FFI primitives (in-process
+network, high-level child-spawn, low-level spawn syscalls, FFI) to construct
+ZERO of them.
 
 ::: almanak.framework.data.null_readers.NullPoolHistoryReader
     options:

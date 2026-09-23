@@ -75,7 +75,7 @@ docker-compose exec strategy \
 3. **Mauvaise configuration réseau**
    ```bash
    # Vérifier que les deux conteneurs sont sur le même réseau
-   docker network inspect deploy_internal
+   docker network inspect almanak_internal
    ```
 
 ### Problème : "Method Not Allowed" pour les appels RPC
@@ -89,11 +89,15 @@ docker-compose exec strategy \
 **Solution :**
 
 Seules ces méthodes sont autorisées :
-- `eth_call`, `eth_getBalance`, `eth_getTransactionCount`
-- `eth_getTransactionReceipt`, `eth_getBlockByNumber`, `eth_getBlockByHash`
-- `eth_blockNumber`, `eth_chainId`, `eth_gasPrice`, `eth_estimateGas`
-- `eth_getLogs`, `eth_getCode`, `eth_getStorageAt`
-- `eth_sendRawTransaction`, `net_version`
+- `eth_call`, `eth_simulateV1`, `eth_getBalance`, `eth_getTransactionCount`
+- `eth_getCode`, `eth_getStorageAt`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`
+- `eth_getTransactionByBlockHashAndIndex`, `eth_getTransactionByBlockNumberAndIndex`
+- `eth_blockNumber`, `eth_getBlockByNumber`, `eth_getBlockByHash`
+- `eth_getBlockTransactionCountByHash`, `eth_getBlockTransactionCountByNumber`
+- `eth_getLogs`, `eth_newFilter`, `eth_newBlockFilter`, `eth_getFilterChanges`, `eth_getFilterLogs`, `eth_uninstallFilter`
+- `eth_gasPrice`, `eth_estimateGas`, `eth_feeHistory`, `eth_maxPriorityFeePerGas`
+- `eth_chainId`, `net_version`, `net_listening`, `web3_clientVersion`
+- `eth_sendRawTransaction`
 
 Si vous avez besoin d'une méthode bloquée, contactez le support pour discuter des alternatives.
 
@@ -159,10 +163,10 @@ docker-compose exec gateway env | grep -E 'RPC_URL|ALCHEMY'
    state = GatewayStateManager(gateway_client)
 
    # Sauvegarder
-   await state.save(deployment_id="my-strategy", data=data)
+   await state.save_state(data)  # data.deployment_id set on the StateData
 
    # Charger avec le même ID
-   data = await state.load(deployment_id="my-strategy")  # Même ID !
+   data = await state.load_state(deployment_id="my-strategy")  # Même ID !
    ```
 
 2. **Limite de taille d'état dépassée**
@@ -174,7 +178,7 @@ docker-compose exec gateway env | grep -E 'RPC_URL|ALCHEMY'
 
 3. **Base de données non configurée**
    ```bash
-   # Vérifier DATABASE_URL dans la passerelle
+   # Vérifier que ALMANAK_GATEWAY_DATABASE_URL est défini dans la passerelle
    docker-compose exec gateway env | grep DATABASE_URL
    ```
 
@@ -197,7 +201,7 @@ Utilisez les services fournis par la passerelle à la place :
 
 # Utiliser l'intégration passerelle
 from almanak.framework.integrations import coingecko
-prices = await coingecko.get_price("ethereum")
+prices = coingecko.get_price("ethereum")
 ```
 
 ### Problème : Erreurs de sécurité des conteneurs
@@ -266,11 +270,11 @@ La passerelle supporte la réflexion gRPC pour le débogage :
 grpcurl -plaintext localhost:50051 list
 
 # Décrire un service
-grpcurl -plaintext localhost:50051 describe almanak.gateway.MarketService
+grpcurl -plaintext localhost:50051 describe almanak.gateway.proto.MarketService
 
 # Appeler une méthode
 grpcurl -plaintext -d '{"chain": "arbitrum", "token": "ETH"}' \
-  localhost:50051 almanak.gateway.MarketService/GetPrice
+  localhost:50051 almanak.gateway.proto.MarketService/GetPrice
 ```
 
 ### Logs d'audit

@@ -106,7 +106,7 @@ message PriceResponse {
 from almanak.framework.data.price import GatewayPriceOracle
 
 oracle = GatewayPriceOracle(gateway_client)
-price = await oracle.get_price("ETH", "USD")
+result = await oracle.get_aggregated_price("ETH", "USD")
 ```
 
 ### GetReferencePrice
@@ -574,7 +574,7 @@ rpc SaveLedgerEntry(SaveLedgerEntryRequest) returns (SaveLedgerEntryResponse)
 message SaveLedgerEntryRequest {
   string id = 1;                   // UUID primary key (idempotent ON CONFLICT target)
   string cycle_id = 2;
-  string deployment_id = 3;
+  reserved 3;
   string deployment_id = 4;
   string execution_mode = 5;       // "live" | "paper" | "dry_run"
   int64 timestamp = 6;             // Unix epoch seconds
@@ -593,6 +593,9 @@ message SaveLedgerEntryRequest {
   bool success = 19;
   string error = 20;
   bytes extracted_data_json = 21;  // Serialised extracted_data dict
+  bytes price_inputs_json = 22;    // Token prices at execution time — enables replay
+  bytes pre_state_json = 23;       // On-chain state before execution
+  bytes post_state_json = 24;      // On-chain state after execution
 }
 ```
 
@@ -1015,38 +1018,61 @@ Non-EVM chains:
 
 **Allowed Methods (EVM):**
 - `eth_call`
+- `eth_simulateV1`
 - `eth_getBalance`
 - `eth_getTransactionCount`
-- `eth_getTransactionReceipt`
-- `eth_getBlockByNumber`
-- `eth_getBlockByHash`
-- `eth_blockNumber`
-- `eth_chainId`
-- `eth_gasPrice`
-- `eth_estimateGas`
-- `eth_getLogs`
 - `eth_getCode`
 - `eth_getStorageAt`
-- `eth_sendRawTransaction`
+- `eth_getTransactionByHash`
+- `eth_getTransactionReceipt`
+- `eth_getTransactionByBlockHashAndIndex`
+- `eth_getTransactionByBlockNumberAndIndex`
+- `eth_blockNumber`
+- `eth_getBlockByNumber`
+- `eth_getBlockByHash`
+- `eth_getBlockTransactionCountByHash`
+- `eth_getBlockTransactionCountByNumber`
+- `eth_getLogs`
+- `eth_newFilter`
+- `eth_newBlockFilter`
+- `eth_getFilterChanges`
+- `eth_getFilterLogs`
+- `eth_uninstallFilter`
+- `eth_gasPrice`
+- `eth_estimateGas`
+- `eth_feeHistory`
+- `eth_maxPriorityFeePerGas`
+- `eth_chainId`
 - `net_version`
+- `net_listening`
+- `web3_clientVersion`
+- `eth_sendRawTransaction`
 
 **Allowed Methods (Solana):**
+- `getAccountInfo`
 - `getBalance`
-- `getTokenAccountsByOwner`
+- `getMultipleAccounts`
+- `getProgramAccounts`
 - `getTokenAccountBalance`
+- `getTokenAccountsByOwner`
+- `getTokenLargestAccounts`
+- `getTokenSupply`
 - `getTransaction`
 - `getSignaturesForAddress`
-- `getAccountInfo`
-- `getMultipleAccounts`
-- `getLatestBlockhash`
-- `getSlot`
+- `getSignatureStatuses`
+- `getBlock`
 - `getBlockHeight`
+- `getBlockTime`
+- `getSlot`
 - `getEpochInfo`
-- `getMinimumBalanceForRentExemption`
-- `sendTransaction`
-- `simulateTransaction`
+- `getFeeForMessage`
 - `getRecentPrioritizationFees`
-- `isBlockhashValid`
+- `getMinimumBalanceForRentExemption`
+- `simulateTransaction`
+- `getHealth`
+- `getVersion`
+- `getLatestBlockhash`
+- `sendTransaction`
 
 **Blocked Methods:**
 - `debug_*` - Debugging methods
@@ -2692,8 +2718,8 @@ message OrderStatusResponse {
 
 | Service | Limit |
 |---------|-------|
-| RpcService (EVM chains) | 300 req/min per chain |
-| RpcService (Solana) | 100 req/min |
+| RpcService (EVM chains) | 100 req/min per chain by default; 300 req/min for chains that override it (ethereum, arbitrum, base, optimism, polygon, avalanche, bsc, sonic, plasma) |
+| RpcService (Solana) | 300 req/min |
 | IntegrationService.Binance | 1200 req/min |
 | IntegrationService.CoinGecko | 50 req/min (free tier) |
 | IntegrationService.TheGraph | 100 req/min |

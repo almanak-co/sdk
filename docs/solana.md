@@ -47,87 +47,37 @@ JUPITER_API_KEY=your_jupiter_api_key
 
 ## Demo Strategies
 
-Three reference demos cover representative swap, lending, and LP paths. Copy them from the bundled demo catalog before running them:
+Packaged Solana demo strategies are not yet available in this release -- `almanak strat demo --list` ships EVM strategies only today. To build a Solana strategy now, scaffold one directly and implement `decide()` against the Solana-supporting connectors documented above (Jupiter, Kamino, Drift, Raydium, Orca, Meteora):
 
 ```bash
-almanak strat demo --name solana_swap
-almanak strat demo --name solana_lend
-almanak strat demo --name solana_lp
+uv run almanak strat new --chain solana --template blank -n my_solana_strategy
 ```
 
-### solana_swap -- Token Swap via Jupiter
-
-Swaps a fixed amount of USDC to SOL on every iteration using the Jupiter aggregator. The simplest possible Solana strategy.
-
-**Generated `solana_swap/config.json`:**
-
-```json
-{
-    "from_token": "USDC",
-    "to_token": "SOL",
-    "amount": "0.10",
-    "max_slippage_pct": 1.0,
-    "chain": "solana"
-}
-```
-
-### solana_lend -- Supply USDC to Kamino
-
-Supplies a fixed amount of USDC to Kamino Finance on every iteration. Demonstrates the lending intent path on Solana.
-
-**Generated `solana_lend/config.json`:**
-
-```json
-{
-    "token": "USDC",
-    "amount": "1.0",
-    "chain": "solana"
-}
-```
-
-### solana_lp -- Concentrated LP on Raydium
-
-Opens a concentrated liquidity position on Raydium CLMM in the SOL/USDC pool with a specified price range.
-
-**Generated `solana_lp/config.json`:**
-
-```json
-{
-    "pool": "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv",
-    "amount_sol": "0.001",
-    "amount_usdc": "0.15",
-    "range_lower": "80",
-    "range_upper": "95",
-    "chain": "solana"
-}
-```
+Use the same `Intent` API as EVM chains -- `Intent.swap(...)`, `Intent.supply(...)`, `Intent.lp_open(...)`, etc. -- with `"chain": "solana"` in your strategy's `config.json` and a `protocol` matching one of the connectors above (e.g. `jupiter`, `kamino`, `drift`, `raydium`, `orca`, `meteora`).
 
 ## Running Strategies
 
 Solana strategies run through the gateway, just like EVM strategies. The gateway handles balance queries (via `SolanaBalanceProvider`), execution routing, and RPC access for Solana.
 
 ```bash
-# Copy the reference strategy
-almanak strat demo --name solana_swap
-
 # Real execution on mainnet (gateway auto-starts)
-uv run almanak strat run -d solana_swap --network mainnet
+uv run almanak strat run -d my_solana_strategy --network mainnet
 
 # Dry run (compile intents, no submission)
-uv run almanak strat run -d solana_swap --network mainnet --dry-run
+uv run almanak strat run -d my_solana_strategy --network mainnet --dry-run
 
 # Local testing with solana-test-validator
-uv run almanak strat run -d solana_swap --network anvil
+uv run almanak strat run -d my_solana_strategy --network anvil
 ```
 
 !!! warning
-    On mainnet, Solana strategies execute with **real funds**. Start with the small default amounts in the demo configs.
+    On mainnet, Solana strategies execute with **real funds**. Start with small amounts.
 
 !!! tip
     Use `--dry-run` first to verify that intent compilation succeeds before executing with real funds:
 
     ```bash
-    uv run almanak strat run -d solana_swap --network mainnet --dry-run
+    uv run almanak strat run -d my_solana_strategy --network mainnet --dry-run
     ```
 
 ## Local Testing

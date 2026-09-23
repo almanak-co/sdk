@@ -88,8 +88,8 @@ Desktop config at it:
       "command": "almanak",
       "args": ["mcp", "serve"],
       "env": {
-        "ALMANAK_GATEWAY_GRPC_HOST": "localhost",
-        "ALMANAK_GATEWAY_GRPC_PORT": "50051",
+        "ALMANAK_GATEWAY_HOST": "localhost",
+        "ALMANAK_GATEWAY_PORT": "50051",
         "ALMANAK_PRIVATE_KEY": "your-key"
       }
     }

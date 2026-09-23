@@ -41,8 +41,8 @@
 | 变量 | 何时需要 | 获取密钥 |
 |----------|-------------|-----------|
 | `ENSO_API_KEY` | 通过 Enso Finance 聚合器进行交换路由 | [enso.finance](https://enso.finance/) |
-| `COINGECKO_API_KEY` | 改善价格数据的速率限制（无密钥也可使用） | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
-| `ALMANAK_API_KEY` | Almanak 平台身份验证 | [app.almanak.co](https://app.almanak.co/) |
+| `COINGECKO_API_KEY` | CoinGecko API 密钥，用于市场价格；在本地运行 gateway 时，CoinGecko Onchain 池/OHLCV 数据也需要它 | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
+| `ALMANAK_API_KEYS` | 本地 operator API 服务器接受的入站请求认证密钥列表（逗号分隔） | `key1,key2` |
 | `THEGRAPH_API_KEY` | 使用子图数据进行回测（DEX 交易量、借贷 APY） | [thegraph.com/studio](https://thegraph.com/studio/) |
 
 ---

@@ -39,8 +39,12 @@ If your strategy holds multiple position types, teardown intents must follow thi
 1. **PERP** -- close perpetual positions first (highest risk)
 2. **BORROW** -- repay borrows to free collateral
 3. **SUPPLY** -- withdraw supplied collateral
-4. **LP** -- close liquidity positions
-5. **TOKEN** -- swap remaining tokens to stable
+4. **VAULT** -- redeem ERC-4626 vault shares (must close before LP -- vaults often wrap LPs)
+5. **LP** -- close liquidity positions
+6. **STAKE** -- unstake staked tokens
+7. **PREDICTION** -- close prediction market positions
+8. **CEX** -- withdraw from CEX
+9. **TOKEN** -- swap remaining tokens to stable
 
 ### Example: Swap Strategy Teardown
 
@@ -159,7 +163,7 @@ class MyStrategy(IntentStrategy):
             return self._forced_intent(market)
 
         # Production decide() begins here.
-        rsi = market.indicators.rsi(self.base_token, ...)
+        rsi = market.rsi(self.base_token, ...)
         if rsi.value < self.rsi_oversold:
             return Intent.swap(...)
         return Intent.hold(reason="No signal")

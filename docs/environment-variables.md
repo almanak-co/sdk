@@ -80,7 +80,7 @@ Set these based on which protocols and features your strategy uses.
 |----------|-------------|-----------|
 | `ENSO_API_KEY` | Swap routing via Enso Finance aggregator | [enso.finance](https://enso.finance/) |
 | `COINGECKO_API_KEY` | CoinGecko API key for market prices. Also required for CoinGecko Onchain pool/OHLCV data when running a local gateway. | [coingecko.com/en/api](https://www.coingecko.com/en/api) |
-| `ALMANAK_API_KEY` | Almanak platform authentication | [app.almanak.co](https://app.almanak.co/) |
+| `ALMANAK_API_KEYS` | Comma-separated list of keys accepted by the local operator API server for inbound REST request authentication (not outbound platform auth). | `key1,key2` |
 | `ALMANAK_DASHBOARD_API_KEY` | API key used by the operator dashboard when calling non-gateway REST endpoints (pause/resume go through gateway; `bump-gas` / `cancel-tx` still use REST). Must match a key listed in `ALMANAK_API_KEYS` on the API server. | `dash_abc123...` |
 | `THEGRAPH_API_KEY` | Backtesting with subgraph data (DEX volumes, lending APYs, liquidity depth) | [thegraph.com/studio](https://thegraph.com/studio/) |
 
@@ -260,6 +260,9 @@ across every command (VIB-5163 / GH #2099).
 | `ALMANAK_GATEWAY_AUDIT_LOG_LEVEL` | Log level for audit events (independent of `ALMANAK_GATEWAY_LOG_LEVEL`). | `info` |
 | `ALMANAK_LOG_EMOJIS` | Strategy-process log emoji prefixes. Set to `false` / `0` / `no` to disable. | `true` |
 | `ALMANAK_REDACT_SECRETS` | Redact known secret patterns (private keys, JWTs) from strategy logs. Set to `false` to disable. | `true` |
+| `ALMANAK_GATEWAY_SLACK_WEBHOOK_URL` | Slack incoming-webhook URL the gateway posts strategy alerts to. | unset |
+| `ALMANAK_GATEWAY_TELEGRAM_BOT_TOKEN` | Telegram bot token for alerting; must be set together with `ALMANAK_GATEWAY_TELEGRAM_CHAT_ID`. | unset |
+| `ALMANAK_GATEWAY_TELEGRAM_CHAT_ID` | Telegram chat ID alerts are sent to. | unset |
 
 ---
 
@@ -409,6 +412,7 @@ For strategies that execute through a Gnosis Safe multisig.
 |----------|-------------|
 | `ALMANAK_GATEWAY_SAFE_ADDRESS` | Safe wallet address |
 | `ALMANAK_GATEWAY_SAFE_MODE` | `direct` (Anvil/threshold-1) or `zodiac` (production) |
+| `ALMANAK_GATEWAY_EOA_ADDRESS` | Zodiac mode: explicit submitting EOA address, preferred over deriving one from `PRIVATE_KEY` (platform deployments use a remote signer with no local key) |
 | `ALMANAK_GATEWAY_ZODIAC_ROLES_ADDRESS` | Zodiac Roles module address (zodiac mode) |
 | `ALMANAK_GATEWAY_SIGNER_SERVICE_URL` | Remote signer service URL (zodiac mode) |
 | `ALMANAK_GATEWAY_SIGNER_SERVICE_JWT` | Remote signer JWT (zodiac mode) |
