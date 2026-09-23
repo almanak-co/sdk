@@ -17,9 +17,41 @@ from almanak.framework.intents.compiler_models import IntentCompilerConfig
 from tests.intents.conftest import CHAIN_CONFIGS, get_token_balance, get_token_decimals
 from tests.intents.intent_evidence import decode_explorer_view
 
-BIN_STEP = 20
-SWAP_AMOUNT = Decimal("0.01")
 MAX_SLIPPAGE = Decimal("0.01")
+
+
+@dataclass(frozen=True)
+class TraderJoeVenue:
+    """The one LBPair a chain's exact-swap cell trades, and the size it trades.
+
+    Liquidity Book addresses a pair by (tokenX, tokenY, binStep), so the bin step
+    belongs to the venue and never to a shared default: the same pair at another
+    bin step is a different pool. Sizes are per chain because the registry's pair
+    is denominated in that chain's own asset -- 0.01 is a third of a dollar in
+    WAVAX and twenty-seven in WETH.
+    """
+
+    token_x: str
+    token_y: str
+    bin_step: int
+    amount: Decimal
+
+
+TRADERJOE_VENUES: dict[str, TraderJoeVenue] = {
+    "avalanche": TraderJoeVenue("WAVAX", "USDT", 20, Decimal("0.01")),
+    "arbitrum": TraderJoeVenue("WETH", "USDC", 15, Decimal("0.01")),
+    # BSC's only registered pair (WBNB/USDT/15) is one-sided: the connector measures
+    # 45.8% price impact on 0.01 WBNB and refuses. The safe leg's own swap then pushes
+    # the eoa leg further past the ceiling, so the venue cannot carry both exec paths.
+    # No cell is enrolled for bsc rather than ship one that is green only when it runs
+    # first.
+    # The only registered Ethereum pair is stable/stable, where 0.01 units is a
+    # cent and rounds away against 6-decimal output.
+    "ethereum": TraderJoeVenue("USDT", "USDC", 1, Decimal("10")),
+}
+
+BIN_STEP = TRADERJOE_VENUES["avalanche"].bin_step
+SWAP_AMOUNT = TRADERJOE_VENUES["avalanche"].amount
 
 
 @dataclass(frozen=True)
@@ -32,30 +64,34 @@ class TraderJoeSwapTargetResult:
     compile_metadata: dict[str, Any]
 
 
-def _pair_address(chain: str) -> str:
+def _pair_address(chain: str, venue: TraderJoeVenue) -> str:
     rows = [
         row
         for row in TRADERJOE_V2_LBPAIRS[chain]
-        if row["tokenX"] == "WAVAX" and row["tokenY"] == "USDT" and row["bin_step"] == BIN_STEP
+        if row["tokenX"] == venue.token_x and row["tokenY"] == venue.token_y and row["bin_step"] == venue.bin_step
     ]
-    assert len(rows) == 1, "Exact Trader Joe WAVAX/USDT/20 registry identity is ambiguous"
+    assert len(rows) == 1, (
+        f"Exact Trader Joe {venue.token_x}/{venue.token_y}/{venue.bin_step} registry identity is ambiguous on {chain}"
+    )
     return Web3.to_checksum_address(str(rows[0]["address"]))
 
 
-def _factory_witness(web3: Web3, *, chain: str, token_x: str, token_y: str, pair: str) -> dict[str, Any]:
+def _factory_witness(
+    web3: Web3, *, chain: str, token_x: str, token_y: str, pair: str, bin_step: int = BIN_STEP
+) -> dict[str, Any]:
     factory = TRADERJOE_V2[chain]["factory"]
     calldata = (
         "0x704037bd"
         + token_x.removeprefix("0x").lower().zfill(64)
         + token_y.removeprefix("0x").lower().zfill(64)
-        + f"{BIN_STEP:064x}"
+        + f"{bin_step:064x}"
     )
     block = web3.eth.get_block("latest")
     number = int(block["number"])
     result = web3.eth.call({"to": Web3.to_checksum_address(factory), "data": calldata}, block_identifier=number)
     raw = bytes(result)
     assert len(raw) >= 128
-    assert int.from_bytes(raw[:32], "big") == BIN_STEP
+    assert int.from_bytes(raw[:32], "big") == bin_step
     assert Web3.to_checksum_address("0x" + raw[44:64].hex()) == pair
     return {
         "block_number": number,
@@ -106,19 +142,21 @@ async def run_traderjoe_v2_swap_exact_proof(
     orchestrator: ExecutionOrchestrator,
     price_oracle: dict[str, Decimal],
     intent_evidence: Any,
-    amount: Decimal = SWAP_AMOUNT,
+    chain: str = "avalanche",
+    amount: Decimal | None = None,
     execution_context: ExecutionContext | None = None,
     compiler_config: IntentCompilerConfig | None = None,
     rpc_url: str | None = None,
     gateway_client: Any | None = None,
 ) -> TraderJoeSwapTargetResult:
-    """Prove WAVAX→USDT through the exact live LBPair and bilateral flow."""
-    chain = "avalanche"
+    """Prove tokenX→tokenY through the chain's exact live LBPair and bilateral flow."""
+    venue = TRADERJOE_VENUES[chain]
+    amount = venue.amount if amount is None else amount
     tokens = CHAIN_CONFIGS[chain]["tokens"]
-    token_in, token_out = tokens["WAVAX"], tokens["USDT"]
+    token_in, token_out = tokens[venue.token_x], tokens[venue.token_y]
     router = TRADERJOE_V2[chain]["router"]
     factory = TRADERJOE_V2[chain]["factory"]
-    pair = _pair_address(chain)
+    pair = _pair_address(chain, venue)
     input_decimals = get_token_decimals(web3, token_in)
     output_decimals = get_token_decimals(web3, token_out)
     requested_raw = int(amount * Decimal(10**input_decimals))
@@ -146,7 +184,7 @@ async def run_traderjoe_v2_swap_exact_proof(
     assert compiled.status.value == "SUCCESS", f"Trader Joe SWAP compilation failed: {compiled.error}"
     assert compiled.action_bundle is not None
     metadata = dict(compiled.action_bundle.metadata)
-    assert metadata.get("bin_step") == BIN_STEP
+    assert metadata.get("bin_step") == venue.bin_step
     assert str(metadata.get("router") or "").lower() == router.lower()
     for field in ("amount_out_min_wei", "oracle_expected_wei", "quoter_amount_wei"):
         assert int(metadata.get(field) or 0) > 0, f"Trader Joe compile guard omitted {field}"
@@ -167,7 +205,9 @@ async def run_traderjoe_v2_swap_exact_proof(
     output_received = output_after - output_before
     assert input_spent == requested_raw and output_received > 0
     assert int(parsed.amount_in) == input_spent and int(parsed.amount_out) == output_received
-    witness = _factory_witness(web3, chain=chain, token_x=token_in, token_y=token_out, pair=pair)
+    witness = _factory_witness(
+        web3, chain=chain, token_x=token_in, token_y=token_out, pair=pair, bin_step=venue.bin_step
+    )
     logs = decode_explorer_view(transaction.receipt.to_dict())["logs"]
     wallet = funded_wallet.lower()
     input_transfers = [
@@ -223,7 +263,7 @@ async def run_traderjoe_v2_swap_exact_proof(
         resource_address=pair,
         factory_address=factory,
         router_address=router,
-        bin_step=BIN_STEP,
+        bin_step=venue.bin_step,
         requested_amount_raw=requested_raw,
         wallet_before_raw=input_before,
         wallet_after_raw=input_after,
@@ -254,16 +294,17 @@ async def execute_traderjoe_v2_reverse_cleanup(
     rpc_url: str,
     gateway_client: Any,
     amount_in_raw: int,
+    chain: str = "avalanche",
 ) -> TraderJoeSwapTargetResult:
-    """Swap only the measured forward USDT output back to WAVAX."""
-    chain = "avalanche"
+    """Swap only the measured forward tokenY output back to tokenX."""
+    venue = TRADERJOE_VENUES[chain]
     tokens = CHAIN_CONFIGS[chain]["tokens"]
-    token_in, token_out = tokens["USDT"], tokens["WAVAX"]
-    pair = _pair_address(chain)
+    token_in, token_out = tokens[venue.token_y], tokens[venue.token_x]
+    pair = _pair_address(chain, venue)
     decimals = get_token_decimals(web3, token_in)
     amount_raw = amount_in_raw
     if amount_raw <= 0:
-        raise AssertionError("Trader Joe reverse cleanup requires measured USDT")
+        raise AssertionError(f"Trader Joe reverse cleanup requires a positive measured {venue.token_y} output")
     input_before = get_token_balance(web3, token_in, wallet)
     if input_before < amount_raw:
         raise AssertionError("Trader Joe reverse cleanup output exceeds the wallet balance")
@@ -286,7 +327,7 @@ async def execute_traderjoe_v2_reverse_cleanup(
         gateway_client=gateway_client,
     ).compile(intent)
     assert compiled.status.value == "SUCCESS" and compiled.action_bundle is not None
-    assert compiled.action_bundle.metadata.get("bin_step") == BIN_STEP
+    assert compiled.action_bundle.metadata.get("bin_step") == venue.bin_step
     executed = await orchestrator.execute(compiled.action_bundle, execution_context)
     assert executed.success
     transaction = _target_transaction(executed, wallet=wallet, token_in=token_in, token_out=token_out, pair=pair)

@@ -118,3 +118,31 @@ def test_every_v4_exact_swap_cell_proves_the_contract_it_declares() -> None:
             assert requested == declared, (
                 f"{path.relative_to(root)}::{name} declares {declared!r} but proves {requested!r}"
             )
+
+
+def test_forward_and_reverse_v4_swaps_pin_fee_and_tick_spacing() -> None:
+    """Both legs must name the pool the declared profile resolved.
+
+    The connector's default tier is a different pool. A reverse cleanup that
+    omits the pin spends that pool before the pool-id assertion can refuse it.
+    """
+    path = Path(__file__).resolve().parents[3] / "tests" / "intents" / "_uniswap_v4_exact_proofs.py"
+    tree = ast.parse(path.read_text())
+    pins: list[ast.expr | None] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id != "SwapIntent":
+            continue
+        pins.append(next((keyword.value for keyword in node.keywords if keyword.arg == "swap_params"), None))
+    assert len(pins) == 2, f"expected the forward and reverse SwapIntents, found {len(pins)}"
+    for params in pins:
+        assert isinstance(params, ast.Dict)
+        found: dict[object, ast.expr] = {}
+        for key, value in zip(params.keys, params.values, strict=True):
+            assert isinstance(key, ast.Constant)
+            found[key.value] = value
+        assert set(found) == {"fee_tier", "tick_spacing"}
+        for field, attr in (("fee_tier", "fee"), ("tick_spacing", "tick_spacing")):
+            value = found[field]
+            assert isinstance(value, ast.Attribute)
+            assert isinstance(value.value, ast.Name) and value.value.id == "pool_key"
+            assert value.attr == attr

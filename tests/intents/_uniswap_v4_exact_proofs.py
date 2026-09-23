@@ -163,6 +163,12 @@ async def run_uniswap_v4_swap_exact_proof(
         max_slippage=max_slippage,
         protocol="uniswap_v4",
         chain=chain,
+        # Pin the route to the pool this cell declares. Without the pin, fee_tier
+        # steered only the expectation while the connector routed through its own
+        # default tier, so the cell asserted one pool and traded another -- caught
+        # by pool_id_matches_resolved_pool_key, but only after spending the swap.
+        # V4 addresses a pool by fee AND tickSpacing, so both travel or neither does.
+        swap_params={"fee_tier": pool_key.fee, "tick_spacing": pool_key.tick_spacing},
     )
     intent_evidence.bind(intent)
     compiled = IntentCompiler(
@@ -304,10 +310,9 @@ async def execute_uniswap_v4_exact_reverse_cleanup(
     Mainnet cleanup returns the wallet to flat, so it consumes the amount the
     target swap actually produced rather than a recipe constant: a nominal
     amount would leave dust behind on a favourable fill and revert on an
-    unfavourable one. The reverse leg settles in the same pool the target used,
-    re-derived from the same declared contract profile, so a routing change
-    between the two legs surfaces as a pool-id mismatch instead of silently
-    unwinding somewhere else.
+    unfavourable one. The reverse intent carries the fee and tick spacing that
+    profile resolved. Omitting either lets the connector settle its default
+    pool and spend before the pool-id check can refuse it.
     """
     tokens = CHAIN_CONFIGS[chain]["tokens"]
     token_in = tokens[from_symbol]
@@ -335,6 +340,7 @@ async def execute_uniswap_v4_exact_reverse_cleanup(
         max_slippage=max_slippage,
         protocol="uniswap_v4",
         chain=chain,
+        swap_params={"fee_tier": pool_key.fee, "tick_spacing": pool_key.tick_spacing},
     )
     compiled = IntentCompiler(
         chain=chain,
