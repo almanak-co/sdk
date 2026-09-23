@@ -200,7 +200,7 @@ class TestDefaultRegistry:
 
     def test_gmx_v2_has_perp_actions(self) -> None:
         registry = get_default_registry()
-        info = registry.lookup("arbitrum", "0x1C3fa76e6E1088bCE750f23a5BFcffa1efEF6A41")
+        info = registry.lookup("arbitrum", "0x7dE39FF2e232A2203196788d37e234cF8F1b83f1")
         assert info is not None
         assert info.protocol == "gmx_v2"
         assert set(info.supported_actions) == {"PERP_OPEN", "PERP_CLOSE"}

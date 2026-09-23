@@ -59,8 +59,15 @@ def _normalize_datetime_to_utc(dt: datetime) -> datetime:
 # Constants
 # =============================================================================
 
-# GMX v2 contract addresses per chain (updated Mar 2026)
+# GMX v2 contract addresses per chain (v2.2c, updated Sep 2026)
 # Source: https://github.com/gmx-io/gmx-interface/blob/master/sdk/src/configs/contracts.ts
+#
+# Read addresses from gmx-interface, NOT from gmx-synthetics. At the v2.2c
+# cutover the gmx-synthetics `deployments/` tree, its `release-v2.2c` branch and
+# `docs/*-deployments.md` all still listed the disabled v2.2b addresses, so
+# "verified against gmx-synthetics" would have re-confirmed dead contracts.
+# `order_handler` is not published in either; it is read from the live
+# ExchangeRouter's own `orderHandler()` getter, which cannot drift from it.
 #
 # Note on GMX V2 architecture:
 # - Position state is stored in DataStore, not a separate PositionHandler
@@ -68,8 +75,8 @@ def _normalize_datetime_to_utc(dt: datetime) -> datetime:
 # - Read positions via Reader contract (SyntheticsReader)
 GMX_V2_ADDRESSES: dict[str, dict[str, str]] = {
     "arbitrum": {
-        "exchange_router": "0x1C3fa76e6E1088bCE750f23a5BFcffa1efEF6A41",
-        "order_handler": "0x63492B775e30a9E6b4b4761c12605EB9d071d5e9",
+        "exchange_router": "0x7dE39FF2e232A2203196788d37e234cF8F1b83f1",
+        "order_handler": "0xa5D2d45228ee2E3A18AB122B2cE84997d008f4Eb",
         "data_store": "0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8",
         "reader": "0xf60becbba223EEA9495Da3f606753867eC10d139",
         "synthetics_reader": "0x470fbC46bcC0f16532691Df360A07d8Bf5ee0789",
@@ -80,8 +87,8 @@ GMX_V2_ADDRESSES: dict[str, dict[str, str]] = {
         "event_emitter": "0xC8ee91A54287DB53897056e12D9819156D3822Fb",
     },
     "avalanche": {
-        "exchange_router": "0x8f550E53DFe96C055D5Bdb267c21F268fCAF63B2",
-        "order_handler": "0x823b558B4bC0a2C4974a0d8D7885AA1102D15dEC",
+        "exchange_router": "0xc002Db96E682FFF6675966F959677285a0C45Efa",
+        "order_handler": "0xC993eF170859DAE0241a3c12B8186e456Fa1c1B0",
         "data_store": "0x2F0b22339414ADeD7D5F06f9D604c7fF5b2fe3f6",
         "reader": "0x2eFEE1950ededC65De687b40Fd30a7B5f4544aBd",
         "synthetics_reader": "0x62Cb8740E6986B29dC671B2EB596676f60590A5B",

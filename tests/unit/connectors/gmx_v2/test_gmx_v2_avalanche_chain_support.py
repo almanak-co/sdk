@@ -29,7 +29,7 @@ def stub_gateway() -> MagicMock:
 def test_arbitrum_remains_supported(stub_gateway: MagicMock) -> None:
     sdk = GMXV2SDK(chain="arbitrum", gateway_client=stub_gateway)
     assert sdk.chain == "arbitrum"
-    assert sdk.EXCHANGE_ROUTER_ADDRESS.lower() == "0x1c3fa76e6e1088bce750f23a5bfcffa1efef6a41"
+    assert sdk.EXCHANGE_ROUTER_ADDRESS.lower() == "0x7de39ff2e232a2203196788d37e234cf8f1b83f1"
 
 
 def test_avalanche_construction_succeeds(stub_gateway: MagicMock) -> None:
@@ -37,7 +37,7 @@ def test_avalanche_construction_succeeds(stub_gateway: MagicMock) -> None:
     sdk = GMXV2SDK(chain="avalanche", gateway_client=stub_gateway)
     assert sdk.chain == "avalanche"
     # Compare lowercase to be tolerant of EIP-55 vs lowercase casing in the registry.
-    assert sdk.EXCHANGE_ROUTER_ADDRESS.lower() == "0x8f550e53dfe96c055d5bdb267c21f268fcaf63b2"
+    assert sdk.EXCHANGE_ROUTER_ADDRESS.lower() == "0xc002db96e682fff6675966f959677285a0c45efa"
     assert sdk.WETH_ADDRESS.lower() == "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7", (
         "WETH alias on Avalanche should resolve to WAVAX (the native wrapper)"
     )

@@ -132,7 +132,7 @@ class TestPerpOpenApproval:
 
         # Mock SDK
         mock_sdk = MagicMock()
-        mock_sdk.EXCHANGE_ROUTER_ADDRESS = "0x1C3fa76e6E1088bCE750f23a5BFcffa1efEF6A41"
+        mock_sdk.EXCHANGE_ROUTER_ADDRESS = "0x7dE39FF2e232A2203196788d37e234cF8F1b83f1"
         mock_sdk.ROUTER_ADDRESS = "0x7452c558d45f8afC8c83dAe62C3f8A5BE19c71f6"
         mock_sdk.get_execution_fee.return_value = 100000000000000  # 0.0001 ETH
         mock_tx_data = MagicMock()
@@ -200,7 +200,7 @@ class TestPerpOpenApproval:
         mock_adapter_result.order_key = "0xabc123"
 
         mock_sdk = MagicMock()
-        mock_sdk.EXCHANGE_ROUTER_ADDRESS = "0x1C3fa76e6E1088bCE750f23a5BFcffa1efEF6A41"
+        mock_sdk.EXCHANGE_ROUTER_ADDRESS = "0x7dE39FF2e232A2203196788d37e234cF8F1b83f1"
         mock_sdk.WETH_ADDRESS = market_record("arbitrum", "ETH/USD").long_token
         mock_sdk.get_execution_fee.return_value = 100000000000000
         mock_tx_data = MagicMock()
