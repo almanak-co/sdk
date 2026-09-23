@@ -13,7 +13,7 @@ import shutil
 import sqlite3
 import stat
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -1666,6 +1666,9 @@ def test_intent_junit_seal_maps_results_and_repaints_lab(modules, catalog_path: 
     assert latest[cell_id]["attribution_mode"] == "exact-runtime"
     intent_catalog = json.loads((store / "catalog" / "intent_cells.json").read_text())
     assert latest[cell_id]["catalog_sha256"] == intent_catalog["catalog_sha256"]
+    catalog_cell = next(item for item in intent_catalog["cells"] if item["id"] == cell["id"])
+    assert latest[cell_id]["cell_identity_sha256"] == catalog_cell["cell_identity_sha256"]
+    assert len(latest[cell_id]["cell_identity_sha256"]) == 64
     assert latest[cell_id]["nodeids"] == [nodeid]
     assert latest[cell_id]["receipt_counts"] == {"fail": 0, "hard": 2, "soft": 0}
     assert latest[cell_id]["evidence_status"] == "COMPLETE"
@@ -2375,6 +2378,7 @@ def test_exact_cell_runner_executes_only_planned_node_then_seals(monkeypatch, mo
     qa, _, _ = modules
     cell_id = "intent.aave_v3.arbitrum.SUPPLY.anvil.safe"
     nodeid = "tests/intents/arbitrum/test_aave_v3_lending.py::TestAaveV3SupplyIntent::test_supply_usdc_using_intent"
+    identity = "ab" * 32
     plan = {
         "schema_version": 1,
         "cell_id": cell_id,
@@ -2383,6 +2387,7 @@ def test_exact_cell_runner_executes_only_planned_node_then_seals(monkeypatch, mo
         "chain": "arbitrum",
         "network": "anvil",
         "exec_path": "safe",
+        "cell_identity_sha256": identity,
         "proof_recipe": {"nodeids": [nodeid]},
     }
     monkeypatch.setattr(qa, "intent_cell_plan", lambda **_kwargs: plan)
@@ -2437,6 +2442,9 @@ def test_exact_cell_runner_executes_only_planned_node_then_seals(monkeypatch, mo
     assert seal_call["network"] == "anvil"
     assert seal_call["exec_path"] == "safe"
     assert seal_call["sdk_provenance"] == TEST_SDK
+    # The planned identity has to reach admission, or the seal admits any cell the
+    # catalog currently fingerprints and a redefined cell keeps its old green.
+    assert seal_call["expected_cell_identity_sha256"] == identity
 
 
 def test_exact_cell_runner_rejects_public_rpc_before_creating_attempt(monkeypatch, modules, tmp_path: Path) -> None:
@@ -4664,6 +4672,8 @@ def test_harness_failure_seal_can_never_write_a_pass(modules, catalog_path: Path
     row = json.loads((store / "index" / "intent_latest.json").read_text())[plan["cell_id"]]
     assert row["status"] == "FAIL"
     assert row.get("last_pass_at") is None
+    assert row["cell_identity_sha256"] == plan["cell_identity_sha256"]
+    assert len(row["cell_identity_sha256"]) == 64
 
 
 def test_the_harness_canary_cell_resolves_to_a_real_failing_node(modules) -> None:
@@ -4873,6 +4883,203 @@ def test_composite_lp_close_cannot_change_policy_or_principal_between_receipts(m
     receipts[1]["semantic_verification"]["facts"][key] = {"forged": True}
     with pytest.raises(ValueError, match=key):
         qa._validate_composite_semantic_receipts(receipts, nodeid="forged-collect")
+
+
+def test_exact_runtime_stamp_refuses_a_missing_fingerprint_and_pins_a_present_one(modules):
+    qa, _, _ = modules
+    row = {
+        "intent_cell_id": "intent.uni.base.SWAP.anvil.safe",
+        "base_cell_id": "intent.uni.base.SWAP",
+        "attribution_mode": "exact-runtime",
+    }
+    with pytest.raises(ValueError, match="null cell_identity_sha256"):
+        qa._stamp_sealed_cell_identity(
+            [row],
+            {"cells": [{"id": "intent.uni.base.SWAP", "cell_identity_sha256": None}]},
+            network="anvil",
+            exec_path="safe",
+        )
+    identity = "ab" * 32
+    qa._stamp_sealed_cell_identity(
+        [row],
+        {"cells": [{"id": "intent.uni.base.SWAP", "cell_identity_sha256": identity}]},
+        network="anvil",
+        exec_path="safe",
+    )
+    assert row["cell_identity_sha256"] == identity
+    with pytest.raises(ValueError, match="execution plan"):
+        qa._stamp_sealed_cell_identity(
+            [row],
+            {"cells": [{"id": "intent.uni.base.SWAP", "cell_identity_sha256": identity}]},
+            network="anvil",
+            exec_path="safe",
+            expected_cell_identity_sha256="cd" * 32,
+        )
+
+
+def test_board_pass_requires_cell_identity_or_the_catalog_hash(modules):
+    import subprocess
+
+    qa, _, _ = modules
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required to execute the dashboard identity regression")
+    identity = "aa" * 32
+    cell = {
+        "id": "intent.uni.arbitrum.SWAP",
+        "protocol": "uni",
+        "intent": "SWAP",
+        "chain": "arbitrum",
+        "cell_identity_sha256": identity,
+    }
+    cell_id = cell["id"] + ".anvil.safe"
+    admitted = {
+        "status": "PASS",
+        "evidence_status": "COMPLETE",
+        "contract_status": "VERIFIED",
+        "provenance_status": "VERIFIED",
+        "attribution_mode": "exact-runtime",
+        "network": "anvil",
+        "exec_path": "safe",
+        "intent_cell_id": cell_id,
+        "catalog_sha256": "other-catalog",
+        # Declared so this row exercises the identity gate alone; an undated seal
+        # has an age the board cannot measure and is held back on that count.
+        "sealed_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+    def paint(row):
+        data = {
+            "catalog": [cell],
+            "chains": ["arbitrum"],
+            "catalog_sha256": "current-catalog",
+            "eligibility": {"authenticated_cell_ids": [cell_id]},
+            "index": {cell_id: row},
+        }
+        script = (
+            "const root={innerHTML:'',children:[],appendChild(node){this.children.push(node.innerHTML)}};"
+            "const document={getElementById(){return root},createElement(){return {innerHTML:''}}};"
+            "const location={search:''};function triageMarker(){return ''}\n"
+            + f"const INTENT_DATA={json.dumps(data)};const INTENT_STATUS={qa._intent_status_js()};\n"
+            + qa.INTENT_JS.split("if(!openLinkedCell())render();", 1)[0]
+            + "\nconsole.log(JSON.stringify({state:cellState(catalog[0]),official:official(index[cellId(catalog[0])])}));"
+        )
+        result = subprocess.run([node, "-e", script], text=True, capture_output=True, check=True)
+        return json.loads(result.stdout)
+
+    unstamped = paint(admitted)
+    assert unstamped["state"]["id"] == "catalog_drift"
+    assert unstamped["state"]["label"] == "CATALOG MOVED"
+    assert unstamped["state"]["key"] != "pass"
+    assert unstamped["official"] is False
+
+    stamped = paint({**admitted, "cell_identity_sha256": identity})
+    assert stamped["state"]["id"] == "pass"
+    assert stamped["official"] is True
+
+    redefined = paint({**admitted, "cell_identity_sha256": "bb" * 32, "catalog_sha256": "current-catalog"})
+    assert redefined["state"]["id"] == "map_drift"
+    assert redefined["state"]["label"] == "CELL REDEFINED"
+    assert redefined["official"] is False
+
+
+def test_a_stale_seal_stays_historical_pass_but_loses_current_signoff(modules):
+    import subprocess
+
+    qa, _, _ = modules
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required to execute the dashboard sign-off regression")
+    cell = {"id": "intent.uni.arbitrum.SWAP", "protocol": "uni", "intent": "SWAP", "chain": "arbitrum"}
+    cell_id = cell["id"] + ".anvil.safe"
+
+    def verdicts(sealed_at):
+        row = {
+            "status": "PASS",
+            "evidence_status": "COMPLETE",
+            "contract_status": "VERIFIED",
+            "provenance_status": "VERIFIED",
+            "attribution_mode": "exact-runtime",
+            "network": "anvil",
+            "exec_path": "safe",
+            "intent_cell_id": cell_id,
+            "catalog_sha256": "current-catalog",
+            "sealed_at": sealed_at,
+        }
+        data = {
+            "catalog": [cell],
+            "chains": ["arbitrum"],
+            "catalog_sha256": "current-catalog",
+            "eligibility": {"authenticated_cell_ids": [cell_id]},
+            "index": {cell_id: row},
+        }
+        script = (
+            "const root={innerHTML:'',children:[],appendChild(node){this.children.push(node.innerHTML)}};"
+            "const document={getElementById(){return root},createElement(){return {innerHTML:''}}};"
+            "const location={search:''};function triageMarker(){return ''}\n"
+            + f"const INTENT_DATA={json.dumps(data)};const INTENT_STATUS={qa._intent_status_js()};\n"
+            + qa.INTENT_JS.split("if(!openLinkedCell())render();", 1)[0]
+            + "\nconst r=index[cellId(catalog[0])];console.log(JSON.stringify("
+            "{state:cellState(catalog[0]).id,official:official(r),current:currentlyOfficial(r)}));"
+        )
+        result = subprocess.run([node, "-e", script], text=True, capture_output=True, check=False)
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    fresh = verdicts(datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    assert fresh == {"state": "pass", "official": True, "current": True}
+
+    # pass_stale reads "a historical record, not current coverage". The sign-off pill
+    # and the proof hero make a current claim, so they must not be satisfiable by it.
+    stale = verdicts((datetime.now(UTC) - timedelta(days=45)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    assert stale == {"state": "pass_stale", "official": True, "current": False}
+
+    # An age the board cannot measure must not read as the freshest thing on it.
+    # Clamping a future stamp to zero exempted a forward-skewed sealing clock from
+    # ageing forever, and an unreadable stamp claimed currency nothing established.
+    skewed = verdicts((datetime.now(UTC) + timedelta(days=45)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    assert skewed == {"state": "pass_stale", "official": True, "current": False}
+    unreadable = verdicts("not-a-timestamp")
+    assert unreadable == {"state": "pass_stale", "official": True, "current": False}
+
+
+def test_freshness_kpi_ignores_unauthenticated_rows(modules):
+    import subprocess
+
+    qa, _, _ = modules
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required to execute the dashboard freshness regression")
+    cells = [
+        {"id": "intent.uni.arbitrum.SWAP", "protocol": "uni", "intent": "SWAP", "chain": "arbitrum"},
+        {"id": "intent.uni.base.SWAP", "protocol": "uni", "intent": "SWAP", "chain": "base"},
+    ]
+    fresh = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    data = {
+        "catalog": cells,
+        "chains": ["arbitrum", "base"],
+        "catalog_sha256": "catalog",
+        "eligibility": {"authenticated_cell_ids": [cells[0]["id"] + ".anvil.safe"]},
+        "index": {
+            cells[0]["id"] + ".anvil.safe": {"sealed_at": fresh, "status": "PASS"},
+            cells[1]["id"] + ".anvil.safe": {"sealed_at": fresh, "status": "PASS"},
+        },
+    }
+    script = (
+        "const written={};"
+        "const document={getElementById(id){return {set textContent(v){written[id]=v},get textContent(){return written[id]||''},"
+        "classList:{toggle(){}},setAttribute(){},innerHTML:''}},querySelectorAll(){return []},querySelector(){return null},"
+        "createElement(){return {innerHTML:''}}};"
+        "const location={search:''};function triageMarker(){return ''}\n"
+        + f"const INTENT_DATA={json.dumps(data)};const INTENT_STATUS={qa._intent_status_js()};\n"
+        + qa.INTENT_JS.split("if(!openLinkedCell())render();", 1)[0]
+        + "\nrenderRecorderHealth=function(){};renderAssetCounts=function(){};renderMatrices=function(){};"
+        + "render();console.log(JSON.stringify(written));"
+    )
+    result = subprocess.run([node, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    written = json.loads(result.stdout)
+    assert written["intent-fresh"] == "1/1"
 
 
 def test_lp_contract_upgrade_changes_catalog_identity_but_line_moves_do_not(modules):

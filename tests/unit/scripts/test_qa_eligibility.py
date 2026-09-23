@@ -39,6 +39,38 @@ def test_green_requires_every_admission_axis(field, value):
     assert not intent_product_green({**GREEN, field: value}, CATALOG["catalog_sha256"])
 
 
+def test_per_cell_identity_admits_a_grown_catalog_and_a_mismatch_does_not(tmp_path):
+    identity = "a" * 64
+    catalog = {
+        "catalog_sha256": "d" * 64,
+        "cells": [{"id": "intent.uni.base.SWAP", "cell_identity_sha256": identity}],
+    }
+    current = _seal_product(
+        tmp_path,
+        CELL,
+        {**GREEN, "catalog_sha256": "old", "cell_identity_sha256": identity},
+    )
+    counts = intent_eligibility(tmp_path, catalog, {CELL: current})
+    assert counts["current_product_green"] == 1
+    assert counts["map_drift"] == 0
+    assert intent_product_green(current, catalog["catalog_sha256"], cell_identity_sha256=identity)
+
+    moved_store = tmp_path / "moved"
+    moved = _seal_product(
+        moved_store,
+        CELL,
+        {**GREEN, "catalog_sha256": catalog["catalog_sha256"], "cell_identity_sha256": "b" * 64},
+    )
+    drifted = intent_eligibility(moved_store, catalog, {CELL: moved})
+    assert drifted["current_product_green"] == 0
+    assert drifted["map_drift"] == 1
+    assert not intent_product_green(
+        {**GREEN, "cell_identity_sha256": "b" * 64},
+        GREEN["catalog_sha256"],
+        cell_identity_sha256=identity,
+    )
+
+
 def test_history_catalog_eligibility_and_product_admission_stay_distinct(tmp_path):
     rows = {
         CELL: GREEN,
@@ -110,7 +142,6 @@ def test_real_ledger_controls_gate_trust_but_expiry_preserves_measured_green(tmp
 
 
 def _seal_product(store, cell_id, row, suffix=""):
-
     row = {**row, "intent_cell_id": cell_id}
     run_id = cell_id.replace(".", "-") + suffix
     run_dir = store / "intents" / run_id
@@ -242,3 +273,19 @@ def test_renderer_never_enriches_receipt_path_from_an_unauthenticated_index(tmp_
 def test_malformed_catalog_is_refused_not_reported_as_zero_coverage(tmp_path, cells):
     with pytest.raises(ValueError, match="catalog cells"):
         intent_eligibility(tmp_path, {"cells": cells}, {})
+
+
+def test_an_index_row_cannot_invent_a_fingerprint_the_seal_never_wrote(tmp_path):
+    identity = "a" * 64
+    catalog = {
+        "catalog_sha256": "d" * 64,
+        "cells": [{"id": "intent.uni.base.SWAP", "cell_identity_sha256": identity}],
+    }
+    legacy = _seal_product(tmp_path, CELL, {**GREEN, "catalog_sha256": "old"})
+    assert intent_eligibility(tmp_path, catalog, {CELL: legacy})["map_drift"] == 1
+
+    forged = {**legacy, "cell_identity_sha256": identity}
+    counts = intent_eligibility(tmp_path, catalog, {CELL: forged})
+    assert counts["unverified_index"] == 1
+    assert counts["historical_sealed"] == 0
+    assert counts["current_product_green"] == 0
