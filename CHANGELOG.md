@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.29.1] - 2026-09-24
+
+### Security
+- **Platform backtest callbacks use a run-scoped token instead of the shared
+  platform secret.** The runner and its progress reporter send
+  `x-almanak-backtest-token` from `PLATFORM_CALLBACK_TOKEN`, which the platform
+  mints per execution; the shared `PLATFORM_CALLBACK_SECRET` is used only when
+  no token is set. (#4049)
+- **Backtest runner jobs published from this release no longer carry the
+  platform secret.** The publish template stops mounting
+  `PLATFORM_SECRET_ACCESS_KEY` into the runner container, which executes user
+  strategy code. Sweep runner jobs keep it until the sweep runner gains the
+  same token support.
+
+### Fixed
+- **GMX v2 orders no longer revert.** GMX retired its v2.2b synthetics
+  contracts; the connector now targets the v2.2c `ExchangeRouter` and
+  `OrderHandler` on Arbitrum and Avalanche. (#4046)
+- **QA mainnet lane binds per-chain gas ceilings and prices a leg before
+  funding it.** (#4043)
+- **Intent-certification coverage gap closed**, fixing the money-lane defects it
+  surfaced. (#4040)
+
+### Changed
+- Almanak Code pinned to v1.0.77. (#4045, #4048)
+- 16 exact SWAP proof cells enrolled (Uniswap V4 on six chains, Trader Joe V2 on
+  two). (#4044)
+
 ## [2.29.0] - 2026-09-23
 
 ### Added
