@@ -1217,6 +1217,37 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             return None
         return await self._resolve_evm_address_for_pricing(token, chain)
 
+    async def _manual_override_price(
+        self,
+        token: str,
+        quote: str,
+        resolved_token: Any,
+    ) -> Any:
+        """Operator override for a price every primary source failed to produce.
+
+        ``None`` when overrides are disabled or none is set for this token.
+        ``getattr`` tolerates ``__new__``-constructed test doubles that bypass
+        ``__init__``.
+        """
+        from almanak.framework.data.interfaces import DataSourceUnavailable
+
+        manual_override = getattr(self, "_manual_price_override", None)
+        if manual_override is None:
+            return None
+        try:
+            result = await manual_override.get_price(token, quote, resolved_token=resolved_token)
+        except DataSourceUnavailable:
+            return None
+        logger.warning(
+            "%s/%s unresolved by every primary oracle source; using MANUAL OVERRIDE price=%s "
+            "confidence=%s from an ALMANAK_PRICE_OVERRIDE_* env var, not a real oracle.",
+            token,
+            quote,
+            result.price,
+            result.confidence,
+        )
+        return result
+
     async def GetPrice(
         self,
         request: gateway_pb2.PriceRequest,
@@ -1344,10 +1375,7 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                 except Exception as alias_err:
                     logger.debug(f"GetPrice: alias {alias} also failed for {token}/{quote}: {alias_err}")
 
-            from almanak.framework.data.interfaces import (
-                AllDataSourcesFailed,
-                DataSourceUnavailable,
-            )
+            from almanak.framework.data.interfaces import AllDataSourcesFailed
             from almanak.gateway.data.price.aggregator import _is_known_unpriceable
 
             # Last-resort fallback: consult the manual override source if all
@@ -1356,22 +1384,9 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
             # only activates when no real source produced a result. Logged
             # at WARNING so audit trails always show when a price came from
             # an operator-supplied env var instead of a real oracle.
-            # ``getattr`` tolerates ``__new__``-constructed test doubles that
-            # bypass ``__init__``.
-            manual_override = getattr(self, "_manual_price_override", None)
-            if isinstance(e, AllDataSourcesFailed) and manual_override is not None:
-                try:
-                    override_result = await manual_override.get_price(token, quote)
-                    logger.warning(
-                        "GetPrice: %s/%s unresolved by every primary oracle source; "
-                        "returning MANUAL OVERRIDE price=%s confidence=%s. "
-                        "This value came from an ALMANAK_PRICE_OVERRIDE_* env var, "
-                        "not a real oracle — confirm it is current before acting on it.",
-                        token,
-                        quote,
-                        override_result.price,
-                        override_result.confidence,
-                    )
+            if isinstance(e, AllDataSourcesFailed):
+                override_result = await self._manual_override_price(token, quote, resolved_token)
+                if override_result is not None:
                     return gateway_pb2.PriceResponse(
                         price=str(override_result.price),
                         timestamp=int(override_result.timestamp.timestamp()),
@@ -1379,8 +1394,6 @@ class MarketServiceServicer(gateway_pb2_grpc.MarketServiceServicer):
                         confidence=override_result.confidence,
                         stale=override_result.stale,
                     )
-                except DataSourceUnavailable:
-                    pass  # No override configured — fall through to the normal error path
 
             # Only downgrade to WARNING for known-unpriceable tokens when the failure
             # is "all sources failed" (expected). Keep ERROR for infra/unexpected failures.

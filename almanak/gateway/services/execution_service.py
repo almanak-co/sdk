@@ -303,6 +303,24 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             self._solana_route_refresher = _GatewaySolanaRouteRefresher()
         return self._solana_route_refresher
 
+    async def _aggregated_or_manual_price(self, aggregator: Any, token: str, resolved_token: Any) -> Any:
+        """Aggregated USD price, or the market service's opt-in operator override.
+
+        The override applies only when every primary source failed, exactly as
+        ``GetPrice`` applies it, so compilation and the caller's risk checks
+        value a token the same way.
+        """
+        from almanak.framework.data.interfaces import AllDataSourcesFailed
+
+        try:
+            return await aggregator.get_aggregated_price(token, "USD", resolved_token=resolved_token)
+        except AllDataSourcesFailed:
+            manual_override_price = getattr(self.market_servicer, "_manual_override_price", None)
+            override = await manual_override_price(token, "USD", resolved_token) if manual_override_price else None
+            if override is None:
+                raise
+            return override
+
     async def _fetch_prices_for_tokens(self, tokens: list[str], chain: str) -> _FetchedPriceBatch:
         """Fetch prices from the gateway's own market service for the given tokens.
 
@@ -346,7 +364,7 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
             try:
                 resolver = getattr(self.market_servicer, "_resolve_token_for_pricing", None)
                 resolved_token = await resolver(token, chain) if resolver is not None else None
-                result = await aggregator.get_aggregated_price(token, "USD", resolved_token=resolved_token)
+                result = await self._aggregated_or_manual_price(aggregator, token, resolved_token)
                 if result and result.price:
                     source = str(getattr(result, "source", ""))
                     token_ref = getattr(resolved_token, "token_ref", None)

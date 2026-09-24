@@ -178,6 +178,8 @@ class PolicyDecision:
             dispatching to the gateway.
         approval_estimated_usd: Estimated USD value that triggered approval.
         approval_threshold_usd: The effective threshold that was exceeded.
+        estimated_usd: USD value the spend check measured and accepted. ``None``
+            when spend limits were not evaluated or a leg was unmeasured.
     """
 
     allowed: bool
@@ -186,6 +188,7 @@ class PolicyDecision:
     requires_approval: bool = False
     approval_estimated_usd: Decimal = Decimal("0")
     approval_threshold_usd: Decimal = Decimal("0")
+    estimated_usd: Decimal | None = None
 
     def raise_if_denied(self, tool_name: str) -> None:
         """Raise ``RiskBlockedError`` if the decision is denied."""
@@ -238,6 +241,53 @@ class PolicyStateStore:
             return None
 
 
+# Symbols for which amount == USD is accepted when no oracle price exists.
+# Address-shaped tokens are never in this set. Savings tokens whose exchange
+# rate can sit above $1 are not either: a missing price stays unmeasured.
+_USD_PEGGED_SYMBOLS: frozenset[str] = frozenset(
+    {"USDC", "USDT", "USDS", "USDC.E", "DAI", "FRAX", "LUSD", "USDBC", "USDG", "TUSD", "PYUSD"}
+)
+
+
+def is_usd_pegged(token: object) -> bool:
+    """True only for a recognised USD stablecoin symbol, never a bare address."""
+    text = str(token or "").strip()
+    if not text or text.startswith("0x"):
+        return False
+    return text.upper() in _USD_PEGGED_SYMBOLS
+
+
+def _call_price_lookup(
+    lookup: Callable[..., Decimal | None],
+    token: object,
+    chain: object,
+) -> Decimal | None:
+    """Call a one-arg or ``(token, chain)`` price lookup.
+
+    Production lookups take the chain. Unit fixtures often take only the token.
+    """
+    if chain:
+        try:
+            return lookup(token, chain)
+        except TypeError:
+            return lookup(token)
+    return lookup(token)
+
+
+def _positive_finite(price: object) -> bool:
+    """True only for a real, positive, finite price.
+
+    Infinity passes a bare ``> 0`` and then propagates through the estimate, so
+    the spend check compares a number nothing measured. Accepts float as well as
+    Decimal because unit fixtures supply either.
+    """
+    try:
+        value = price if isinstance(price, Decimal) else Decimal(str(price))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return value.is_finite() and value > 0
+
+
 class PolicyEngine:
     """Evaluates tool calls against an ``AgentPolicy``.
 
@@ -276,6 +326,9 @@ class PolicyEngine:
 
         # Rebalance viability gate
         self._rebalance_approved: bool = False
+        # Tokens whose USD value could not be measured on the latest estimate.
+        # Empty means every priced leg was measured. It is not a zero notional.
+        self._unpriced_legs: list[str] = []
 
         # State persistence (opt-in)
         self._state_store: PolicyStateStore | None = (
@@ -293,6 +346,7 @@ class PolicyEngine:
         requires_approval = False
         approval_estimated_usd = Decimal("0")
         approval_threshold_usd = Decimal("0")
+        estimated_usd: Decimal | None = None
 
         # Resolve effective args: for tools like compile_intent that nest
         # token/protocol/chain inside a "params" dict, merge those fields
@@ -313,7 +367,7 @@ class PolicyEngine:
             # Vault lifecycle tools use raw token amounts (e.g. 10000000 = 10 USDC),
             # not USD values. Skip spend limit checks for these tools.
             if tool_def.name not in _VAULT_LIFECYCLE_TOOLS:
-                self._check_spend_limits(effective_args, violations, suggestions)
+                estimated_usd = self._check_spend_limits(effective_args, violations, suggestions)
                 self._check_position_size(effective_args, violations, suggestions)
                 approval_result = self._check_approval_gate(tool_def, effective_args) if not violations else None
                 if approval_result is not None:
@@ -336,6 +390,7 @@ class PolicyEngine:
             requires_approval=requires_approval,
             approval_estimated_usd=approval_estimated_usd,
             approval_threshold_usd=approval_threshold_usd,
+            estimated_usd=estimated_usd,
         )
 
     def record_trade(self, usd_amount: Decimal, *, success: bool, tool_name: str = "") -> None:
@@ -872,7 +927,7 @@ class PolicyEngine:
                 f"Allowed intent types: {sorted(member.value for member in self.policy.allowed_intent_types)}"
             )
 
-    def _check_spend_limits(self, args: dict, violations: list[str], suggestions: list[str]) -> None:
+    def _check_spend_limits(self, args: dict, violations: list[str], suggestions: list[str]) -> Decimal | None:
         # Auto daily reset: check if 24h has elapsed since last reset
         now = time.time()
         if now - self._day_start >= 86400:
@@ -880,8 +935,22 @@ class PolicyEngine:
 
         total_usd = self._estimate_usd_value(args)
 
+        if self._unpriced_legs:
+            tokens = ", ".join(self._unpriced_legs)
+            violations.append(
+                f"USD value of {tokens} is unmeasured. Refusing the trade rather than "
+                "treating the token amount or zero as dollars."
+            )
+            suggestions.append(
+                "Configure a price source for the token. For a contract no source covers, the gateway "
+                "operator can enable manual price overrides and set "
+                "ALMANAK_PRICE_OVERRIDE_<CHAIN>_<ADDRESS>=<usd price>, with the variable name in "
+                "upper case (for example ALMANAK_PRICE_OVERRIDE_ROBINHOOD_0XEA16...)."
+            )
+            return None
+
         if total_usd == 0:
-            return
+            return total_usd
 
         if total_usd > self.policy.max_single_trade_usd:
             violations.append(
@@ -895,6 +964,7 @@ class PolicyEngine:
                 f"Projected daily spend ${projected:.2f} exceeds daily limit ${self.policy.max_daily_spend_usd}."
             )
             suggestions.append("Wait until the daily limit resets or reduce the trade size.")
+        return total_usd
 
     def _check_rate_limits(self, tool_def: ToolDefinition, violations: list[str], suggestions: list[str]) -> None:
         now = time.time()
@@ -1010,6 +1080,7 @@ class PolicyEngine:
         ]
 
         total_usd = Decimal("0")
+        self._unpriced_legs = []
         for entry in amount_token_pairs:
             amount_key = entry[0]
             token_keys = entry[1:]
@@ -1038,14 +1109,31 @@ class PolicyEngine:
                 if decimals is not None:
                     amount = raw_amount / Decimal(10**decimals)
 
-            usd_amount = amount  # fallback: treat as USD
+            # A token count is not a USD amount. A peg symbol may use amount == USD.
+            # Anything else without a positive price is unmeasured: recorded, then
+            # refused by the spend check. Zero would skip that check.
+            usd_amount: Decimal | None = None
+            # A bridge spends on its source chain, and the executor only copies
+            # from_chain into args["chain"] after this check has run. The same
+            # address is a different asset on another chain, so pricing it there
+            # values one token at another's price.
+            pricing_chain = args.get("from_chain") or args.get("chain")
             if self._price_lookup and token:
                 try:
-                    price = self._price_lookup(token)
-                    if price is not None and price > 0:
+                    price = _call_price_lookup(self._price_lookup, token, pricing_chain)
+                    if price is not None and _positive_finite(price):
                         usd_amount = amount * price
                 except Exception:  # noqa: BLE001
-                    logger.debug("Price lookup failed for token %r, using raw amount as USD estimate", token)
+                    logger.debug("Price lookup failed for token %r", token)
+            if usd_amount is None:
+                if token and not is_usd_pegged(token):
+                    logger.warning(
+                        "No price for token %r; its USD value is unmeasured and is excluded from the estimate.",
+                        token,
+                    )
+                    self._unpriced_legs.append(str(token))
+                    continue
+                usd_amount = amount
 
             total_usd += usd_amount
 

@@ -34,6 +34,9 @@ def _execution_result(
 def gateway() -> MagicMock:
     client = MagicMock()
     client.is_connected = True
+    # These branches are about deposit dispatch, not valuation. An unpriced
+    # underlying is refused before dispatch, so give it a gateway price.
+    client.market.GetPrice.return_value = SimpleNamespace(price="1")
     return client
 
 

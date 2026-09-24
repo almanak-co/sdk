@@ -2119,8 +2119,17 @@ class TestValidateRisk:
         assert len(cb_violations) >= 1
 
     @pytest.mark.asyncio
-    async def test_validate_risk_lp_open_intent(self, executor):
+    async def test_validate_risk_lp_open_intent(self, executor, mock_gateway):
         """LP open intents should map pool tokens correctly for validation."""
+        requested: list[str] = []
+
+        def get_price(request):
+            requested.append(request.token)
+            response = MagicMock()
+            response.price = {"WETH": "3000", "USDC": "1"}[request.token]
+            return response
+
+        mock_gateway.market.GetPrice.side_effect = get_price
         result = await executor.execute(
             "validate_risk",
             {
@@ -2135,8 +2144,41 @@ class TestValidateRisk:
             },
         )
         assert result.status == "success"
-        # Should pass with permissive executor policy
         assert result.data["valid"] is True
+        assert {"WETH", "USDC"} <= set(requested)
+        assert Decimal(result.data["risk_summary"]["estimated_value_usd"]) == Decimal("6200")
+        assert result.data["risk_summary"]["unpriced_tokens"] == []
+
+    @pytest.mark.asyncio
+    async def test_validate_risk_reports_an_unpriced_leg(self, executor):
+        meme = "0xea169512f81d60f9d76b306878ce99808b66b030"
+        result = await executor.execute(
+            "validate_risk",
+            {
+                "intent_type": "swap",
+                "params": {"from_token": meme, "to_token": "ETH", "amount": "16240"},
+                "chain": "arbitrum",
+            },
+        )
+        assert result.status == "success"
+        assert result.data["valid"] is False
+        assert any(item["check"] == "unmeasured_value" for item in result.data["violations"])
+        assert meme in result.data["risk_summary"]["unpriced_tokens"]
+        assert any(item["check"] == "unpriced_tokens" for item in result.data["warnings"])
+
+    @pytest.mark.asyncio
+    async def test_post_trade_spend_never_counts_a_token_amount_as_dollars(self, executor, mock_gateway):
+        """The daily counter must not book 16,240 unpriced tokens as $16,240."""
+        meme = "0xea169512f81d60f9d76b306878ce99808b66b030"
+        mock_gateway.market.GetPrice.side_effect = RuntimeError("All data sources failed")
+
+        unpriced = await executor._estimate_usd_spend(
+            {"token_in": meme, "amount": "16240.321598567055201355", "chain": "arbitrum"}
+        )
+        stable = await executor._estimate_usd_spend({"token_in": "USDC", "amount": "25", "chain": "arbitrum"})
+
+        assert unpriced == Decimal("0")
+        assert stable == Decimal("25")
 
     @pytest.mark.asyncio
     async def test_validate_risk_returns_risk_summary(self, executor):

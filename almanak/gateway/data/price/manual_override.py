@@ -13,6 +13,10 @@ unsupported tokens by setting:
     ALMANAK_PRICE_OVERRIDE_W0G=0.12          # W0G priced at $0.12 USD
     ALMANAK_PRICE_OVERRIDE_WBTC=95000        # WBTC/USD
     ALMANAK_PRICE_OVERRIDE_W0G_WBTC=0.0000012  # W0G/WBTC pair
+    ALMANAK_PRICE_OVERRIDE_ROBINHOOD_0XEA16...=0.00018  # one contract on one chain
+
+Use the chain-and-address form for a contract: a symbol or bare-address key
+applies on every chain the gateway serves.
 
 Confidence is deliberately low (0.5) so that when a real oracle source
 also produces a price, the aggregator prefers the real one. The override
@@ -56,19 +60,25 @@ def _normalise(symbol: str) -> str:
     return symbol.strip().upper()
 
 
-def _lookup(token: str, quote: str) -> Decimal | None:
+def _lookup(token: str, quote: str, identity: tuple[str, str] | None = None) -> Decimal | None:
     """Return the override price for ``token/quote`` if one is configured.
 
     Resolution order:
-      1. ALMANAK_PRICE_OVERRIDE_{TOKEN}_{QUOTE}  (explicit pair)
-      2. ALMANAK_PRICE_OVERRIDE_{TOKEN}          (implicit USD)
+      1. ALMANAK_PRICE_OVERRIDE_{CHAIN}_{ADDRESS}  (USD; the exact contract on
+         that chain, from the resolved ``(canonical chain, address)`` identity)
+      2. ALMANAK_PRICE_OVERRIDE_{TOKEN}_{QUOTE}    (explicit pair)
+      3. ALMANAK_PRICE_OVERRIDE_{TOKEN}            (implicit USD)
 
-    Invalid (non-decimal) values are logged and ignored so a typo can't
-    poison production pricing.
+    Invalid (non-decimal) and non-finite values are logged and ignored so a
+    typo can't poison production pricing.
     """
     token_u = _normalise(token)
     quote_u = _normalise(quote)
-    candidates = [f"{_ENV_PREFIX}{token_u}_{quote_u}"]
+    candidates = []
+    if identity is not None and quote_u == "USD":
+        chain, address = identity
+        candidates.append(f"{_ENV_PREFIX}{_normalise(chain)}_{_normalise(address)}")
+    candidates.append(f"{_ENV_PREFIX}{token_u}_{quote_u}")
     if quote_u == "USD":
         candidates.append(f"{_ENV_PREFIX}{token_u}")
 
@@ -81,8 +91,8 @@ def _lookup(token: str, quote: str) -> Decimal | None:
         except (InvalidOperation, TypeError):
             logger.warning("Invalid manual price override for %s: %r", var, raw)
             continue
-        if value <= 0:
-            logger.warning("Non-positive manual price override for %s: %s", var, value)
+        if not value.is_finite() or value <= 0:
+            logger.warning("Non-finite or non-positive manual price override for %s: %s", var, value)
             continue
         return value
     return None
@@ -127,10 +137,12 @@ class ManualPriceOverrideSource(BasePriceSource):
         token: str,
         quote: str = "USD",
         *,
-        resolved_token: ResolvedToken | None = None,  # noqa: ARG002
+        resolved_token: ResolvedToken | None = None,
     ) -> PriceResult:
         """Return the overridden price, or raise DataSourceUnavailable."""
-        price = _lookup(token, quote)
+        token_ref = getattr(resolved_token, "token_ref", None)
+        identity = getattr(token_ref, "identity_key", None)
+        price = _lookup(token, quote, identity)
         if price is None:
             raise DataSourceUnavailable(
                 source=self.source_name,

@@ -414,17 +414,18 @@ class TestPolicyEnginePriceAwareSpendLimits:
         assert decision.allowed is False
         assert "single-trade limit" in decision.violations[0]
 
-    def test_high_value_token_passes_without_price_lookup(self):
-        """Without price lookup, 100 (raw) < 10000 limit, so it passes (old behavior)."""
+    def test_unpriced_token_is_refused_without_a_price(self):
+        """100 ETH with no price is unmeasured, not a $100 trade under the cap."""
         engine = PolicyEngine(
             AgentPolicy(max_single_trade_usd=Decimal("10000"), cooldown_seconds=0),
         )
         tool = _make_tool("swap_tokens", category=ToolCategory.ACTION, risk_tier=RiskTier.MEDIUM)
         decision = engine.check(tool, {"amount": "100", "token_in": "ETH", "chain": "arbitrum"})
-        assert decision.allowed is True
+        assert decision.allowed is False
+        assert "unmeasured" in decision.violations[0]
 
-    def test_price_lookup_failure_falls_back_to_raw(self):
-        """If price lookup raises, fall back to raw amount (backward compatible)."""
+    def test_price_lookup_failure_does_not_treat_amount_as_usd(self):
+        """A raised lookup must not fall back to the raw token count."""
         def failing_lookup(token):
             raise RuntimeError("gateway down")
 
@@ -433,9 +434,10 @@ class TestPolicyEnginePriceAwareSpendLimits:
             price_lookup=failing_lookup,
         )
         tool = _make_tool("swap_tokens", category=ToolCategory.ACTION, risk_tier=RiskTier.MEDIUM)
-        # 3000 raw < 5000 limit, so should pass even though lookup fails
+        # 3000 would be under the $5000 cap if the count were treated as USD.
         decision = engine.check(tool, {"amount": "3000", "token_in": "ETH", "chain": "arbitrum"})
-        assert decision.allowed is True
+        assert decision.allowed is False
+        assert "unmeasured" in decision.violations[0]
 
     def test_price_lookup_returns_none_falls_back(self):
         """If price lookup returns None, fall back to raw amount."""

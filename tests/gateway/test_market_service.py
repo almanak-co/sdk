@@ -768,7 +768,7 @@ class TestGetPriceManualOverrideFallback:
             assert response.price == "0.12"
             assert response.source == "manual_override"
             assert response.confidence == 0.5
-            service._manual_price_override.get_price.assert_awaited_once_with("W0G", "USD")
+            service._manual_price_override.get_price.assert_awaited_once_with("W0G", "USD", resolved_token=None)
         finally:
             await service.close()
 

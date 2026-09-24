@@ -15,6 +15,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -48,7 +49,7 @@ from almanak.framework.agent_tools.errors import (
     ToolValidationError,
     get_error_category,
 )
-from almanak.framework.agent_tools.policy import AgentPolicy, PolicyEngine
+from almanak.framework.agent_tools.policy import AgentPolicy, PolicyEngine, is_usd_pegged
 from almanak.framework.agent_tools.schemas import ToolResponse, ToolResponseStatus
 from almanak.framework.agent_tools.tracing import DecisionTracer, ToolExecutionTrace, sanitize_args
 
@@ -59,6 +60,10 @@ if TYPE_CHECKING:
     from almanak.framework.gateway_client import GatewayClient
 
 logger = logging.getLogger(__name__)
+
+# USD value the policy accepted for the tool call running in this context. Post-trade
+# spend tracking falls back to it when a price it needs is no longer available.
+_ACCEPTED_SPEND_USD: ContextVar[Decimal | None] = ContextVar("accepted_spend_usd", default=None)
 
 
 def _canonicalize_chain_args(arguments: dict) -> dict:
@@ -1159,9 +1164,11 @@ class ToolExecutor:
         # allows agents to query risk status even when the circuit breaker is
         # tripped (they need to know *why* trading is blocked).
         policy_result_dict: dict | None = None
+        _ACCEPTED_SPEND_USD.set(None)
         if tool_name != "validate_risk":
             self._policy_engine.record_tool_call()
             decision = self._policy_engine.check(tool_def, request.model_dump())
+            _ACCEPTED_SPEND_USD.set(decision.estimated_usd)
             policy_result_dict = {
                 "allowed": decision.allowed,
                 "violations": decision.violations,
@@ -2149,7 +2156,10 @@ class ToolExecutor:
 
         Attempts to look up token prices via the gateway to convert raw
         token amounts to USD. For LP opens, tracks both token_a and token_b.
-        Falls back to the raw amount or zero if price lookup fails.
+        A leg with no price is left out rather than counted as dollars, except a
+        USD-pegged stablecoin symbol, which counts at its amount. When a leg is left
+        out, the value the policy accepted before the trade is the floor, so a
+        price that disappears after execution cannot shrink the daily total.
         """
         from almanak.framework.data.tokens import get_token_resolver
         from almanak.gateway.proto import gateway_pb2
@@ -2175,6 +2185,7 @@ class ToolExecutor:
             spend_items.append((args["token_b"], str(args["amount_b"])))
 
         total = Decimal("0")
+        unmeasured = False
         chain = args.get("chain", self._default_chain)
         for token, amount_str in spend_items:
             if amount_str.lower() == "all":
@@ -2199,14 +2210,27 @@ class ToolExecutor:
             except Exception:  # noqa: BLE001
                 pass
 
+            price: Decimal | None = None
             try:
                 resp = self._client.market.GetPrice(gateway_pb2.PriceRequest(token=token, quote="USD", chain=chain))
                 price = Decimal(str(resp.price))
-                total += raw_amount * price if price > 0 else raw_amount
             except Exception:  # noqa: BLE001 - gateway may raise any gRPC error
-                logger.debug("Could not look up price for %s; using raw amount for spend tracking", token)
+                price = None
+            if price is not None and price.is_finite() and price > 0:
+                total += raw_amount * price
+            elif is_usd_pegged(token):
                 total += raw_amount
+            else:
+                # Same rule as the pre-trade check: a token count is not dollars.
+                logger.warning("No price for %s after the trade; its spend is unmeasured", token)
+                unmeasured = True
 
+        accepted = _ACCEPTED_SPEND_USD.get()
+        if unmeasured and accepted is not None and accepted > total:
+            logger.warning(
+                "Recording the pre-trade accepted value $%s for a trade priced incompletely after execution", accepted
+            )
+            return accepted
         return total
 
     async def _fetch_portfolio_value(self) -> Decimal:
@@ -4785,12 +4809,14 @@ class ToolExecutor:
 
         # Build risk summary.
         estimated_value_usd = self._policy_engine._estimate_usd_value(synthetic_args)
+        unpriced_tokens = list(self._policy_engine._unpriced_legs)
         daily_spend_used = self._policy_engine._daily_spend_usd
         daily_limit = self._policy_engine.policy.max_daily_spend_usd
         daily_remaining = max(daily_limit - daily_spend_used, Decimal("0"))
 
         risk_summary = {
             "estimated_value_usd": str(estimated_value_usd),
+            "unpriced_tokens": unpriced_tokens,
             "daily_spend_remaining_usd": str(daily_remaining),
             "daily_spend_used_usd": str(daily_spend_used),
             "daily_spend_limit_usd": str(daily_limit),
@@ -4868,6 +4894,18 @@ class ToolExecutor:
         policy = self._policy_engine.policy
 
         estimated_usd = self._policy_engine._estimate_usd_value(synthetic_args)
+        unpriced = list(self._policy_engine._unpriced_legs)
+        if unpriced:
+            warnings.append(
+                {
+                    "check": "unpriced_tokens",
+                    "message": (
+                        f"USD value of {', '.join(unpriced)} is unmeasured. "
+                        "The numeric estimate excludes those legs and is not a zero-value trade."
+                    ),
+                    "severity": "warning",
+                }
+            )
 
         # Warn if trade would use >80% of single-trade limit
         if estimated_usd > 0 and policy.max_single_trade_usd > 0:
@@ -4957,6 +4995,8 @@ class ToolExecutor:
             return "token_not_allowed"
         if "intent type" in text_lower and "not allowed" in text_lower:
             return "intent_type_not_allowed"
+        if "unmeasured" in text_lower:
+            return "unmeasured_value"
         if "single-trade limit" in text_lower:
             return "single_trade_limit"
         if "daily" in text_lower and ("spend" in text_lower or "limit" in text_lower):

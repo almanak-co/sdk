@@ -498,6 +498,50 @@ async def test_fetch_prices_returns_decimals_from_aggregator():
     assert result.peg_tokens == frozenset()
 
 
+def _market_with_failing_sources(override: object) -> MagicMock:
+    from almanak.framework.data.interfaces import AllDataSourcesFailed
+
+    aggregator = AsyncMock()
+    aggregator.get_aggregated_price = AsyncMock(side_effect=AllDataSourcesFailed(errors={"dexscreener": "no pairs"}))
+    market = MagicMock()
+    market._ensure_initialized = AsyncMock()
+    market._aggregator_for = MagicMock(return_value=aggregator)
+    market._resolve_token_for_pricing = AsyncMock(
+        return_value=SimpleNamespace(token_ref=TokenRef(chain="robinhood", address=_MEME, decimals=18))
+    )
+    market._manual_override_price = AsyncMock(return_value=override)
+    return market
+
+
+_MEME = "0xea169512f81d60f9d76b306878ce99808b66b030"
+
+
+@pytest.mark.asyncio
+async def test_fetch_prices_uses_the_market_override_when_every_source_fails():
+    """Compilation sees the same opt-in override GetPrice returns, keyed by contract."""
+    service = ExecutionServiceServicer(GatewaySettings())
+    override = SimpleNamespace(price=Decimal("0.00018"), source="manual_override")
+    service.market_servicer = _market_with_failing_sources(override)
+
+    result = await service._fetch_prices_for_tokens([_MEME], "robinhood")
+
+    assert result.prices[f"robinhood:{_MEME}"] == Decimal("0.00018")
+    assert result.sources[f"robinhood:{_MEME}"] == "manual_override"
+    service.market_servicer._manual_override_price.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_fetch_prices_leaves_the_token_unpriced_without_an_override(caplog):
+    service = ExecutionServiceServicer(GatewaySettings())
+    service.market_servicer = _market_with_failing_sources(None)
+
+    with caplog.at_level("WARNING", logger="almanak.gateway.services.execution_service"):
+        result = await service._fetch_prices_for_tokens([_MEME], "robinhood")
+
+    assert result.prices == {}
+    assert f"Self-serve price fetch failed for {_MEME} on robinhood" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_fetch_prices_handles_partial_failures(caplog):
     """_fetch_prices_for_tokens returns available prices even if some fail."""

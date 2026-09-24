@@ -279,6 +279,29 @@ class TestFullAgentLoopSimulation:
         assert len(executor._policy_engine._trades_this_hour) == 2
 
     @pytest.mark.asyncio
+    async def test_daily_spend_keeps_the_accepted_value_when_the_post_trade_price_fails(self, mock_gw):
+        """A price that disappears after execution must not record the trade as $0."""
+        executor = _make_executor(mock_gw, allowed_tokens=["WETH", "USDC"], max_daily_spend_usd=Decimal("10000"))
+        _setup_compile_response(mock_gw)
+        _setup_execute_response(mock_gw, tx_hashes=["0xtx1"])
+        priced = MagicMock(price="2000", source="coingecko", timestamp=1700000000)
+
+        def get_price(request):
+            if mock_gw.execution.Execute.called:
+                raise RuntimeError("All data sources failed")
+            return priced
+
+        mock_gw.market.GetPrice.side_effect = get_price
+
+        result = await executor.execute(
+            "swap_tokens",
+            {"token_in": "WETH", "token_out": "USDC", "amount": "1.5", "chain": "arbitrum"},
+        )
+
+        assert result.status == "success"
+        assert executor._policy_engine._daily_spend_usd == Decimal("3000")
+
+    @pytest.mark.asyncio
     async def test_batch_get_balances_in_full_loop(self, mock_gw):
         """Agent uses batch_get_balances to get portfolio overview."""
         executor = _make_executor(mock_gw)

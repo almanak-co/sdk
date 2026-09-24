@@ -2,10 +2,12 @@
 
 import os
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
 from almanak.framework.data.interfaces import DataSourceUnavailable
+from almanak.framework.data.tokens import TokenRef
 from almanak.gateway.data.price.manual_override import ManualPriceOverrideSource
 
 
@@ -77,6 +79,36 @@ class TestManualPriceOverrideSource:
             await source.get_price("W0G", "USD")
 
         monkeypatch.setenv("ALMANAK_PRICE_OVERRIDE_W0G", "-1")
+        with pytest.raises(DataSourceUnavailable):
+            await source.get_price("W0G", "USD")
+
+    @pytest.mark.asyncio
+    async def test_chain_and_address_key_prices_that_contract_only(self, source, monkeypatch, clean_env):
+        """The chain-scoped key needs the resolved identity; another chain does not match."""
+        meme = "0xea169512f81d60f9d76b306878ce99808b66b030"
+        monkeypatch.setenv(f"ALMANAK_PRICE_OVERRIDE_ROBINHOOD_{meme.upper()}", "0.00018")
+        on_robinhood = SimpleNamespace(token_ref=TokenRef(chain="robinhood", address=meme, decimals=18))
+        on_arbitrum = SimpleNamespace(token_ref=TokenRef(chain="arbitrum", address=meme, decimals=18))
+
+        result = await source.get_price(meme, "USD", resolved_token=on_robinhood)
+        assert result.price == Decimal("0.00018")
+        with pytest.raises(DataSourceUnavailable):
+            await source.get_price(meme, "USD", resolved_token=on_arbitrum)
+        with pytest.raises(DataSourceUnavailable):
+            await source.get_price(meme, "USD")
+
+    @pytest.mark.asyncio
+    async def test_chain_key_uses_the_canonical_chain_name(self, source, monkeypatch, clean_env):
+        """A caller that says bnb must hit the bsc key the operator documented."""
+        token = "0x55d398326f99059ff775485246999027b3197955"
+        monkeypatch.setenv(f"ALMANAK_PRICE_OVERRIDE_BSC_{token.upper()}", "1.001")
+        resolved = SimpleNamespace(token_ref=TokenRef(chain="bnb", address=token, decimals=18))
+        result = await source.get_price(token, "USD", resolved_token=resolved)
+        assert result.price == Decimal("1.001")
+
+    @pytest.mark.asyncio
+    async def test_non_finite_value_rejected(self, source, monkeypatch, clean_env):
+        monkeypatch.setenv("ALMANAK_PRICE_OVERRIDE_W0G", "Infinity")
         with pytest.raises(DataSourceUnavailable):
             await source.get_price("W0G", "USD")
 
