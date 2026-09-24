@@ -763,6 +763,98 @@ def test_post_start_callback_uses_start_endpoint_without_json(monkeypatch: pytes
     ]
 
 
+def _capture_callback_headers(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str]]:
+    headers: list[dict[str, str]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+    def fake_post(url: str, **kwargs: Any) -> Response:
+        headers.append(kwargs["headers"])
+        return Response()
+
+    monkeypatch.setattr(runner.requests, "post", fake_post)
+    return headers
+
+
+def test_callbacks_send_only_run_scoped_token_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    headers = _capture_callback_headers(monkeypatch)
+    env = _env(PLATFORM_CALLBACK_TOKEN="v1.1790000000.mac")
+
+    runner.post_start_callback(env)
+    runner.post_callback(env, {"status": "COMPLETED"})
+
+    assert headers == [{"x-almanak-backtest-token": "v1.1790000000.mac"}] * 2
+    assert env.callback_headers == {"x-almanak-backtest-token": "v1.1790000000.mac"}
+
+
+@pytest.mark.parametrize("token", ["", "   "])
+def test_callbacks_fall_back_to_legacy_secret_without_token(monkeypatch: pytest.MonkeyPatch, token: str) -> None:
+    headers = _capture_callback_headers(monkeypatch)
+    env = _env(PLATFORM_CALLBACK_TOKEN=token)
+
+    runner.post_start_callback(env)
+    runner.post_callback(env, {"status": "COMPLETED"})
+
+    assert headers == [{"x-almanak-secret-key": "secret"}] * 2
+    assert env.callback_headers == {"x-almanak-secret-key": "secret"}
+
+
+def test_from_env_accepts_run_scoped_token_without_static_secret() -> None:
+    env = _env(PLATFORM_CALLBACK_TOKEN=" v1.1790000000.mac\n", PLATFORM_CALLBACK_SECRET="")
+
+    assert env.platform_callback_token == "v1.1790000000.mac"
+    assert env.callback_headers == {"x-almanak-backtest-token": "v1.1790000000.mac"}
+
+
+def test_from_env_requires_static_secret_without_token() -> None:
+    with pytest.raises(runner.PlatformRunnerError, match="PLATFORM_CALLBACK_SECRET"):
+        _env(PLATFORM_CALLBACK_TOKEN="", PLATFORM_CALLBACK_SECRET="")
+
+
+def test_callback_credentials_stay_out_of_env_repr_and_redacted_text() -> None:
+    env = _env(PLATFORM_CALLBACK_TOKEN="v1.1790000000.mac", PLATFORM_CALLBACK_SECRET="callback-secret")
+
+    assert "v1.1790000000.mac" not in repr(env)
+    assert "callback-secret" not in repr(env)
+    assert runner._redact("bad header v1.1790000000.mac / callback-secret", env) == (
+        "bad header PLATFORM_CALLBACK_TOKEN / PLATFORM_CALLBACK_SECRET"
+    )
+
+
+def test_progress_reporter_uses_run_scoped_callback_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    reporters: list[tuple[str, dict[str, str]]] = []
+
+    class FakeReporter:
+        def __init__(self, url: str, headers: dict[str, str]) -> None:
+            reporters.append((url, dict(headers)))
+
+        def __enter__(self) -> FakeReporter:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def observe(self, _progress: object) -> None:
+            return None
+
+    async def fake_run(_env: runner.PlatformRunnerEnv) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(runner, "ProgressReporter", FakeReporter)
+    monkeypatch.setattr(runner, "_run_platform_backtest", fake_run)
+
+    asyncio.run(runner.run_platform_backtest(_env(PLATFORM_CALLBACK_TOKEN="v1.1790000000.mac")))
+
+    assert reporters == [
+        (
+            "https://api.example/internal/backtest/test-123/progress",
+            {"x-almanak-backtest-token": "v1.1790000000.mac"},
+        )
+    ]
+
+
 def test_run_platform_backtest_posts_start_before_clone(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     env = _env(STRATEGY_WORKDIR=str(tmp_path / "strategy"))
     order: list[str] = []
@@ -906,6 +998,7 @@ def test_main_posts_failed_callback_for_env_validation_error(monkeypatch: pytest
     monkeypatch.setenv("GCS_BUCKET", "bucket")
     monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
     monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+    monkeypatch.delenv("PLATFORM_CALLBACK_TOKEN", raising=False)
 
     def fake_post_callback_values(**kwargs: Any) -> None:
         calls.append(kwargs)
@@ -919,6 +1012,7 @@ def test_main_posts_failed_callback_for_env_validation_error(monkeypatch: pytest
             "platform_callback_url": "https://api.example",
             "backtest_id": "test-123",
             "platform_callback_secret": "secret",
+            "platform_callback_token": "",
             "payload": {
                 "status": "FAILED",
                 "error_message": error_message,
@@ -937,6 +1031,23 @@ def test_main_posts_failed_callback_for_env_validation_error(monkeypatch: pytest
             },
         }
     ]
+
+
+def test_main_env_validation_failure_authenticates_with_run_scoped_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    headers = _capture_callback_headers(monkeypatch)
+
+    monkeypatch.setenv("BACKTEST_ID", "test-123")
+    monkeypatch.setenv("COMMIT_SHA", "main")
+    monkeypatch.setenv("GITHUB_CLONE_URL", "https://x-access-token:token@example/repo.git")
+    monkeypatch.setenv("STRATEGY_CONFIG", "{}")
+    monkeypatch.setenv("BACKTEST_CONFIG", "{}")
+    monkeypatch.setenv("GCS_BUCKET", "bucket")
+    monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
+    monkeypatch.delenv("PLATFORM_CALLBACK_SECRET", raising=False)
+    monkeypatch.setenv("PLATFORM_CALLBACK_TOKEN", "v1.1790000000.mac")
+
+    assert runner.main() == 1
+    assert headers == [{"x-almanak-backtest-token": "v1.1790000000.mac"}]
 
 
 def test_main_posts_failed_callback_for_runtime_error(monkeypatch: pytest.MonkeyPatch) -> None:

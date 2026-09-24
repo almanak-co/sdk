@@ -9,7 +9,9 @@ from scripts.platform_backtest_progress import ProgressReporter
 def test_coalesces_ticks_and_only_sends_new_observations(monkeypatch):
     post = Mock()
     monkeypatch.setattr("scripts.platform_backtest_progress.requests.post", post)
-    reporter = ProgressReporter("https://platform/internal/backtest/run/progress", "secret")
+    reporter = ProgressReporter(
+        "https://platform/internal/backtest/run/progress", {"x-almanak-backtest-token": "v1.1790000000.mac"}
+    )
     for tick in range(100):
         reporter.observe(BacktestProgress("simulating", tick, 100, tick * 1000))
     post.assert_not_called()
@@ -21,12 +23,13 @@ def test_coalesces_ticks_and_only_sends_new_observations(monkeypatch):
     assert payload["simulation_elapsed_ms"] == 99000
     assert payload["observed_at"].endswith("+00:00")
     assert post.call_args.kwargs["timeout"] == (2, 2)
+    assert post.call_args.kwargs["headers"] == {"x-almanak-backtest-token": "v1.1790000000.mac"}
 
 
 def test_old_backend_or_network_failure_does_not_fail_run(monkeypatch):
     post = Mock(side_effect=requests.HTTPError("404"))
     monkeypatch.setattr("scripts.platform_backtest_progress.requests.post", post)
-    reporter = ProgressReporter("https://platform/progress", "secret")
+    reporter = ProgressReporter("https://platform/progress", {"x-almanak-secret-key": "secret"})
     reporter.observe(BacktestProgress("preparing"))
     reporter._send_latest()
     post.side_effect = None
@@ -46,7 +49,7 @@ def test_reporter_shutdown_is_nonblocking(monkeypatch):
         return Mock()
 
     monkeypatch.setattr("scripts.platform_backtest_progress.requests.post", blocked_post)
-    reporter = ProgressReporter("https://platform/progress", "secret", interval=0.001)
+    reporter = ProgressReporter("https://platform/progress", {"x-almanak-secret-key": "secret"}, interval=0.001)
     try:
         with reporter:
             reporter.observe(BacktestProgress("simulating", 1, 100))
