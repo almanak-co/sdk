@@ -545,3 +545,270 @@ def test_finding_instances_are_appended_to_report(tmp_path: Path) -> None:
     assert "empty_teardown_intents" in codes
     # Every appended finding is a real Finding dataclass (not a dict).
     assert all(isinstance(f, Finding) for f in report.findings)
+
+
+_TEARDOWN_SWAP_HEADER = (
+    "from almanak.framework.intents import Intent, SwapIntent\n"
+    "from almanak.framework.strategies.intent_strategy import IntentStrategy\n\n"
+    "class S(IntentStrategy):\n"
+)
+
+
+def _missing_chain_lines(report: CheckReport) -> list[int | None]:
+    return [f.line for f in report.findings if f.code == "teardown_swap_missing_chain"]
+
+
+def test_teardown_swap_via_shared_helper_without_chain_is_error(tmp_path: Path) -> None:
+    """A close helper shared by runtime and teardown is reported at the helper's swap."""
+    strategy_file = _write(
+        tmp_path / "helper",
+        _TEARDOWN_SWAP_HEADER + "    def decide(self, market):\n"
+        "        return self._close()\n"
+        "    def _close(self):\n"
+        '        return Intent.swap(from_token="A", to_token="B", amount="all")\n'
+        "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        "        return [self._close()]\n",
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == [8]
+    finding = next(f for f in report.findings if f.code == "teardown_swap_missing_chain")
+    assert finding.severity == Severity.ERROR
+    assert finding.layer == Layer.AST
+
+
+@pytest.mark.parametrize(
+    "construction",
+    [
+        'Intent.swap(from_token="A", to_token="B", amount="all")',
+        'SwapIntent(from_token="A", to_token="B", amount="all")',
+    ],
+    ids=["intent_swap", "swap_intent_model"],
+)
+def test_direct_teardown_swap_without_chain_is_error(tmp_path: Path, construction: str) -> None:
+    strategy_file = _write(
+        tmp_path / f"direct_{hash(construction) & 0xFFFF:x}",
+        _TEARDOWN_SWAP_HEADER + "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        f"        return [{construction}]\n",
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == [6]
+
+
+@pytest.mark.parametrize(
+    "construction",
+    [
+        'Intent.swap(from_token="A", to_token="B", amount="all", chain=self.chain)',
+        'Intent.swap("A", "B", None, "all", None, None, None, self.chain)',
+        'Intent.swap(from_token="A", to_token="B", amount="all", **self._swap_kwargs)',
+    ],
+    ids=["keyword_chain", "positional_chain", "forwarded_kwargs"],
+)
+def test_teardown_swap_that_may_pass_chain_is_not_flagged(tmp_path: Path, construction: str) -> None:
+    strategy_file = _write(
+        tmp_path / f"ok_{hash(construction) & 0xFFFF:x}",
+        _TEARDOWN_SWAP_HEADER + "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        f"        return [{construction}]\n",
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == []
+
+
+def test_runtime_only_swap_without_chain_is_not_flagged(tmp_path: Path) -> None:
+    """Runtime swaps default to the strategy chain; only teardown-reachable swaps are checked."""
+    strategy_file = _write(
+        tmp_path / "runtime",
+        _TEARDOWN_SWAP_HEADER + "    def decide(self, market):\n"
+        '        return Intent.swap(from_token="A", to_token="B", amount_usd=3)\n'
+        "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        '        return [Intent.swap(from_token="B", to_token="A", amount="all", chain=self.chain)]\n',
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == []
+
+
+def test_model_copy_that_binds_chain_is_not_flagged(tmp_path: Path) -> None:
+    """A chain-less helper is safe when teardown returns a copy that sets chain."""
+    strategy_file = _write(
+        tmp_path / "model_copy_bound",
+        _TEARDOWN_SWAP_HEADER + "    def decide(self, market):\n"
+        "        return self._close()\n"
+        "    def _close(self):\n"
+        '        return Intent.swap(from_token="A", to_token="B", amount="all")\n'
+        "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        '        return [self._close().model_copy(update={"chain": self.chain})]\n',
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == []
+
+
+def test_model_copy_without_chain_is_still_flagged(tmp_path: Path) -> None:
+    strategy_file = _write(
+        tmp_path / "model_copy_other",
+        _TEARDOWN_SWAP_HEADER + "    def _close(self):\n"
+        '        return Intent.swap(from_token="A", to_token="B", amount="all")\n'
+        "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        '        return [self._close().model_copy(update={"max_slippage": 1})]\n',
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == [6]
+
+
+def test_model_copy_with_unreadable_update_is_not_flagged(tmp_path: Path) -> None:
+    """An update dict the scan cannot read may bind chain, so the omission is not certain."""
+    strategy_file = _write(
+        tmp_path / "model_copy_dynamic",
+        _TEARDOWN_SWAP_HEADER + "    def _close(self):\n"
+        '        return Intent.swap(from_token="A", to_token="B", amount="all")\n'
+        "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        "        return [self._close().model_copy(update=self._swap_update)]\n",
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == []
+
+
+def test_uncalled_nested_swap_is_not_flagged(tmp_path: Path) -> None:
+    strategy_file = _write(
+        tmp_path / "nested_unused",
+        _TEARDOWN_SWAP_HEADER + "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        "        def _unused():\n"
+        '            return Intent.swap(from_token="A", to_token="B", amount="all")\n'
+        '        return [Intent.swap(from_token="A", to_token="B", amount="all", chain=self.chain)]\n',
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == []
+
+
+def test_called_nested_swap_without_chain_is_error(tmp_path: Path) -> None:
+    strategy_file = _write(
+        tmp_path / "nested_called",
+        _TEARDOWN_SWAP_HEADER + "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        "        def _close():\n"
+        '            return Intent.swap(from_token="A", to_token="B", amount="all")\n'
+        "        return [_close()]\n",
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == [7]
+
+
+def test_appended_teardown_swap_without_chain_is_error(tmp_path: Path) -> None:
+    strategy_file = _write(
+        tmp_path / "appended",
+        _TEARDOWN_SWAP_HEADER + "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        "        intents = []\n"
+        "        for _token in self.tokens:\n"
+        '            intents.append(Intent.swap(from_token="A", to_token="B", amount="all"))\n'
+        "        return intents\n",
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == [8]
+
+
+def test_swap_passed_through_helper_parameter_is_error(tmp_path: Path) -> None:
+    strategy_file = _write(
+        tmp_path / "param",
+        _TEARDOWN_SWAP_HEADER + "    def _wrap(self, intent):\n"
+        "        return intent\n"
+        "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        '        return [self._wrap(Intent.swap(from_token="A", to_token="B", amount="all"))]\n',
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == [8]
+
+
+def test_keyword_argument_swap_without_chain_is_error(tmp_path: Path) -> None:
+    strategy_file = _write(
+        tmp_path / "kw_param",
+        _TEARDOWN_SWAP_HEADER + "    def _wrap(self, intent):\n"
+        "        return intent\n"
+        "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        '        return [self._wrap(intent=Intent.swap(from_token="A", to_token="B", amount="all"))]\n',
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == [8]
+
+
+def test_called_lambda_without_chain_is_error_and_unused_lambda_is_not(tmp_path: Path) -> None:
+    unused = _write(
+        tmp_path / "lambda_unused",
+        _TEARDOWN_SWAP_HEADER + "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        '        _unused = lambda: Intent.swap(from_token="A", to_token="B", amount="all")\n'
+        '        return [Intent.swap(from_token="A", to_token="B", amount="all", chain=self.chain)]\n',
+    )
+    called = _write(
+        tmp_path / "lambda_called",
+        _TEARDOWN_SWAP_HEADER + "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        '        build = lambda: Intent.swap(from_token="A", to_token="B", amount="all")\n'
+        "        return [build()]\n",
+    )
+    assert _missing_chain_lines(_scan(unused)[0]) == []
+    assert _missing_chain_lines(_scan(called)[0]) == [6]
+
+
+def test_assigned_swap_returned_from_branch_is_error(tmp_path: Path) -> None:
+    strategy_file = _write(
+        tmp_path / "branch",
+        _TEARDOWN_SWAP_HEADER + "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        "        if self.ready:\n"
+        '            intent = Intent.swap(from_token="A", to_token="B", amount="all")\n'
+        "        else:\n"
+        '            intent = Intent.swap(from_token="A", to_token="B", amount="all", chain=self.chain)\n'
+        "        return [intent]\n",
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == [7]
+
+
+def test_unpack_from_helper_carries_chainless_swap(tmp_path: Path) -> None:
+    strategy_file = _write(
+        tmp_path / "unpack_missing",
+        _TEARDOWN_SWAP_HEADER + "    def _finalize(self, intent):\n"
+        "        return intent, None\n"
+        "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        '        intent, _meta = self._finalize(Intent.swap(from_token="A", to_token="B", amount="all"))\n'
+        "        return [intent]\n",
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == [8]
+
+
+def test_unpack_from_chain_bound_copy_is_not_flagged(tmp_path: Path) -> None:
+    strategy_file = _write(
+        tmp_path / "unpack_bound",
+        _TEARDOWN_SWAP_HEADER + "    def _finalize(self, intent):\n"
+        '        return intent.model_copy(update={"chain": self.chain}), None\n'
+        "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        '        intent = Intent.swap(from_token="A", to_token="B", amount="all")\n'
+        "        intent, _meta = self._finalize(intent)\n"
+        "        return [intent]\n",
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == []
+
+
+def test_try_else_returns_chainless_swap(tmp_path: Path) -> None:
+    strategy_file = _write(
+        tmp_path / "try_else",
+        _TEARDOWN_SWAP_HEADER + "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        "        try:\n"
+        '            intent = Intent.swap(from_token="A", to_token="B", amount="all")\n'
+        "        except ValueError:\n"
+        "            return []\n"
+        "        else:\n"
+        "            return [intent]\n",
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == [7]
+
+
+def test_loop_else_returns_appended_swap(tmp_path: Path) -> None:
+    strategy_file = _write(
+        tmp_path / "loop_else",
+        _TEARDOWN_SWAP_HEADER + "    def generate_teardown_intents(self, mode=None, market=None):\n"
+        "        intents = []\n"
+        "        for _token in self.tokens:\n"
+        '            intents.append(Intent.swap(from_token="A", to_token="B", amount="all"))\n'
+        "        else:\n"
+        "            return intents\n",
+    )
+    report, _facts = _scan(strategy_file)
+    assert _missing_chain_lines(report) == [8]

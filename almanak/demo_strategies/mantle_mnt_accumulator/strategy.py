@@ -401,14 +401,15 @@ class MantleMntAccumulator(IntentStrategy):
 
         # On teardown, sell all target token back to stables. Deliberately
         # unpinned (no swap_params): risk reduction must not block on the
-        # pinned pool's health.
+        # pinned pool's health. Teardown never infers a missing chain, so unlike the
+        # runtime swaps in decide() this one must name it.
         return [
             Intent.swap(
-                    chain=self.chain,
                 from_token=self.target_token,
                 to_token=self.stable_token,
                 amount="all",
                 max_slippage=max_slippage,
                 protocol=self.protocol,
+                chain=self.chain,
             )
         ]

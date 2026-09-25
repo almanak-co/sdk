@@ -119,6 +119,7 @@ class TestPoolPinning:
         swaps = [i for i in intents if i.intent_type.value == "SWAP"]
         assert swaps, "teardown should sweep the base token"
         assert all(i.swap_params is None for i in swaps)
+        assert all(i.chain == config["chain"] for i in swaps)
         assert all(i.max_slippage == Decimal(config["max_slippage_bps"]) / Decimal("10000") for i in swaps)
 
     def test_malformed_pool_rejected_at_preflight(self, config: dict) -> None:

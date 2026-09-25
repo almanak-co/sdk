@@ -1410,6 +1410,21 @@ class _StrategyASTVisitor(ast.NodeVisitor):
                         line=method.lineno,
                     )
                 )
+            for call in _teardown_swaps_without_chain(method_defs):
+                self.report.add(
+                    Finding(
+                        severity=Severity.ERROR,
+                        layer=Layer.AST,
+                        code="teardown_swap_missing_chain",
+                        message=(
+                            "A swap reachable from generate_teardown_intents() does not pass chain=. "
+                            "Teardown never infers a missing chain and rejects this swap, so the "
+                            "position cannot be closed. Pass chain=self.chain (or the position's chain)."
+                        ),
+                        file=str(self.strategy_file),
+                        line=call.lineno,
+                    )
+                )
         elif not inherits_stateless:
             # StatelessStrategy subclasses inherit a valid default implementation.
             self.report.add(
@@ -1541,6 +1556,667 @@ def _is_trivial_teardown_body(func: ast.FunctionDef | ast.AsyncFunctionDef) -> b
             return True
 
     return False
+
+
+# Positional index of ``chain`` in ``Intent.swap(...)``.
+_INTENT_SWAP_CHAIN_POSITION = 7
+
+# ``list.append`` / ``extend`` / ``insert`` mutate the receiver and return None.
+_LIST_MUTATIONS = frozenset({"append", "extend", "insert"})
+
+
+@dataclass(frozen=True)
+class _SwapFlow:
+    """Swaps a value may still carry, plus a nested callable stored in a name."""
+
+    missing: frozenset[ast.Call] = field(default_factory=frozenset)
+    nested: ast.AST | None = None
+
+
+@dataclass
+class _FlowEnv:
+    """Name bindings for one function scope. Nested defs read, and list-mutate, the parent."""
+
+    bindings: dict[str, _SwapFlow] = field(default_factory=dict)
+    parent: _FlowEnv | None = None
+    local_names: set[str] = field(default_factory=set)
+
+    def copy(self) -> _FlowEnv:
+        return _FlowEnv(bindings=dict(self.bindings), parent=self.parent, local_names=set(self.local_names))
+
+    def child(self, local_names: set[str]) -> _FlowEnv:
+        return _FlowEnv(parent=self, local_names=set(local_names))
+
+    def get(self, name: str) -> _SwapFlow:
+        if name in self.local_names:
+            return self.bindings.get(name, _SwapFlow())
+        if name in self.bindings:
+            return self.bindings[name]
+        if self.parent is not None:
+            return self.parent.get(name)
+        return _SwapFlow()
+
+    def set(self, name: str, flow: _SwapFlow) -> None:
+        self.local_names.add(name)
+        self.bindings[name] = flow
+
+    def mutate(self, name: str, flow: _SwapFlow) -> None:
+        """Update a binding in place. Closure list mutations write through to the outer scope."""
+        if name in self.local_names or self.parent is None:
+            self.local_names.add(name)
+            self.bindings[name] = flow
+            return
+        self.parent.mutate(name, flow)
+
+
+@dataclass(frozen=True)
+class _FlowCtx:
+    receiver: str | None
+    method_defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef]
+    stack: frozenset[int]
+
+
+def _union_flows(*flows: _SwapFlow) -> _SwapFlow:
+    missing: set[ast.Call] = set()
+    nested: ast.AST | None = None
+    for flow in flows:
+        missing |= set(flow.missing)
+        if flow.nested is None:
+            continue
+        nested = flow.nested if nested is None or nested is flow.nested else None
+    return _SwapFlow(missing=frozenset(missing), nested=nested)
+
+
+def _join_into(dest: _FlowEnv, branches: list[_FlowEnv]) -> None:
+    names = set().union(*(branch.bindings for branch in branches))
+    dest.bindings = {
+        name: _union_flows(*(branch.bindings.get(name, _SwapFlow()) for branch in branches)) for name in names
+    }
+    dest.local_names.update(*(branch.local_names for branch in branches))
+
+
+def _swap_call_chain_unset(node: ast.Call) -> bool:
+    """True for an ``Intent.swap(...)`` / ``SwapIntent(...)`` call that never passes ``chain``.
+
+    ``**kwargs`` forwarding is treated as possibly supplying ``chain``: the scan
+    reports only calls where the omission is certain.
+    """
+    func = node.func
+    is_intent_swap = (
+        isinstance(func, ast.Attribute)
+        and func.attr == "swap"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "Intent"
+    )
+    is_swap_intent = (isinstance(func, ast.Name) and func.id == "SwapIntent") or (
+        isinstance(func, ast.Attribute) and func.attr == "SwapIntent"
+    )
+    if not (is_intent_swap or is_swap_intent):
+        return False
+    if any(keyword.arg in ("chain", None) for keyword in node.keywords):
+        return False
+    if any(isinstance(arg, ast.Starred) for arg in node.args):
+        return False
+    return not (is_intent_swap and len(node.args) > _INTENT_SWAP_CHAIN_POSITION)
+
+
+def _is_swap_constructor(node: ast.Call) -> bool:
+    func = node.func
+    if isinstance(func, ast.Attribute) and func.attr == "swap" and isinstance(func.value, ast.Name):
+        return func.value.id == "Intent"
+    if isinstance(func, ast.Name):
+        return func.id == "SwapIntent"
+    return isinstance(func, ast.Attribute) and func.attr == "SwapIntent"
+
+
+def _dict_binds_chain(node: ast.Dict) -> bool | None:
+    """Whether a dict literal certainly contains ``chain``. ``None`` means unpacked and unknown."""
+    unpacked = False
+    for key in node.keys:
+        if key is None:
+            unpacked = True
+            continue
+        if isinstance(key, ast.Constant) and key.value == "chain":
+            return True
+    return None if unpacked else False
+
+
+def _model_copy_binds_chain(call: ast.Call) -> bool | None:
+    """``True``/``False`` when ``update`` certainly does or does not set ``chain``.
+
+    ``None`` means this is not ``model_copy``, or the update value is not a literal
+    the scan can read. An unreadable update is not a certain omission.
+    """
+    func = call.func
+    if not isinstance(func, ast.Attribute) or func.attr != "model_copy":
+        return None
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            return None
+        if keyword.arg != "update":
+            continue
+        if isinstance(keyword.value, ast.Dict):
+            return _dict_binds_chain(keyword.value)
+        return None
+    return False
+
+
+def _target_names(target: ast.AST) -> set[str]:
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, ast.Starred):
+        return _target_names(target.value)
+    if isinstance(target, ast.Tuple | ast.List):
+        return {name for element in target.elts for name in _target_names(element)}
+    return set()
+
+
+def _scoped_assigned_names(stmts: Sequence[ast.stmt]) -> set[str]:
+    """Names assigned in this scope, excluding bodies of nested functions."""
+    names: set[str] = set()
+    pending: list[ast.AST] = list(stmts)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            names.add(node.name)
+            continue
+        if isinstance(node, ast.Lambda | ast.ClassDef):
+            continue
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                names.update(_target_names(target))
+        elif isinstance(node, ast.AnnAssign | ast.AugAssign | ast.For | ast.AsyncFor):
+            names.update(_target_names(node.target))
+        elif isinstance(node, ast.NamedExpr):
+            names.update(_target_names(node.target))
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        elif isinstance(node, ast.match_case):
+            names.update(_pattern_binding_names(node.pattern))
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            names.update(_target_names(node.optional_vars))
+        pending.extend(ast.iter_child_nodes(node))
+    return names
+
+
+def _function_local_names(fn: ast.AST) -> set[str]:
+    assert isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
+    args = fn.args
+    names = {arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+    if args.vararg is not None:
+        names.add(args.vararg.arg)
+    if args.kwarg is not None:
+        names.add(args.kwarg.arg)
+    if isinstance(fn, ast.Lambda):
+        return names
+    return names | _scoped_assigned_names(fn.body)
+
+
+def _store_name(target: ast.Name, value: ast.AST, env: _FlowEnv, ctx: _FlowCtx) -> None:
+    if isinstance(value, ast.Attribute):
+        # ``alias = intent.chain`` reads a field; it does not carry the swap.
+        _flow_expr(value, env, ctx)
+        env.set(target.id, _SwapFlow())
+        return
+    env.set(target.id, _flow_expr(value, env, ctx))
+
+
+def _store_sequence(target: ast.AST, value: ast.AST, env: _FlowEnv, ctx: _FlowCtx) -> bool:
+    if not isinstance(target, ast.Tuple | ast.List) or not isinstance(value, ast.Tuple | ast.List):
+        return False
+    if len(target.elts) != len(value.elts):
+        return False
+    for element, item in zip(target.elts, value.elts, strict=True):
+        _store_target(element, item, env, ctx)
+    return True
+
+
+def _store_subscript(target: ast.AST, value: ast.AST, env: _FlowEnv, ctx: _FlowCtx) -> bool:
+    if not isinstance(target, ast.Subscript) or not isinstance(target.value, ast.Name):
+        return False
+    env.mutate(target.value.id, _union_flows(env.get(target.value.id), _flow_expr(value, env, ctx)))
+    return True
+
+
+def _store_target(target: ast.AST, value: ast.AST, env: _FlowEnv, ctx: _FlowCtx) -> None:
+    if isinstance(target, ast.Name):
+        _store_name(target, value, env, ctx)
+        return
+    if isinstance(target, ast.Starred):
+        _store_target(target.value, value, env, ctx)
+        return
+    if _store_sequence(target, value, env, ctx):
+        return
+    if _store_subscript(target, value, env, ctx):
+        return
+    # A call or other non-literal can still produce every unpacked name.
+    flow = _flow_expr(value, env, ctx)
+    for name in _target_names(target):
+        env.set(name, flow)
+
+
+def _assign_targets(targets: list[ast.expr], value: ast.AST, env: _FlowEnv, ctx: _FlowCtx) -> None:
+    for target in targets:
+        _store_target(target, value, env, ctx)
+
+
+def _flow_passthrough(node: ast.AST, env: _FlowEnv, ctx: _FlowCtx) -> _SwapFlow:
+    inner = getattr(node, "value", None)
+    if inner is None:
+        return _SwapFlow()
+    return _flow_expr(inner, env, ctx)
+
+
+def _flow_union_children(node: ast.AST, env: _FlowEnv, ctx: _FlowCtx) -> _SwapFlow:
+    flow = _SwapFlow()
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.Lambda):
+            flow = _union_flows(flow, _SwapFlow(nested=child))
+            continue
+        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+        if isinstance(child, ast.expr):
+            flow = _union_flows(flow, _flow_expr(child, env, ctx))
+            continue
+        flow = _union_flows(flow, _flow_union_children(child, env, ctx))
+    return flow
+
+
+def _flow_named(node: ast.NamedExpr, env: _FlowEnv, ctx: _FlowCtx) -> _SwapFlow:
+    flow = _flow_expr(node.value, env, ctx)
+    if isinstance(node.target, ast.Name):
+        env.set(node.target.id, flow)
+    return flow
+
+
+def _flow_attribute(node: ast.Attribute, env: _FlowEnv, ctx: _FlowCtx) -> _SwapFlow:
+    # Evaluating the receiver can build a swap, but the attribute itself is not that swap.
+    _flow_expr(node.value, env, ctx)
+    return _SwapFlow()
+
+
+def _list_mutation_flow(call: ast.Call, env: _FlowEnv, ctx: _FlowCtx) -> _SwapFlow | None:
+    func = call.func
+    if not isinstance(func, ast.Attribute) or func.attr not in _LIST_MUTATIONS:
+        return None
+    if not isinstance(func.value, ast.Name):
+        return None
+    added = _SwapFlow()
+    if func.attr == "append" and call.args:
+        added = _flow_expr(call.args[0], env, ctx)
+    elif func.attr == "extend" and call.args:
+        added = _flow_expr(call.args[0], env, ctx)
+    elif func.attr == "insert" and len(call.args) >= 2:
+        added = _flow_expr(call.args[1], env, ctx)
+    current = env.get(func.value.id)
+    env.mutate(func.value.id, _union_flows(current, added))
+    return _SwapFlow()
+
+
+def _positional_params(fn: ast.AST, *, skip_self: bool) -> list[ast.arg]:
+    assert isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
+    params = [*fn.args.posonlyargs, *fn.args.args]
+    if skip_self and params:
+        return params[1:]
+    return params
+
+
+def _call_forwards_arguments(call: ast.Call) -> bool:
+    """``*args`` / ``**kwargs`` can hide ``chain``, so the scan must not treat them as a certain omission."""
+    return any(isinstance(arg, ast.Starred) for arg in call.args) or any(
+        keyword.arg is None for keyword in call.keywords
+    )
+
+
+def _flow_call_arguments(call: ast.Call, env: _FlowEnv, ctx: _FlowCtx) -> None:
+    for arg in call.args:
+        _flow_expr(arg, env, ctx)
+    for keyword in call.keywords:
+        _flow_expr(keyword.value, env, ctx)
+
+
+def _bind_parameters(
+    fn: ast.AST,
+    call: ast.Call,
+    caller_env: _FlowEnv,
+    callee_env: _FlowEnv,
+    ctx: _FlowCtx,
+    *,
+    skip_self: bool,
+) -> None:
+    assert isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
+    if _call_forwards_arguments(call):
+        _flow_call_arguments(call, caller_env, ctx)
+        return
+    params = _positional_params(fn, skip_self=skip_self)
+    flows = [_flow_expr(arg, caller_env, ctx) for arg in call.args]
+    for param, flow in zip(params, flows, strict=False):
+        callee_env.set(param.arg, flow)
+    names = {param.arg for param in (*params, *fn.args.kwonlyargs)}
+    for keyword in call.keywords:
+        if keyword.arg in names:
+            callee_env.set(keyword.arg, _flow_expr(keyword.value, caller_env, ctx))
+
+
+def _invoke(
+    fn: ast.AST, call: ast.Call, caller_env: _FlowEnv, ctx: _FlowCtx, *, skip_self: bool
+) -> frozenset[ast.Call]:
+    if id(fn) in ctx.stack:
+        return frozenset()
+    assert isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
+    if isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef) and ctx.method_defs.get(fn.name) is fn:
+        receiver = _method_receiver_name(fn)
+        callee_env = _FlowEnv(local_names=_function_local_names(fn))
+        bind_skip_self = True
+    else:
+        receiver = ctx.receiver
+        callee_env = caller_env.child(_function_local_names(fn))
+        bind_skip_self = skip_self
+    child_ctx = _FlowCtx(receiver, ctx.method_defs, ctx.stack | {id(fn)})
+    _bind_parameters(fn, call, caller_env, callee_env, ctx, skip_self=bind_skip_self)
+    if isinstance(fn, ast.Lambda):
+        return _flow_expr(fn.body, callee_env, child_ctx).missing
+    return _exec_block(fn.body, callee_env, child_ctx)
+
+
+def _callee(call: ast.Call, env: _FlowEnv, ctx: _FlowCtx) -> tuple[ast.AST, bool] | None:
+    func = call.func
+    if isinstance(func, ast.Lambda):
+        return func, False
+    if isinstance(func, ast.Name):
+        nested = env.get(func.id).nested
+        if nested is not None:
+            return nested, False
+        return None
+    if (
+        ctx.receiver is not None
+        and isinstance(func, ast.Attribute)
+        and isinstance(func.value, ast.Name)
+        and func.value.id == ctx.receiver
+    ):
+        method = ctx.method_defs.get(func.attr)
+        if method is not None:
+            return method, True
+    return None
+
+
+def _flow_call(call: ast.Call, env: _FlowEnv, ctx: _FlowCtx) -> _SwapFlow:
+    mutated = _list_mutation_flow(call, env, ctx)
+    if mutated is not None:
+        return mutated
+    binds_chain = _model_copy_binds_chain(call)
+    if binds_chain is not None or (isinstance(call.func, ast.Attribute) and call.func.attr == "model_copy"):
+        base = _flow_expr(call.func.value, env, ctx) if isinstance(call.func, ast.Attribute) else _SwapFlow()
+        for arg in call.args:
+            _flow_expr(arg, env, ctx)
+        for keyword in call.keywords:
+            _flow_expr(keyword.value, env, ctx)
+        # Runtime validates the returned object, so a copy that binds chain is not an omission.
+        if binds_chain is False:
+            return _SwapFlow(missing=base.missing)
+        return _SwapFlow()
+    if _swap_call_chain_unset(call):
+        for arg in call.args:
+            _flow_expr(arg, env, ctx)
+        for keyword in call.keywords:
+            _flow_expr(keyword.value, env, ctx)
+        return _SwapFlow(missing=frozenset({call}))
+    if _is_swap_constructor(call):
+        for arg in call.args:
+            _flow_expr(arg, env, ctx)
+        for keyword in call.keywords:
+            _flow_expr(keyword.value, env, ctx)
+        return _SwapFlow()
+    resolved = _callee(call, env, ctx)
+    if resolved is not None:
+        fn, skip_self = resolved
+        return _SwapFlow(missing=_invoke(fn, call, env, ctx, skip_self=skip_self))
+    for child in ast.iter_child_nodes(call):
+        if isinstance(child, ast.expr):
+            _flow_expr(child, env, ctx)
+    return _SwapFlow()
+
+
+def _flow_expr(node: ast.AST, env: _FlowEnv, ctx: _FlowCtx) -> _SwapFlow:
+    if isinstance(node, ast.Call):
+        return _flow_call(node, env, ctx)
+    if isinstance(node, ast.Name):
+        return env.get(node.id)
+    if isinstance(node, ast.Lambda):
+        return _SwapFlow(nested=node)
+    if isinstance(node, ast.Attribute):
+        return _flow_attribute(node, env, ctx)
+    if isinstance(node, ast.NamedExpr):
+        return _flow_named(node, env, ctx)
+    if isinstance(node, ast.Await | ast.Yield | ast.YieldFrom | ast.Starred):
+        return _flow_passthrough(node, env, ctx)
+    if isinstance(node, ast.Constant | ast.Slice):
+        return _SwapFlow()
+    return _flow_union_children(node, env, ctx)
+
+
+def _exec_assign(stmt: ast.Assign, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    _assign_targets(stmt.targets, stmt.value, env, ctx)
+    return frozenset()
+
+
+def _exec_annassign(stmt: ast.AnnAssign, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    if stmt.value is not None:
+        _store_target(stmt.target, stmt.value, env, ctx)
+    return frozenset()
+
+
+def _exec_augassign(stmt: ast.AugAssign, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    flow = _flow_expr(stmt.value, env, ctx)
+    if isinstance(stmt.target, ast.Name):
+        env.mutate(stmt.target.id, _union_flows(env.get(stmt.target.id), flow))
+    return frozenset()
+
+
+def _exec_return(stmt: ast.Return, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    if stmt.value is None:
+        return frozenset()
+    return _flow_expr(stmt.value, env, ctx).missing
+
+
+def _exec_expr_stmt(stmt: ast.Expr, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    value = stmt.value
+    if isinstance(value, ast.Yield | ast.YieldFrom):
+        return _flow_passthrough(value, env, ctx).missing
+    _flow_expr(value, env, ctx)
+    return frozenset()
+
+
+def _exec_branches(env: _FlowEnv, ctx: _FlowCtx, bodies: list[Sequence[ast.stmt]]) -> frozenset[ast.Call]:
+    returned: set[ast.Call] = set()
+    copies: list[_FlowEnv] = []
+    for body in bodies:
+        branch = env.copy()
+        returned |= set(_exec_block(body, branch, ctx))
+        copies.append(branch)
+    if copies:
+        _join_into(env, copies)
+    return frozenset(returned)
+
+
+def _exec_if(stmt: ast.If, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    _flow_expr(stmt.test, env, ctx)
+    return _exec_branches(env, ctx, [stmt.body, stmt.orelse])
+
+
+def _exec_for(stmt: ast.For | ast.AsyncFor, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    iter_flow = _flow_expr(stmt.iter, env, ctx)
+    ran = env.copy()
+    _store_flow_on_target(stmt.target, iter_flow, ran)
+    # Loop else runs after the body and sees its assignments. The other branch is zero iterations.
+    returned = set(_exec_block([*stmt.body, *stmt.orelse], ran, ctx))
+    skipped = env.copy()
+    returned |= set(_exec_block(stmt.orelse, skipped, ctx))
+    _join_into(env, [env.copy(), ran, skipped])
+    return frozenset(returned)
+
+
+def _store_flow_on_target(target: ast.AST, flow: _SwapFlow, env: _FlowEnv) -> None:
+    if isinstance(target, ast.Name):
+        env.set(target.id, flow)
+        return
+    if isinstance(target, ast.Tuple | ast.List):
+        for element in target.elts:
+            _store_flow_on_target(element, flow, env)
+
+
+def _exec_while(stmt: ast.While, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    _flow_expr(stmt.test, env, ctx)
+    return _exec_branches(env, ctx, [[*stmt.body, *stmt.orelse], stmt.orelse])
+
+
+def _exec_try(stmt: ast.Try, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    # else runs only after the body. Handlers see assignments from the body. finally runs after either.
+    bodies: list[Sequence[ast.stmt]] = [[*stmt.body, *stmt.orelse]]
+    bodies.extend([*stmt.body, *handler.body] for handler in stmt.handlers)
+    returned = set(_exec_branches(env, ctx, bodies))
+    returned |= set(_exec_block(stmt.finalbody, env, ctx))
+    return frozenset(returned)
+
+
+def _exec_match(stmt: ast.Match, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    subject = _flow_expr(stmt.subject, env, ctx)
+    returned: set[ast.Call] = set()
+    copies: list[_FlowEnv] = []
+    for case in stmt.cases:
+        branch = env.copy()
+        for name in _pattern_binding_names(case.pattern):
+            branch.set(name, subject)
+        returned |= set(_exec_block(case.body, branch, ctx))
+        copies.append(branch)
+    if copies:
+        _join_into(env, copies)
+    return frozenset(returned)
+
+
+def _exec_with(stmt: ast.With | ast.AsyncWith, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    for item in stmt.items:
+        flow = _flow_expr(item.context_expr, env, ctx)
+        if item.optional_vars is not None:
+            _store_flow_on_target(item.optional_vars, flow, env)
+    return _exec_block(stmt.body, env, ctx)
+
+
+def _exec_delete(stmt: ast.Delete, env: _FlowEnv, _ctx: _FlowCtx) -> frozenset[ast.Call]:
+    for target in stmt.targets:
+        if isinstance(target, ast.Name):
+            env.bindings.pop(target.id, None)
+    return frozenset()
+
+
+def _exec_function_def(
+    stmt: ast.FunctionDef | ast.AsyncFunctionDef, env: _FlowEnv, _ctx: _FlowCtx
+) -> frozenset[ast.Call]:
+    # The body runs only if a later call resolves this name. An uncalled nested
+    # helper cannot reject teardown.
+    env.set(stmt.name, _SwapFlow(nested=stmt))
+    return frozenset()
+
+
+def _exec_block(stmts: Sequence[ast.stmt], env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    returned: set[ast.Call] = set()
+    for stmt in stmts:
+        returned |= set(_exec_stmt(stmt, env, ctx))
+    return frozenset(returned)
+
+
+def _exec_binding_stmt(stmt: ast.stmt, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call] | None:
+    if isinstance(stmt, ast.FunctionDef | ast.AsyncFunctionDef):
+        return _exec_function_def(stmt, env, ctx)
+    if isinstance(stmt, ast.Return):
+        return _exec_return(stmt, env, ctx)
+    if isinstance(stmt, ast.Assign):
+        return _exec_assign(stmt, env, ctx)
+    if isinstance(stmt, ast.AnnAssign):
+        return _exec_annassign(stmt, env, ctx)
+    if isinstance(stmt, ast.AugAssign):
+        return _exec_augassign(stmt, env, ctx)
+    if isinstance(stmt, ast.Expr):
+        return _exec_expr_stmt(stmt, env, ctx)
+    return None
+
+
+def _exec_control_stmt(stmt: ast.stmt, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call] | None:
+    if isinstance(stmt, ast.If):
+        return _exec_if(stmt, env, ctx)
+    if isinstance(stmt, ast.For | ast.AsyncFor):
+        return _exec_for(stmt, env, ctx)
+    if isinstance(stmt, ast.While):
+        return _exec_while(stmt, env, ctx)
+    if isinstance(stmt, ast.Try):
+        return _exec_try(stmt, env, ctx)
+    if isinstance(stmt, ast.Match):
+        return _exec_match(stmt, env, ctx)
+    if isinstance(stmt, ast.With | ast.AsyncWith):
+        return _exec_with(stmt, env, ctx)
+    if isinstance(stmt, ast.Delete):
+        return _exec_delete(stmt, env, ctx)
+    return None
+
+
+def _exec_stmt(stmt: ast.stmt, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    bound = _exec_binding_stmt(stmt, env, ctx)
+    if bound is not None:
+        return bound
+    controlled = _exec_control_stmt(stmt, env, ctx)
+    if controlled is not None:
+        return controlled
+    if isinstance(
+        stmt,
+        ast.ClassDef | ast.Pass | ast.Break | ast.Continue | ast.Import | ast.ImportFrom | ast.Global | ast.Nonlocal,
+    ):
+        return frozenset()
+    if isinstance(stmt, ast.Raise):
+        if stmt.exc is not None:
+            _flow_expr(stmt.exc, env, ctx)
+        return frozenset()
+    if isinstance(stmt, ast.Assert):
+        _flow_expr(stmt.test, env, ctx)
+        return frozenset()
+    return _fallback_scan(stmt, env, ctx)
+
+
+def _fallback_scan(node: ast.AST, env: _FlowEnv, ctx: _FlowCtx) -> frozenset[ast.Call]:
+    """Scan children of a statement the flow does not model, without entering nested defs."""
+    returned: set[ast.Call] = set()
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.stmt):
+            returned |= set(_exec_stmt(child, env, ctx))
+        elif isinstance(child, ast.expr):
+            returned |= set(_flow_expr(child, env, ctx).missing)
+        elif not isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+            returned |= set(_fallback_scan(child, env, ctx))
+    return frozenset(returned)
+
+
+def _teardown_swaps_without_chain(
+    method_defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+) -> list[ast.Call]:
+    """Chain-less swaps teardown can still return, in source order.
+
+    Runtime validates the intent object ``generate_teardown_intents`` returns, not
+    every constructor it can see. A chain-less construction is omitted from the
+    result when the returned value binds ``chain`` (including via
+    ``model_copy(update={"chain": ...})``). Nested functions contribute only when
+    the method actually calls them.
+    """
+    method = method_defs.get("generate_teardown_intents")
+    if method is None:
+        return []
+    ctx = _FlowCtx(None, method_defs, frozenset())
+    missing = _invoke(
+        method,
+        ast.Call(func=ast.Name(id=method.name, ctx=ast.Load()), args=[], keywords=[]),
+        _FlowEnv(),
+        ctx,
+        skip_self=True,
+    )
+    return sorted(missing, key=lambda call: (call.lineno, call.col_offset))
 
 
 # =============================================================================

@@ -164,7 +164,9 @@ class SwapIntent(BaseIntent):
             If the on-chain quoter returns an amount deviating more than this from the oracle
             estimate, compilation fails. Defaults to None (uses compiler config default of 10%).
         protocol: Preferred protocol for the swap (e.g., "uniswap_v3", "enso")
-        chain: Source chain for execution (defaults to strategy's primary chain)
+        chain: Source chain for execution. Runtime defaults it to the strategy's primary
+            chain; swaps returned by ``generate_teardown_intents()`` must set it explicitly
+            (teardown rejects a swap without a chain)
         destination_chain: Destination chain for cross-chain swaps (None for same-chain)
         priority_fee_level: Solana priority fee level for Jupiter swaps.
             Valid values: "low", "medium", "high", "veryHigh". Defaults to "veryHigh".
@@ -1390,7 +1392,9 @@ class Intent:
                 Defaults to None (uses compiler config default of 10%). Mutually
                 exclusive with ``max_price_impact_bps``.
             protocol: Preferred protocol for the swap
-            chain: Source chain for execution (defaults to strategy's primary chain)
+            chain: Source chain for execution. Runtime defaults it to the strategy's primary
+                chain; teardown swaps must pass it explicitly (for example
+                ``chain=self.chain``) or teardown rejects them
             destination_chain: Destination chain for cross-chain swaps (None for same-chain)
             swap_params: Optional connector-specific routing/escape-hatch params
                 (e.g. Aerodrome ``{"classic": True}`` / ``{"tick_spacing": 200}``;

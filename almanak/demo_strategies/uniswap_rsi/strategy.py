@@ -899,15 +899,16 @@ class UniswapRSIStrategy(IntentStrategy):
             f"{self.quote_token} (mode={mode.value}, slippage_bps={max_slippage_bps})"
         )
 
-        # Swap all base token back to quote token
+        # Swap all base token back to quote token. Teardown never infers a missing
+        # chain, so unlike the runtime swaps in decide() this one must name it.
         intents.append(
             Intent.swap(
-                    chain=self.chain,
                 from_token=self.base_token,
                 to_token=self.quote_token,
                 amount="all",  # Swap entire balance
                 max_slippage_bps=max_slippage_bps,
                 protocol=self.protocol,
+                chain=self.chain,
             )
         )
 

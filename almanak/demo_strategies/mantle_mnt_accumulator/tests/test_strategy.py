@@ -115,3 +115,4 @@ class TestFeeTierPinning:
         swaps = [i for i in intents if i.intent_type.value == "SWAP"]
         assert swaps, "teardown should sweep the target token"
         assert all(i.swap_params is None for i in swaps)
+        assert all(i.chain == config["chain"] for i in swaps)
