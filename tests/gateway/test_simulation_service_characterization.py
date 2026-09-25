@@ -39,6 +39,7 @@ import grpc
 import pytest
 
 from almanak.config.env import gateway_config_from_env
+from almanak.core.rpc_network import Network
 from almanak.framework.execution.interfaces import SimulationResult
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.simulation_service import SimulationServiceServicer
@@ -71,9 +72,10 @@ def _make_settings(
     tenderly_key: str | None = None,
     alchemy_key: str | None = None,
 ) -> SimpleNamespace:
-    """Build a minimal GatewaySettings shim. ``SimulationServiceServicer``
-    only reads four optional credential attributes."""
+    """Build a minimal GatewaySettings shim: the four optional credential
+    attributes plus the always-present network."""
     return SimpleNamespace(
+        network=Network.MAINNET,
         tenderly_account_slug=tenderly_account,
         tenderly_project_slug=tenderly_project,
         tenderly_access_key=tenderly_key,

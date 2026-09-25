@@ -627,10 +627,16 @@ class SimulationProfile:
         tenderly_supported: Whether Tenderly's Transaction Simulator covers this chain.
         alchemy_network: Alchemy simulateExecutionBundle network name (e.g.
             "eth-mainnet"), or None when Alchemy simulation is unsupported.
+        node_simulate_v1: Whether the chain's own RPC endpoints serve
+            ``eth_simulateV1``. Only consulted when no vendor covers the chain:
+            it is then the only backend that can simulate a dependent bundle
+            (approve + action) against live state. Measured per chain — some
+            vendor-less nodes (HyperEVM) answer ``Method not found``.
     """
 
     tenderly_supported: bool = False
     alchemy_network: str | None = None
+    node_simulate_v1: bool = False
 
 
 @dataclass(frozen=True)

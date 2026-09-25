@@ -49,7 +49,7 @@ from almanak.framework.execution.simulator.config import (
 from almanak.framework.execution.simulator.tenderly import TenderlySimulator
 from almanak.gateway.core.settings import GatewaySettings
 from almanak.gateway.proto import gateway_pb2, gateway_pb2_grpc
-from almanak.gateway.services.rpc_simulator import GatewayRpcSimulator
+from almanak.gateway.services.rpc_simulator import GatewayRpcSimulator, requires_node_simulation
 from almanak.gateway.utils.ssl_context import build_ssl_context
 
 logger = logging.getLogger(__name__)
@@ -162,7 +162,10 @@ class SimulationServiceServicer(gateway_pb2_grpc.SimulationServiceServicer):
         return self._alchemy_sim
 
     def _select_rpc(self, chain: str, tx_count: int, preferred: str) -> bool:
-        if preferred != "rpc" and (preferred or self._simulation_config.backend != "rpc"):
+        if preferred != "rpc" and (
+            preferred
+            or (self._simulation_config.backend != "rpc" and not requires_node_simulation(chain, self.settings.network))
+        ):
             return False
         descriptor = ChainRegistry.resolve(chain)
         if descriptor.family is not ChainFamily.EVM:

@@ -248,6 +248,23 @@ class TestGetOrchestrator:
         assert service._orchestrator_default_gas_caps[cache_key] == 321
 
     @pytest.mark.asyncio
+    async def test_live_chain_no_vendor_covers_is_simulated_by_its_own_node(self):
+        from almanak.core.rpc_network import Network
+        from almanak.gateway.services.rpc_simulator import GatewayRpcSimulator
+
+        service = _eoa_service()
+        service.settings.network = Network.MAINNET
+
+        stack, orch_cls, sim, _sub, _rpc = _orchestrator_harness()
+        with stack, patch("almanak.gateway.services.rpc_simulator.get_cached_web3", return_value=MagicMock()):
+            await service._get_orchestrator("robinhood", TEST_DERIVED_EOA)
+
+        sim.assert_not_called()
+        simulator = orch_cls.call_args.kwargs["simulator"]
+        assert isinstance(simulator, GatewayRpcSimulator)
+        assert simulator.supports_chain("robinhood")
+
+    @pytest.mark.asyncio
     async def test_registry_resolved_wallet_supplies_signer(self):
         service = _eoa_service()
         registry = MagicMock()

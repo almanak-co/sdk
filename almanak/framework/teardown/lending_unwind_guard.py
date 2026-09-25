@@ -170,11 +170,10 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-# Exposure (collateral or debt) below this USD value is treated as measured-flat.
-# Deliberately matches ``leverage_loop._DUST_USD`` ($0.01) — both answer the same
-# question ("is this leg effectively cleared on-chain?"), so the guard's drop
-# threshold must agree with the staircase's "debt cleared" threshold. This is a
-# DIFFERENT question from the $5 token-consolidation dust floor
+# Collateral below this USD value is treated as measured-flat (not worth a
+# withdraw). Debt has no floor: a protocol refuses withdraw-all while ANY debt
+# remains, so sub-cent debt is still debt (the staircase clears it with a full
+# repay). This is a DIFFERENT question from the $5 token-consolidation dust floor
 # (``TokenConsolidationConfig.min_swap_value_usd``), which is "is a residual swap
 # worth the gas?" — a much higher, economic threshold. Do not unify the two.
 _DUST_USD = Decimal("0.01")
@@ -241,7 +240,7 @@ class _Exposure:
     @property
     def debt_is_zero(self) -> bool:
         """True only on a MEASURED zero debt (Empty ≠ Zero)."""
-        return self.debt_usd is not None and self.debt_usd <= _DUST_USD
+        return self.debt_usd is not None and self.debt_usd <= 0
 
     @property
     def collateral_is_zero(self) -> bool:

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import logging
 from decimal import Decimal
 from unittest.mock import MagicMock
+
+import pytest
 
 from almanak.connectors._strategy_base.base.compiler import CLAdapterFactoryContext, CLCompilerContext
 from almanak.connectors._strategy_base.swap_quote_registry import SwapQuoteResult, SwapQuoteUnavailable
@@ -157,6 +161,30 @@ def test_uniswap_v3_swap_slippage_uses_quoter_directly_when_above_oracle() -> No
     assert min_output == 1_188
     assert quoted_for_metrics == 1_200
     assert clamped_expected == 1_200
+
+
+@pytest.mark.parametrize(
+    ("quoter_amount", "managed_fork", "decision"),
+    [(990, False, "OK"), (100, False, "IMPACT_TOO_HIGH"), (100, True, "SKIPPED_MANAGED_FORK")],
+)
+def test_uniswap_v3_price_impact_guard_logs_evidence_for_every_outcome(caplog, quoter_amount, managed_fork, decision):
+    """A passing guard must leave the same attestable record as a refusal (ALM-3776 class)."""
+    rpc_url = "http://0.0.0.0:8545" if managed_fork else "https://arb.example.invalid"
+    with caplog.at_level(logging.INFO, logger="almanak.connectors.uniswap_v3.compiler"):
+        UniswapV3Compiler._apply_swap_slippage_and_impact(
+            ctx=_ctx(_Adapter(), rpc_url=rpc_url, managed_fork=managed_fork),
+            intent=_swap_intent(),
+            oracle_estimate=1_000,
+            quoter_amount=quoter_amount,
+        )
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("v3_price_impact_check")]
+    assert len(lines) == 1
+    evidence = json.loads(lines[0].split("evidence=", 1)[1])
+    assert evidence["decision"] == decision
+    assert evidence["quoter_amount_raw"] == str(quoter_amount)
+    assert evidence["protocol"] == "pancakeswap_v3"
+    if decision == "OK":
+        assert evidence["price_impact"] is not None and evidence["max_price_impact"] == "0.05"
 
 
 def test_uniswap_v3_swap_price_impact_guard_skips_declared_managed_fork() -> None:

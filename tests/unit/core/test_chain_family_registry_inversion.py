@@ -34,6 +34,7 @@ FROZEN_CHAIN_RATE_LIMITS: dict[str, int] = {
     "sonic": 300,
     "plasma": 300,
     "solana": 300,
+    "robinhood": 300,
 }
 
 FROZEN_ARCHIVE_RPC_REQUIRED_CHAINS = frozenset({"polygon", "ethereum", "avalanche", "zerog", "xlayer"})

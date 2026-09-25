@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Mapping
 from decimal import Decimal
@@ -1169,6 +1170,25 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
         }
 
     @staticmethod
+    def _log_price_impact_evidence(
+        ctx: CLCompilerContext, intent: SwapIntent, oracle_estimate: int, quoter_amount: int | None, result: Any
+    ) -> None:
+        """One structured line per guard outcome, so a pass is as attestable as a refusal."""
+        evidence = {
+            "protocol": ctx.protocol,
+            "oracle_estimate_raw": str(oracle_estimate),
+            "quoter_amount_raw": None if quoter_amount is None else str(quoter_amount),
+            "decision": "SKIPPED_MANAGED_FORK" if result is None else result.decision.value,
+            "price_impact": None if result is None or result.price_impact is None else str(result.price_impact),
+            "max_price_impact": (
+                None if result is None or result.effective_max_impact is None else str(result.effective_max_impact)
+            ),
+        }
+        logger.info(
+            "v3_price_impact_check intent_id=%s evidence=%s", intent.intent_id, json.dumps(evidence, sort_keys=True)
+        )
+
+    @staticmethod
     def _apply_swap_slippage_and_impact(
         *,
         ctx: CLCompilerContext,
@@ -1212,6 +1232,7 @@ class UniswapV3Compiler(BaseConcentratedLiquidityCompiler):
                 using_placeholders=ctx.using_placeholders,
             )
             impact = impact_result.decision
+        UniswapV3Compiler._log_price_impact_evidence(ctx, intent, oracle_estimate, quoter_amount, impact_result)
         if impact is PriceImpactDecision.IMPACT_TOO_HIGH and impact_result is not None:
             # VIB-5746: a price-impact refusal is a pre-execution SAFETY success,
             # not an execution fault — no tx is built, the position is untouched.

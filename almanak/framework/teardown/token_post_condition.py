@@ -111,10 +111,10 @@ _TOKEN_DUST_WEI = 10
 # The same read also cannot judge a VIB-5494 target-token no-op, where the wallet
 # is SUPPOSED to end holding the consolidation target.
 #
-# Fix direction (NOT attribution against tracked inventory — that needs the
-# ACCOUNTING StateManager, which this seam does not have and which silently
-# yields the unmeasured sentinel): answer "no opinion" for an unattributable
-# balance, and gate the ratchet on whether an authority exists at all.
+# Attribution happens above this seam: for an EOA exit of one TOKEN position the
+# manager's transaction-bound proof (``token_inventory_closure``) is consulted
+# first and certifies closure while unrelated balance remains. This verdict is
+# what a position without such a proof still receives.
 
 # Explicit held-token metadata precedes a legacy base-only declaration. A PT's
 # base token describes sale proceeds, not the token whose closure must be proved.

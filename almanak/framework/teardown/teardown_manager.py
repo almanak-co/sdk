@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from almanak.framework.intents.compiler import IntentCompiler
     from almanak.framework.teardown.native_inventory_closure import NativeClosureProof
     from almanak.framework.teardown.runner_helpers import TeardownRunnerHelpers
+    from almanak.framework.teardown.token_inventory_closure import TokenClosureProof
 
 from almanak.framework.teardown.cancel_window import CancelWindowManager
 from almanak.framework.teardown.chain_validation import teardown_intent_type, teardown_swap_chain_error
@@ -2470,7 +2471,7 @@ class TeardownManager:
         # Keep dispatch on self so static accounting validation can verify commit pairing.
         snapshots = await self._capture_pre_attempt_snapshots(strategy, intent)
         pre_snapshot, lending_pre, v4_fees, v4_native = snapshots
-        native_anchor = await asyncio.to_thread(self._capture_native_exit, strategy, intent, context)
+        inventory_anchor = await asyncio.to_thread(self._capture_inventory_exit, strategy, intent, context)
         exec_result = await self.orchestrator.execute(compilation_result.action_bundle, context)
         bundle_metadata = getattr(compilation_result.action_bundle, "metadata", None) or None
         async_submission = None
@@ -2528,38 +2529,69 @@ class TeardownManager:
                 intent_count,
                 outcome.degraded_reason or "unknown",
             )
-        if exec_result.success and not outcome.accounting_degraded and native_anchor is not None:
-            await asyncio.to_thread(self._complete_native_exit, strategy, native_anchor, exec_result)
+        if exec_result.success and not outcome.accounting_degraded and inventory_anchor is not None:
+            await asyncio.to_thread(self._complete_inventory_exit, strategy, inventory_anchor, exec_result)
         return exec_result, outcome, async_submission
 
-    def _capture_native_exit(self, strategy: Any, intent: Any, context: Any) -> Any:
+    def _capture_inventory_exit(self, strategy: Any, intent: Any, context: Any) -> Any:
         from .native_inventory_closure import capture_native_exit, native_input
+        from .token_inventory_closure import capture_token_exit
 
-        if not native_input(_intent_field(intent, "from_token"), context.chain):
-            return None
         reader = self.runner_helpers.get_native_closure_inventory
         if reader is None:
             return None
+        capture = (
+            capture_native_exit
+            if native_input(_intent_field(intent, "from_token"), context.chain)
+            else capture_token_exit
+        )
         try:
-            return capture_native_exit(
+            return capture(
                 strategy=strategy,
                 intent=intent,
-                positions=getattr(self, "_native_closure_positions", []),
+                positions=getattr(self, "_inventory_closure_positions", []),
                 tracked=reader(strategy, context.chain, context.wallet_address),
                 gateway=self._teardown_gateway_client(),
             )
         except Exception as exc:  # noqa: BLE001 — evidence failure must not block risk reduction
-            logger.warning("Native closure anchor unmeasured: %s", exc)
+            logger.warning("Inventory closure anchor unmeasured: %s", exc)
             return None
 
-    def _complete_native_exit(self, strategy: Any, anchor: Any, result: Any) -> None:
+    def _complete_inventory_exit(self, strategy: Any, anchor: Any, result: Any) -> None:
+        from .token_inventory_closure import TokenExitAnchor, complete_token_exit
+
+        if isinstance(anchor, TokenExitAnchor):
+            try:
+                reader = self.runner_helpers.get_native_closure_inventory
+                tracked = reader(strategy, anchor.key[1], anchor.wallet) if reader is not None else None
+                token_proof = complete_token_exit(anchor, result, tracked, self._teardown_gateway_client())
+                self._inventory_closure_proofs[anchor.key] = token_proof
+                logger.info(
+                    "token_inventory_closure_proof deployment_id=%s wallet=%s position=%s token=%s amount_raw=%s transactions=%s pre_block=%s terminal_block=%s pre_hash=%s terminal_hash=%s pre_balance_raw=%s terminal_balance_raw=%s",
+                    anchor.deployment_id,
+                    anchor.wallet,
+                    anchor.key,
+                    anchor.token,
+                    anchor.amount,
+                    token_proof.transaction_hashes,
+                    anchor.block_number,
+                    token_proof.terminal_block,
+                    anchor.block_hash,
+                    token_proof.terminal_hash,
+                    anchor.balance,
+                    token_proof.terminal_balance,
+                )
+            except Exception as exc:  # noqa: BLE001 — retain unmeasured closure after successful risk reduction
+                logger.warning("ERC-20 closure proof unmeasured: %s", exc)
+            return
+
         from .native_inventory_closure import complete_native_exit
 
         try:
             reader = self.runner_helpers.get_native_closure_inventory
             tracked = reader(strategy, anchor.key[1], anchor.wallet) if reader is not None else None
             proof = complete_native_exit(anchor, result, tracked, self._teardown_gateway_client())
-            self._native_closure_proofs[anchor.key] = proof
+            self._inventory_closure_proofs[anchor.key] = proof
             logger.info(
                 "native_inventory_closure_proof deployment_id=%s wallet=%s position=%s amount_raw=%s gas_wei=%s transactions=%s pre_block=%s terminal_block=%s pre_hash=%s terminal_hash=%s pre_balance_raw=%s terminal_balance_raw=%s managed_fork=%s",
                 anchor.deployment_id,
@@ -2579,17 +2611,45 @@ class TeardownManager:
         except Exception as exc:  # noqa: BLE001 — retain unmeasured closure after successful risk reduction
             logger.warning("Native closure proof unmeasured: %s", exc)
 
-    def _native_closure_check(
+    def _inventory_closure_check(
         self, position: Any, wallet: str, gateway: Any, *, deployment_id: str = "", strategy: Any = None
     ) -> Any:
         from .native_inventory_closure import position_key
 
-        proof = getattr(self, "_native_closure_proofs", {}).get(position_key(position))
+        proof = getattr(self, "_inventory_closure_proofs", {}).get(position_key(position))
         if proof is None:
             return None
         reader = self.runner_helpers.get_native_closure_inventory
         tracked = reader(strategy, proof.anchor.key[1], wallet) if reader is not None and strategy is not None else None
         return proof.verify(position, wallet, gateway, deployment_id=deployment_id, tracked=tracked)
+
+    def _token_closure_or_fallback(
+        self, position: Any, wallet: str, gateway: Any, *, strategy: Any, rpc_url: str | None
+    ) -> Any:
+        """Transaction-bound closure proof, re-measuring the balance when the chain contradicts an ERC-20 proof.
+
+        A rejected ERC-20 proof (the token's inventory or balance moved after the
+        exit) is not closure evidence. When the proof established that the wallet
+        held none of the token after the exit, the whole-account balance belongs
+        to this position, so the ordinary TOKEN post-condition re-measures it at
+        the block the rejection observed. When the wallet keeps a proven
+        pre-existing holding, the whole-account read would report that holding
+        as this position's residual, so the rejection stays UNMEASURED. Unmeasured
+        proof reads and native proofs keep raising and stay UNMEASURED.
+        """
+        from .token_inventory_closure import TokenClosureRejected
+
+        try:
+            return self._inventory_closure_check(
+                position, wallet, gateway, deployment_id=strategy.deployment_id, strategy=strategy
+            )
+        except TokenClosureRejected as exc:
+            if exc.terminal_balance != 0:
+                raise
+            logger.warning("ERC-20 closure proof rejected; re-measuring the balance at block %s: %s", exc.block, exc)
+            return _resolve_and_run_post_condition(
+                position, wallet_address=wallet, gateway_client=gateway, rpc_url=rpc_url, block=exc.block
+            )
 
     def _prepare_async_submission(
         self,
@@ -3342,8 +3402,8 @@ class TeardownManager:
             TeardownResult with execution outcome
         """
         del consolidation_consent
-        self._native_closure_positions = list(positions.positions)
-        self._native_closure_proofs: dict[tuple[str, str, str], NativeClosureProof] = {}
+        self._inventory_closure_positions = list(positions.positions)
+        self._inventory_closure_proofs: dict[tuple[str, str, str], NativeClosureProof | TokenClosureProof] = {}
         started_at = teardown_state.started_at
         mode_str = "graceful" if mode == TeardownMode.SOFT else "emergency"
 
@@ -3643,12 +3703,12 @@ class TeardownManager:
                     _teardown_wallet_for_chain(strategy, str(getattr(position, "chain", "") or "")) or wallet_address
                 )
                 try:
-                    check = self._native_closure_check(
+                    check = self._token_closure_or_fallback(
                         position,
                         position_wallet,
                         gateway_client,
-                        deployment_id=strategy.deployment_id,
                         strategy=strategy,
+                        rpc_url=rpc_url,
                     )
                     if check is None:
                         check = _resolve_and_run_post_condition(
@@ -3865,13 +3925,13 @@ class TeardownManager:
 
         deployment_id = getattr(strategy, "deployment_id", "") or ""
 
-        def _revalidate_native_closure(position: Any, wallet: str, gateway: Any) -> Any:
+        def _revalidate_inventory_closure(position: Any, wallet: str, gateway: Any) -> Any:
             nonlocal verification
             from .native_inventory_closure import position_key
 
             key = position_key(position)
             try:
-                return self._native_closure_check(
+                return self._inventory_closure_check(
                     position, wallet, gateway, deployment_id=deployment_id, strategy=strategy
                 )
             except Exception:
@@ -3900,7 +3960,7 @@ class TeardownManager:
                 wallet_address=self._teardown_wallet_address(strategy),
                 wallet_for_chain=getattr(strategy, "get_wallet_for_chain", None),
                 phase="post",
-                token_closure_authority=_revalidate_native_closure,
+                token_closure_authority=_revalidate_inventory_closure,
             )
         except Exception:  # noqa: BLE001 — the CHECK must never fault the teardown lane
             logger.exception(
@@ -4043,7 +4103,7 @@ class TeardownManager:
         # A freshly revalidated transaction proof resolves that attribution only
         # for its exact position; a measured pre-existing zero remains stale.
         fresh_keys = (
-            set(getattr(self, "_native_closure_proofs", {}))
+            set(getattr(self, "_inventory_closure_proofs", {}))
             & hook_proven_keys
             & {position_key(entry) for entry in post_report.diverged}
         )

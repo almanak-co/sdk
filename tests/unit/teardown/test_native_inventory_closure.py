@@ -222,7 +222,7 @@ def test_restart_has_no_in_memory_proof_to_certify(scenario):
     from almanak.framework.teardown.teardown_manager import TeardownManager
 
     manager = TeardownManager()
-    assert manager._native_closure_check(scenario.position, WALLET, scenario.gateway) is None
+    assert manager._inventory_closure_check(scenario.position, WALLET, scenario.gateway) is None
 
 
 @pytest.mark.parametrize("code", ["0x6000", "0xef0100" + "1" * 40])
@@ -247,7 +247,7 @@ async def test_manager_and_post_reconciliation_share_chain_bound_proof(scenario)
     s = scenario
     proof = complete_native_exit(s.anchor, s.result, {}, s.gateway)
     manager = TeardownManager()
-    manager._native_closure_proofs = {s.anchor.key: proof}
+    manager._inventory_closure_proofs = {s.anchor.key: proof}
     from dataclasses import replace
 
     manager.runner_helpers = replace(manager.runner_helpers, get_native_closure_inventory=lambda *args: {})
@@ -266,7 +266,7 @@ async def test_manager_and_post_reconciliation_share_chain_bound_proof(scenario)
         market=None,
         wallet_address=WALLET,
         phase="post",
-        token_closure_authority=lambda position, wallet, gateway: manager._native_closure_check(
+        token_closure_authority=lambda position, wallet, gateway: manager._inventory_closure_check(
             position, wallet, gateway, deployment_id=s.strategy.deployment_id, strategy=s.strategy
         ),
     )
@@ -417,7 +417,7 @@ async def test_final_native_revalidation_revokes_prior_td14_proof(scenario, chan
     s = scenario
     proof = complete_native_exit(s.anchor, s.result, {}, s.gateway)
     manager = TeardownManager()
-    manager._native_closure_proofs = {s.anchor.key: proof}
+    manager._inventory_closure_proofs = {s.anchor.key: proof}
     inventory = {}
     manager.runner_helpers = replace(manager.runner_helpers, get_native_closure_inventory=lambda *args: inventory)
     manager._teardown_gateway_client = lambda: s.gateway
@@ -539,7 +539,7 @@ async def test_native_pre_unknown_resolved_only_by_exact_fresh_full_flow_proof(s
 
     proof = complete_native_exit(s.anchor, s.result, {}, s.gateway)
     manager = TeardownManager()
-    manager._native_closure_proofs = {s.anchor.key: proof}
+    manager._inventory_closure_proofs = {s.anchor.key: proof}
     manager.runner_helpers = replace(manager.runner_helpers, get_native_closure_inventory=lambda *args: {})
     manager._teardown_gateway_client = lambda: s.gateway
     manager._teardown_rpc_url = lambda: None
@@ -550,7 +550,7 @@ async def test_native_pre_unknown_resolved_only_by_exact_fresh_full_flow_proof(s
     if fault == "stale_proof":
         s.state["end_nonce"] += 1
     elif fault == "missing_proof":
-        manager._native_closure_proofs = {}
+        manager._inventory_closure_proofs = {}
     final = await manager.verify_closure_against_chain(
         s.strategy,
         verification=prior,

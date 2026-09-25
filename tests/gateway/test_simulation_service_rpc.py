@@ -80,3 +80,21 @@ async def test_unknown_requested_simulator_never_falls_back(preferred, has_trans
     assert not response.success and not response.simulated
     assert "Unsupported simulator" in response.error
     context.set_code.assert_called_once_with(grpc.StatusCode.INVALID_ARGUMENT)
+
+
+@pytest.mark.parametrize(
+    "chain,network,expected",
+    [
+        ("robinhood", Network.MAINNET, "rpc"),
+        ("robinhood", Network.ANVIL, None),
+        ("hyperevm", Network.MAINNET, None),
+    ],
+)
+def test_auto_backend_selects_the_node_only_where_it_is_the_sole_live_simulator(chain, network, expected):
+    with patch.object(SimulationConfig, "from_env", return_value=SimulationConfig(backend="auto")):
+        service = SimulationServiceServicer(SimpleNamespace(network=network))
+    if expected is None:
+        with pytest.raises(ValueError):
+            service._select_simulator(chain, 2, False, "")
+    else:
+        assert service._select_simulator(chain, 2, False, "") == expected

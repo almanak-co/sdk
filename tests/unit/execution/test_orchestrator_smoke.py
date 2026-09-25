@@ -377,6 +377,98 @@ class TestExecuteSubmitterFailure:
         assert failed_submission_requires_reconciliation(result) is True
 
 
+class TestExecuteNativeFundingShortfall:
+    """An underfunded EOA must be refused before the first send, not mid-bundle.
+
+    Mirrors the Robinhood wedge: two approvals land, the node refuses the
+    action for gas, and the retained action hash leaves a permanent
+    broadcast-reconciliation barrier.
+    """
+
+    @staticmethod
+    def _bundle() -> ActionBundle:
+        approve = "0x095ea7b3" + "00" * 64
+        return ActionBundle(
+            intent_type="SWAP",
+            transactions=[
+                {"to": "0xtoken", "data": approve, "value": 0, "tx_type": "approve"},
+                {"to": "0xpermit2", "data": approve, "value": 0, "tx_type": "approve"},
+                {"to": "0xrouter", "data": "0x12345678", "value": 0, "tx_type": "swap"},
+            ],
+        )
+
+    @staticmethod
+    def _wire(orchestrator, *, balance: int) -> PublicMempoolSubmitter:
+        from almanak.framework.execution.interfaces import SignedTransaction, TransactionType, UnsignedTransaction
+
+        _wire_for_happy_path(orchestrator, tx_count=3)
+        payer = orchestrator.signer.address
+        unsigned = [
+            UnsignedTransaction(
+                to="0x" + "2" * 40,
+                value=0,
+                data="0x",
+                chain_id=42161,
+                gas_limit=limit,
+                max_fee_per_gas=10,
+                max_priority_fee_per_gas=1,
+                tx_type=TransactionType.EIP_1559,
+                from_address=payer,
+            )
+            for limit in (100, 100, 300)
+        ]
+        signed = [
+            SignedTransaction(raw_tx="0x01", tx_hash=f"0x{index + 1:064x}", unsigned_tx=tx)
+            for index, tx in enumerate(unsigned)
+        ]
+        orchestrator.signer.sign_batch = AsyncMock(return_value=signed)
+        orchestrator.rpc_url = "http://localhost:8545"
+        web3 = MagicMock()
+        web3.to_checksum_address.side_effect = lambda address: address
+        web3.eth.get_balance = AsyncMock(return_value=balance)
+        web3.eth.get_transaction_count = AsyncMock(return_value=7)
+        orchestrator._get_web3 = AsyncMock(return_value=web3)
+        submitter = PublicMempoolSubmitter(rpc_url="http://localhost:8545")
+        submitter._submit_single = AsyncMock(
+            side_effect=[
+                SubmissionResult(tx_hash=signed[0].tx_hash, submitted=True),
+                SubmissionResult(tx_hash=signed[1].tx_hash, submitted=True),
+                InsufficientFundsError(required=3_000, available=2_999),
+            ]
+        )
+        submitter.get_receipt = AsyncMock(
+            side_effect=[
+                _make_receipt(success=True, tx_hash=signed[0].tx_hash),
+                _make_receipt(success=True, tx_hash=signed[1].tx_hash),
+            ]
+        )
+        orchestrator.submitter = submitter
+        return submitter
+
+    @pytest.mark.asyncio
+    async def test_shortfall_is_refused_before_any_submission(self, orchestrator):
+        submitter = self._wire(orchestrator, balance=4_999)
+
+        result = await orchestrator.execute(self._bundle())
+
+        assert result.success is False
+        assert result.error_phase is ExecutionPhase.VALIDATION
+        assert "needs 5000 wei" in (result.error or "")
+        assert result.submission_provenance is SubmissionProvenance.NOT_ATTEMPTED
+        assert result.transaction_results == []
+        submitter._submit_single.assert_not_awaited()
+        assert failed_submission_requires_reconciliation(result) is False
+
+    @pytest.mark.asyncio
+    async def test_exact_reserve_reaches_submission(self, orchestrator):
+        submitter = self._wire(orchestrator, balance=5_000)
+
+        result = await orchestrator.execute(self._bundle())
+
+        assert submitter._submit_single.await_count == 3
+        assert result.submission_provenance is SubmissionProvenance.ATTEMPTED
+
+
 # =============================================================================
 # Receipt timeout with partial hashes preserved
 # =============================================================================

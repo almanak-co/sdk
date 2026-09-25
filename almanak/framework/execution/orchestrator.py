@@ -1468,7 +1468,7 @@ class ExecutionOrchestrator:
         2. Simulates transactions (if enabled)
         3. Assigns sequential nonces
         4. Signs all transactions
-        5. Validates opted-in final native-funding liabilities
+        5. Validates final native-funding liabilities
         6. Submits transactions
         7. Polls for and parses receipts
 
@@ -1976,7 +1976,7 @@ class ExecutionOrchestrator:
         return None
 
     async def _phase_native_funding(self, state: ExecutionPipelineState) -> ExecutionResult | None:
-        """Validate final node-admission liabilities before sending an opted-in bundle.
+        """Validate final node-admission liabilities before sending any live bundle.
 
         This phase runs after live gas estimation, fee selection, nonce assignment,
         and Safe-wrapper construction, so it checks the values the node will
@@ -1987,12 +1987,22 @@ class ExecutionOrchestrator:
         Atomic Safe bundles additionally require the Safe to hold the sum of their
         inner ``msg.value`` transfers, while the EOA funds the wrapper gas.
 
+        A shortfall found here is refused before the submission boundary, so the
+        result stays NOT_ATTEMPTED and the next iteration may retry. Letting the
+        node refuse a later transaction instead strands the bundle behind a
+        broadcast-reconciliation barrier once earlier transactions have landed.
+        The summed worst-case reserve can refuse a bundle that the node would
+        have admitted with less, because each confirmed transaction is charged
+        its effective price rather than its fee cap.
+
         Balance reads are best-effort. A read gap cannot safely prove a shortfall,
         so submission remains allowed and the node is the authoritative backstop.
+        The bundle's ``native_funding_preflight`` metadata only adds a stable error
+        prefix and extends the check to dry runs.
         """
         config = (state.action_bundle.metadata or {}).get(_NATIVE_FUNDING_PREFLIGHT_KEY)
         if not isinstance(config, dict):
-            return self._complete_opted_in_dry_run(state)
+            config = {}
 
         assert state.signed_txs is not None
         requirements = self._collect_native_funding_requirements(state)

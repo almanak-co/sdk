@@ -1,4 +1,4 @@
-"""Node simulation is an explicit gateway setting, independent of chain names."""
+"""Gateway simulator selection: explicit node backend, or the node when it is the only one covering a live chain."""
 
 from unittest.mock import MagicMock, patch
 
@@ -15,11 +15,24 @@ from almanak.framework.execution.simulator.config import SimulationConfig
 from almanak.gateway.services.rpc_simulator import GatewayRpcSimulator, create_gateway_simulator
 
 CHAINS = [chain.name for chain in ChainRegistry.all() if chain.family is ChainFamily.EVM]
+NODE_ONLY_CHAINS = [
+    chain.name
+    for chain in ChainRegistry.all()
+    if chain.family is ChainFamily.EVM
+    and chain.simulation.node_simulate_v1
+    and not (chain.simulation.tenderly_supported or chain.simulation.alchemy_network)
+]
+FALLBACK_CHAINS = [chain for chain in CHAINS if chain not in NODE_ONLY_CHAINS]
 
 
-@pytest.mark.parametrize("chain", CHAINS)
+def test_robinhood_is_simulated_by_its_own_node():
+    assert "robinhood" in NODE_ONLY_CHAINS
+    assert "hyperevm" in FALLBACK_CHAINS
+
+
+@pytest.mark.parametrize("chain", FALLBACK_CHAINS)
 @pytest.mark.parametrize("network", [Network.MAINNET, Network.ANVIL])
-def test_default_backend_preserves_existing_selection_for_every_evm_chain(chain, network):
+def test_default_backend_preserves_existing_selection_for_other_evm_chains(chain, network):
     config = SimulationConfig(enabled=True)
     with patch("almanak.framework.execution.simulator.create_simulator") as original:
         selected = create_gateway_simulator(
@@ -27,6 +40,31 @@ def test_default_backend_preserves_existing_selection_for_every_evm_chain(chain,
         )
     assert selected is original.return_value
     original.assert_called_once_with(config=config, rpc_url="https://rpc.example.invalid")
+
+
+@pytest.mark.parametrize("chain", NODE_ONLY_CHAINS)
+def test_default_backend_uses_the_node_on_a_live_chain_no_vendor_covers(chain):
+    config = SimulationConfig(enabled=True)
+    with (
+        patch("almanak.gateway.services.rpc_simulator.get_cached_web3", return_value=MagicMock()),
+        patch("almanak.framework.execution.simulator.create_simulator") as original,
+    ):
+        selected = create_gateway_simulator(
+            config=config, rpc_url="https://rpc.example.invalid", chain=chain, network=Network.MAINNET
+        )
+    assert isinstance(selected, GatewayRpcSimulator)
+    assert selected.supports_chain(chain)
+    original.assert_not_called()
+
+
+@pytest.mark.parametrize("chain", NODE_ONLY_CHAINS)
+def test_default_backend_keeps_the_snapshotting_simulator_on_a_managed_fork(chain):
+    config = SimulationConfig(enabled=True)
+    with patch("almanak.framework.execution.simulator.create_simulator") as original:
+        selected = create_gateway_simulator(
+            config=config, rpc_url="http://127.0.0.1:8545", chain=chain, network=Network.ANVIL
+        )
+    assert selected is original.return_value
 
 
 @pytest.mark.parametrize("chain", CHAINS)

@@ -89,7 +89,9 @@ class LendingUnwindError(RuntimeError):
     """
 
 
-# Debt below this USD value is treated as fully repaid.
+# Collateral and swap slices below this USD value are not worth a transaction.
+# Never a debt threshold: a lending protocol refuses withdraw-all while ANY debt
+# remains, so debt is cleared only by a planned full repay.
 _DUST_USD = Decimal("0.01")
 
 # Extra margin below the swap's guaranteed min-out so an intermediate PARTIAL
@@ -240,7 +242,7 @@ def generate_lending_unwind(
 
     intents: list[AnyIntent] = []
 
-    if debt_usd <= _DUST_USD:
+    if debt_usd <= 0:
         if collateral_usd > _DUST_USD:
             intents.append(_withdraw(protocol, collateral_token, withdraw_all=True, market_id=market_id, chain=chain))
             if sweep_to_collateral:
@@ -272,10 +274,12 @@ def generate_lending_unwind(
     # wallet covers only part of the debt, repay an explicit partial amount.
     wallet_borrow = _wallet_balance(market, borrow_token, chain=chain)
     remaining_debt_usd = debt_usd
+    debt_cleared = False
     if wallet_borrow > 0:
         if wallet_borrow * borrow_price >= debt_usd * _WALLET_FIRST_BUFFER:
             intents.append(_repay_full(protocol, borrow_token, market_id=market_id, chain=chain))
             remaining_debt_usd = Decimal("0")
+            debt_cleared = True
         else:
             repay_tokens = wallet_borrow * (Decimal("1") - _REPAY_SAFETY_HAIRCUT)
             intents.append(_repay(protocol, borrow_token, amount=repay_tokens, market_id=market_id, chain=chain))
@@ -290,7 +294,9 @@ def generate_lending_unwind(
     # partial slice would pull the entire debt and revert on Morpho/Compound.
     remaining_collateral_usd = collateral_usd
     for _ in range(max_rounds):
-        if remaining_debt_usd <= _DUST_USD:
+        # A residual below any USD floor still blocks withdraw-all; only a planned
+        # full repay ends the staircase.
+        if debt_cleared:
             break
 
         # safe slice solves (collateral - slice) * lltv / debt == floor
@@ -321,12 +327,18 @@ def generate_lending_unwind(
             intents.append(_repay_full(protocol, borrow_token, market_id=market_id, chain=chain))
             remaining_collateral_usd -= settle_slice_usd
             remaining_debt_usd = Decimal("0")
+            debt_cleared = True
             break
 
         # HF-constrained round: withdraw the largest safe slice and repay only the
         # swap's guaranteed output (explicit partial amount, never repay_full).
         slice_tokens = safe_slice_usd / collateral_price
-        repay_usd = safe_slice_usd * (Decimal("1") - slippage) * (Decimal("1") - _REPAY_SAFETY_HAIRCUT)
+        # Capped below the remaining debt so a partial repay never over-pulls and
+        # the next round still settles the residual with a full repay.
+        repay_usd = min(
+            safe_slice_usd * (Decimal("1") - slippage),
+            remaining_debt_usd,
+        ) * (Decimal("1") - _REPAY_SAFETY_HAIRCUT)
         repay_tokens = repay_usd / borrow_price
         intents.append(_withdraw(protocol, collateral_token, amount=slice_tokens, market_id=market_id, chain=chain))
         intents.append(_swap(collateral_token, borrow_token, slice_tokens, slippage, chain, swap_protocol))

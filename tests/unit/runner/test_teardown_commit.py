@@ -1811,8 +1811,8 @@ async def test_manager_dispatches_failed_result_to_commit_without_closure():
     manager.orchestrator = SimpleNamespace(execute=AsyncMock(return_value=result))
     manager.runner_helpers = SimpleNamespace(has_commit=True, commit=AsyncMock(return_value=outcome))
     manager._capture_pre_attempt_snapshots = AsyncMock(return_value=(None, None, None, None))
-    manager._capture_native_exit = MagicMock(return_value=None)
-    manager._complete_native_exit = MagicMock()
+    manager._capture_inventory_exit = MagicMock(return_value=None)
+    manager._complete_inventory_exit = MagicMock()
     manager._prepare_async_submission = MagicMock()
     state = _IntentAttemptState()
     actual = await manager._execute_and_commit_attempt(
@@ -1830,7 +1830,7 @@ async def test_manager_dispatches_failed_result_to_commit_without_closure():
     assert manager.runner_helpers.commit.await_args.kwargs["execution_result"] is result
     assert not state.submission_landed
     manager._prepare_async_submission.assert_not_called()
-    manager._complete_native_exit.assert_not_called()
+    manager._complete_inventory_exit.assert_not_called()
 
 
 @pytest.mark.asyncio

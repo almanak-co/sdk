@@ -87,18 +87,32 @@ def looks_like_address(value: str | None, chain: str | None = None) -> bool:
     return is_solana_chain((chain or "").lower()) and looks_like_case_sensitive_address(stripped)
 
 
+class _Unresolved(Exception):
+    """Raised inside the cache so a miss is never memoized."""
+
+
 @lru_cache(maxsize=_CACHE_SIZE)
-def _resolve_cached(lookup: str, chain: str) -> str | None:
+def _resolve_known(lookup: str, chain: str) -> str:
     from almanak.framework.data.tokens import get_token_resolver
 
     try:
         info = get_token_resolver().resolve(lookup, chain=chain, log_errors=False, skip_gateway=True)
-    except Exception:  # noqa: BLE001 — best-effort seam; caller keeps fail-closed behaviour
-        return None
+    except Exception as exc:  # noqa: BLE001 — best-effort seam; caller keeps fail-closed behaviour
+        raise _Unresolved from exc
     symbol = getattr(info, "symbol", None)
     if not symbol:
-        return None
+        raise _Unresolved
     return str(symbol).upper()
+
+
+def _resolve_cached(lookup: str, chain: str) -> str | None:
+    # A miss is transient: the resolver learns a token on its first on-chain
+    # discovery, and a memoized miss would hide that token from every later
+    # caller in the process (a teardown then treats its own inventory as foreign).
+    try:
+        return _resolve_known(lookup, chain)
+    except _Unresolved:
+        return None
 
 
 def resolve_token_symbol(value: str | None, chain: str | None) -> str | None:

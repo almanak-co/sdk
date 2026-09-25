@@ -139,6 +139,9 @@ class _PlainBorrowSim:
 
     def _apply_withdraw(self, intent: Any) -> None:
         if getattr(intent, "withdraw_all", False):
+            if self.debt_usd > 0:
+                # Morpho: "insufficient collateral"; Aave: HF check. Any debt, not debt above a floor.
+                raise AssertionError(f"withdraw_all with ${self.debt_usd} debt remaining -> revert")
             w_tokens = self.collateral_tokens
         else:
             w_tokens = Decimal(str(intent.amount))
@@ -205,9 +208,7 @@ def _no_withdraw_all_while_debt(sim: _PlainBorrowSim, intents: list) -> None:
     fresh = _PlainBorrowSim(**sim._init_args)
     for intent in intents:
         if type(intent).__name__ == "WithdrawIntent" and getattr(intent, "withdraw_all", False):
-            assert fresh.debt_usd <= _DUST, (
-                f"withdraw_all issued while debt ${fresh.debt_usd} remains -> 0x6679996d strand"
-            )
+            assert fresh.debt_usd <= 0, f"withdraw_all issued while debt ${fresh.debt_usd} remains -> 0x6679996d strand"
         fresh.apply(intent)
 
 
@@ -244,6 +245,29 @@ def test_plain_cross_asset_borrow_no_withdraw_all_while_debt_remains() -> None:
     sim = _PlainBorrowSim(**sim_args)
     intents = _drive(sim)
     _no_withdraw_all_while_debt(sim, intents)
+
+
+@pytest.mark.parametrize(
+    "debt_usd,wallet",
+    [
+        ("0.0900001", "0.09"),  # small borrow: the 1% repay haircut alone leaves $0.0009, under any USD floor
+        ("0.0009", "0"),  # residual debt left by an earlier partial teardown
+    ],
+)
+def test_a_residual_below_the_usd_floor_is_still_repaid_before_withdraw_all(debt_usd, wallet) -> None:
+    """Robinhood mainnet: 0.3 USDe collateral, 0.09 USDG borrowed; withdraw-all reverted on $0.0009 of debt."""
+    sim = _PlainBorrowSim(
+        collateral_token="USDe",
+        borrow_token="USDG",
+        collateral_price="0.9998",
+        collateral_amount="0.3",
+        debt_usd=debt_usd,
+        wallet_borrow_tokens=wallet,
+    )
+    intents = _drive(sim)
+    assert sim.debt_usd <= 0
+    assert sim.collateral_tokens <= Decimal("1e-6")
+    assert any(getattr(i, "repay_full", False) for i in intents)
 
 
 def test_default_consolidate_sweeps_recovered_collateral_into_borrow_asset() -> None:
@@ -287,7 +311,9 @@ def test_builder_stamps_the_position_chain_on_synthesized_swaps():
     market.price.return_value = Decimal("1")
     market.balance.return_value = SimpleNamespace(balance=Decimal("0"))
     market.position_health.return_value = _FakeHealth(Decimal("100"), Decimal("0"), Decimal("0.8"))
-    intents = generate_lending_unwind(market=market, protocol="aave_v3", collateral_token="WETH", borrow_token="USDC", chain=None)
+    intents = generate_lending_unwind(
+        market=market, protocol="aave_v3", collateral_token="WETH", borrow_token="USDC", chain=None
+    )
     swaps = [intent for intent in intents if intent.intent_type.value == "SWAP"]
     assert swaps
     assert all(intent.chain == "arbitrum" for intent in swaps)

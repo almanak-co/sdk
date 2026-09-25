@@ -10,21 +10,45 @@ import threading
 from typing import Any
 
 from almanak.core.chains import ChainRegistry
+from almanak.core.enums import ChainFamily
 from almanak.core.rpc_network import Network
 from almanak.framework.execution.interfaces import SimulationError, SimulationResult, Simulator, UnsignedTransaction
 from almanak.gateway.utils.rpc_provider import get_cached_web3
 
 logger = logging.getLogger(__name__)
 
+# Nitro's virtual NodeInterface; gasEstimateL1Component(address,bool,bytes).
+_NODE_INTERFACE = "0x00000000000000000000000000000000000000C8"
+_GAS_ESTIMATE_L1_COMPONENT = "0x77d488a2"
+
+
+def requires_node_simulation(chain: str, network: Network) -> bool:
+    """Whether ``auto`` must simulate on the chain's own node.
+
+    True for a live EVM chain that no vendor covers but whose node declares
+    ``eth_simulateV1``. The vendor-less framework fallback cannot snapshot a
+    live node, so it refuses every dependent bundle there. Keyed on declared
+    capability, never on credentials: a vendor-covered chain with missing
+    credentials must stay loud. A managed fork keeps the snapshotting local
+    simulator.
+    """
+    if network is Network.ANVIL:
+        return False
+    descriptor = ChainRegistry.try_resolve(chain)
+    if descriptor is None or descriptor.family is not ChainFamily.EVM:
+        return False
+    profile = descriptor.simulation
+    return profile.node_simulate_v1 and not (profile.tenderly_supported or profile.alchemy_network)
+
 
 def create_gateway_simulator(*, config: Any, rpc_url: str, chain: str, network: Network) -> Simulator:
-    """Select an explicitly configured node backend without changing auto defaults."""
+    """Select the node backend when configured or when it is the only one covering the chain."""
     from almanak.framework.execution.simulator import create_simulator
 
-    if config.backend == "rpc" and config.enabled:
-        return GatewayRpcSimulator(chain=chain, network=network, timeout_seconds=config.timeout_seconds)
     if config.backend not in ("auto", "rpc"):
         raise ValueError(f"Unknown simulation backend: {config.backend}")
+    if config.enabled and (config.backend == "rpc" or requires_node_simulation(chain, network)):
+        return GatewayRpcSimulator(chain=chain, network=network, timeout_seconds=config.timeout_seconds)
     return create_simulator(config=config, rpc_url=rpc_url)
 
 
@@ -72,6 +96,31 @@ class GatewayRpcSimulator(Simulator):
             raise ValueError(f"{method} returned no result")
         return response["result"]
 
+    def _l1_gas(self, txs: list[UnsignedTransaction], number: int) -> list[int]:
+        """L1 data gas each call is charged on an Arbitrum-family chain, at the simulation parent.
+
+        Simulation runs with a zero base fee, so its gasUsed omits the poster
+        charge that the node adds to intrinsic gas at admission; a limit sized
+        from gasUsed alone is refused as "intrinsic gas too low" whenever the
+        chain's L1 price is non-zero. The read is required, never defaulted.
+        """
+        if ChainRegistry.get(self._chain).gas.l1_fee_oracle_kind != "arbitrum_nodeinterface":
+            return [0] * len(txs)
+        from eth_abi import encode
+
+        l1_gas = []
+        for index, tx in enumerate(txs):
+            data = bytes.fromhex(tx.data.removeprefix("0x")) if tx.data else b""
+            target = tx.to or "0x" + "0" * 40
+            payload = (
+                _GAS_ESTIMATE_L1_COMPONENT + encode(["address", "bool", "bytes"], [target, tx.to is None, data]).hex()
+            )
+            raw = self._rpc("eth_call", [{"to": _NODE_INTERFACE, "data": payload}, hex(number)])
+            if not isinstance(raw, str) or re.fullmatch(r"0x[0-9a-fA-F]{192,}", raw) is None:
+                raise ValueError(f"L1 gas estimate for call {index} is malformed")
+            l1_gas.append(int(raw[2:66], 16))
+        return l1_gas
+
     def _simulate(self, txs: list[UnsignedTransaction], state_overrides: dict[str, Any] | None) -> SimulationResult:
         header = self._rpc("eth_getBlockByNumber", ["latest", False])
         if not isinstance(header, dict):
@@ -113,6 +162,8 @@ class GatewayRpcSimulator(Simulator):
             if not isinstance(call_logs, list):
                 raise ValueError(f"Sequential simulation call {index} logs are malformed")
             logs.extend(call_logs)
+        l1_gas = self._l1_gas(txs, number)
+        gas = [execution + poster for execution, poster in zip(gas, l1_gas, strict=True)]
         closing = self._rpc("eth_getBlockByNumber", [hex(number), False])
         if not isinstance(closing, dict) or closing.get("hash", "").lower() != parent_hash.lower():
             raise ValueError("Simulation parent was reorganized during evaluation")
@@ -123,6 +174,7 @@ class GatewayRpcSimulator(Simulator):
             "parent_timestamp": _quantity(header["timestamp"], "parent timestamp"),
             "evaluated_indices": list(range(len(txs))),
             "calls": results,
+            "l1_gas": l1_gas,
         }
         logger.info(
             "Sequential RPC simulation: parent_block=%s parent_hash=%s calls=%d",

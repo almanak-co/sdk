@@ -737,7 +737,6 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         """
         from almanak.framework.execution.fork_signal import is_managed_fork_network
         from almanak.framework.execution.orchestrator import ExecutionOrchestrator
-        from almanak.framework.execution.simulator import create_simulator
         from almanak.framework.execution.submitter import PublicMempoolSubmitter
         from almanak.gateway.utils import get_rpc_url
 
@@ -776,16 +775,12 @@ class ExecutionServiceServicer(gateway_pb2_grpc.ExecutionServiceServicer):
         # Requests carry the resolved preference; the cached backend must remain capable.
         simulation_config.enabled = True
         from almanak.core.rpc_network import Network
+        from almanak.gateway.services.rpc_simulator import create_gateway_simulator
         from almanak.gateway.services.venue_verification_gateway import GatewayRpcVenueVerificationGateway
 
-        if simulation_config.backend == "rpc":
-            from almanak.gateway.services.rpc_simulator import create_gateway_simulator
-
-            simulator = create_gateway_simulator(
-                config=simulation_config, rpc_url=rpc_url, chain=chain, network=Network.parse(network)
-            )
-        else:
-            simulator = create_simulator(config=simulation_config, rpc_url=rpc_url)
+        simulator = create_gateway_simulator(
+            config=simulation_config, rpc_url=rpc_url, chain=chain, network=Network.parse(network)
+        )
 
         orchestrator = ExecutionOrchestrator(
             signer=signer,

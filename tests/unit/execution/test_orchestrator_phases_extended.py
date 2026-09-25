@@ -888,6 +888,38 @@ class TestPhaseNativeFunding:
         orchestrator.submitter.submit.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_bundle_without_metadata_is_checked_before_submission(self, orchestrator):
+        payer = orchestrator.signer.address
+        approve = _funding_tx(payer=payer, value=0, gas_limit=10, max_fee_per_gas=10)  # 100
+        action = _funding_tx(payer=payer, value=0, gas_limit=20, max_fee_per_gas=10)  # 200
+        state = _make_state(orchestrator)
+        state.unsigned_txs = [approve, action]
+        state.signed_txs = [_signed(approve), _signed(action)]
+        self._install_balance(orchestrator, 299)
+        orchestrator.submitter.submit = AsyncMock()
+
+        result = await orchestrator._phase_native_funding(state)
+
+        assert result is state.result
+        assert result.error is not None
+        assert result.error.startswith("insufficient funds for native submission:")
+        assert "needs 300 wei" in result.error
+        assert result.error_phase is ExecutionPhase.VALIDATION
+        orchestrator.submitter.submit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bundle_without_metadata_passes_at_exact_reserve(self, orchestrator):
+        payer = orchestrator.signer.address
+        approve = _funding_tx(payer=payer, value=0, gas_limit=10, max_fee_per_gas=10)
+        action = _funding_tx(payer=payer, value=0, gas_limit=20, max_fee_per_gas=10)
+        state = _make_state(orchestrator)
+        state.unsigned_txs = [approve, action]
+        state.signed_txs = [_signed(approve), _signed(action)]
+        self._install_balance(orchestrator, 300)
+
+        assert await orchestrator._phase_native_funding(state) is None
+
+    @pytest.mark.asyncio
     async def test_balance_read_gap_defers_to_node_admission(self, orchestrator):
         payer = orchestrator.signer.address
         tx = _funding_tx(payer=payer, value=1, gas_limit=1, max_fee_per_gas=1)

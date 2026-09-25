@@ -57,6 +57,7 @@ from ._descriptor import (
     GasProfile,
     NativeToken,
     RpcProfile,
+    SimulationProfile,
 )
 from ._registry import register_chain
 
@@ -119,6 +120,9 @@ DESCRIPTOR = register_chain(
             public_rpc="https://rpc.mainnet.chain.robinhood.com",
             # Verified live: robinhood-mainnet.g.alchemy.com (https + wss).
             alchemy_prefix="robinhood",
+            # The 100 rpm fallback cannot serve one LP decide() inside its 30 s
+            # timeout; the chain is served by the same Alchemy tier as arbitrum.
+            rate_limit_rpm=300,
             anvil_port=8560,  # next free port after hyperevm (8559)
             # The public_rpc above prunes within a few thousand blocks (~10
             # min of chain time), so a managed fork pinned outside that window
@@ -235,6 +239,12 @@ DESCRIPTOR = register_chain(
             },
             wrapped_native_deposit=True,
         ),
+        # No simulation vendor covers 4663 (Alchemy answers
+        # ``Unsupported method: alchemy_simulateExecutionBundle on robinhood``).
+        # Both the public endpoint and Alchemy's robinhood-mainnet serve
+        # ``eth_simulateV1`` (measured 2026-09-24), so dependent bundles are
+        # simulated by the chain's own node.
+        simulation=SimulationProfile(node_simulate_v1=True),
         aliases=(),
     )
 )

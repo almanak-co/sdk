@@ -998,9 +998,9 @@ async def reconcile_known_positions_against_chain(
             try:
                 authority_check = token_closure_authority(position, position_wallet, gateway_client)
             except Exception:  # noqa: BLE001 — a faulted proof is unmeasured, never closure
-                logger.warning("Native transaction-bound closure authority unavailable", exc_info=True)
+                logger.warning("Transaction-bound inventory closure authority unavailable", exc_info=True)
         if authority_check is not None and authority_check.closed and not authority_check.unmeasured:
-            verdict, detail = ReconciliationVerdict.DIVERGED_CLOSED, "Transaction-bound native inventory closure proved"
+            verdict, detail = ReconciliationVerdict.DIVERGED_CLOSED, "Transaction-bound inventory closure proved"
         else:
             verdict, detail = await _reconcile_one(
                 position=position,

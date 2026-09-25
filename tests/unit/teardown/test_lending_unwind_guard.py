@@ -114,11 +114,13 @@ def test_case5_zero_debt_drops_repay_but_keeps_withdraw():
     assert not result.degraded
 
 
-def test_case5_dust_debt_treated_as_zero():
-    """Debt below the dust floor is a measured zero -> no REPAY emitted."""
+def test_case5_sub_cent_debt_is_still_repaid_before_withdraw_all():
+    """Any debt blocks withdraw-all: Robinhood Morpho reverted it on $0.00089 of debt."""
     market = _FakeMarket(collateral_usd=Decimal("1000"), debt_usd=Decimal("0.001"))
     result = sanitize_lending_teardown_intents([_repay(), _withdraw_all()], market)
-    assert "REPAY" not in _types(result.intents)
+    types = _types(result.intents)
+    assert "REPAY" in types
+    assert types.index("REPAY") < types.index("WITHDRAW")
 
 
 def test_case2_debt_and_collateral_repays_before_withdraw():
@@ -548,15 +550,18 @@ def test_vib4466_planner_failure_degrades_to_repay_only_no_unsafe_withdraw():
     assert any("staircase unavailable" in d for d in result.dropped)
 
 
-def test_vib4466_dust_debt_below_floor_does_not_synthesize():
-    """A position whose live debt is below the dust floor is measured-zero debt
-    (collateral-only) -> existing path keeps the withdraw_all, no synthesis."""
+def test_vib4466_sub_cent_debt_the_wallet_cannot_cover_is_synthesized():
+    """Sub-cent debt with an empty wallet still strands a naive withdraw-all, so the
+    staircase must source it from collateral and fully repay before withdraw-all."""
     market = _RichMarket(
         collateral_usd=Decimal("2300"), debt_usd=Decimal("0.005"), lltv=Decimal("0.8"), wallet_usdc=Decimal("0")
     )
     result = sanitize_lending_teardown_intents(_plain_borrow_plan(), market)
-    assert not result.synthesized_positions
-    assert _types(result.intents) == ["WITHDRAW"]
+    assert result.synthesized_positions
+    full_repays = [i for i in result.intents if getattr(i, "repay_full", False)]
+    withdraw_alls = [i for i in result.intents if getattr(i, "withdraw_all", False)]
+    assert full_repays and withdraw_alls
+    assert result.intents.index(full_repays[-1]) < result.intents.index(withdraw_alls[-1])
 
 
 def test_vib4466_order_locked_staircase_is_never_resynthesized():

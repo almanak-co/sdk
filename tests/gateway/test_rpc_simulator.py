@@ -32,7 +32,7 @@ def make_node():
     }
     web3 = MagicMock()
     requests = []
-    output = {"block": block, "closing_hash": HASH, "rpc_error": None}
+    output = {"block": block, "closing_hash": HASH, "rpc_error": None, "l1_gas": 0, "l1_result": None}
 
     def rpc(method, params):
         requests.append((method, deepcopy(params)))
@@ -42,6 +42,12 @@ def make_node():
                 assert params[0] == "0x64"
                 value["hash"] = output["closing_hash"]
             return {"result": value}
+        if method == "eth_call":
+            assert params[0]["to"] == "0x00000000000000000000000000000000000000C8"
+            assert params[1] == "0x64"
+            if output["l1_result"] is not None:
+                return {"result": output["l1_result"]}
+            return {"result": "0x" + f"{output['l1_gas']:064x}" + "0" * 128}
         assert method == "eth_simulateV1"
         if output["rpc_error"] is not None:
             return {"error": output["rpc_error"]}
@@ -70,7 +76,13 @@ async def test_ordered_calls_are_measured_and_round_trip_with_evidence(node):
     assert params[0]["blockStateCalls"][0]["calls"] == [
         {"from": tx.from_address, "to": tx.to, "value": hex(tx.value), "data": tx.data} for tx in txs
     ]
-    assert [method for method, _ in requests] == ["eth_getBlockByNumber", "eth_simulateV1", "eth_getBlockByNumber"]
+    assert [method for method, _ in requests] == [
+        "eth_getBlockByNumber",
+        "eth_simulateV1",
+        "eth_call",
+        "eth_call",
+        "eth_getBlockByNumber",
+    ]
 
 
 @pytest.mark.asyncio
@@ -179,3 +191,42 @@ async def test_timeout_does_not_allow_overlapping_rpc_workers(node):
     simulator._timeout = 5
     result = await simulator.simulate(txs, "robinhood")
     assert result.success and result.simulated
+
+
+@pytest.mark.asyncio
+async def test_arbitrum_family_limits_include_the_l1_poster_gas(node):
+    simulator, txs, output, requests = node
+    output["l1_gas"] = 116_239
+    result = await simulator.simulate(txs, "robinhood")
+    assert result.gas_estimates == [40960 + 116_239, 45056 + 116_239]
+    assert result.evidence["l1_gas"] == [116_239, 116_239]
+    l1_calls = [params for method, params in requests if method == "eth_call"]
+    assert [call[0]["data"][:10] for call in l1_calls] == ["0x77d488a2", "0x77d488a2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("l1_result", ["0x", "0x" + "0" * 64, {"not": "hex"}])
+async def test_an_unmeasured_l1_component_fails_closed(node, l1_result):
+    simulator, txs, output, _ = node
+    output["l1_result"] = l1_result
+    with pytest.raises(SimulationError, match="L1 gas estimate for call 0 is malformed"):
+        await simulator.simulate(txs, "robinhood")
+
+
+@pytest.mark.asyncio
+async def test_a_chain_without_an_l1_oracle_makes_no_poster_gas_read():
+    web3 = MagicMock()
+    calls = []
+
+    def rpc(method, params):
+        calls.append(method)
+        if method == "eth_getBlockByNumber":
+            return {"result": {"number": "0x64", "hash": HASH, "timestamp": "0x6aa1a122"}}
+        return {"result": [{"parentHash": HASH, "calls": [{"status": "0x1", "gasUsed": "0xa000", "logs": []}]}]}
+
+    web3.provider.make_request.side_effect = rpc
+    with patch("almanak.gateway.services.rpc_simulator.get_cached_web3", return_value=web3):
+        simulator = GatewayRpcSimulator(chain="bsc", network=Network.MAINNET)
+    result = await simulator.simulate([replace(_make_tx(), chain_id=56)], "bsc")
+    assert result.gas_estimates == [40960]
+    assert "eth_call" not in calls

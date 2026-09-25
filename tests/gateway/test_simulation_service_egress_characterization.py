@@ -51,6 +51,7 @@ from unittest.mock import MagicMock, patch
 import grpc
 import pytest
 
+from almanak.core.rpc_network import Network
 from almanak.gateway.proto import gateway_pb2
 from almanak.gateway.services.simulation_service import SimulationServiceServicer
 from tests.gateway.grpc_harness import make_grpc_context
@@ -85,6 +86,7 @@ def _make_settings(
     alchemy_key: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
+        network=Network.MAINNET,
         tenderly_account_slug=tenderly_account,
         tenderly_project_slug=tenderly_project,
         tenderly_access_key=tenderly_key,
