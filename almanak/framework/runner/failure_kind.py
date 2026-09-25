@@ -44,6 +44,9 @@ class FailureKind(Enum):
     DATA_UNAVAILABLE = "data_unavailable"
     DATA_RATE_LIMITED = "data_rate_limited"
     DATA_TIMEOUT = "data_timeout"
+    # Prices failed consensus before execution; keep observing without
+    # incrementing or clearing an existing failure streak.
+    PRICE_DISAGREEMENT = "price_disagreement"
     EXECUTION_REVERTED = "execution_reverted"
     STATE_CORRUPT = "state_corrupt"
     # VIB-5746: a pre-execution SAFETY-GUARD refusal — the strategy proposed an

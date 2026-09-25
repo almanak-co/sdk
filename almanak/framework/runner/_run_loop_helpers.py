@@ -1840,8 +1840,8 @@ async def handle_iteration_failure(
 ) -> None:
     """Post-iteration bookkeeping for the failure branch.
 
-    Unresolved execution is neutral: it neither adds to nor clears an error
-    streak, and it cannot trigger emergency teardown. Other outcomes increment
+    Unresolved execution and price-consensus waits are neutral: neither adds
+    to nor clears an error streak or triggers emergency teardown. Other outcomes increment
     ``_consecutive_errors``, record the first-error timestamp,
     records the failure on the circuit breaker (skipping statuses that
     were already recorded inline to avoid double-counting), maybe
@@ -1863,6 +1863,18 @@ async def handle_iteration_failure(
 
     inferred_kind = kind_for_status(result.status, result.error)
     recorded_kind = result.failure_kind or inferred_kind
+    if recorded_kind is FailureKind.PRICE_DISAGREEMENT:
+        from ..intents.vocabulary import HoldIntent
+
+        # Only the no-action price-consensus path is neutral. A later
+        # persistence or execution failure must retain its normal budget.
+        if (
+            result.status is IterationStatus.DATA_ERROR
+            and isinstance(result.intent, HoldIntent)
+            and result.execution_result is None
+        ):
+            return
+        recorded_kind = inferred_kind
     # A typed hold cannot neutralize a landed accounting failure or an
     # execution result that carries no durable replay-barrier evidence.
     if recorded_kind is FailureKind.RECONCILIATION_HOLD and recorded_kind is not inferred_kind:

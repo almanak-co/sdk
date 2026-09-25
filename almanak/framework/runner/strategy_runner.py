@@ -2356,6 +2356,31 @@ class StrategyRunner:
         details = ""
         if hasattr(market, "summarize_critical_data_failures") and callable(market.summarize_critical_data_failures):
             details = market.summarize_critical_data_failures(limit=3)
+        if classification == "price_disagreement":
+            from .failure_kind import FailureKind
+
+            reason = "Waiting for reliable price — sources disagree; retrying automatically."
+            error = f"{reason} If a position is open, price-based stop-loss protection is unavailable while waiting."
+            logger.warning("%s %s: %s", state.deployment_id, error, details)
+            waiting_intent = (hold_intent or HoldIntent()).model_copy(
+                update={
+                    "reason": reason,
+                    "reason_code": "PRICE_DISAGREEMENT",
+                    "reason_details": {
+                        "strategy_reason": hold_intent.reason if hold_intent else None,
+                        "price_failure": details,
+                    },
+                }
+            )
+            self._record_failure()
+            return IterationResult(
+                status=IterationStatus.DATA_ERROR,
+                intent=waiting_intent,
+                error=error,
+                deployment_id=state.deployment_id,
+                duration_ms=self._calculate_duration_ms(state.start_time),
+                failure_kind=FailureKind.PRICE_DISAGREEMENT,
+            )
         error = f"Critical market-data failures while strategy returned HOLD (classification={classification})"
         if details:
             error = f"{error}: {details}"

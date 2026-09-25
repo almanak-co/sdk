@@ -1261,11 +1261,13 @@ market.fork_block       # int | None - current fork block number (paper trading 
 The runner uses these methods to detect when a strategy returns HOLD while market-data lookups
 were failing (e.g. price oracle timeouts, unknown tokens), and escalates those cycles into
 `IterationStatus.DATA_ERROR` so the consecutive-error circuit breaker fires correctly.
+Price-only consensus disagreements remain `DATA_ERROR` but retry automatically without
+incrementing or clearing failure streaks; the price safety check remains enforced.
 
 ```python
 market.has_critical_data_failures()          # bool - True if any data lookup failed this cycle
 market.critical_data_failure_count()         # int - number of tracked failures
-market.classify_critical_data_failures()     # str - "transient", "permanent", "mixed", or "none"
+market.classify_critical_data_failures()     # str - "transient", "permanent", "mixed", "price_disagreement", or "none"
 market.summarize_critical_data_failures()    # str - human-readable summary (for logs)
 market.clear_critical_data_failures()        # None - reset all failures (called by runner after pre-warm)
 ```

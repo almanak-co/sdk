@@ -124,6 +124,22 @@ _SOLANA_BASE58_TOKEN_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 # false transient hit on a purely permanent failure (e.g. "Unknown token for Binance").
 _DSU_BOILERPLATE_RE = re.compile(r"data source '[^']*' unavailable:\s*")
 
+# The PriceAggregator's exactly-two-sources refusal, which it attributes to BOTH
+# disagreeing sources as "<source>: Two-source divergence: <lo>=<p> vs <hi>=<p>
+# (<pct>% apart, no consensus possible)".
+_TWO_SOURCE_DIVERGENCE_RE = re.compile(
+    r"Two-source divergence: (?P<lo>[\w.-]+)=\S+ vs (?P<hi>[\w.-]+)=\S+ \(\S+% apart, no consensus possible\)"
+)
+
+
+def _is_two_source_divergence(detail: str) -> bool:
+    match = _TWO_SOURCE_DIVERGENCE_RE.search(detail)
+    if match is None or match["lo"] == match["hi"]:
+        return False
+    clause = match.group(0)
+    return f"{match['lo']}: {clause}" in detail and f"{match['hi']}: {clause}" in detail
+
+
 # Matches the DEX quiet-pool staleness miss emitted by the OHLCV router
 # (``ohlcv_router._build_stale_response_miss``). This phrase is unique to that
 # path: it means the provider *returned* data that is merely old (no recent
@@ -2655,9 +2671,19 @@ class MarketSnapshot:
         return len(self._critical_data_failures)
 
     def classify_critical_data_failures(self) -> str:
-        """Classify observed data failures as transient, permanent, or mixed."""
+        """Classify failures, distinguishing price-only consensus waits."""
         if not self._critical_data_failures:
             return "none"
+
+        # The gateway's two-source refusal means prices were obtained but
+        # cannot be trusted together. An unavailable fallback listing does
+        # not make that disagreement permanent. Other failed reads must not
+        # inherit this exemption from the circuit-breaker budget.
+        if all(
+            source == "price" and _is_two_source_divergence(detail)
+            for (source, _), detail in self._critical_data_failures.items()
+        ):
+            return "price_disagreement"
 
         transient_hints = (
             "timeout",
