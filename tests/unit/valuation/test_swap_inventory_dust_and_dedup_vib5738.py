@@ -33,6 +33,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock
 
+import pytest
+
 from almanak.framework.portfolio.models import PortfolioSnapshot, PositionValue, TokenBalance
 from almanak.framework.teardown.models import (
     PositionInfo,
@@ -45,6 +47,7 @@ from almanak.framework.valuation.portfolio_valuer import (
     _build_wallet_match_index,
     _classify_swap_inventory,
     _dedup_wallet_pseudo_positions_covered_by_swap_inventory,
+    _is_wallet_pseudo_position,
     _resolve_swap_dust_floor,
 )
 
@@ -438,3 +441,67 @@ class TestClassifierDustSkip:
         )
         assert len(out.rows) == 1
         assert out.rows[0].value_usd == Decimal("0.0008") * Decimal("1770")
+
+
+class TestAddressConfiguredWalletBalances:
+    """An address-configured strategy's balances carry the contract in ``symbol`` and no ``address``.
+
+    Robinhood mainnet: the strategy's ``WETH`` TOKEN row and the ``weth`` swap-inventory row
+    both survived, and ``total_value_usd`` persisted $6.00 for a $3.00 holding.
+    """
+
+    _WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+
+    def _balances(self):
+        return [
+            TokenBalance(
+                symbol=self._WETH,
+                balance=Decimal("0.001117444581556004"),
+                value_usd=Decimal("2.9986"),
+                address="",
+                chain="robinhood",
+            )
+        ]
+
+    def _strategy_row(self):
+        return PositionValue(
+            position_type=PositionType.TOKEN,
+            protocol="uniswap_v3",
+            chain="robinhood",
+            value_usd=Decimal("2.9987"),
+            label="uniswap_v3 TOKEN",
+            tokens=[],
+            details={"asset": "WETH", "base_token": "WETH"},
+        )
+
+    def _swap_row(self):
+        return PositionValue(
+            position_type=PositionType.TOKEN,
+            protocol="wallet",
+            chain="robinhood",
+            value_usd=Decimal("2.9986"),
+            label="swap inventory weth",
+            tokens=["weth"],
+            details={"asset": "weth", "source": "swap_inventory_lots"},
+        )
+
+    def test_a_symbol_named_row_overlaps_an_address_keyed_balance(self):
+        assert _is_wallet_pseudo_position(self._strategy_row(), self._balances())
+
+    def test_the_duplicate_of_the_swap_inventory_row_is_dropped(self):
+        balances = self._balances()
+        kept = _dedup_wallet_pseudo_positions_covered_by_swap_inventory(
+            [self._strategy_row()], [self._swap_row()], _build_wallet_match_index(balances), balances
+        )
+        assert kept == []
+
+    @pytest.mark.parametrize("key", ["address", "asset"])
+    @pytest.mark.parametrize("spelling", [str.lower, lambda a: a])
+    def test_an_address_named_duplicate_of_the_swap_inventory_row_is_dropped(self, key, spelling):
+        row = self._strategy_row()
+        row.details = {key: spelling(self._WETH)}
+        balances = self._balances()
+        kept = _dedup_wallet_pseudo_positions_covered_by_swap_inventory(
+            [row], [self._swap_row()], _build_wallet_match_index(balances), balances
+        )
+        assert kept == []

@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from almanak.connectors._strategy_base.lending_read_registry import LendingReadRegistry
 from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
 from almanak.framework.data.market_snapshot import DEFAULT_STABLECOINS
+from almanak.framework.data.tokens.address_resolution import resolve_token_symbol
 from almanak.framework.portfolio.models import (
     STRATEGY_REPORTED_VALUATION_SOURCE,
     PortfolioSnapshot,
@@ -252,6 +253,34 @@ def _is_evm_address_shape(value: str) -> bool:
     return len(value) == 42 and value.startswith("0x") and all(c in "0123456789abcdefABCDEF" for c in value[2:])
 
 
+def _balance_identities(tb: Any) -> tuple[set[str], set[str], set[str]]:
+    """Case-folded symbols, case-folded EVM addresses and exact non-EVM addresses naming one balance.
+
+    Balances of address-configured tokens carry the contract in ``symbol`` and
+    no ``address``; such a symbol names both the contract and, when the offline
+    registry knows it, the token's canonical symbol, so a position naming the
+    same token either way still matches. A registry miss adds no alias.
+    """
+    symbols: set[str] = set()
+    evm_addresses: set[str] = set()
+    exact_addresses: set[str] = set()
+    sym = getattr(tb, "symbol", None)
+    if isinstance(sym, str) and sym:
+        symbols.add(sym.casefold())
+        if _is_evm_address_shape(sym):
+            evm_addresses.add(sym.casefold())
+            canonical = resolve_token_symbol(sym, getattr(tb, "chain", None))
+            if canonical:
+                symbols.add(canonical.casefold())
+    addr = getattr(tb, "address", None)
+    if isinstance(addr, str) and addr:
+        if _is_evm_address_shape(addr):
+            evm_addresses.add(addr.casefold())
+        else:
+            exact_addresses.add(addr)
+    return symbols, evm_addresses, exact_addresses
+
+
 def _build_wallet_match_index(wallet_balances: list[Any]) -> _WalletMatchIndex:
     """Build the per-snapshot wallet-overlap index in a single pass.
 
@@ -266,15 +295,10 @@ def _build_wallet_match_index(wallet_balances: list[Any]) -> _WalletMatchIndex:
     evm_addresses: set[str] = set()
     exact_addresses: set[str] = set()
     for tb in wallet_balances:
-        sym = getattr(tb, "symbol", None)
-        if isinstance(sym, str) and sym:
-            symbols.add(sym.casefold())
-        addr = getattr(tb, "address", None)
-        if isinstance(addr, str) and addr:
-            if _is_evm_address_shape(addr):
-                evm_addresses.add(addr.casefold())
-            else:
-                exact_addresses.add(addr)
+        tb_symbols, tb_evm, tb_exact = _balance_identities(tb)
+        symbols |= tb_symbols
+        evm_addresses |= tb_evm
+        exact_addresses |= tb_exact
     return _WalletMatchIndex(
         symbols=frozenset(symbols),
         evm_addresses=frozenset(evm_addresses),
@@ -487,16 +511,15 @@ def _swap_inventory_covered_identities(
                 symbols.add(tok.casefold())
     evm_addresses: set[str] = set()
     exact_addresses: set[str] = set()
+    address_symbols: set[str] = set()
     for tb in wallet_balances:
-        sym = getattr(tb, "symbol", None)
-        if not (isinstance(sym, str) and sym and sym.casefold() in symbols):
+        tb_symbols, tb_evm, tb_exact = _balance_identities(tb)
+        if not tb_symbols & symbols:
             continue
-        addr = getattr(tb, "address", None)
-        if isinstance(addr, str) and addr:
-            if _is_evm_address_shape(addr):
-                evm_addresses.add(addr.casefold())
-            else:
-                exact_addresses.add(addr)
+        evm_addresses |= tb_evm
+        exact_addresses |= tb_exact
+        address_symbols |= {s for s in tb_symbols if _is_evm_address_shape(s)}
+    symbols |= address_symbols
     return _SwapCoveredIdentities(
         symbols=frozenset(symbols),
         evm_addresses=frozenset(evm_addresses),
