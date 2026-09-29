@@ -642,6 +642,10 @@ class TestUniswapV3CollectFeesIntent:
 
     @pytest.mark.intent(IntentType.LP_OPEN, IntentType.SWAP, IntentType.LP_COLLECT_FEES)
     @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        strict=False,
+        reason="VIB-5968: same-pool fee-accrual flake, mirrored from optimism — at the 2026-W40 base fork pin (block 51896401) the pinned 3000-tier swap credits the in-range position zero fees; strict=False because a later pin may accrue and xpass is legitimate (as of 2026-09-29)",
+    )
     async def test_collect_fees_weth_usdc(
         self,
         web3: Web3,

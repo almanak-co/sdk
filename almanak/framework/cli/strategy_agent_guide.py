@@ -284,7 +284,6 @@ Dependencies are declared in `pyproject.toml`.
 | `.env` | Secrets (private key, API keys) - never commit this |
 | `.gitignore` | Git ignore rules (excludes `.venv/`, `.env`, etc.) |
 | `.python-version` | Python version pin (3.12) |
-| `tests/test_strategy.py` | Unit tests for the strategy |
 
 ## How to Run
 
@@ -346,10 +345,9 @@ See `docs/internal/blueprints/14-teardown-system.md` for the full teardown syste
 
 ## Testing
 
-```bash
-# Unit tests
-pytest tests/ -v
+No unit tests: the fork lifecycle below is the test.
 
+```bash
 # Lifecycle + teardown on a managed Anvil fork
 # (drives each force_action through the production code path, then runs teardown)
 almanak strat test --actions <csv> --teardown --json

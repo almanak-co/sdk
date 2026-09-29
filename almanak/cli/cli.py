@@ -1270,7 +1270,6 @@ def new(ctx, name, working_dir, template, chain, protocol):
     This scaffolds a strategy project with:
     - strategy.py: Main strategy with decide() method
     - config.json: Runtime configuration
-    - tests/: Test scaffolding
 
     \b
     Templates:

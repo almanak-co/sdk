@@ -7,7 +7,6 @@ Create a new strategy from template.
     This scaffolds a strategy project with:
     - strategy.py: Main strategy with decide() method
     - config.json: Runtime configuration
-    - tests/: Test scaffolding
 
     
     Templates:
@@ -59,7 +58,7 @@ Usage: almanak strat new [OPTIONS]
 
 
 * `chain`:
-    * Type: <almanak.framework.cli.chain_params.ChainChoice object at 0x7f2c7db655e0>
+    * Type: <almanak.framework.cli.chain_params.ChainChoice object at 0x7fef4dac40b0>
     * Default: `arbitrum`
     * Usage: `--chain
 -c`
@@ -91,7 +90,6 @@ Usage: almanak strat new [OPTIONS]
   This scaffolds a strategy project with:
   - strategy.py: Main strategy with decide() method
   - config.json: Runtime configuration
-  - tests/: Test scaffolding
 
   Templates:
     blank          Minimal starting point for custom implementations
