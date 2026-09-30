@@ -115,3 +115,53 @@ def test_exit_codes_match_the_perp_market_command_contract():
         _DEX_POOLS_EXIT_INVALID_INPUT,
         _DEX_POOLS_EXIT_UNVERIFIED,
     ) == (0, 1, 2, 4)
+
+
+def test_cli_defaults_to_volume_sort_and_a_page_of_twenty_and_passes_filters(monkeypatch):
+    """The CLI is what agents call; its defaults decide how much output lands in their context."""
+    from click.testing import CliRunner
+
+    import almanak.framework.cli.ax as ax_mod
+
+    seen: dict = {}
+
+    def fake_run_tool(ctx, name, args):
+        seen.update(args)
+        return ToolResponse(
+            status=ToolResponseStatus.SUCCESS,
+            data={
+                "pools": [
+                    {
+                        "pool_address": "0xabc",
+                        "dex_id": "uniswap_v3",
+                        "name": "WETH / USDC",
+                        "reserve_usd": "1",
+                        "volume_24h_usd": "2",
+                        "execution_support": "supported",
+                    }
+                ],
+                "complete": True,
+                "product_distinct_dex_id": True,
+                "venue_support_complete": True,
+                "count": 1,
+                "unfiltered_count": 30,
+                "matched_count": 3,
+                "sort_by": "volume",
+                "offset": 0,
+                "limit": 1,
+                "has_more": True,
+            },
+        )
+
+    monkeypatch.setattr(ax_mod, "_run_tool", fake_run_tool)
+    result = CliRunner().invoke(
+        ax_mod.ax, ["--chain", "base", "dex-pools", "WETH", "--quote", "USDC", "--min-volume", "5"]
+    )
+
+    assert result.exit_code == _DEX_POOLS_EXIT_OK, result.output
+    assert seen["sort_by"] == "volume"
+    assert seen["limit"] == 20
+    assert seen["offset"] == 0
+    assert seen["quote_token"] == "USDC"
+    assert seen["min_volume_usd"] == 5
+    assert "showing 1–1 of 3 matched venues, sorted by 24h volume — --offset 1 for more" in result.output

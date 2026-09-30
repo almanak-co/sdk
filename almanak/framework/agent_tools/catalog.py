@@ -286,7 +286,10 @@ _BUILTIN_TOOLS: list[ToolDefinition] = [
             "A GM or aToken receipt token may still return a few dust AMM pools; that is incidental "
             "wrapper liquidity, NOT the depth of the underlying perp or lending market. "
             "An EMPTY result means 'no venue' ONLY when complete=true; with complete=false the view "
-            "was truncated — report that as 'could not verify', never as 'this token has no venue'."
+            "was truncated — report that as 'could not verify', never as 'this token has no venue'. "
+            "Narrow with quote_token (the other side of the pair), min_volume_usd, sort_by='volume' "
+            "(harder to inflate than reserves) and limit/offset; matched_count and has_more say what "
+            "the page left out."
         ),
         category=ToolCategory.DATA,
         risk_tier=RiskTier.NONE,

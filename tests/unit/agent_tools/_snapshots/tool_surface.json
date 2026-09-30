@@ -365,7 +365,7 @@
       "name": "list_lending_reserves"
     },
     {
-      "description": "List the AMM/DEX spot pools where a token trades, with per-venue USD reserves and 24h volume. Use BEFORE committing to a token or protocol: it answers whether a tradeable spot venue exists at all, and whether the deepest one is actually live. SPOT AMMs ONLY \u2014 perp markets (GMX, Hyperliquid), lending markets (Aave, Morpho) and Pendle PT/YT are NOT venues here; use get_perp_market / list_lending_reserves instead. A GM or aToken receipt token may still return a few dust AMM pools; that is incidental wrapper liquidity, NOT the depth of the underlying perp or lending market. An EMPTY result means 'no venue' ONLY when complete=true; with complete=false the view was truncated \u2014 report that as 'could not verify', never as 'this token has no venue'.",
+      "description": "List the AMM/DEX spot pools where a token trades, with per-venue USD reserves and 24h volume. Use BEFORE committing to a token or protocol: it answers whether a tradeable spot venue exists at all, and whether the deepest one is actually live. SPOT AMMs ONLY \u2014 perp markets (GMX, Hyperliquid), lending markets (Aave, Morpho) and Pendle PT/YT are NOT venues here; use get_perp_market / list_lending_reserves instead. A GM or aToken receipt token may still return a few dust AMM pools; that is incidental wrapper liquidity, NOT the depth of the underlying perp or lending market. An EMPTY result means 'no venue' ONLY when complete=true; with complete=false the view was truncated \u2014 report that as 'could not verify', never as 'this token has no venue'. Narrow with quote_token (the other side of the pair), min_volume_usd, sort_by='volume' (harder to inflate than reserves) and limit/offset; matched_count and has_more say what the page left out.",
       "inputSchema": {
         "description": "List the DEX venues where a token trades, with per-venue depth.\n\nRead-only discovery (VIB-6599). Answers \"where can this token actually be\ntraded, and how deep is each venue?\" \u2014 the viability check that belongs\nBEFORE a strategy is written. Without it the answer surfaces three layers\ndown as an oracle-divergence refusal that reads like a data-quality bug:\nthe motivating case (BTT on ethereum) had no Uniswap V3 pool at all, and\nits only real venue held $211k of reserves against $84 of 24h volume.",
         "properties": {
@@ -374,12 +374,64 @@
             "title": "Chain",
             "type": "string"
           },
+          "limit": {
+            "anyOf": [
+              {
+                "maximum": 500,
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Return at most this many venues after filtering and sorting. None = all.",
+            "title": "Limit"
+          },
           "min_liquidity_usd": {
             "default": 0.0,
             "description": "Optional floor on a venue's USD reserves. Venues with UNMEASURED reserves are excluded when this is > 0 ('unknown' does not satisfy '>= X') and kept when it is 0.",
             "minimum": 0.0,
             "title": "Min Liquidity Usd",
             "type": "number"
+          },
+          "min_volume_usd": {
+            "default": 0.0,
+            "description": "Optional floor on a venue's 24h USD volume. Venues with UNMEASURED volume are excluded when this is > 0 and kept when it is 0.",
+            "minimum": 0.0,
+            "title": "Min Volume Usd",
+            "type": "number"
+          },
+          "offset": {
+            "default": 0,
+            "description": "Skip this many venues first (pagination).",
+            "minimum": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "quote_token": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional other side of the pair (symbol or contract address). Keeps only pools that pair `token` with this token, e.g. token=WETH quote_token=USDC for the WETH/USDC venues.",
+            "title": "Quote Token"
+          },
+          "sort_by": {
+            "default": "liquidity",
+            "description": "'liquidity' ranks by USD reserves (deepest first); 'volume' ranks by 24h volume, which is harder to inflate than provider reserve figures. Unmeasured values sort last.",
+            "enum": [
+              "liquidity",
+              "volume"
+            ],
+            "title": "Sort By",
+            "type": "string"
           },
           "token": {
             "description": "Token symbol or contract address.",
@@ -2188,7 +2240,7 @@
     },
     {
       "function": {
-        "description": "List the AMM/DEX spot pools where a token trades, with per-venue USD reserves and 24h volume. Use BEFORE committing to a token or protocol: it answers whether a tradeable spot venue exists at all, and whether the deepest one is actually live. SPOT AMMs ONLY \u2014 perp markets (GMX, Hyperliquid), lending markets (Aave, Morpho) and Pendle PT/YT are NOT venues here; use get_perp_market / list_lending_reserves instead. A GM or aToken receipt token may still return a few dust AMM pools; that is incidental wrapper liquidity, NOT the depth of the underlying perp or lending market. An EMPTY result means 'no venue' ONLY when complete=true; with complete=false the view was truncated \u2014 report that as 'could not verify', never as 'this token has no venue'.",
+        "description": "List the AMM/DEX spot pools where a token trades, with per-venue USD reserves and 24h volume. Use BEFORE committing to a token or protocol: it answers whether a tradeable spot venue exists at all, and whether the deepest one is actually live. SPOT AMMs ONLY \u2014 perp markets (GMX, Hyperliquid), lending markets (Aave, Morpho) and Pendle PT/YT are NOT venues here; use get_perp_market / list_lending_reserves instead. A GM or aToken receipt token may still return a few dust AMM pools; that is incidental wrapper liquidity, NOT the depth of the underlying perp or lending market. An EMPTY result means 'no venue' ONLY when complete=true; with complete=false the view was truncated \u2014 report that as 'could not verify', never as 'this token has no venue'. Narrow with quote_token (the other side of the pair), min_volume_usd, sort_by='volume' (harder to inflate than reserves) and limit/offset; matched_count and has_more say what the page left out.",
         "name": "list_token_pools",
         "parameters": {
           "description": "List the DEX venues where a token trades, with per-venue depth.\n\nRead-only discovery (VIB-6599). Answers \"where can this token actually be\ntraded, and how deep is each venue?\" \u2014 the viability check that belongs\nBEFORE a strategy is written. Without it the answer surfaces three layers\ndown as an oracle-divergence refusal that reads like a data-quality bug:\nthe motivating case (BTT on ethereum) had no Uniswap V3 pool at all, and\nits only real venue held $211k of reserves against $84 of 24h volume.",
@@ -2198,12 +2250,64 @@
               "title": "Chain",
               "type": "string"
             },
+            "limit": {
+              "anyOf": [
+                {
+                  "maximum": 500,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Return at most this many venues after filtering and sorting. None = all.",
+              "title": "Limit"
+            },
             "min_liquidity_usd": {
               "default": 0.0,
               "description": "Optional floor on a venue's USD reserves. Venues with UNMEASURED reserves are excluded when this is > 0 ('unknown' does not satisfy '>= X') and kept when it is 0.",
               "minimum": 0.0,
               "title": "Min Liquidity Usd",
               "type": "number"
+            },
+            "min_volume_usd": {
+              "default": 0.0,
+              "description": "Optional floor on a venue's 24h USD volume. Venues with UNMEASURED volume are excluded when this is > 0 and kept when it is 0.",
+              "minimum": 0.0,
+              "title": "Min Volume Usd",
+              "type": "number"
+            },
+            "offset": {
+              "default": 0,
+              "description": "Skip this many venues first (pagination).",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            },
+            "quote_token": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional other side of the pair (symbol or contract address). Keeps only pools that pair `token` with this token, e.g. token=WETH quote_token=USDC for the WETH/USDC venues.",
+              "title": "Quote Token"
+            },
+            "sort_by": {
+              "default": "liquidity",
+              "description": "'liquidity' ranks by USD reserves (deepest first); 'volume' ranks by 24h volume, which is harder to inflate than provider reserve figures. Unmeasured values sort last.",
+              "enum": [
+                "liquidity",
+                "volume"
+              ],
+              "title": "Sort By",
+              "type": "string"
             },
             "token": {
               "description": "Token symbol or contract address.",

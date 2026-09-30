@@ -31,7 +31,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import grpc
 
@@ -202,23 +202,53 @@ def _decimal_or_zero(value: str) -> Decimal:
 def rank_token_pools(
     pools: tuple[TokenPool, ...],
     min_liquidity_usd: Decimal | None = None,
+    *,
+    min_volume_usd: Decimal | None = None,
+    quote_token_address: str | None = None,
+    token_address: str | None = None,
+    sort_by: Literal["liquidity", "volume"] = "liquidity",
 ) -> tuple[TokenPool, ...]:
-    """Filter by a depth floor and sort deepest-first, unmeasured last.
+    """Filter by depth / volume floors and an optional pair, then sort, unmeasured last.
 
-    The single owner of both rules, shared by ``MarketSnapshot.token_pools``
+    The single owner of these rules, shared by ``MarketSnapshot.token_pools``
     and the ``list_token_pools`` agent tool — two surfaces that must not drift
-    on what "deepest" means or on how an unmeasured reserve is treated.
+    on what "deepest" means or on how an unmeasured figure is treated.
 
-    Unmeasured reserves sort LAST rather than as zero, and are DROPPED when a
-    floor is set: ranking an unknown depth below a measured-empty pool asserts
-    something the data does not say, and "unknown" does not satisfy ">= X"
-    (Empty != Zero, AGENTS.md "Accounting").
+    ``sort_by="liquidity"`` (the default) ranks deepest-first by reserves;
+    ``sort_by="volume"`` ranks by 24h traded volume, which is harder to inflate
+    than provider reserve figures (a dust pair can report billions of "reserves"
+    while trading a few thousand dollars a day). Unmeasured figures sort LAST
+    rather than as zero, and are DROPPED when a floor on that figure is set:
+    "unknown" does not satisfy ">= X" (Empty != Zero, AGENTS.md "Accounting").
+
+    ``quote_token_address`` keeps only pools whose other side is that token
+    (needs ``token_address``, the token the venues were keyed on). EVM
+    addresses compare case-insensitively; anything else (Solana mints) exactly.
     """
-    kept = (
-        pools
-        if min_liquidity_usd is None
-        else tuple(p for p in pools if p.reserve_usd is not None and p.reserve_usd >= min_liquidity_usd)
+
+    def _same(a: str, b: str) -> bool:
+        if a.startswith("0x") or b.startswith("0x"):
+            return a.lower() == b.lower()
+        return a == b
+
+    def _pairs_with_quote(p: TokenPool) -> bool:
+        if quote_token_address is None:
+            return True
+        if token_address is None:
+            return _same(p.base_token_address, quote_token_address) or _same(p.quote_token_address, quote_token_address)
+        return (_same(p.base_token_address, token_address) and _same(p.quote_token_address, quote_token_address)) or (
+            _same(p.quote_token_address, token_address) and _same(p.base_token_address, quote_token_address)
+        )
+
+    kept = tuple(
+        p
+        for p in pools
+        if (min_liquidity_usd is None or (p.reserve_usd is not None and p.reserve_usd >= min_liquidity_usd))
+        and (min_volume_usd is None or (p.volume_24h_usd is not None and p.volume_24h_usd >= min_volume_usd))
+        and _pairs_with_quote(p)
     )
+    if sort_by == "volume":
+        return tuple(sorted(kept, key=lambda p: (p.volume_24h_usd is None, -(p.volume_24h_usd or Decimal(0)))))
     return tuple(sorted(kept, key=lambda p: (p.reserve_usd is None, -(p.reserve_usd or Decimal(0)))))
 
 

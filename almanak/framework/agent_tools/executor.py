@@ -18,7 +18,7 @@ from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import ValidationError
 
@@ -679,6 +679,150 @@ def _pool_state_supported_keys() -> list[str]:
         if any(key in supported for key in spec.keys):
             supported.update(spec.keys)
     return sorted(supported)
+
+
+@dataclass(frozen=True)
+class _TokenPoolsQuery:
+    min_liquidity_usd: Decimal | None
+    min_volume_usd: Decimal | None
+    sort_by: Literal["liquidity", "volume"]
+    offset: int
+    limit: int | None
+    quote_token_address: str | None
+
+
+def _token_pools_validation_error(message: str) -> ToolResponse:
+    return ToolResponse(
+        status=ToolResponseStatus.ERROR,
+        error=_error_payload(AgentErrorCode.VALIDATION_ERROR, message),
+    )
+
+
+def _resolve_token_pools_address(value: str, chain: str, *, label: str = "") -> str | ToolResponse:
+    """Resolve a symbol or address to the address venue discovery is keyed by."""
+    from almanak.framework.data.tokens import get_token_resolver
+    from almanak.framework.market.snapshot import _SOLANA_BASE58_TOKEN_RE
+
+    # Address-shaped input passes straight through: venue discovery is
+    # address-keyed, and the tail tokens this tool exists for are exactly
+    # the ones no registry lists. Both families, not just EVM — a Solana
+    # mint is base58 and CASE-SENSITIVE, so it must never be lower-cased
+    # (that yields a different address) and must not be sent to the symbol
+    # resolver, which would report a valid address as unresolvable.
+    if value.lower().startswith("0x") and len(value) == 42:
+        return value.lower()
+    if _SOLANA_BASE58_TOKEN_RE.match(value):
+        return value
+    try:
+        return get_token_resolver().resolve(value, chain).address
+    except Exception as e:  # noqa: BLE001 - any resolution failure is the same user-facing answer
+        return _token_pools_validation_error(
+            f"list_token_pools: cannot resolve {label}'{value}' on {chain} ({e}). Pass a contract address."
+        )
+
+
+def _optional_usd_floor(raw: Any) -> Decimal | None:
+    raw = raw or 0
+    return Decimal(str(raw)) if float(raw) > 0 else None
+
+
+def _parse_token_pools_sort(args: dict) -> Literal["liquidity", "volume"] | ToolResponse:
+    raw_sort = args.get("sort_by") or "liquidity"
+    if raw_sort not in ("liquidity", "volume"):
+        return _token_pools_validation_error(
+            f"list_token_pools: sort_by must be 'liquidity' or 'volume', got {raw_sort!r}"
+        )
+    return "volume" if raw_sort == "volume" else "liquidity"
+
+
+def _parse_token_pools_page(args: dict) -> tuple[int, int | None] | ToolResponse:
+    offset = int(args.get("offset") or 0)
+    raw_limit = args.get("limit")
+    limit = int(raw_limit) if raw_limit is not None else None
+    if offset < 0 or (limit is not None and limit < 1):
+        return _token_pools_validation_error("list_token_pools: offset must be >= 0 and limit >= 1")
+    return offset, limit
+
+
+def _parse_token_pools_query(args: dict, chain: str) -> _TokenPoolsQuery | ToolResponse:
+    min_liquidity_usd = _optional_usd_floor(args.get("min_liquidity_usd"))
+    min_volume_usd = _optional_usd_floor(args.get("min_volume_usd"))
+    sort_by = _parse_token_pools_sort(args)
+    if isinstance(sort_by, ToolResponse):
+        return sort_by
+    page = _parse_token_pools_page(args)
+    if isinstance(page, ToolResponse):
+        return page
+    quote = str(args.get("quote_token") or "").strip()
+    quote_address = _resolve_token_pools_address(quote, chain, label="quote_token ") if quote else None
+    if isinstance(quote_address, ToolResponse):
+        return quote_address
+    return _TokenPoolsQuery(
+        min_liquidity_usd=min_liquidity_usd,
+        min_volume_usd=min_volume_usd,
+        sort_by=sort_by,
+        offset=page[0],
+        limit=page[1],
+        quote_token_address=quote_address,
+    )
+
+
+def _token_pool_row(pool: Any, support: Any) -> dict[str, Any]:
+    return {
+        "pool_address": pool.pool_address,
+        "dex_id": pool.dex_id,
+        "name": pool.name,
+        # Unmeasured stays "" on the wire — never coerced to "0", which would
+        # read as a measured-empty venue.
+        "reserve_usd": "" if pool.reserve_usd is None else str(pool.reserve_usd),
+        "volume_24h_usd": "" if pool.volume_24h_usd is None else str(pool.volume_24h_usd),
+        "base_token_address": pool.base_token_address,
+        "quote_token_address": pool.quote_token_address,
+        "execution_support": support.status,
+        "protocols": list(support.protocols),
+        "supported_intents": list(support.intents),
+    }
+
+
+def _token_pools_response(
+    token: str, result: Any, query: _TokenPoolsQuery, matched: tuple[Any, ...], pools: tuple[Any, ...]
+) -> ToolResponse:
+    from almanak.connectors._strategy_base.venue_support import VenueSupportIndex
+
+    # Which of these venues a connector can actually target. Built once per
+    # response off the connector manifests; the provider's dex ids are only
+    # matchable when it reports them product-distinct.
+    venues = VenueSupportIndex(result.chain)
+    support = [venues.classify(p.dex_id, product_distinct=result.product_distinct_dex_id) for p in pools]
+    return ToolResponse(
+        status=ToolResponseStatus.SUCCESS,
+        data={
+            "schema_version": 1,
+            "chain": result.chain,
+            "token": token,
+            "token_address": result.token_address,
+            "count": len(pools),
+            # Report the count BEFORE the caller's filters as well. Without it,
+            # "no venues exist" and "venues exist, none met your floor" are the
+            # same empty list — and a caller acting on the second as though it
+            # were the first reports a tradeable token as untradeable.
+            "unfiltered_count": len(result.pools),
+            "matched_count": len(matched),
+            "sort_by": query.sort_by,
+            "quote_token_address": query.quote_token_address or "",
+            "min_liquidity_usd": str(query.min_liquidity_usd) if query.min_liquidity_usd is not None else "",
+            "min_volume_usd": str(query.min_volume_usd) if query.min_volume_usd is not None else "",
+            "offset": query.offset,
+            "limit": query.limit,
+            "has_more": query.offset + len(pools) < len(matched),
+            "source": result.source,
+            "complete": result.complete,
+            "product_distinct_dex_id": result.product_distinct_dex_id,
+            "venue_support_complete": venues.complete,
+            "supported_pool_protocols": list(venues.pool_protocols),
+            "pools": [_token_pool_row(p, s) for p, s in zip(pools, support, strict=True)],
+        },
+    )
 
 
 class _TeardownContext:
@@ -3190,42 +3334,16 @@ class ToolExecutor:
         owned by ``PoolAnalyticsReader`` / ``rank_token_pools`` so this tool and
         ``MarketSnapshot.token_pools`` cannot drift apart.
         """
-        from decimal import Decimal
-
         from almanak.framework.data.interfaces import DataSourceUnavailable
         from almanak.framework.data.pools.analytics import PoolAnalyticsReader, rank_token_pools
-        from almanak.framework.data.tokens import get_token_resolver
-        from almanak.framework.market.snapshot import _SOLANA_BASE58_TOKEN_RE
 
         token = str(args.get("token") or "").strip()
         chain = args.get("chain", self._default_chain)
         if not token:
-            return ToolResponse(
-                status=ToolResponseStatus.ERROR,
-                error=_error_payload(AgentErrorCode.VALIDATION_ERROR, "list_token_pools: 'token' is required"),
-            )
-
-        # Address-shaped input passes straight through: venue discovery is
-        # address-keyed, and the tail tokens this tool exists for are exactly
-        # the ones no registry lists. Both families, not just EVM — a Solana
-        # mint is base58 and CASE-SENSITIVE, so it must never be lower-cased
-        # (that yields a different address) and must not be sent to the symbol
-        # resolver, which would report a valid address as unresolvable.
-        if token.lower().startswith("0x") and len(token) == 42:
-            token_address = token.lower()
-        elif _SOLANA_BASE58_TOKEN_RE.match(token):
-            token_address = token
-        else:
-            try:
-                token_address = get_token_resolver().resolve(token, chain).address
-            except Exception as e:  # noqa: BLE001 - any resolution failure is the same user-facing answer
-                return ToolResponse(
-                    status=ToolResponseStatus.ERROR,
-                    error=_error_payload(
-                        AgentErrorCode.VALIDATION_ERROR,
-                        f"list_token_pools: cannot resolve '{token}' on {chain} ({e}). Pass a contract address.",
-                    ),
-                )
+            return _token_pools_validation_error("list_token_pools: 'token' is required")
+        token_address = _resolve_token_pools_address(token, chain)
+        if isinstance(token_address, ToolResponse):
+            return token_address
 
         try:
             envelope = PoolAnalyticsReader(
@@ -3249,57 +3367,20 @@ class ToolExecutor:
                 ),
             )
 
-        from almanak.connectors._strategy_base.venue_support import VenueSupportIndex
-
-        raw_floor = args.get("min_liquidity_usd") or 0
-        floor = Decimal(str(raw_floor)) if float(raw_floor) > 0 else None
+        query = _parse_token_pools_query(args, chain)
+        if isinstance(query, ToolResponse):
+            return query
         result = envelope.value
-        pools = rank_token_pools(result.pools, floor)
-        # Which of these venues a connector can actually target. Built once per
-        # response off the connector manifests; the provider's dex ids are only
-        # matchable when it reports them product-distinct.
-        venues = VenueSupportIndex(result.chain)
-        support = [venues.classify(p.dex_id, product_distinct=result.product_distinct_dex_id) for p in pools]
-        # Report the count BEFORE the caller's floor as well. Without it, "no
-        # venues exist" and "venues exist, none met your floor" are the same
-        # empty list — and a caller acting on the second as though it were the
-        # first reports a tradeable token as untradeable.
-        unfiltered_count = len(result.pools)
-
-        return ToolResponse(
-            status=ToolResponseStatus.SUCCESS,
-            data={
-                "schema_version": 1,
-                "chain": result.chain,
-                "token": token,
-                "token_address": result.token_address,
-                "count": len(pools),
-                "unfiltered_count": unfiltered_count,
-                "min_liquidity_usd": str(floor) if floor is not None else "",
-                "source": result.source,
-                "complete": result.complete,
-                "product_distinct_dex_id": result.product_distinct_dex_id,
-                "venue_support_complete": venues.complete,
-                "supported_pool_protocols": list(venues.pool_protocols),
-                "pools": [
-                    {
-                        "pool_address": p.pool_address,
-                        "dex_id": p.dex_id,
-                        "name": p.name,
-                        # Unmeasured stays "" on the wire — never coerced to
-                        # "0", which would read as a measured-empty venue.
-                        "reserve_usd": "" if p.reserve_usd is None else str(p.reserve_usd),
-                        "volume_24h_usd": "" if p.volume_24h_usd is None else str(p.volume_24h_usd),
-                        "base_token_address": p.base_token_address,
-                        "quote_token_address": p.quote_token_address,
-                        "execution_support": s.status,
-                        "protocols": list(s.protocols),
-                        "supported_intents": list(s.intents),
-                    }
-                    for p, s in zip(pools, support, strict=True)
-                ],
-            },
+        matched = rank_token_pools(
+            result.pools,
+            query.min_liquidity_usd,
+            min_volume_usd=query.min_volume_usd,
+            quote_token_address=query.quote_token_address,
+            token_address=result.token_address or token_address,
+            sort_by=query.sort_by,
         )
+        end = query.offset + query.limit if query.limit is not None else None
+        return _token_pools_response(token, result, query, matched, matched[query.offset : end])
 
     def _read_lp_position_current_tick(
         self,

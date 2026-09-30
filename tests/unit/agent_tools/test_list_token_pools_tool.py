@@ -193,3 +193,123 @@ async def test_empty_venue_list_is_a_success_not_an_error(executor: ToolExecutor
     assert response.data["pools"] == []
     assert response.data["unfiltered_count"] == 0
     assert response.data["complete"] is True
+
+
+_USDC = "0xaf88d065e77c8cc2239327c5edb3a432268e5831"
+_ARB = "0x912ce59144191c1204e64559fe8253a0e49e6548"
+
+
+def _pair(name: str, other: str, reserve: Decimal | None, volume: Decimal | None, n: int) -> TokenPool:
+    return TokenPool(
+        pool_address="0x" + str(n) * 40,
+        dex_id="uniswap_v3",
+        name=name,
+        reserve_usd=reserve,
+        volume_24h_usd=volume,
+        base_token_address=_WETH,
+        quote_token_address=other,
+    )
+
+
+_MIXED = (
+    # A dust pair reporting huge reserves: exactly what a reserve ranking puts first.
+    _pair("DUST / WETH", "0x" + "d" * 40, Decimal("1594907410"), Decimal("2237"), 1),
+    _pair("WETH / USDC 0.05%", _USDC, Decimal("36450588"), Decimal("48226261"), 2),
+    _pair("WETH / USDC 0.3%", _USDC, Decimal("160266587"), Decimal("75923020"), 3),
+    _pair("ARB / WETH", _ARB, Decimal("5000000"), None, 4),
+)
+
+
+@pytest.mark.asyncio
+async def test_sort_by_volume_ranks_traded_venues_first_and_unmeasured_last(executor: ToolExecutor):
+    response, _ = await _run(executor, {"token": _WETH, "sort_by": "volume"}, _envelope(_MIXED))
+
+    assert [p["name"] for p in response.data["pools"]] == [
+        "WETH / USDC 0.3%",
+        "WETH / USDC 0.05%",
+        "DUST / WETH",
+        "ARB / WETH",
+    ]
+    assert response.data["sort_by"] == "volume"
+
+
+@pytest.mark.asyncio
+async def test_default_sort_is_still_liquidity(executor: ToolExecutor):
+    """MarketSnapshot.token_pools and existing tool callers keep deepest-first."""
+    response, _ = await _run(executor, {"token": _WETH}, _envelope(_MIXED))
+
+    assert response.data["pools"][0]["name"] == "DUST / WETH"
+    assert response.data["sort_by"] == "liquidity"
+
+
+@pytest.mark.asyncio
+async def test_quote_token_keeps_only_that_pair(executor: ToolExecutor):
+    response, _ = await _run(
+        executor,
+        {"token": _WETH, "quote_token": _USDC.upper().replace("0X", "0x"), "sort_by": "volume"},
+        _envelope(_MIXED),
+    )
+
+    assert [p["name"] for p in response.data["pools"]] == ["WETH / USDC 0.3%", "WETH / USDC 0.05%"]
+    assert response.data["quote_token_address"] == _USDC
+    assert response.data["matched_count"] == 2
+    assert response.data["unfiltered_count"] == 4
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_quote_token_is_a_validation_error(executor: ToolExecutor):
+    response, _ = await _run(executor, {"token": _WETH, "quote_token": "NOT-A-REAL-SYMBOL-XYZ"}, _envelope(_MIXED))
+
+    assert response.status == ToolResponseStatus.ERROR
+    assert response.error["error_code"] == AgentErrorCode.VALIDATION_ERROR
+    assert "quote_token" in response.error["message"]
+
+
+@pytest.mark.asyncio
+async def test_volume_floor_drops_unmeasured_and_quiet_venues(executor: ToolExecutor):
+    response, _ = await _run(executor, {"token": _WETH, "min_volume_usd": 10000}, _envelope(_MIXED))
+
+    assert {p["name"] for p in response.data["pools"]} == {"WETH / USDC 0.3%", "WETH / USDC 0.05%"}
+    assert response.data["min_volume_usd"] == "10000"
+
+
+@pytest.mark.asyncio
+async def test_limit_and_offset_page_through_matches(executor: ToolExecutor):
+    args = {"token": _WETH, "sort_by": "volume", "limit": 2}
+    first, _ = await _run(executor, args, _envelope(_MIXED))
+    second, _ = await _run(executor, {**args, "offset": 2}, _envelope(_MIXED))
+
+    assert [p["name"] for p in first.data["pools"]] == ["WETH / USDC 0.3%", "WETH / USDC 0.05%"]
+    assert first.data["count"] == 2
+    assert first.data["matched_count"] == 4
+    assert first.data["has_more"] is True
+    assert [p["name"] for p in second.data["pools"]] == ["DUST / WETH", "ARB / WETH"]
+    assert second.data["has_more"] is False
+
+
+@pytest.mark.asyncio
+async def test_offset_past_the_end_is_an_empty_success_with_counts(executor: ToolExecutor):
+    response, _ = await _run(executor, {"token": _WETH, "offset": 10}, _envelope(_MIXED))
+
+    assert response.status == ToolResponseStatus.SUCCESS
+    assert response.data["pools"] == []
+    assert response.data["matched_count"] == 4
+    assert response.data["has_more"] is False
+
+
+@pytest.mark.asyncio
+async def test_unknown_sort_is_a_validation_error(executor: ToolExecutor):
+    response, _ = await _run(executor, {"token": _WETH, "sort_by": "apr"}, _envelope(_MIXED))
+
+    assert response.status == ToolResponseStatus.ERROR
+    assert response.error["error_code"] == AgentErrorCode.VALIDATION_ERROR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page", [{"offset": -1}, {"limit": 0}])
+async def test_out_of_range_page_is_a_validation_error(executor: ToolExecutor, page: dict):
+    response, _ = await _run(executor, {"token": _WETH, **page}, _envelope(_MIXED))
+
+    assert response.status == ToolResponseStatus.ERROR
+    assert response.error["error_code"] == AgentErrorCode.VALIDATION_ERROR
+    assert "offset must be >= 0 and limit >= 1" in response.error["message"]

@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
-from typing import assert_never
+from typing import Literal, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -525,6 +525,35 @@ class ListTokenPoolsRequest(BaseModel):
             "excluded when this is > 0 ('unknown' does not satisfy '>= X') and kept when it is 0."
         ),
     )
+    quote_token: str | None = Field(
+        default=None,
+        description=(
+            "Optional other side of the pair (symbol or contract address). Keeps only pools that pair "
+            "`token` with this token, e.g. token=WETH quote_token=USDC for the WETH/USDC venues."
+        ),
+    )
+    min_volume_usd: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Optional floor on a venue's 24h USD volume. Venues with UNMEASURED volume are excluded "
+            "when this is > 0 and kept when it is 0."
+        ),
+    )
+    sort_by: Literal["liquidity", "volume"] = Field(
+        default="liquidity",
+        description=(
+            "'liquidity' ranks by USD reserves (deepest first); 'volume' ranks by 24h volume, which is "
+            "harder to inflate than provider reserve figures. Unmeasured values sort last."
+        ),
+    )
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        le=500,
+        description="Return at most this many venues after filtering and sorting. None = all.",
+    )
+    offset: int = Field(default=0, ge=0, description="Skip this many venues first (pagination).")
 
 
 class TokenPoolSummary(BaseModel):
@@ -605,8 +634,20 @@ class ListTokenPoolsResponse(BaseModel):
     )
     pools: list[TokenPoolSummary] = Field(
         default_factory=list,
-        description="Venues sorted by reserve_usd descending, unmeasured last. EMPTY = no venues found.",
+        description=(
+            "Venues after filters, sorted per sort_by (default reserve_usd descending), unmeasured last, "
+            "then paginated by offset/limit. EMPTY = no venues found (see unfiltered_count / matched_count)."
+        ),
     )
+    unfiltered_count: int = Field(default=0, description="Venues the provider returned, before any filter.")
+    matched_count: int = Field(default=0, description="Venues left after the filters, before offset/limit.")
+    sort_by: str = Field(default="liquidity", description="Ranking applied: 'liquidity' or 'volume'.")
+    quote_token_address: str = Field(default="", description="Resolved quote_token filter; '' when not filtered.")
+    min_liquidity_usd: str = Field(default="", description="Reserve floor applied; '' when none.")
+    min_volume_usd: str = Field(default="", description="Volume floor applied; '' when none.")
+    offset: int = Field(default=0, description="Venues skipped before this page.")
+    limit: int | None = Field(default=None, description="Page size requested; None = all.")
+    has_more: bool = Field(default=False, description="True when more matched venues follow this page.")
 
 
 class GetPortfolioRequest(BaseModel):

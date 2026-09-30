@@ -4007,10 +4007,39 @@ _VENUE_SUPPORT_MARKS = {
     default=0.0,
     help="Only show venues with at least this much USD liquidity (venues of unknown depth are dropped).",
 )
+@click.option(
+    "--quote",
+    "quote_token",
+    default=None,
+    help="Only pools pairing TOKEN with this token (symbol or address), e.g. `dex-pools WETH --quote USDC`.",
+)
+@click.option(
+    "--min-volume",
+    "min_volume",
+    type=float,
+    default=0.0,
+    help="Only show venues with at least this much 24h USD volume (venues of unknown volume are dropped).",
+)
+@click.option(
+    "--sort",
+    "sort_by",
+    type=click.Choice(["volume", "liquidity"]),
+    default="volume",
+    show_default=True,
+    help="Rank by 24h volume or by USD liquidity. Provider liquidity figures can be inflated by dust pairs.",
+)
+@click.option(
+    "--limit",
+    type=click.IntRange(1, 500),
+    default=20,
+    show_default=True,
+    help="Show at most this many venues.",
+)
+@click.option("--offset", type=click.IntRange(0), default=0, show_default=True, help="Skip this many venues first.")
 @_chain_option
 @click.pass_context
-def dex_pools(ctx, token, min_liquidity):
-    """List the AMM/DEX spot pools where a token trades, deepest first.
+def dex_pools(ctx, token, min_liquidity, quote_token, min_volume, sort_by, limit, offset):
+    """List the AMM/DEX spot pools where a token trades, busiest first.
 
     Read-only. Shows each venue's USD liquidity and 24h volume, so you can
     answer "is there anywhere to actually trade this?" before writing a
@@ -4035,6 +4064,12 @@ def dex_pools(ctx, token, min_liquidity):
         almanak ax dex-pools 0xc669928185dbce49d2230cc9b0979be6dc797957 --chain ethereum
         almanak ax --chain base dex-pools USDC --min-liquidity 100000
         almanak ax --chain base --json dex-pools USDC
+        almanak ax --chain base --json dex-pools WETH --quote USDC --limit 5
+        almanak ax --chain base dex-pools WETH --sort liquidity --offset 20
+
+    Ranks by 24h volume by default (`--sort liquidity` for reserves) and shows
+    the first 20 (`--limit` / `--offset` page through the rest; the JSON
+    reports `matched_count` and `has_more`).
 
     \b
     Exit codes (mirrors `ax perp-market`):
@@ -4057,6 +4092,11 @@ def dex_pools(ctx, token, min_liquidity):
                 "token": token,
                 "chain": ctx.obj["chain"],
                 "min_liquidity_usd": min_liquidity,
+                "quote_token": quote_token,
+                "min_volume_usd": min_volume,
+                "sort_by": sort_by,
+                "limit": limit,
+                "offset": offset,
             },
         )
         # The generic renderer flattens the venue list into one unreadable
@@ -4146,12 +4186,28 @@ def _render_dex_pools_table(response, *, token: str, chain: str) -> None:
         # the caller's own floor excluded, an absence the provider can vouch
         # for, and a view too truncated to vouch for anything.
         floor = data.get("min_liquidity_usd") or ""
+        volume_floor = data.get("min_volume_usd") or ""
+        quote = data.get("quote_token_address") or ""
         unfiltered = data.get("unfiltered_count") or 0
-        if unfiltered:
+        matched = data.get("matched_count", 0)
+        if unfiltered and matched and (data.get("offset") or 0) >= matched:
             click.echo(
                 click.style(
-                    f"  {unfiltered} venue(s) found, none with at least ${float(floor or 0):,.0f} liquidity "
-                    f"— lower --min-liquidity to see them",
+                    f"  {matched} venue(s) matched — --offset {data.get('offset')} is past the end", fg="yellow"
+                )
+            )
+        elif unfiltered:
+            filters = []
+            if floor:
+                filters.append(f"at least ${float(floor):,.0f} liquidity (--min-liquidity)")
+            if volume_floor:
+                filters.append(f"at least ${float(volume_floor):,.0f} 24h volume (--min-volume)")
+            if quote:
+                filters.append(f"paired with {quote} (--quote)")
+            click.echo(
+                click.style(
+                    f"  {unfiltered} venue(s) found, none with {' and '.join(filters) or 'the requested filters'} "
+                    f"— relax the filters to see them",
                     fg="yellow",
                 )
             )
@@ -4202,6 +4258,13 @@ def _render_dex_pools_table(response, *, token: str, chain: str) -> None:
             f"{click.style(mark, fg=colour)}{' ' * (4 - len(mark))} "
             f"{pool.get('pool_address') or '?'}"
         )
+    matched = data.get("matched_count", len(pools))
+    offset = data.get("offset") or 0
+    order = "24h volume" if data.get("sort_by") == "volume" else "liquidity"
+    footer = f"\n  showing {offset + 1}–{offset + len(pools)} of {matched} matched venues, sorted by {order}"
+    if data.get("has_more"):
+        footer += f" — --offset {offset + len(pools)} for more"
+    click.echo(footer)
     _echo_dex_pools_support_footer(pools, data, chain=chain)
     click.echo("")
 
