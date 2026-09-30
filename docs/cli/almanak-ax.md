@@ -132,6 +132,14 @@ Usage: almanak ax [OPTIONS] COMMAND [ARGS]...
     Network mode. Auto-starts a gateway if none is running (default: mainnet).
 
 
+* `verbose`:
+    * Type: BOOL
+    * Default: `False`
+    * Usage: `--verbose
+-v`
+    Show library warnings and gateway start-up notes on stderr (always written to ~/.almanak/logs/cli.log).
+
+
 * `help`:
     * Type: BOOL
     * Default: `False`
@@ -204,6 +212,9 @@ Options:
                              plain English (e.g. -n "swap 5 USDC to ETH").
   --network [mainnet|anvil]  Network mode. Auto-starts a gateway if none is
                              running (default: mainnet).
+  -v, --verbose              Show library warnings and gateway start-up notes
+                             on stderr (always written to
+                             ~/.almanak/logs/cli.log).
   --help                     Show this message and exit.
 
 Commands:

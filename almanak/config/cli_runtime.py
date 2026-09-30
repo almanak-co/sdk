@@ -889,3 +889,13 @@ __all__ = [
     "max_value_usd_override",
     "subprocess_env_with_overrides",
 ]
+
+
+def cli_log_level_from_env() -> str:
+    """``ALMANAK_CLI_LOG_LEVEL``: stderr threshold for short-lived CLI commands ('' = default)."""
+    return (os.environ.get("ALMANAK_CLI_LOG_LEVEL") or "").strip().lower()
+
+
+def cli_log_file_from_env() -> str | None:
+    """``ALMANAK_CLI_LOG_FILE``: CLI log destination; ``None`` = default path, ``""`` = no file."""
+    return os.environ.get("ALMANAK_CLI_LOG_FILE")

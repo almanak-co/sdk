@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import logging
 import re
 import sys
 import time
@@ -21,6 +22,8 @@ from almanak.config.cli_options import gateway_client_options
 from almanak.core.chains import DEFAULT_CHAIN, ChainRegistry
 from almanak.framework.agent_tools.schemas import ToolResponse, ToolResponseStatus
 from almanak.framework.data.models import _NATIVE_TO_WRAPPED
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from decimal import Decimal
@@ -147,8 +150,17 @@ def _chain_option(fn):
     envvar="ALMANAK_GATEWAY_NETWORK",
     help="Network mode. Auto-starts a gateway if none is running (default: mainnet).",
 )
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    default=False,
+    help="Show library warnings and gateway start-up notes on stderr (always written to ~/.almanak/logs/cli.log).",
+)
 @click.pass_context
-def ax(ctx, gateway_host, gateway_port, chain, wallet, max_trade_usd, dry_run, json_output, yes, natural, network):
+def ax(
+    ctx, gateway_host, gateway_port, chain, wallet, max_trade_usd, dry_run, json_output, yes, natural, network, verbose
+):
     """Execute DeFi actions directly from the command line.
 
     One-shot commands for swaps, balance checks, price queries, and more.
@@ -210,7 +222,13 @@ def ax(ctx, gateway_host, gateway_port, chain, wallet, max_trade_usd, dry_run, j
         if env_file.exists():
             _load_dotenv_once(str(env_file))
 
+    # After the dotenv loads above, so ALMANAK_CLI_LOG_* set in .env / .power-env apply.
+    from almanak.framework.cli._cli_logging import configure_cli_logging
+
+    configure_cli_logging(verbose=verbose)
+
     ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
     ctx.obj["gateway_host"] = gateway_host
     ctx.obj["gateway_port"] = gateway_port
     ctx.obj["chain"] = chain
@@ -566,10 +584,10 @@ def _start_managed_gateway(
     # Status messages go to STDERR so they don't corrupt the CLI's actual
     # stdout payload — critical for ``--json`` output mode where callers
     # parse stdout directly.
-    click.echo(
-        click.style("Auto-starting gateway", bold=True) + f" ({resolved_network}) on {host}:{gw_port}...",
-        err=True,
-    )
+    # Start-up notes go through logging: the CLI log file always, stderr only
+    # with --verbose (agents read stderr, and a successful start says nothing
+    # about the command's result). Failures still raise.
+    logger.info("Auto-starting gateway (%s) on %s:%s...", resolved_network, host, gw_port)
 
     managed = ManagedGateway(
         settings=settings,
@@ -604,7 +622,7 @@ def _start_managed_gateway(
     ctx.obj["gateway_host"] = managed.host
     ctx.obj["gateway_port"] = managed.port
 
-    click.echo(click.style("Gateway ready.", fg="green", bold=True), err=True)
+    logger.info("Gateway ready on %s:%s.", managed.host, managed.port)
     ctx.obj["gateway_auth_token"] = session_auth_token
     return managed
 

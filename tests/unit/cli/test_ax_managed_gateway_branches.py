@@ -73,9 +73,32 @@ def test_start_managed_gateway_preserves_port_auth_env_and_process_contract(caps
         "gateway_port": 50123,
         "gateway_auth_token": "session-token",
     }
-    assert click.unstyle(capsys.readouterr().err) == (
-        "Auto-starting gateway (mainnet) on 127.0.0.1:50123...\nGateway ready.\n"
-    )
+    # Start-up notes are INFO log records, not echoes: the CLI log file keeps
+    # them and stderr shows them only with --verbose (see test_cli_logging.py).
+    assert click.unstyle(capsys.readouterr().err) == ""
+
+
+def test_start_managed_gateway_logs_startup_notes_at_info(caplog) -> None:
+    ctx = _FakeCtx({"chain": "base", "wallet": ""})
+    managed = MagicMock(host="127.0.0.1", port=50123)
+
+    with (
+        patch("almanak.config.load_config", return_value=_config()),
+        patch("almanak.config.env.gateway_config_from_env", return_value=object()),
+        patch("almanak.framework.local_paths.auto_detect_strategy_folder"),
+        patch("almanak.config.runtime.private_key_from_env", return_value=""),
+        patch("almanak.gateway.managed.is_port_in_use", return_value=True),
+        patch("almanak.gateway.managed.find_available_gateway_port", return_value=50123),
+        patch("almanak.gateway.managed.ManagedGateway", return_value=managed),
+        patch("almanak.framework.cli.ax._assert_signer_matches_intended_wallet"),
+        patch("uuid.uuid4", return_value=SimpleNamespace(hex="session-token")),
+        patch("atexit.register"),
+    ):
+        with caplog.at_level("INFO", logger="almanak.framework.cli.ax"):
+            _start_managed_gateway(ctx, "127.0.0.1", 50051, None)
+
+    messages = [r.getMessage() for r in caplog.records if r.name == "almanak.framework.cli.ax"]
+    assert messages == ["Auto-starting gateway (mainnet) on 127.0.0.1:50123...", "Gateway ready on 127.0.0.1:50123."]
 
 
 @pytest.mark.parametrize(

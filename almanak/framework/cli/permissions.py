@@ -331,8 +331,20 @@ def _render_manifests(manifests: list[PermissionManifest], output_format: str, o
     help="RPC URL for on-chain discovery (e.g. Aerodrome pool addresses). "
     "Auto-resolved from ALCHEMY_API_KEY env if not provided.",
 )
+@click.option(
+    "--verbose",
+    "-v",
+    is_flag=True,
+    default=False,
+    help="Show library warnings on stderr (always written to ~/.almanak/logs/cli.log).",
+)
 def permissions(
-    working_dir: str, chain: str | None, output: str | None, output_format: str, rpc_url: str | None
+    working_dir: str,
+    chain: str | None,
+    output: str | None,
+    output_format: str,
+    rpc_url: str | None,
+    verbose: bool = False,
 ) -> None:
     """Generate a Zodiac Roles permission manifest for a strategy.
 
@@ -340,6 +352,10 @@ def permissions(
     synthetic intents with the strategy's declared protocols and intent types.
     """
     options = _resolve_cli_inputs(working_dir, chain, output, output_format, rpc_url)
+    # After _resolve_cli_inputs loads the working dir's .env, so ALMANAK_CLI_LOG_* there apply.
+    from almanak.framework.cli._cli_logging import configure_cli_logging
+
+    configure_cli_logging(verbose=verbose)
     inputs = _load_strategy_inputs(options.working_path, options.chain)
     chains = _select_output_chains(inputs.chains, options.output_format)
     if not chains:
