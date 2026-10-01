@@ -43,6 +43,8 @@ WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 #: looks fully wired. Leaving it out would be the vacuous pass described above,
 #: one gate along.
 REQUIRED_GATES = [
+    ("lint-check", "scripts/ci/check_market_snapshot_uniqueness.py"),
+    ("lint-check", "scripts/ci/check_no_legacy_marketsnapshot_imports.py"),
     ("check-orphan-scripts", "scripts/ci/check_orphan_scripts.py"),
     ("check-import-provenance", "scripts/ci/check_import_provenance.py"),
     ("check-chain-truth", "scripts/ci/check_chain_truth_agreement.py"),
@@ -58,6 +60,8 @@ REQUIRED_GATES = [
 ]
 
 REQUIRED_NESTED_GATES = [
+    ("lint-check", "scripts/ci/check_market_snapshot_uniqueness.py"),
+    ("lint-check", "scripts/ci/check_no_legacy_marketsnapshot_imports.py"),
     ("check-sdk-scoped-lifecycle-claims", "scripts/ci/generate_sdk_scoped_support_shadow.py"),
 ]
 
@@ -116,7 +120,7 @@ def _run_steps() -> list[str]:
 
           - run: |
               # TODO(VIB-9999): re-enable make check-orphan-scripts once triaged
-              make lint-check
+              make format-check
 
       That is not hypothetical — commenting a step out to unblock a red build is
       exactly the pressure that produces an inert gate, and it is the moment
@@ -209,7 +213,7 @@ def test_a_commented_out_step_does_not_satisfy_the_guard(tmp_path, monkeypatch):
         "      - run: |\n"
         "          # TODO(VIB-9999): re-enable make check-orphan-scripts once triaged\n"
         "          # make check-import-provenance\n"
-        "          make lint-check\n",
+        "          make format-check\n",
         encoding="utf-8",
     )
     steps = _run_steps()
@@ -244,13 +248,13 @@ def test_a_real_step_does_satisfy_the_guard(tmp_path, monkeypatch):
         # A heredoc BODY naming the gate is documentation being printed, not a
         # command. Stripping shell comments alone left this readable — the same
         # defect as the commented-out case, one layer along.
-        ("cat <<'EOF'\nmake check-orphan-scripts\nEOF\nmake lint-check\n", False),
-        ("# make check-orphan-scripts\nmake lint-check\n", False),
-        ('echo "remember to run make check-orphan-scripts"\nmake lint-check\n', False),
+        ("cat <<'EOF'\nmake check-orphan-scripts\nEOF\nmake format-check\n", False),
+        ("# make check-orphan-scripts\nmake format-check\n", False),
+        ('echo "remember to run make check-orphan-scripts"\nmake format-check\n', False),
         ('printf "make check-orphan-scripts"\n', False),
         # Real invocations must still satisfy it.
         ("make check-orphan-scripts\n", True),
-        ("make lint-check && make check-orphan-scripts\n", True),
+        ("make format-check && make check-orphan-scripts\n", True),
         ("uv run python scripts/ci/check_orphan_scripts.py\n", True),
     ],
 )

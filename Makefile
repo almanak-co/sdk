@@ -28,6 +28,8 @@ lint-check: ## Ruff check + format, no fixes (CI)
 	uv run ruff format almanak --check
 	$(MAKE) test-quant-report
 	$(MAKE) check-comment-quality
+	uv run python scripts/ci/check_market_snapshot_uniqueness.py
+	uv run python scripts/ci/check_no_legacy_marketsnapshot_imports.py
 
 test-quant-report: ## Fail-closed guards in the quant-test report renderer
 	# These guards decide whether a mainnet QA run reads PASS or FAIL. They were
