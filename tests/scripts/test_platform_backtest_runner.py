@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import sys
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -122,7 +123,7 @@ def _env(**overrides: str) -> runner.PlatformRunnerEnv:
         "BACKTEST_CONFIG": '{"start_time":"2024-01-01","end_time":"2024-03-01"}',
         "GCS_BUCKET": "bucket",
         "PLATFORM_CALLBACK_URL": "https://api.example",
-        "PLATFORM_CALLBACK_SECRET": "secret",
+        "PLATFORM_CALLBACK_TOKEN": "v1.1790000000.mac",
     }
     values.update(overrides)
     return runner.PlatformRunnerEnv.from_env(values)
@@ -662,17 +663,18 @@ def test_clone_strategy_repo_separates_options_from_clone_url(monkeypatch: pytes
 def test_redact_masks_general_url_credentials() -> None:
     env = _env(
         GITHUB_CLONE_URL="https://oauth2:token@example/repo.git",
-        PLATFORM_CALLBACK_SECRET="callback-secret",
+        PLATFORM_CALLBACK_TOKEN="cb-token-value",
     )
 
     redacted = runner._redact(
-        "clone https://oauth2:token@example/repo.git failed; fallback https://user:pass@host/repo.git callback-secret",
+        "clone https://oauth2:token@example/repo.git failed; fallback https://user:pass@host/repo.git cb-token-value",
         env,
     )
 
-    assert "token" not in redacted
+    assert "oauth2:token" not in redacted
     assert "pass" not in redacted
-    assert "callback-secret" not in redacted
+    assert "cb-token-value" not in redacted
+    assert "PLATFORM_CALLBACK_TOKEN" in redacted
     assert str(env.strategy_dir) not in runner._redact(f"failed in {env.strategy_dir}", env)
     assert "GITHUB_CLONE_URL" in redacted
     assert "https://***@host/repo.git" in redacted
@@ -682,7 +684,7 @@ def test_redact_json_value_preserves_tuple_shape_and_redacts_nested_values() -> 
     env = _env()
     value = (
         "https://user:password@example.test/top",
-        {"nested": (env.github_clone_url, env.platform_callback_secret)},
+        {"nested": (env.github_clone_url, env.platform_callback_token)},
     )
 
     redacted = runner._redact_json_value(value, env)
@@ -691,7 +693,7 @@ def test_redact_json_value_preserves_tuple_shape_and_redacts_nested_values() -> 
     assert isinstance(redacted[1]["nested"], tuple)
     assert redacted == (
         "https://***@example.test/top",
-        {"nested": ("GITHUB_CLONE_URL", "PLATFORM_CALLBACK_SECRET")},
+        {"nested": ("GITHUB_CLONE_URL", "PLATFORM_CALLBACK_TOKEN")},
     )
 
 
@@ -724,7 +726,7 @@ def test_post_callback_values_retries_transient_failures(monkeypatch: pytest.Mon
     runner.post_callback_values(
         platform_callback_url="https://api.example",
         backtest_id="test-123",
-        platform_callback_secret="secret",
+        platform_callback_token="v1.1790000000.mac",
         payload={"status": "COMPLETED"},
     )
 
@@ -756,7 +758,7 @@ def test_post_start_callback_uses_start_endpoint_without_json(monkeypatch: pytes
         {
             "url": "https://api.example/internal/backtest/test-123/start",
             "kwargs": {
-                "headers": {"x-almanak-secret-key": "secret"},
+                "headers": {"x-almanak-backtest-token": "v1.1790000000.mac"},
                 "timeout": 30,
             },
         }
@@ -778,49 +780,37 @@ def _capture_callback_headers(monkeypatch: pytest.MonkeyPatch) -> list[dict[str,
     return headers
 
 
-def test_callbacks_send_only_run_scoped_token_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_callbacks_send_only_run_scoped_token(monkeypatch: pytest.MonkeyPatch) -> None:
     headers = _capture_callback_headers(monkeypatch)
-    env = _env(PLATFORM_CALLBACK_TOKEN="v1.1790000000.mac")
+    # A stale shared secret left in the environment must never be sent.
+    env = _env(PLATFORM_CALLBACK_TOKEN="v1.1790000000.mac", PLATFORM_CALLBACK_SECRET="retired-secret")
 
     runner.post_start_callback(env)
     runner.post_callback(env, {"status": "COMPLETED"})
 
     assert headers == [{"x-almanak-backtest-token": "v1.1790000000.mac"}] * 2
     assert env.callback_headers == {"x-almanak-backtest-token": "v1.1790000000.mac"}
+    assert all("x-almanak-secret-key" not in sent for sent in headers)
 
 
-@pytest.mark.parametrize("token", ["", "   "])
-def test_callbacks_fall_back_to_legacy_secret_without_token(monkeypatch: pytest.MonkeyPatch, token: str) -> None:
-    headers = _capture_callback_headers(monkeypatch)
-    env = _env(PLATFORM_CALLBACK_TOKEN=token)
-
-    runner.post_start_callback(env)
-    runner.post_callback(env, {"status": "COMPLETED"})
-
-    assert headers == [{"x-almanak-secret-key": "secret"}] * 2
-    assert env.callback_headers == {"x-almanak-secret-key": "secret"}
-
-
-def test_from_env_accepts_run_scoped_token_without_static_secret() -> None:
-    env = _env(PLATFORM_CALLBACK_TOKEN=" v1.1790000000.mac\n", PLATFORM_CALLBACK_SECRET="")
+def test_from_env_strips_run_scoped_token() -> None:
+    env = _env(PLATFORM_CALLBACK_TOKEN=" v1.1790000000.mac\n")
 
     assert env.platform_callback_token == "v1.1790000000.mac"
     assert env.callback_headers == {"x-almanak-backtest-token": "v1.1790000000.mac"}
 
 
-def test_from_env_requires_static_secret_without_token() -> None:
-    with pytest.raises(runner.PlatformRunnerError, match="PLATFORM_CALLBACK_SECRET"):
-        _env(PLATFORM_CALLBACK_TOKEN="", PLATFORM_CALLBACK_SECRET="")
+@pytest.mark.parametrize("token", ["", "   "])
+def test_from_env_requires_run_scoped_token_even_with_legacy_secret(token: str) -> None:
+    with pytest.raises(runner.PlatformRunnerError, match="PLATFORM_CALLBACK_TOKEN"):
+        _env(PLATFORM_CALLBACK_TOKEN=token, PLATFORM_CALLBACK_SECRET="retired-secret")
 
 
-def test_callback_credentials_stay_out_of_env_repr_and_redacted_text() -> None:
-    env = _env(PLATFORM_CALLBACK_TOKEN="v1.1790000000.mac", PLATFORM_CALLBACK_SECRET="callback-secret")
+def test_callback_token_stays_out_of_env_repr_and_redacted_text() -> None:
+    env = _env(PLATFORM_CALLBACK_TOKEN="v1.1790000000.mac")
 
     assert "v1.1790000000.mac" not in repr(env)
-    assert "callback-secret" not in repr(env)
-    assert runner._redact("bad header v1.1790000000.mac / callback-secret", env) == (
-        "bad header PLATFORM_CALLBACK_TOKEN / PLATFORM_CALLBACK_SECRET"
-    )
+    assert runner._redact("bad header v1.1790000000.mac", env) == "bad header PLATFORM_CALLBACK_TOKEN"
 
 
 def test_progress_reporter_uses_run_scoped_callback_headers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -982,7 +972,7 @@ def test_from_env_rejects_non_sha_commit() -> None:
                 "BACKTEST_CONFIG": "{}",
                 "GCS_BUCKET": "bucket",
                 "PLATFORM_CALLBACK_URL": "https://api.example",
-                "PLATFORM_CALLBACK_SECRET": "secret",
+                "PLATFORM_CALLBACK_TOKEN": "v1.1790000000.mac",
             }
         )
 
@@ -997,8 +987,7 @@ def test_main_posts_failed_callback_for_env_validation_error(monkeypatch: pytest
     monkeypatch.setenv("BACKTEST_CONFIG", "{}")
     monkeypatch.setenv("GCS_BUCKET", "bucket")
     monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
-    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
-    monkeypatch.delenv("PLATFORM_CALLBACK_TOKEN", raising=False)
+    monkeypatch.setenv("PLATFORM_CALLBACK_TOKEN", "v1.1790000000.mac")
 
     def fake_post_callback_values(**kwargs: Any) -> None:
         calls.append(kwargs)
@@ -1011,8 +1000,7 @@ def test_main_posts_failed_callback_for_env_validation_error(monkeypatch: pytest
         {
             "platform_callback_url": "https://api.example",
             "backtest_id": "test-123",
-            "platform_callback_secret": "secret",
-            "platform_callback_token": "",
+            "platform_callback_token": "v1.1790000000.mac",
             "payload": {
                 "status": "FAILED",
                 "error_message": error_message,
@@ -1043,11 +1031,35 @@ def test_main_env_validation_failure_authenticates_with_run_scoped_token(monkeyp
     monkeypatch.setenv("BACKTEST_CONFIG", "{}")
     monkeypatch.setenv("GCS_BUCKET", "bucket")
     monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
-    monkeypatch.delenv("PLATFORM_CALLBACK_SECRET", raising=False)
+    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "retired-secret")
     monkeypatch.setenv("PLATFORM_CALLBACK_TOKEN", "v1.1790000000.mac")
 
     assert runner.main() == 1
     assert headers == [{"x-almanak-backtest-token": "v1.1790000000.mac"}]
+
+
+def test_main_without_run_scoped_token_logs_and_sends_no_callback(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    headers = _capture_callback_headers(monkeypatch)
+
+    monkeypatch.setenv("BACKTEST_ID", "test-123")
+    monkeypatch.setenv("COMMIT_SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_CLONE_URL", "https://x-access-token:token@example/repo.git")
+    monkeypatch.setenv("STRATEGY_CONFIG", "{}")
+    monkeypatch.setenv("BACKTEST_CONFIG", "{}")
+    monkeypatch.setenv("GCS_BUCKET", "bucket")
+    monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
+    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "retired-secret")
+    monkeypatch.delenv("PLATFORM_CALLBACK_TOKEN", raising=False)
+    monkeypatch.setattr(runner, "run_platform_backtest", lambda env: pytest.fail("must not run without a token"))
+
+    with caplog.at_level(logging.ERROR, logger="almanak.platform_backtest_runner"):
+        assert runner.main() == 1
+
+    assert headers == []
+    assert "PLATFORM_CALLBACK_TOKEN" in caplog.text
+    assert "retired-secret" not in caplog.text
 
 
 def test_main_posts_failed_callback_for_runtime_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1061,7 +1073,7 @@ def test_main_posts_failed_callback_for_runtime_error(monkeypatch: pytest.Monkey
     monkeypatch.setenv("BACKTEST_CONFIG", "{}")
     monkeypatch.setenv("GCS_BUCKET", "bucket")
     monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
-    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+    monkeypatch.setenv("PLATFORM_CALLBACK_TOKEN", "v1.1790000000.mac")
 
     async def fake_run_platform_backtest(env: runner.PlatformRunnerEnv) -> dict[str, Any]:
         raise runner.PlatformRunnerError("strategy not found")
@@ -1191,7 +1203,7 @@ def test_run_platform_backtest_certifies_failed_engine_result(monkeypatch: pytes
     _patch_successful_run(monkeypatch, tmp_path)
     result = SimpleNamespace(
         success=False,
-        error="engine failed at https://user:password@example.test and secret",
+        error="engine failed at https://user:password@example.test and v1.1790000000.mac",
         decision_events=None,
     )
 
@@ -1234,7 +1246,7 @@ def test_run_platform_backtest_certifies_failed_engine_result(monkeypatch: pytes
     result_artifact = uploads[0][1]
     assert result_artifact["result"]["success"] is False
     assert "password" not in result_artifact["result"]["error"]
-    assert "secret" not in result_artifact["result"]["error"]
+    assert "v1.1790000000.mac" not in result_artifact["result"]["error"]
 
     terminal = uploads[1][1]
     assert terminal["schema_version"] == 1
@@ -1485,7 +1497,7 @@ def test_run_platform_backtest_redacts_preflight_artifacts_and_callback(
 ) -> None:
     env = _env(STRATEGY_WORKDIR=str(tmp_path / "strategy"))
     exc = _FeasibilityGateError(
-        "clone https://x-access-token:token@example/repo.git failed with secret",
+        "clone https://x-access-token:token@example/repo.git failed with v1.1790000000.mac",
         code="BACKTEST_NOT_READY",
         blockers=[
             {
@@ -1503,7 +1515,7 @@ def test_run_platform_backtest_redacts_preflight_artifacts_and_callback(
     assert "x-access-token:token@example" not in rendered
     assert "user:password" not in rendered
     assert "GITHUB_CLONE_URL" in payload["error_message"]
-    assert "PLATFORM_CALLBACK_SECRET" in payload["error_message"]
+    assert "PLATFORM_CALLBACK_TOKEN" in payload["error_message"]
     blocker = payload["result_summary"]["blockers"][0]
     assert blocker["message"] == "provider https://***@data.example rejected the request"
     assert blocker["recommendations"] == ["retry against GITHUB_CLONE_URL"]
@@ -1569,7 +1581,7 @@ def test_main_certifies_preflight_failure_without_a_second_verdict(
     monkeypatch.setenv("GCS_BUCKET", "bucket")
     monkeypatch.setenv("GCS_RESULT_PATH", "gs://bucket/backtests/test-123/result.json")
     monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
-    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+    monkeypatch.setenv("PLATFORM_CALLBACK_TOKEN", "v1.1790000000.mac")
     monkeypatch.setenv("STRATEGY_WORKDIR", str(tmp_path / "strategy"))
 
     exc = _FeasibilityGateError("window is infeasible", code="WINDOW_TOO_LONG", blockers=[])
@@ -1601,7 +1613,7 @@ def test_main_maps_escaped_preflight_failure_without_artifacts(monkeypatch: pyte
     monkeypatch.setenv("BACKTEST_CONFIG", "{}")
     monkeypatch.setenv("GCS_BUCKET", "bucket")
     monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
-    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+    monkeypatch.setenv("PLATFORM_CALLBACK_TOKEN", "v1.1790000000.mac")
 
     async def fake_run_platform_backtest(env: runner.PlatformRunnerEnv) -> dict[str, Any]:
         raise PreflightValidationError(
@@ -1986,7 +1998,7 @@ def test_recover_failure_summary_degrades_when_certified_artifact_is_unreadable(
 def test_recover_failure_summary_redacts_recovered_blockers(monkeypatch: pytest.MonkeyPatch) -> None:
     env = _env(GCS_RESULT_PATH="gs://bucket/backtests/test-123/result.json")
     artifact = _preflight_result_artifact(env, "boom")
-    artifact["failure"]["blockers"][0]["recommendations"] = ["retry with secret"]
+    artifact["failure"]["blockers"][0]["recommendations"] = ["retry with v1.1790000000.mac"]
     artifact["failure"]["blockers"][0]["message"] = "clone https://user:pw@example/repo.git failed"
     _patch_result_blob(monkeypatch, json.dumps(artifact).encode())
     terminal = _existing_terminal(env, runner.PlatformBacktestOutcome.FAILED, error_message="boom")
@@ -1995,7 +2007,7 @@ def test_recover_failure_summary_redacts_recovered_blockers(monkeypatch: pytest.
 
     assert summary is not None
     assert summary["blockers"][0]["message"] == "clone https://***@example/repo.git failed"
-    assert summary["blockers"][0]["recommendations"] == ["retry with PLATFORM_CALLBACK_SECRET"]
+    assert summary["blockers"][0]["recommendations"] == ["retry with PLATFORM_CALLBACK_TOKEN"]
 
 
 @pytest.mark.parametrize(
@@ -2032,7 +2044,7 @@ def test_main_does_not_post_failed_when_only_completed_callback_fails(
     monkeypatch.setenv("BACKTEST_CONFIG", "{}")
     monkeypatch.setenv("GCS_BUCKET", "bucket")
     monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
-    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+    monkeypatch.setenv("PLATFORM_CALLBACK_TOKEN", "v1.1790000000.mac")
 
     async def fake_run_platform_backtest(env: runner.PlatformRunnerEnv) -> dict[str, Any]:
         raise runner.CompletedCallbackDeliveryError(env.gcs_result_path)
@@ -2059,7 +2071,7 @@ def test_main_does_not_post_failed_when_terminal_certificate_inspection_is_ambig
     monkeypatch.setenv("GCS_BUCKET", "bucket")
     monkeypatch.setenv("GCS_RESULT_PATH", "gs://bucket/backtests/test-123/result.json")
     monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
-    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+    monkeypatch.setenv("PLATFORM_CALLBACK_TOKEN", "v1.1790000000.mac")
 
     async def fake_run_platform_backtest(env: runner.PlatformRunnerEnv) -> dict[str, Any]:
         raise runner.TerminalArtifactInspectionError("GCS read timed out")
@@ -2085,7 +2097,7 @@ def test_main_does_not_post_failed_when_terminal_certificate_publication_fails(
     monkeypatch.setenv("GCS_BUCKET", "bucket")
     monkeypatch.setenv("GCS_RESULT_PATH", "gs://bucket/backtests/test-123/result.json")
     monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
-    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+    monkeypatch.setenv("PLATFORM_CALLBACK_TOKEN", "v1.1790000000.mac")
 
     async def fake_run_platform_backtest(env: runner.PlatformRunnerEnv) -> dict[str, Any]:
         raise runner.TerminalArtifactPublicationError(env.gcs_result_uri, runner.PlatformBacktestOutcome.COMPLETED)
@@ -2111,7 +2123,7 @@ def test_main_posts_failed_for_permanent_terminal_certificate_contract_error(
     monkeypatch.setenv("GCS_BUCKET", "bucket")
     monkeypatch.setenv("GCS_RESULT_PATH", "gs://bucket/backtests/test-123/result.json")
     monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
-    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+    monkeypatch.setenv("PLATFORM_CALLBACK_TOKEN", "v1.1790000000.mac")
 
     async def fake_run_platform_backtest(env: runner.PlatformRunnerEnv) -> dict[str, Any]:
         raise runner.TerminalArtifactContractError("Existing terminal certificate is invalid: wrong result URI")

@@ -29,7 +29,7 @@ def test_coalesces_ticks_and_only_sends_new_observations(monkeypatch):
 def test_old_backend_or_network_failure_does_not_fail_run(monkeypatch):
     post = Mock(side_effect=requests.HTTPError("404"))
     monkeypatch.setattr("scripts.platform_backtest_progress.requests.post", post)
-    reporter = ProgressReporter("https://platform/progress", {"x-almanak-secret-key": "secret"})
+    reporter = ProgressReporter("https://platform/progress", {"x-almanak-backtest-token": "v1.1790000000.mac"})
     reporter.observe(BacktestProgress("preparing"))
     reporter._send_latest()
     post.side_effect = None
@@ -49,7 +49,9 @@ def test_reporter_shutdown_is_nonblocking(monkeypatch):
         return Mock()
 
     monkeypatch.setattr("scripts.platform_backtest_progress.requests.post", blocked_post)
-    reporter = ProgressReporter("https://platform/progress", {"x-almanak-secret-key": "secret"}, interval=0.001)
+    reporter = ProgressReporter(
+        "https://platform/progress", {"x-almanak-backtest-token": "v1.1790000000.mac"}, interval=0.001
+    )
     try:
         with reporter:
             reporter.observe(BacktestProgress("simulating", 1, 100))

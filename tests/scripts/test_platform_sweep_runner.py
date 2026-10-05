@@ -32,7 +32,7 @@ def _env(**overrides: str) -> sweep_runner.PlatformSweepEnv:
         "SWEEP_CONFIG": json.dumps(_SWEEP_CONFIG),
         "GCS_BUCKET": "bucket",
         "PLATFORM_CALLBACK_URL": "https://api.example",
-        "PLATFORM_CALLBACK_SECRET": "secret",
+        "PLATFORM_CALLBACK_TOKEN": "v1.1790000000.mac",
     }
     values.update(overrides)
     return sweep_runner.PlatformSweepEnv.from_env(values)
@@ -44,6 +44,28 @@ def test_from_env_parses_and_derives_result_path() -> None:
     assert env.sweep_id == "sweep-123"
     assert env.gcs_result_path == "sweep-results/sweep-123/result.json"
     assert env.strategy_dir == Path("/workspace/strategy")
+
+
+def test_from_env_requires_run_scoped_token_even_with_legacy_secret() -> None:
+    with pytest.raises(sweep_runner.PlatformRunnerError, match="PLATFORM_CALLBACK_TOKEN"):
+        _env(PLATFORM_CALLBACK_TOKEN="", PLATFORM_CALLBACK_SECRET="retired-secret")
+
+
+def test_sweep_callbacks_send_only_run_scoped_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(sweep_runner, "_post_with_retries", lambda url, **kwargs: calls.append({"url": url, **kwargs}))
+    env = _env(PLATFORM_CALLBACK_TOKEN=" v1.1790000000.mac\n", PLATFORM_CALLBACK_SECRET="retired-secret")
+
+    sweep_runner.post_sweep_callback(env, action="start")
+
+    assert "v1.1790000000.mac" not in repr(env)
+    assert calls == [
+        {
+            "url": "https://api.example/internal/sweep/sweep-123/start",
+            "headers": {"x-almanak-backtest-token": "v1.1790000000.mac"},
+            "payload": None,
+        }
+    ]
 
 
 def test_from_env_rejects_unsafe_sweep_id() -> None:
@@ -536,7 +558,7 @@ def test_main_posts_failed_callback_for_env_validation_error(monkeypatch: pytest
     monkeypatch.setenv("SWEEP_CONFIG", json.dumps(_SWEEP_CONFIG))
     monkeypatch.setenv("GCS_BUCKET", "bucket")
     monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
-    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+    monkeypatch.setenv("PLATFORM_CALLBACK_TOKEN", "v1.1790000000.mac")
 
     def fake_post_with_retries(url: str, *, headers: dict[str, str], payload: Any) -> None:
         calls.append({"url": url, "headers": headers, "payload": payload})
@@ -547,7 +569,7 @@ def test_main_posts_failed_callback_for_env_validation_error(monkeypatch: pytest
     assert calls == [
         {
             "url": "https://api.example/internal/sweep/sweep-123/complete",
-            "headers": {"x-almanak-secret-key": "secret"},
+            "headers": {"x-almanak-backtest-token": "v1.1790000000.mac"},
             "payload": {
                 "status": "FAILED",
                 "error_message": "PlatformRunnerError: COMMIT_SHA must be a 40-character git SHA",
@@ -569,7 +591,7 @@ def test_main_does_not_post_failed_when_only_completed_callback_fails(
     monkeypatch.setenv("SWEEP_CONFIG", json.dumps(_SWEEP_CONFIG))
     monkeypatch.setenv("GCS_BUCKET", "bucket")
     monkeypatch.setenv("PLATFORM_CALLBACK_URL", "https://api.example")
-    monkeypatch.setenv("PLATFORM_CALLBACK_SECRET", "secret")
+    monkeypatch.setenv("PLATFORM_CALLBACK_TOKEN", "v1.1790000000.mac")
 
     async def fake_run_platform_sweep(env: sweep_runner.PlatformSweepEnv) -> dict[str, Any]:
         raise sweep_runner.CompletedCallbackDeliveryError(env.gcs_result_path)
