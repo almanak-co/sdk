@@ -1,12 +1,10 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.13'",
     "python_full_version < '3.13'",
 ]
-
-[manifest]
 
 [[manifest.dependency-metadata]]
 name = "poly-eip712-structs"
@@ -158,7 +156,7 @@ wheels = [
 
 [[package]]
 name = "almanak"
-version = "2.29.1"
+version = "2.29.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
