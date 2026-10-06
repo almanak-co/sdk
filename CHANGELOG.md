@@ -6,46 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [2.29.2] - 2026-10-06
-
-### Added
-- **`ax dex-pools` ranks and filters pools.** New `--sort volume|liquidity`
-  (default `volume`, since 24h volume is harder to inflate than reported
-  reserves), `--quote <token>` and a minimum-volume filter, plus pagination.
-  `list_token_pools` gains the same options. (#4061)
-
-### Changed
-- **`almanak strat new` no longer scaffolds `tests/`.** The generated
-  `AGENTS.md` points to the fork lifecycle (`almanak strat test --actions …
-  --teardown`) as the strategy test, and the unused test-file generator is
-  removed. (#4059)
-- **`almanak ax` and `almanak strat permissions` keep library warnings and
-  gateway start-up notes off stderr.** (#4062)
-- **Bundled Almanak Code updated to v1.0.89.** It adds a hosted mode for
-  platform sessions: file tools are confined to the workspace and the SDK,
-  commands run in a Bubblewrap sandbox, and tool output is redacted of the
-  process's secrets. The compiled CLI also no longer auto-loads a project's
-  `.env` or `bunfig.toml`. (#4054, #4055, #4056, #4057, #4060, #4063, #4070)
-
-### Fixed
-- **Robinhood strategies execute and tear down on hosted deployments and
-  mainnet.** (#4051)
-- **The runner retries price-source disagreements without stopping the
-  strategy.** The price guard still applies; waiting iterations hold with a
-  `PRICE_DISAGREEMENT` reason. (#4047)
-- **The policy engine no longer values unpriceable tokens at their token
-  count**, which had blocked risk-reducing sells and weakened spend limits.
-  (#4042)
-- **Wallet balances keyed by token address match symbol-named positions**, so
-  one holding is no longer counted twice in portfolio value. (#4052)
-- **`strat check` rejects teardown swaps without an explicit chain** before
-  deployment instead of failing at teardown time. (#4053)
-
-### Security
-- **Platform runner jobs no longer receive the shared platform callback
-  secret.** Backtest and sweep runners use only the run-scoped
-  `PLATFORM_CALLBACK_TOKEN`. (#4066)
-
 ## [2.29.1] - 2026-09-24
 
 ### Security

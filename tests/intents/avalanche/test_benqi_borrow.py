@@ -79,6 +79,18 @@ from tests.intents.conftest import (
 
 pytestmark = pytest.mark.no_zodiac(reason="benqi connector not in manifest matrix")
 
+BORROW_CAP_REVERT = "market borrow cap reached"
+
+
+def _xfail_if_borrow_cap(result: Any) -> None:
+    """XFAIL only when a borrow failed because the live BENQI USDC market is at its borrow cap.
+
+    As of 2026-10-06 the market is capped on-chain (#4074), so every fork borrow simulates as
+    "market borrow cap reached". Any other failure still fails the test.
+    """
+    if not result.success and BORROW_CAP_REVERT in str(result.error or ""):
+        pytest.xfail(f"BENQI USDC market at its on-chain borrow cap as of 2026-10-06 (#4074): {result.error}")
+
 # =============================================================================
 # Test Configuration
 # =============================================================================
@@ -368,6 +380,7 @@ class TestBenqiBorrowIntent:
         print("\nExecuting via ExecutionOrchestrator...")
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
 
+        _xfail_if_borrow_cap(execution_result)
         assert execution_result.success, f"Execution failed: {execution_result.error}"
         print(f"Execution successful! {len(execution_result.transaction_results)} transactions confirmed")
 
@@ -544,6 +557,7 @@ class TestBenqiBorrowIntent:
             borrow_intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False
         )
         borrow_exec = await orchestrator.execute(borrow_result.action_bundle)
+        _xfail_if_borrow_cap(borrow_exec)
         assert borrow_exec.success, f"Initial borrow failed: {borrow_exec.error}"
 
         # Layer 5: persist the BORROW. In the Spark/Aave goldens this seeds the
@@ -614,6 +628,7 @@ class TestBenqiBorrowIntent:
         pre_state = _capture_lending_state(intent, funded_wallet, anvil_eth_call_adapter, price_oracle, post=False)
 
         execution_result = await orchestrator.execute(compilation_result.action_bundle)
+        _xfail_if_borrow_cap(execution_result)
         assert execution_result.success, f"Execution failed: {execution_result.error}"
 
         # Parse receipts
@@ -768,6 +783,7 @@ class TestBenqiBorrowIntent:
         assert setup_result.status.value == "SUCCESS", f"Setup compilation failed: {setup_result.error}"
         assert setup_result.action_bundle is not None
         setup_exec = await orchestrator.execute(setup_result.action_bundle)
+        _xfail_if_borrow_cap(setup_exec)
         assert setup_exec.success, f"Setup execution failed: {setup_exec.error}"
         print("Setup complete: 10 AVAX supplied, markets entered, 10 USDC borrowed")
 
@@ -828,6 +844,7 @@ class TestBenqiBorrowIntent:
         print("\nExecuting via ExecutionOrchestrator...")
         execution_result = await orchestrator.execute(bundle)
 
+        _xfail_if_borrow_cap(execution_result)
         assert execution_result.success, f"Execution failed: {execution_result.error}"
         print(f"Execution successful! {len(execution_result.transaction_results)} transaction(s) confirmed")
 
