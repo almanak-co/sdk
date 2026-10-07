@@ -348,7 +348,10 @@ def _intent_fallback_token_in(intent: Any) -> str:
     """The legacy intent-attr ``token_in`` precedence chain (pure, no side effects).
 
     Token precedence:
-        ``from_token > borrow_token > supply_token > token``
+        ``from_token > borrow_token > supply_token > token > asset``
+
+    ``asset`` names the token of the perp-venue cash movements
+    (``PERP_DEPOSIT`` / ``PERP_WITHDRAW``).
 
     Extracted so the lending helper can REUSE the precedence chain to resolve a
     token symbol WITHOUT triggering the fallback's WARN+metric observability
@@ -366,6 +369,7 @@ def _intent_fallback_token_in(intent: Any) -> str:
         or getattr(intent, "borrow_token", "")
         or getattr(intent, "supply_token", "")
         or getattr(intent, "token", "")
+        or getattr(intent, "asset", "")
         or ""
     )
     if isinstance(raw, str) and raw.strip().lower().startswith("0x"):

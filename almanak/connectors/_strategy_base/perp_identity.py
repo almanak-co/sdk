@@ -26,8 +26,8 @@ on Arbitrum mainnet across four runs).
 A single canonical key cannot express this. Two venues of the five make that
 concrete:
 
-* ``aster_perps`` and ``pancakeswap_perps`` (the same Aster Diamond contract
-  under two slugs) have **no derivable identity at all** — the ``tradeHash`` is
+* ``pancakeswap_perps`` (the legacy Aster Diamond) has **no derivable
+  identity at all** — the ``tradeHash`` is
   contract-assigned per open call and there is no pure function from
   ``(account, market, collateral, side)`` to it. A derive-only seam is
   structurally incapable of serving them. **Do not assume a formula exists for

@@ -34,8 +34,14 @@ TOKEN = "0x" + "22" * 20
 #: becomes implemented, stops being called, or is named from a NEW file.
 KNOWN_GAPS: dict[str, tuple[str, frozenset[str]]] = {
     "connector_stub": (
-        "raw gRPC Polymarket stub; no mainnet recipe compiles it",
-        frozenset({"almanak/connectors/polymarket/gateway_client.py"}),
+        "raw gRPC connector stubs (Polymarket, Aster Pro) used by off-chain execution and reads; "
+        "no mainnet recipe compiles them",
+        frozenset(
+            {
+                "almanak/connectors/polymarket/gateway_client.py",
+                "almanak/connectors/aster_perps/gateway_client.py",
+            }
+        ),
     ),
     "estimate_gas": (
         "strategy-base RPC helper; not on a mainnet recipe compile path",

@@ -128,7 +128,6 @@ _SNAPSHOT_LENDING_PROTOCOLS = frozenset(
 _SNAPSHOT_PERP_PROTOCOLS = frozenset(
     {
         "gmx_v2",
-        "aster_perps",
         "pancakeswap_perps",
     }
 )

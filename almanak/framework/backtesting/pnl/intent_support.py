@@ -36,6 +36,7 @@ BACKTEST_INTENT_DISPOSITIONS: dict[IntentType, BacktestIntentDisposition] = {
     IntentType.PERP_CLOSE: BacktestIntentDisposition.GENERIC_SIMULATED,
     IntentType.PERP_CANCEL_ORDER: BacktestIntentDisposition.REFUSED,
     IntentType.PERP_WITHDRAW: BacktestIntentDisposition.REFUSED,
+    IntentType.PERP_DEPOSIT: BacktestIntentDisposition.REFUSED,
     IntentType.BRIDGE: BacktestIntentDisposition.REFUSED,
     IntentType.ENSURE_BALANCE: BacktestIntentDisposition.REFUSED,
     IntentType.FLASH_LOAN: BacktestIntentDisposition.REFUSED,

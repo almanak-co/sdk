@@ -352,6 +352,9 @@ class TeardownRunnerHelpers:
     reconcile_intent_settlement: ReconcileIntentSettlement | None = None
     recover_accepted_order_keys: RecoverAcceptedOrderKeys | None = None
     check_intent_settlement: CheckIntentSettlement | None = None
+    # Queue a failed attempt's ledger row (carrying a measured off-chain fill)
+    # to the accounting processor: ``(strategy, intent, ledger_entry_id)``.
+    book_failed_fill: Callable[[Any, Any, str], Awaitable[None]] | None = None
 
     @property
     def has_commit(self) -> bool:
@@ -701,6 +704,10 @@ async def _check_teardown_intent_settlement(
     return "unproven"
 
 
+async def _book_failed_fill(runner: Any, strategy: Any, intent: Any, ledger_entry_id: str) -> None:
+    await runner._write_outbox_and_fire_processor(strategy, intent, ledger_entry_id)
+
+
 def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
     """Bind the runner instance into a :class:`TeardownRunnerHelpers` bag.
 
@@ -874,6 +881,7 @@ def build_runner_helpers(runner: Any) -> TeardownRunnerHelpers:
         reconcile_intent_settlement=partial(_reconcile_terminal_perp_settlement, runner),
         recover_accepted_order_keys=partial(_recover_accepted_order_keys, runner),
         check_intent_settlement=partial(_check_teardown_intent_settlement, runner),
+        book_failed_fill=partial(_book_failed_fill, runner),
     )
 
 

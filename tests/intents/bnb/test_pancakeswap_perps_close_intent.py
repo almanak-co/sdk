@@ -28,18 +28,18 @@ import pytest
 from pydantic import ValidationError
 from web3 import Web3
 
-from almanak.connectors.aster_perps.addresses import PANCAKESWAP_PERPS
 from almanak.connectors.pancakeswap_perps import (
     PancakeSwapPerpsReceiptParser,
     encode_get_pending_trade_calldata,
     encode_get_position_by_hash_calldata,
 )
+from almanak.connectors.pancakeswap_perps.addresses import PANCAKESWAP_PERPS
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.perp_intents import PerpCloseIntent
 from almanak.framework.intents.vocabulary import IntentType
 from tests.intents.bnb.conftest import (
-    open_aster_perps_position_via_intent,
+    open_pancakeswap_perps_position_via_intent,
     pcs_perps_extract_price_request_id,
     pcs_perps_keeper_fulfill,
 )
@@ -65,7 +65,7 @@ class TestPancakeSwapPerpsCloseViaIntent:
         anvil_rpc_url: str,
         orchestrator: ExecutionOrchestrator,
         perps_price_oracle: dict[str, Decimal],
-        require_tradeable_aster_perp_market,
+        require_tradeable_pancakeswap_perp_market,
     ):
         """Open -> keeper-fill -> CLOSE-via-intent -> keeper-settle, verify 4 layers.
 
@@ -86,9 +86,9 @@ class TestPancakeSwapPerpsCloseViaIntent:
         # =============================================================
         # Setup phase — open a position via Intent + orchestrator so the
         # close path has a tradeHash to target. ``protocol="pancakeswap_perps"``
-        # routes through the same Aster Diamond router with broker_id=2.
+        # routes through the legacy Aster Diamond router with broker_id=2.
         # =============================================================
-        open_receipt = await open_aster_perps_position_via_intent(
+        open_receipt = await open_pancakeswap_perps_position_via_intent(
             orchestrator=orchestrator,
             web3=web3,
             funded_wallet=funded_wallet,

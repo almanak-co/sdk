@@ -480,6 +480,14 @@ def _build_runtime_config(
             runtime_private_key=runtime_private_key,
         )
 
+    if runtime_config.is_safe_mode:
+        from almanak.framework.execution.safe_compatibility import safe_unsupported_protocol_error
+
+        error = safe_unsupported_protocol_error(strategy_protocols)
+        if error:
+            click.secho(f"ERROR: {error}", fg="red", err=True)
+            sys.exit(1)
+
     # Safe-mode preflight only when the CLI manages the gateway (env vars
     # are local). Skip when ALMANAK_GATEWAY_WALLETS is set — the gateway's
     # WalletRegistry handles signer configuration per chain.

@@ -1578,12 +1578,11 @@ def _normalize_protocol_for_dedup(protocol: str | None) -> str:
     """Normalise a protocol identifier for position-dedup identity keys.
 
     Collapses known lending-fork AND perp aliases onto their registry-canonical
-    key (e.g. lending ``"aave"`` -> ``"aave_v3"``; perp ``"pancakeswap_perps"``
-    -> ``"aster_perps"``) so a strategy-reported alias and a discovery-stamped
-    canonical name dedup as ONE position instead of double-counting. A
-    strategy-reported ``pancakeswap_perps`` and a discovery-stamped
-    ``aster_perps`` for the same venue would otherwise key distinctly and
-    survive as two positions. Protocols with no lending- or perps-read canonical
+    key (e.g. lending ``"aave"`` -> ``"aave_v3"``; perp ``"gmx"`` -> ``"gmx_v2"``)
+    so a strategy-reported alias and a discovery-stamped canonical name dedup as
+    ONE position instead of double-counting. A strategy-reported ``gmx`` and a
+    discovery-stamped ``gmx_v2`` for the same venue would otherwise key
+    distinctly and survive as two positions. Protocols with no lending- or perps-read canonical
     form (LP / vault) pass through lowercased — preserving existing keying for
     every other position type.
     """
@@ -4073,25 +4072,7 @@ class PortfolioValuer:
             return Decimal("0"), self._lending_no_signal_details(position), False
 
         if position.position_type == PositionType.PERP:
-            result = self._reprice_perps_on_chain_enriched(position, chain, market)
-            if result is not None:
-                return result[0], result[1], True
-            # VIB-5252: the on-chain net-equity read did not match this perp.
-            # In the common path Site A (``_merge_position_sources``) drops the
-            # strategy's notional stub before it reaches here, so this is hit
-            # only when discovery could NOT scan the venue (read failed / venue
-            # undeclared) and the stub survived. A strategy perp's ``value_usd``
-            # is gross NOTIONAL (collateral × leverage), NOT net equity — booking
-            # it at ``repriced=True`` here would overstate NAV by leverage (the
-            # original double-count, and the inert trap PR #2937 fell into).
-            # Signal no_path instead: confidence drops to UNAVAILABLE (§7.5) so
-            # the runner substitutes ``IntentStrategy.get_portfolio_snapshot``,
-            # which excludes the perp notional rather than re-booking it (Site D).
-            # Unlike the lending branches above we return ``0`` (not the reported
-            # value): a lending stub's value is a real supply/debt amount, but a
-            # perp stub's is inflated notional — if any UNAVAILABLE-tolerant
-            # reader uses it, understating to 0 is safe; over-stating is not.
-            return Decimal("0"), {}, False
+            return self._reprice_perp_enriched(position, chain, market)
 
         if position.position_type == PositionType.VAULT:
             result = self._reprice_vault_on_chain_enriched(position, chain, market)
@@ -4107,6 +4088,52 @@ class PortfolioValuer:
             # carries a measured value) — keep the strategy-reported value.
             return position.value_usd, {}, True
 
+        return position.value_usd, {}, True
+
+    def _reprice_perp_enriched(
+        self,
+        position: "PositionInfo",
+        chain: str,
+        market: MarketDataSource,
+    ) -> tuple[Decimal, dict[str, Any], bool]:
+        """Value a PERP row: a venue-account row as read, else the on-chain net equity."""
+        venue_account = self._venue_account_value(position)
+        if venue_account is not None:
+            return venue_account
+        result = self._reprice_perps_on_chain_enriched(position, chain, market)
+        if result is not None:
+            return result[0], result[1], True
+        # VIB-5252: the on-chain net-equity read did not match this perp.
+        # In the common path Site A (``_merge_position_sources``) drops the
+        # strategy's notional stub before it reaches here, so this is hit
+        # only when discovery could NOT scan the venue (read failed / venue
+        # undeclared) and the stub survived. A strategy perp's ``value_usd``
+        # is gross NOTIONAL (collateral × leverage), NOT net equity — booking
+        # it at ``repriced=True`` here would overstate NAV by leverage (the
+        # original double-count, and the inert trap PR #2937 fell into).
+        # Signal no_path instead: confidence drops to UNAVAILABLE (§7.5) so
+        # the runner substitutes ``IntentStrategy.get_portfolio_snapshot``,
+        # which excludes the perp notional rather than re-booking it (Site D).
+        # Unlike the lending repricers we return ``0`` (not the reported
+        # value): a lending stub's value is a real supply/debt amount, but a
+        # perp stub's is inflated notional — if any UNAVAILABLE-tolerant
+        # reader uses it, understating to 0 is safe; over-stating is not.
+        return Decimal("0"), {}, False
+
+    @staticmethod
+    def _venue_account_value(position: "PositionInfo") -> tuple[Decimal, dict[str, Any], bool] | None:
+        """Account-level row read by discovery this snapshot: its value is already measured.
+
+        Only honoured for a protocol that publishes a venue-account read, so a
+        strategy-reported row cannot claim the marker and bypass valuation.
+        """
+        from almanak.connectors._strategy_base.venue_account_read_base import VENUE_ACCOUNT_VALUATION_SOURCE
+        from almanak.connectors._strategy_base.venue_account_read_registry import VenueAccountReadRegistry
+
+        if position.details.get("valuation_source") != VENUE_ACCOUNT_VALUATION_SOURCE:
+            return None
+        if not VenueAccountReadRegistry.has(position.protocol):
+            return None
         return position.value_usd, {}, True
 
     def _reprice_token_holding_enriched(

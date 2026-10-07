@@ -231,8 +231,8 @@ def test_current_sealed_production_evidence_passes_the_central_policy() -> None:
 def test_current_registered_matrix_evidence_passes_the_ci_policy() -> None:
     summary = validate_matrix_evidence(build_effective_capability_matrix())
 
-    assert summary.satisfied_obligations == 855
-    assert summary.evidence_references == 886
+    assert summary.satisfied_obligations == 870
+    assert summary.evidence_references == 901
 
 
 def test_matrix_evidence_validation_opens_no_network_or_provider_imports(

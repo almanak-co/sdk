@@ -314,3 +314,40 @@ def test_teardown_status_is_not_reclassified():
 
     assert record["status"] == "TEARDOWN"
     assert "noop_reason" not in record
+
+
+def test_offchain_perp_fill_with_venue_order_id_keeps_success_status():
+    """An off-chain perp venue fills with no tx hash; the venue order id is the evidence."""
+    runner = _make_runner(dry_run=False)
+    er = _exec_result_no_tx()
+    er.extracted_data = {"order_id": "18500235911", "clob_status": "matched"}
+    result = IterationResult(
+        status=IterationStatus.SUCCESS,
+        intent=_make_intent("PERP_OPEN"),
+        execution_result=er,
+        deployment_id="aster-perps",
+        duration_ms=500.0,
+    )
+
+    record = _capture_summary(runner, result, chain="bsc")
+
+    assert record["status"] == IterationStatus.SUCCESS.value
+    assert record["order_id"] == "18500235911"
+
+
+def test_onchain_order_id_without_offchain_lane_marker_is_still_noop():
+    """An ``order_id`` alone (no ``clob_status``) is not venue fill evidence."""
+    runner = _make_runner(dry_run=False)
+    er = _exec_result_no_tx()
+    er.extracted_data = {"order_id": "0xabc"}
+    result = IterationResult(
+        status=IterationStatus.SUCCESS,
+        intent=_make_intent("PERP_OPEN"),
+        execution_result=er,
+        deployment_id="gmx-perps",
+        duration_ms=500.0,
+    )
+
+    record = _capture_summary(runner, result, chain="arbitrum")
+
+    assert record["status"] == IterationStatus.EXECUTION_NOOP.value

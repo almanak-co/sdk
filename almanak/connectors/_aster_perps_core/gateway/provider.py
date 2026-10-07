@@ -1,18 +1,7 @@
-"""Gateway-side connector binding for Aster Perps (VIB-4853 / W1).
+"""Gateway-side address binding for the legacy Aster (ApolloX) Diamond on BSC.
 
-Minimal Phase-3-scaffold-style binding so Aster Perps (which also
-fronts PancakeSwap Perps via the broker id = 2 attribution) can publish
-its on-chain contract addresses through :class:`GatewayAddressCapability`
-without forcing every consumer to import the connector by name. The
-strategy-side connector code (adapter, compiler, SDK, receipt parser)
-still lives under ``almanak/connectors/aster_perps/``; this module
-contributes the gateway-side address surface only.
-
-Contributes:
-
-* ``GatewayAddressCapability`` — per-chain Aster Perps Diamond router
-  address on BSC, moved verbatim from the entries previously held in
-  ``almanak.core.contracts``.
+Publishes the Diamond router through :class:`GatewayAddressCapability` for the
+``pancakeswap_perps`` connector, the only connector still trading this venue.
 """
 
 from __future__ import annotations
@@ -26,22 +15,22 @@ from almanak.connectors._base.gateway_capabilities import (
 from almanak.connectors._base.gateway_connector import GatewayConnector
 from almanak.connectors._base.types import ProtocolKind, ProtocolName
 
-from ..addresses import ASTER_PERPS
+from ..addresses import PANCAKESWAP_PERPS
 
 
-class AsterPerpsGatewayConnector(GatewayConnector, GatewayAddressCapability):
-    """Gateway-side connector for Aster Perps (BSC)."""
+class AsterDiamondGatewayConnector(GatewayConnector, GatewayAddressCapability):
+    """Gateway-side connector for PancakeSwap Perps on the Aster Diamond (BSC)."""
 
-    protocol: ClassVar[ProtocolName] = ProtocolName("aster_perps")
+    protocol: ClassVar[ProtocolName] = ProtocolName("pancakeswap_perps")
     kind: ClassVar[ProtocolKind] = ProtocolKind.PERP
 
     def addresses_for(self, chain: str) -> Mapping[str, str]:
-        """Return the Aster Perps contract addresses for ``chain`` (or empty)."""
-        return ASTER_PERPS.get(chain, {})
+        """Return the Diamond contract addresses for ``chain`` (or empty)."""
+        return PANCAKESWAP_PERPS.get(chain, {})
 
     def address_supported_chains(self) -> frozenset[str]:
-        """Chains for which Aster Perps addresses are registered."""
-        return frozenset(ASTER_PERPS.keys())
+        """Chains for which Diamond addresses are registered."""
+        return frozenset(PANCAKESWAP_PERPS.keys())
 
 
-__all__ = ["AsterPerpsGatewayConnector"]
+__all__ = ["AsterDiamondGatewayConnector"]

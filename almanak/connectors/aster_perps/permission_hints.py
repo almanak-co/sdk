@@ -1,5 +1,9 @@
-"""Back-compat shim: ``aster_perps.permission_hints`` re-exports the shared implementation
-from ``almanak.connectors._aster_perps_core.permission_hints`` (single source of truth).
+"""Permission discovery hints.
+
+Aster Pro orders are off-chain API requests signed by the gateway; no strategy
+intent produces an on-chain call, so there is nothing to grant.
 """
 
-from almanak.connectors._aster_perps_core.permission_hints import *  # noqa: F401,F403
+from almanak.framework.permissions.hints import PermissionHints
+
+PERMISSION_HINTS = PermissionHints()

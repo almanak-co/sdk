@@ -86,6 +86,7 @@ from .vocabulary import (
     LPOpenIntent,
     PerpCancelIntent,
     PerpCloseIntent,
+    PerpDepositIntent,
     PerpOpenIntent,
     PerpWithdrawIntent,
     RepayIntent,
@@ -457,6 +458,7 @@ class IntentCompiler:
         IntentType.PERP_CLOSE: _PrimitiveCompilerRoute("_compile_perp_via_registry"),
         IntentType.PERP_CANCEL_ORDER: _PrimitiveCompilerRoute("_compile_perp_via_registry"),
         IntentType.PERP_WITHDRAW: _PrimitiveCompilerRoute("_compile_perp_via_registry"),
+        IntentType.PERP_DEPOSIT: _PrimitiveCompilerRoute("_compile_perp_via_registry"),
         IntentType.HOLD: _PrimitiveCompilerRoute("_compile_hold"),
         IntentType.FLASH_LOAN: _PrimitiveCompilerRoute("_compile_flash_loan"),
         IntentType.STAKE: _PrimitiveCompilerRoute("_compile_staking_via_registry", ("STAKE",)),
@@ -2281,10 +2283,11 @@ class IntentCompiler:
         return self._compile_lending_via_registry(intent, "WITHDRAW")
 
     def _compile_perp_via_registry(
-        self, intent: PerpOpenIntent | PerpCloseIntent | PerpCancelIntent | PerpWithdrawIntent
+        self,
+        intent: PerpOpenIntent | PerpCloseIntent | PerpCancelIntent | PerpWithdrawIntent | PerpDepositIntent,
     ) -> CompilationResult:
         """Compile a PERP intent through a connector-owned compiler."""
-        protocol = self._resolve_protocol(intent.protocol)
+        protocol = self._resolve_protocol(intent.protocol) or self._sole_perp_protocol_on_chain(intent.intent_type)
         connector_compiler = get_connector_compiler(protocol)
         if connector_compiler is not None:
             return connector_compiler.compile(self._build_compiler_context(protocol, connector_compiler), intent)
@@ -2301,6 +2304,12 @@ class IntentCompiler:
             ),
             intent_id=intent.intent_id,
         )
+
+    def _sole_perp_protocol_on_chain(self, intent_type: IntentType) -> str:
+        """The only venue compiling ``intent_type`` on this chain, or ``""`` (ambiguity fails compilation)."""
+        from almanak.framework.intents.perp_intents import _sole_protocol_for
+
+        return _sole_protocol_for(intent_type, self.chain)
 
     def _compile_lending_via_registry(self, intent: Any, primitive: str) -> CompilationResult:
         protocol = self._resolve_protocol(intent.protocol)

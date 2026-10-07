@@ -125,6 +125,7 @@ UNCATEGORISED_INTENTS: frozenset[str] = frozenset(
         "MINT_STABLE",
         "OPEN_CDP",
         "PERP_CANCEL_ORDER",
+        "PERP_DEPOSIT",
         "PERP_WITHDRAW",
         "REPAY_STABLE",
         "UNWRAP_NATIVE",

@@ -225,6 +225,17 @@ TAXONOMY: dict[str, PrimitiveRecord] = dict(
             event_kind=EventKind.NONE,
             wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
         ),
+        # Venue-account deposit moves owned cash into the venue; it opens no
+        # position. The ledger carries the wallet debit and the venue-account
+        # read values the credit, so no accounting event is synthesized.
+        _record(
+            "PERP_DEPOSIT",
+            Primitive.PERP,
+            AccountingCategory.NO_ACCOUNTING,
+            position_type=None,
+            event_kind=EventKind.NONE,
+            wallet_delta=WalletDeltaLane.LEDGER_PROJECTION,
+        ),
         # Keeper settlement shares the PERP version stream but owns no position
         # lifecycle; the submission event already does. The keeper pays gas and no
         # keeper transaction-ledger row exists, so projection would invent gas and

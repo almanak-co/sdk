@@ -195,7 +195,8 @@ def test_seam_is_egress_free_and_lazily_imports_connectors():
         stripped = line.strip()
         if stripped.startswith(("import ", "from ")):
             assert "almanak.connectors.gmx_v2" not in stripped
-            assert "almanak.connectors.aster_perps" not in stripped
+            assert "almanak.connectors._aster_perps_core" not in stripped
+            assert "almanak.connectors.pancakeswap_perps" not in stripped
 
 
 def test_alias_chain_resolves_same_plan_as_canonical():
@@ -203,8 +204,12 @@ def test_alias_chain_resolves_same_plan_as_canonical():
     same read plan as the canonical name ("bsc") instead of an inert ``None``
     (which would silently re-defeat position discovery for the venue)."""
     wallet = "0x1111111111111111111111111111111111111111"
-    via_alias = PerpsReadRegistry.resolve_plan("aster_perps", PerpsPositionQuery(chain="bnb", wallet_address=wallet))
-    via_canonical = PerpsReadRegistry.resolve_plan("aster_perps", PerpsPositionQuery(chain="bsc", wallet_address=wallet))
+    via_alias = PerpsReadRegistry.resolve_plan(
+        "pancakeswap_perps", PerpsPositionQuery(chain="bnb", wallet_address=wallet)
+    )
+    via_canonical = PerpsReadRegistry.resolve_plan(
+        "pancakeswap_perps", PerpsPositionQuery(chain="bsc", wallet_address=wallet)
+    )
     assert via_canonical is not None
     assert via_alias is not None
     assert via_alias.query.chain == "bsc"

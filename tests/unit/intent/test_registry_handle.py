@@ -35,7 +35,6 @@ Acceptance criteria covered:
 
 from __future__ import annotations
 
-import inspect
 import re
 import subprocess
 from decimal import Decimal
@@ -820,6 +819,8 @@ _FACTORY_BUILDERS: dict[str, dict] = {
                               protocol="gmx_v2", chain="arbitrum"),
     "perp_withdraw": dict(amount=Decimal("6.99"),
                           protocol="hyperliquid", chain="hyperevm"),
+    "perp_deposit": dict(amount=Decimal("5"), asset="USDT",
+                         protocol="aster_perps", chain="bsc"),
     "flash_loan": dict(provider="aave", token="USDC",
                        amount=Decimal("1000"),
                        callback_intents=[_flash_loan_minimal_callback()],

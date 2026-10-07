@@ -47,21 +47,38 @@ def _capabilities_for(protocol_lower: str) -> dict[str, Any]:
     return get_protocol_capabilities(protocol_lower)
 
 
-def default_perp_withdraw_protocol() -> str:
-    """Resolve the default PERP_WITHDRAW venue from the compiler registry.
+def _sole_protocol_for(intent_type: IntentType, chain: str | None = None) -> str:
+    """The only venue registered for ``intent_type``, or ``""`` when there are several.
 
-    Self-containment (blueprint 22): the framework must NOT hardcode a connector
-    folder name. Exactly one connector registers ``IntentType.PERP_WITHDRAW`` in
-    its compiler manifest today (hyperliquid), so the default is that sole
-    registered protocol — resolved from the registry, not a bare literal, so
-    adding/renaming the venue needs no edit here. Function-local import + falling
-    back to the sole registered perp venue keeps the vocabulary importable during
+    Self-containment (blueprint 22): the default comes from the compiler
+    registry, never a connector-name literal. With more than one venue the
+    default is left empty and the compiler picks the venue that compiles on the
+    strategy's chain, so adding a venue never silently re-routes another chain's
+    cash movements. Function-local import keeps the vocabulary importable during
     cold-boot connector registration (same constraint as ``_capabilities_for``).
     """
     from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
 
-    protocols = CompilerRegistry.protocols_for_intent(IntentType.PERP_WITHDRAW)
-    return protocols[0] if protocols else ""
+    protocols = CompilerRegistry.protocols_for_intent(intent_type)
+    if chain:
+        target = chain.lower()
+        protocols = tuple(
+            p
+            for p in protocols
+            if (cls := CompilerRegistry._load_class(p)) is not None
+            and target in {c.lower() for c in (cls.chains or ())}
+        )
+    return protocols[0] if len(protocols) == 1 else ""
+
+
+def default_perp_withdraw_protocol() -> str:
+    """Resolve the default PERP_WITHDRAW venue (see :func:`_sole_protocol_for`)."""
+    return _sole_protocol_for(IntentType.PERP_WITHDRAW)
+
+
+def default_perp_deposit_protocol() -> str:
+    """Resolve the default PERP_DEPOSIT venue (see :func:`_sole_protocol_for`)."""
+    return _sole_protocol_for(IntentType.PERP_DEPOSIT)
 
 
 class PerpOpenIntent(BaseIntent):
@@ -355,6 +372,83 @@ class PerpCancelIntent(BaseIntent):
         return cls.model_validate(clean_data)
 
 
+class PerpDepositIntent(BaseIntent):
+    """Intent to deposit funds from the wallet into a perp venue's account.
+
+    The mirror of :class:`PerpWithdrawIntent`: a **cash movement**, not a trade.
+    It moves the strategy's tokens from the on-chain wallet into the venue's
+    margin account (e.g. Aster Pro's deposit vault on BSC), opens no position
+    and carries no PnL. The wallet debit is an on-chain transaction recorded in
+    ``transaction_ledger``; the venue credit is valued through the connector's
+    venue-account read, so NAV is unchanged by the move.
+
+    Attributes:
+        amount: Amount to deposit in human token terms, or ``"all"`` to chain the
+            previous step's output.
+        asset: Token symbol or address to deposit (the venue's margin asset).
+        protocol: Perp venue receiving the funds; resolved from the compiler
+            registry when omitted.
+        chain: Chain the deposit is sent on (defaults to the strategy's chain).
+        intent_id: Unique identifier for this intent.
+        created_at: Timestamp when the intent was created.
+    """
+
+    amount: PydanticChainedAmount
+    asset: str
+    protocol: str = Field(default_factory=default_perp_deposit_protocol)
+    chain: str | None = None
+    intent_id: str = Field(default_factory=default_intent_id)
+    created_at: datetime = Field(default_factory=default_timestamp)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_protocol_for_chain(cls, data: Any) -> Any:
+        """Pick the venue that operates on ``chain`` when no protocol was given."""
+        if isinstance(data, dict) and not data.get("protocol") and data.get("chain"):
+            return {**data, "protocol": _sole_protocol_for(IntentType.PERP_DEPOSIT, str(data["chain"]))}
+        return data
+
+    @model_validator(mode="after")
+    def validate_perp_deposit_intent(self) -> "PerpDepositIntent":
+        """Validate deposit parameters (fail-closed)."""
+        if isinstance(self.amount, Decimal):
+            if not self.amount.is_finite():
+                raise ValueError("amount must be a finite Decimal (not NaN/Infinity)")
+            if self.amount <= 0:
+                raise ValueError("amount must be positive")
+        elif self.amount != "all":
+            raise ValueError("amount must be a positive Decimal or 'all'")
+        if not self.asset or not self.asset.strip():
+            raise ValueError("asset must be a non-empty token symbol or address")
+        return self
+
+    @property
+    def is_chained_amount(self) -> bool:
+        """Check if this intent uses a chained amount from previous step."""
+        return self.amount == "all"
+
+    @property
+    def intent_type(self) -> IntentType:
+        """Return the type of this intent."""
+        return IntentType.PERP_DEPOSIT
+
+    def serialize(self) -> dict[str, Any]:
+        """Serialize the intent to a dictionary."""
+        data = self.model_dump(mode="json")
+        data["type"] = self.intent_type.value
+        if self.amount == "all":
+            data["amount"] = "all"
+        return data
+
+    @classmethod
+    def deserialize(cls, data: dict[str, Any]) -> "PerpDepositIntent":
+        """Deserialize a dictionary to a PerpDepositIntent."""
+        clean_data = {k: v for k, v in data.items() if k != "type"}
+        if "created_at" in clean_data and isinstance(clean_data["created_at"], str):
+            clean_data["created_at"] = datetime.fromisoformat(clean_data["created_at"])
+        return cls.model_validate(clean_data)
+
+
 class PerpWithdrawIntent(BaseIntent):
     """Intent to withdraw funds from a perp venue's off-chain account back to L1.
 
@@ -399,7 +493,7 @@ class PerpWithdrawIntent(BaseIntent):
     amount: PydanticChainedAmount
     asset: str = "USDC"
     # Default resolved from the compiler registry (blueprint 22 — no hardcoded
-    # connector name in framework code); the sole PERP_WITHDRAW venue today.
+    # connector name in framework code); empty when several venues exist.
     protocol: str = Field(default_factory=default_perp_withdraw_protocol)
     chain: str | None = None
     # Fail-closed sender-equality ASSERTION only. The HyperCore bridge credits the
@@ -410,6 +504,14 @@ class PerpWithdrawIntent(BaseIntent):
     destination: str | None = None
     intent_id: str = Field(default_factory=default_intent_id)
     created_at: datetime = Field(default_factory=default_timestamp)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_protocol_for_chain(cls, data: Any) -> Any:
+        """Pick the venue that operates on ``chain`` when no protocol was given."""
+        if isinstance(data, dict) and not data.get("protocol") and data.get("chain"):
+            return {**data, "protocol": _sole_protocol_for(IntentType.PERP_WITHDRAW, str(data["chain"]))}
+        return data
 
     @model_validator(mode="after")
     def validate_perp_withdraw_intent(self) -> "PerpWithdrawIntent":

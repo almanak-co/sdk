@@ -2,8 +2,7 @@
 
 Exists so callers using ``from almanak.connectors.pancakeswap_perps.sdk
 import ...`` keep working after the VIB-3044 extraction. Re-exports from the
-shared ``_aster_perps_core.sdk`` foundation (not the sibling ``aster_perps``
-leaf). New code should import from ``almanak.connectors.aster_perps.sdk``.
+shared ``_aster_perps_core.sdk`` foundation.
 """
 
 from almanak.connectors._aster_perps_core.sdk import *  # noqa: F401,F403 — intentional re-export

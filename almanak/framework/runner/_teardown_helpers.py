@@ -279,6 +279,7 @@ def build_teardown_manager(
     token-consolidation phase honours the request. ``request=None`` derives
     defaults (consolidate to USDC).
     """
+    from ..execution.offchain_venue import offchain_handler_factory
     from ..teardown import create_teardown_state_adapter_for_runtime
     from ..teardown.runner_helpers import build_runner_helpers
     from ..teardown.teardown_manager import TeardownManager
@@ -298,6 +299,10 @@ def build_teardown_manager(
         config=_teardown_config_from_request(request, strategy=strategy),
         runner_helpers=build_runner_helpers(runner),
         simulation_enabled=runner.config.simulation_enabled,
+        offchain_handler_for=offchain_handler_factory(
+            gateway_client=runner._get_gateway_client(),
+            wallet=getattr(strategy, "wallet_address", None),
+        ),
     )
     return teardown_mgr, teardown_state_adapter
 

@@ -3,24 +3,21 @@
 These tests pin CURRENT behavior. They are the regression contract for any future
 refactor of the parser. Do not change parser source in this PR.
 
-Also covers the pancakeswap_perps shim, which re-exports from aster_perps.
+The parser is the shared legacy Aster Diamond parser behind ``pancakeswap_perps``.
 """
 
 from decimal import Decimal
 
 import pytest
 
-from almanak.connectors.aster_perps.receipt_parser import AsterPerpsReceiptParser
-from almanak.connectors.aster_perps.sdk import (
+from almanak.connectors._aster_perps_core.receipt_parser import AsterPerpsReceiptParser
+from almanak.connectors._aster_perps_core.sdk import (
     EVENT_CLOSE_TRADE_RECEIVED,
     EVENT_CLOSE_TRADE_SUCCESSFUL,
     EVENT_MARKET_PENDING_TRADE,
     EVENT_OPEN_MARKET_TRADE,
     EVENT_PENDING_TRADE_REFUND,
-    PRICE_DECIMALS,
-    QTY_DECIMALS,
 )
-
 
 # ---------------------------------------------------------------------------
 # Hex helpers

@@ -137,7 +137,7 @@ class BootStrandReport:
 
 
 def _classify_protocols(
-    protocols: list[str], tracked_tokens: list[str]
+    protocols: list[str], tracked_tokens: list[str], chain: str = ""
 ) -> tuple[list[str], list[str], list[tuple[str, str]]]:
     """Split declared protocols into (lending-scannable, perps-scannable, undetectable).
 
@@ -148,7 +148,8 @@ def _classify_protocols(
       A declared lending protocol with no tracked tokens is *undetectable* (we
       cannot enumerate which reserves to read).
     * perps-scannable — the protocol has a connector-owned perps read (a single
-      account-level read returns the whole book — no token list needed).
+      account-level read returns the whole book — no token list needed), or a
+      venue-account read for ``chain`` (an off-chain venue's open positions).
     * undetectable — everything else (LP, vault, stake, CDP, Compound V3 /
       Morpho lending without a single-reserve read).
     """
@@ -166,7 +167,10 @@ def _classify_protocols(
     # ``pancakeswap_perps``) is never scanned by
     # ``PositionDiscoveryService._discover_perps``, so classifying it scannable
     # would silently assume it clean. It must fall through to ``undetectable``.
-    perps = [p for p in declared if PerpsReadRegistry.canonical(p) is not None]
+    from almanak.connectors._strategy_base.venue_account_read_registry import VenueAccountReadRegistry
+
+    venue_accounts = set(VenueAccountReadRegistry.protocols_to_read(declared, chain)) if chain else set()
+    perps = [p for p in declared if PerpsReadRegistry.canonical(p) is not None or p.lower() in venue_accounts]
 
     undetectable: list[tuple[str, str]] = []
     scannable_lending: list[str] = []
@@ -410,6 +414,7 @@ async def detect_boot_strands(
     the caller's job (:func:`enforce_no_boot_strands`) so the detector stays
     pure and unit-testable.
     """
+    from almanak.connectors._strategy_base.venue_account_read_base import VENUE_ACCOUNT_VALUATION_SOURCE
     from almanak.framework.teardown.models import PositionType
     from almanak.framework.valuation.position_discovery import (
         DiscoveryConfig,
@@ -423,7 +428,7 @@ async def detect_boot_strands(
         # Nothing declared to scan — not an error, just no coverage to assert.
         return report
 
-    scannable_lending, scannable_perps, undetectable = _classify_protocols(protocols, tracked_tokens)
+    scannable_lending, scannable_perps, undetectable = _classify_protocols(protocols, tracked_tokens, chain)
     report.undetectable = undetectable
     report.scanned_protocols = list(dict.fromkeys([*scannable_lending, *scannable_perps]))
 
@@ -481,6 +486,13 @@ async def detect_boot_strands(
         # discovered at boot (no token ids), so it cannot reach this loop.
         if ptype not in (PositionType.SUPPLY, PositionType.BORROW, PositionType.PERP):
             continue
+        # A venue-account row strands only open positions: idle venue cash (e.g.
+        # funds deposited outside this deployment) is valued, never a strand.
+        details = getattr(pos, "details", {}) or {}
+        if details.get("valuation_source") == VENUE_ACCOUNT_VALUATION_SOURCE and not details.get("open_positions"):
+            continue
+        if details.get("venue_account_unread"):
+            continue  # an unread venue is a scan error (already recorded), never proof of a strand
         # Canonicalise the discovered protocol through the SAME helper the known-set
         # uses so an alias (gmx vs gmx_v2) never misses the match and false-halts.
         protocol = _canonical_protocol(pos.protocol)

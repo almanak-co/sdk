@@ -198,6 +198,7 @@ exclude = [
     ".claude/",  # Skills templates with placeholder syntax
     "almanak/gateway/proto/",  # Auto-generated protobuf files
     "almanak/connectors/polymarket/proto/",  # Auto-generated protobuf files (VIB-4813)
+    "almanak/connectors/aster_perps/proto/",  # Auto-generated protobuf files
     "almanak/demo_strategies/",  # Packaged demo strategies (user-facing, copied as-is)
 ]
 
@@ -281,6 +282,7 @@ source = ["almanak"]
 omit = [
     "almanak/gateway/proto/*_pb2*.py",
     "almanak/connectors/polymarket/proto/*_pb2*.py",
+    "almanak/connectors/aster_perps/proto/*_pb2*.py",
     # `almanak/**/tests/*` was previously here to exclude inline pytest test
     # files that lived alongside framework code. After #2066 those files all
     # moved into `tests/unit/`, so the only remaining matches were production
@@ -398,6 +400,7 @@ files = ["almanak"]
 exclude = [
     "almanak/gateway/proto/",  # Auto-generated protobuf files
     "almanak/connectors/polymarket/proto/",  # Auto-generated protobuf files (VIB-4813)
+    "almanak/connectors/aster_perps/proto/",  # Auto-generated protobuf files
     "almanak/demo_strategies/",  # Packaged demo strategies (user-facing, copied as-is)
 ]
 # Start strict-ish: catch real bugs without requiring full annotation coverage

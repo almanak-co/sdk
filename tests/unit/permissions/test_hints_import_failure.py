@@ -253,6 +253,8 @@ class TestMalformedHintsFailClosed:
         # ``PermissionHints()`` and is recorded in the coverage baseline or is
         # non-Safe-reachable (Solana / monad / zerog / off-chain venues).
         deliberately_empty = {
+            # Off-chain order book; the gateway refuses Safe identities, so no Safe path exists.
+            "aster_perps",
             "balancer_v2",
             "benqi",
             "curvance",

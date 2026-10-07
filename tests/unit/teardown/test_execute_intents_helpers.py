@@ -204,6 +204,17 @@ def test_resolve_skips_withdraw_and_repay():
     assert err is None and out is intent
 
 
+def test_resolve_leaves_a_perp_venue_withdraw_all_to_its_compiler():
+    """The venue balance is not a wallet balance: teardown must not refuse to withdraw it."""
+    from almanak.framework.intents.vocabulary import Intent
+
+    mgr = _mgr()
+    intent = Intent.perp_withdraw(amount="all", asset="USDT", protocol="aster_perps", chain="bsc")
+    shape = mgr._classify_intent_shape(intent)
+    out, err = mgr._resolve_all_amount(_strategy(), intent, None, shape)
+    assert err is None and out is intent
+
+
 def test_resolve_missing_context_errors():
     mgr = _mgr()
     intent = {"intent_type": "SWAP", "from_token": "USDC", "amount": "all"}

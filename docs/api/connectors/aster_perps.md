@@ -1,4 +1,4 @@
-# Aster Perps
+# Aster Pro
 
 | Field | Value |
 |-------|-------|
@@ -10,7 +10,7 @@
 
 | Chain | Family | Supported Intents |
 |-------|--------|-------------------|
-| [BNB Chain](../../chains/bsc.md) | EVM | ``PERP_CLOSE``, ``PERP_OPEN`` |
+| [BNB Chain](../../chains/bsc.md) | EVM | ``PERP_CLOSE``, ``PERP_DEPOSIT``, ``PERP_OPEN``, ``PERP_WITHDRAW`` |
 
 ::: almanak.connectors.aster_perps
     options:

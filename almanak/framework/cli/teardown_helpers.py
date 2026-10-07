@@ -1338,12 +1338,15 @@ async def run_teardown_with_brackets(
 
     _execute_lane_config = _TC.default()
     _execute_lane_config.token_consolidation.enabled = False
+    from ..execution.offchain_venue import offchain_handler_factory
+
     teardown_manager = TeardownManager(
         orchestrator=machinery.orchestrator,
         compiler=machinery.compiler,
         state_manager=machinery.state_adapter,
         runner_helpers=runner_helpers_for_manager,
         config=_execute_lane_config,
+        offchain_handler_for=offchain_handler_factory(gateway_client=gateway_client, wallet=wallet_address),
     )
 
     kwargs = {

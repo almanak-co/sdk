@@ -202,6 +202,7 @@ _SPECIALIZED_GOLDENS = {
 _FALLBACK_GOLDENS = {
     IntentType.PERP_CANCEL_ORDER: "[PERP_CANCEL_ORDER] (id=intent-1...)",
     IntentType.PERP_WITHDRAW: "[PERP_WITHDRAW] (id=intent-1...)",
+    IntentType.PERP_DEPOSIT: "[PERP_DEPOSIT] (id=intent-1...)",
     IntentType.ENSURE_BALANCE: "[ENSURE_BALANCE] (id=intent-1...)",
     IntentType.FLASH_LOAN: "[FLASH_LOAN] (id=intent-1...)",
     IntentType.STAKE: "[STAKE] (id=intent-1...)",

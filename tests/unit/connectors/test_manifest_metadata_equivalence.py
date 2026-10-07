@@ -163,16 +163,17 @@ FROZEN_LENDING_ALIASES = {
     "fluid_lending": "fluid",
 }
 
-# almanak/connectors/_strategy_base/perps_read_registry.py tables as of
-# 2026-06-10, frozen verbatim.
+# almanak/connectors/_strategy_base/perps_read_registry.py tables, frozen. The
+# legacy Aster Diamond read is keyed ``pancakeswap_perps`` with no alias:
+# ``aster_perps`` is the off-chain Aster Pro venue and has no on-chain read.
 FROZEN_PERPS_SPEC_LOADERS = {
     "gmx_v2": ("almanak.connectors.gmx_v2.perps_read", "PERPS_READ_SPEC"),
-    "aster_perps": ("almanak.connectors.aster_perps.perps_read", "PERPS_READ_SPEC"),
+    "pancakeswap_perps": ("almanak.connectors._aster_perps_core.perps_read", "PERPS_READ_SPEC"),
     "hyperliquid": ("almanak.connectors.hyperliquid.perps_read", "PERPS_READ_SPEC"),
 }
 # B3 (VIB-4851) added "gmx" (previously a local tuple in the backtesting
 # funding-rate dispatch) as a manifest-declared perps alias.
-FROZEN_PERPS_ALIASES = {"pancakeswap_perps": "aster_perps", "gmx": "gmx_v2"}
+FROZEN_PERPS_ALIASES = {"gmx": "gmx_v2"}
 
 
 def test_lending_read_dispatch_equals_frozen_legacy_tables() -> None:
@@ -687,9 +688,11 @@ FROZEN_PREDICTION_READ_LOADERS = {
 }
 FROZEN_PREDICTION_EXECUTE_LOADERS = {
     "polymarket": ("almanak.connectors.polymarket.clob_handler", "PREDICTION_EXECUTE_SPEC"),
+    "aster_perps": ("almanak.connectors.aster_perps.execution", "EXECUTE_SPEC"),
 }
 FROZEN_GATEWAY_STUB_LOADERS = {
     "polymarket": ("almanak.connectors.polymarket.gateway_stub", "GATEWAY_STUB_SPEC"),
+    "aster_perps": ("almanak.connectors.aster_perps.gateway_stub", "GATEWAY_STUB_SPEC"),
 }
 
 

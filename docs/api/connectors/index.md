@@ -48,7 +48,7 @@ Protocol connectors provide adapters for interacting with DeFi protocols. Each g
 
 | Protocol | Type | Chains | Intent Types | Module |
 |----------|------|--------|--------------|--------|
-| [Aster Perps](aster_perps.md) | Perp | [BNB Chain](../../chains/bsc.md) | ``PERP_CLOSE``, ``PERP_OPEN`` | ``almanak.connectors.aster_perps`` |
+| [Aster Pro](aster_perps.md) | Perp | [BNB Chain](../../chains/bsc.md) | ``PERP_CLOSE``, ``PERP_DEPOSIT``, ``PERP_OPEN``, ``PERP_WITHDRAW`` | ``almanak.connectors.aster_perps`` |
 | [Drift](drift.md) | Perp | [Solana](../../chains/solana.md) | ``PERP_CLOSE``, ``PERP_OPEN`` | ``almanak.connectors.drift`` |
 | [GMX V2](gmx_v2.md) | Perp | [Arbitrum](../../chains/arbitrum.md), [Avalanche](../../chains/avalanche.md) | ``PERP_CANCEL_ORDER``, ``PERP_CLOSE``, ``PERP_OPEN`` | ``almanak.connectors.gmx_v2`` |
 | [Hyperliquid](hyperliquid.md) | Perp | [Hyperevm](../../chains/hyperevm.md) | ``PERP_CLOSE``, ``PERP_OPEN``, ``PERP_WITHDRAW`` | ``almanak.connectors.hyperliquid`` |

@@ -82,12 +82,10 @@ def _registered_provider_modules() -> set[str]:
     ``receipt_parser_provider.py`` instantiated and registered.
 
     Resolving via the provider's module — not via the resolved parser
-    class's ``__module__`` — correctly handles shims like
-    ``pancakeswap_perps``, whose provider returns the canonical
+    class's ``__module__`` — correctly handles re-exports like
+    ``pancakeswap_perps``, whose provider returns the shared
     ``AsterPerpsReceiptParser`` class (so the class's ``__module__``
-    is ``aster_perps.receipt_parser``, not ``pancakeswap_perps``…). The
-    pancakeswap_perps provider file still exists and is still registered;
-    the shim is the legitimate way to keep the legacy key alive.
+    is ``_aster_perps_core.receipt_parser``, not ``pancakeswap_perps``…).
     """
     return {
         type(connector).__module__

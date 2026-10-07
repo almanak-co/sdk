@@ -50,13 +50,13 @@ pytestmark = pytest.mark.no_zodiac(
     )
 )
 
-from almanak.connectors.aster_perps.addresses import PANCAKESWAP_PERPS
 from almanak.connectors.pancakeswap_perps import (
     PancakeSwapPerpsReceiptParser,
     build_close_transaction,
     encode_get_pending_trade_calldata,
     encode_get_position_by_hash_calldata,
 )
+from almanak.connectors.pancakeswap_perps.addresses import PANCAKESWAP_PERPS
 from almanak.connectors.pancakeswap_perps.sdk import (
     OpenTradeStruct,
     encode_open_market_trade_calldata,
@@ -98,7 +98,7 @@ class TestPancakeSwapPerpsCloseIntent:
         funded_wallet: str,
         test_private_key: str,
         anvil_rpc_url: str,
-        require_tradeable_aster_perp_market,
+        require_tradeable_pancakeswap_perp_market,
     ):
         """Full open -> fill -> close cycle for a LONG BTC/USD position."""
         router = PANCAKESWAP_PERPS[CHAIN_NAME]["router"]

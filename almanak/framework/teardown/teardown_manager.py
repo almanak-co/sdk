@@ -364,6 +364,19 @@ def _mark_persisted_async_submission_accepted(
         return False
 
 
+def _rotate_persisted_intent_id(state: TeardownState, intent_index: int) -> bool:
+    """Give one plan item a fresh intent id, so a resumed run re-sending it opens new venue orders."""
+    try:
+        plan = json.loads(state.pending_intents_json) if state.pending_intents_json else []
+        if not isinstance(plan, list) or not 0 <= intent_index < len(plan) or not isinstance(plan[intent_index], dict):
+            return False
+        plan[intent_index] = {**plan[intent_index], "intent_id": str(uuid.uuid4())}
+        state.pending_intents_json = json.dumps(plan)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def _is_persisted_async_submission_accepted(intent: Any) -> bool:
     return isinstance(intent, dict) and intent.get(_ACCEPTED_ASYNC_SUBMISSION_KEY) is True
 
@@ -601,6 +614,10 @@ class _ExecuteDispatch:
 class _IntentAttemptState:
     submission_landed: bool = False
     unsettled_async_submission: bool = False
+    # Ledger row of the latest failed attempt that still carried a measured
+    # off-chain fill (e.g. a partly closed position). Booked once if the intent
+    # finally fails; a later success of the same intent books every fill itself.
+    failed_fill_ledger_id: str | None = None
 
 
 @dataclass
@@ -714,6 +731,8 @@ class TeardownManager:
     5. Results are verified on-chain
     """
 
+    offchain_handler_for: Callable[[str, str], Any] | None = None
+
     def __init__(
         self,
         state_manager: StateManager | None = None,
@@ -723,6 +742,7 @@ class TeardownManager:
         compiler: "IntentCompiler | None" = None,
         runner_helpers: "TeardownRunnerHelpers | None" = None,
         simulation_enabled: bool = False,
+        offchain_handler_for: Callable[[str, str], Any] | None = None,
     ):
         """Initialize the teardown manager.
 
@@ -741,6 +761,10 @@ class TeardownManager:
                 execution. ``None`` retains pre-VIB-3773 behaviour (no
                 accounting writes from this lane) so legacy unit tests that
                 don't construct a runner keep working.
+            offchain_handler_for: ``(protocol, chain) -> handler | None`` for
+                connectors that execute off-chain (no transactions in their
+                bundles). A bundle the handler claims is executed by it instead
+                of the orchestrator, still paired with the per-intent commit.
         """
         from .runner_helpers import TeardownRunnerHelpers
 
@@ -751,6 +775,7 @@ class TeardownManager:
         self.compiler = compiler
         self.runner_helpers = runner_helpers or TeardownRunnerHelpers()
         self.simulation_enabled = simulation_enabled
+        self.offchain_handler_for = offchain_handler_for
 
         self.safety_guard = SafetyGuard(self.config)
         self.slippage_manager = EscalatingSlippageManager(self.config)
@@ -2181,7 +2206,8 @@ class TeardownManager:
             "withdraw_all": withdraw_all,
             "intent_type_val": intent_type_val,
             "to_token": to_token,
-            "is_withdraw": upper in ("WITHDRAW", "INTENTTYPE.WITHDRAW"),
+            # A perp-venue withdrawal's "all" is the venue balance, resolved by its compiler.
+            "is_withdraw": upper in ("WITHDRAW", "INTENTTYPE.WITHDRAW", "PERP_WITHDRAW", "INTENTTYPE.PERP_WITHDRAW"),
             "is_repay": upper in ("REPAY", "INTENTTYPE.REPAY"),
             "is_swap": upper in ("SWAP", "INTENTTYPE.SWAP"),
         }
@@ -2452,6 +2478,16 @@ class TeardownManager:
             wallet_address=_teardown_wallet_for_chain(strategy, intent_chain),
         )
 
+    def _offchain_handler(self, intent: Any, action_bundle: Any, context: Any) -> Any | None:
+        """The off-chain venue handler that claims ``action_bundle``, if any."""
+        if self.offchain_handler_for is None:
+            return None
+        protocol = str(_intent_field(intent, "protocol") or "")
+        handler = self.offchain_handler_for(protocol, context.chain)
+        if handler is None or not handler.can_handle(action_bundle):
+            return None
+        return handler
+
     async def _execute_and_commit_attempt(
         self,
         strategy: Any,
@@ -2472,7 +2508,13 @@ class TeardownManager:
         snapshots = await self._capture_pre_attempt_snapshots(strategy, intent)
         pre_snapshot, lending_pre, v4_fees, v4_native = snapshots
         inventory_anchor = await asyncio.to_thread(self._capture_inventory_exit, strategy, intent, context)
-        exec_result = await self.orchestrator.execute(compilation_result.action_bundle, context)
+        offchain_handler = self._offchain_handler(intent, compilation_result.action_bundle, context)
+        if offchain_handler is not None:
+            from almanak.framework.execution.offchain_venue import offchain_execution_result
+
+            exec_result = offchain_execution_result(await offchain_handler.execute(compilation_result.action_bundle))
+        else:
+            exec_result = await self.orchestrator.execute(compilation_result.action_bundle, context)
         bundle_metadata = getattr(compilation_result.action_bundle, "metadata", None) or None
         async_submission = None
         post_recon: dict[str, Any] | None = None
@@ -2966,6 +3008,7 @@ class TeardownManager:
                 intent_count,
             )
             if not exec_result.success:
+                self._remember_failed_fill(exec_result, commit_outcome, attempt_state)
                 return self._failed_execution_attempt(exec_result, slippage, intent_index, intent_count)
             if async_submission is None:
                 raise RuntimeError("successful teardown dispatch is missing async classification")
@@ -3279,6 +3322,49 @@ class TeardownManager:
         await self._save_execute_floor(teardown_state, resume_floor())
         return progress_pct
 
+    @staticmethod
+    def _remember_failed_fill(exec_result: Any, commit_outcome: Any, attempt_state: _IntentAttemptState) -> None:
+        from almanak.framework.execution.offchain_venue import has_offchain_fill
+
+        ledger_id = getattr(commit_outcome, "ledger_entry_id", None)
+        if ledger_id and has_offchain_fill(exec_result):
+            attempt_state.failed_fill_ledger_id = str(ledger_id)
+
+    async def _book_failed_fill(
+        self, strategy: Any, intent: Any, intent_index: int, ledger_id: str, teardown_state: TeardownState
+    ) -> None:
+        """Book a partial off-chain fill once, when its intent's ladder has ended (failed or paused).
+
+        The venue aggregates every leg sent under one intent id, so a resumed run
+        re-sending this intent would report these legs again. The persisted plan
+        therefore first gets a fresh id for it, and the fill is booked only once
+        that is saved: a crash between the two leaves the ledger row, which
+        records the fill, unbooked rather than counted twice. Loud but never
+        blocking.
+        """
+        book = self.runner_helpers.book_failed_fill
+        if book is None:
+            return
+        if self.state_manager is not None:
+            prior_plan = teardown_state.pending_intents_json
+            try:
+                if not _rotate_persisted_intent_id(teardown_state, intent_index):
+                    raise ValueError(f"teardown plan has no entry {intent_index}")
+                await self.state_manager.save_teardown_state(teardown_state)
+            except Exception:  # noqa: BLE001 — accounting is loud here, never blocking
+                # A later save must not persist an id whose legs were never booked:
+                # under the old id a resume re-aggregates them and books them once.
+                teardown_state.pending_intents_json = prior_plan
+                logger.exception(
+                    "Teardown left the partial fill of ledger row %s unbooked: no fresh intent id was persisted",
+                    ledger_id,
+                )
+                return
+        try:
+            await book(strategy, intent, ledger_id)
+        except Exception:  # noqa: BLE001 — accounting is loud here, never blocking
+            logger.exception("Teardown could not book the partial fill of ledger row %s", ledger_id)
+
     async def _apply_ladder_result(
         self,
         exec_result: Any,
@@ -3329,6 +3415,10 @@ class TeardownManager:
                 return (intent_index, intent, attempts + 1), None
 
             totals.failed += 1
+            if attempt_state.failed_fill_ledger_id:
+                await self._book_failed_fill(
+                    strategy, intent, intent_index, attempt_state.failed_fill_ledger_id, teardown_state
+                )
             if exec_result.status == "paused_awaiting_approval":
                 teardown_state.status = TeardownStatus.PAUSED
                 if self.state_manager:

@@ -1,7 +1,8 @@
-"""IntentCompiler dispatch for protocol='aster_perps' vs 'pancakeswap_perps' (VIB-3045).
+"""IntentCompiler dispatch for the legacy Aster Diamond (``pancakeswap_perps``).
 
-Both protocol keys must compile to the same adapter class; only the broker_id
-attribution on the resulting ActionBundle differs.
+``pancakeswap_perps`` is the only protocol key the Diamond compiler owns and it
+always attributes to the PancakeSwap broker. ``aster_perps`` names Aster Pro, an
+off-chain order book, and must never compile to a Diamond transaction.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ import pytest
 
 from almanak.framework.intents.compiler import CompilationStatus, IntentCompiler
 from almanak.framework.intents.perp_intents import PerpOpenIntent
-
 
 _PRICE_ORACLE: dict[str, Decimal] = {
     "BTC": Decimal("95000"),
@@ -28,7 +28,7 @@ _PRICE_ORACLE: dict[str, Decimal] = {
 _WALLET = "0x0000000000000000000000000000000000000001"
 
 
-def _compile(protocol: str) -> tuple[CompilationStatus, dict]:
+def _compile(protocol: str, collateral_token: str = "BNB") -> tuple[CompilationStatus, dict, list]:
     compiler = IntentCompiler(
         chain="bsc",
         wallet_address=_WALLET,
@@ -36,7 +36,7 @@ def _compile(protocol: str) -> tuple[CompilationStatus, dict]:
     )
     intent = PerpOpenIntent(
         market="BTC/USD",
-        collateral_token="BNB",
+        collateral_token=collateral_token,
         collateral_amount=Decimal("0.3"),
         size_usd=Decimal("500"),
         is_long=True,
@@ -45,30 +45,30 @@ def _compile(protocol: str) -> tuple[CompilationStatus, dict]:
         leverage=Decimal("3"),
     )
     result = compiler.compile(intent)
-    return result.status, (result.action_bundle.metadata if result.action_bundle else {})
+    metadata = result.action_bundle.metadata if result.action_bundle else {}
+    return result.status, metadata, list(result.transactions or [])
 
 
 class TestPerpOpenDispatch:
-    def test_aster_perps_compiles_with_broker_id_0(self) -> None:
-        status, metadata = _compile("aster_perps")
-        assert status == CompilationStatus.SUCCESS
-        assert metadata["broker_id"] == 0, "aster_perps must attribute to raw Aster"
-        assert metadata["protocol"] == "aster_perps"
-        assert metadata["chain"] == "bsc"
-
     def test_pancakeswap_perps_compiles_with_broker_id_2(self) -> None:
-        status, metadata = _compile("pancakeswap_perps")
+        status, metadata, transactions = _compile("pancakeswap_perps")
         assert status == CompilationStatus.SUCCESS
         assert metadata["broker_id"] == 2, "pancakeswap_perps must attribute to PCS"
         assert metadata["protocol"] == "pancakeswap_perps"
+        assert metadata["chain"] == "bsc"
+        assert transactions, "the Diamond lane is on-chain"
 
-    def test_both_protocol_keys_produce_same_router_target(self) -> None:
-        """aster_perps and pancakeswap_perps compile to the same on-chain target (Aster Diamond)."""
-        _, aster_meta = _compile("aster_perps")
-        _, pcs_meta = _compile("pancakeswap_perps")
-        assert aster_meta["pair_base"] == pcs_meta["pair_base"]
-        assert aster_meta["qty_1e10"] == pcs_meta["qty_1e10"]
-        assert aster_meta["limit_price_1e8"] == pcs_meta["limit_price_1e8"]
+    def test_diamond_compiler_owns_only_pancakeswap_perps(self) -> None:
+        from almanak.connectors._aster_perps_core.compiler import AsterDiamondPerpsCompiler
+
+        assert AsterDiamondPerpsCompiler.protocols == frozenset({"pancakeswap_perps"})
+
+    def test_aster_perps_never_compiles_to_a_diamond_transaction(self) -> None:
+        status, metadata, transactions = _compile("aster_perps", collateral_token="USDT")
+        assert status == CompilationStatus.SUCCESS
+        assert transactions == []
+        assert "broker_id" not in metadata
+        assert "pair_base" not in metadata
 
 
 class TestBSCPerpPriceAliasFallback:
@@ -103,7 +103,7 @@ class TestBSCPerpPriceAliasFallback:
             size_usd=Decimal("500"),
             is_long=True,
             max_slippage=Decimal("0.01"),
-            protocol="aster_perps",
+            protocol="pancakeswap_perps",
             leverage=Decimal("3"),
         )
         return compiler.compile(intent).status
@@ -131,10 +131,9 @@ class TestBSCPerpPriceAliasFallback:
 
 
 class TestPerpClosePrecondition:
-    """PERP_CLOSE dispatch — both keys route through the same close flow."""
+    """PERP_CLOSE dispatch through the Diamond close flow."""
 
-    @pytest.mark.parametrize("protocol", ["aster_perps", "pancakeswap_perps"])
-    def test_missing_position_id_rejected(self, protocol: str) -> None:
+    def test_missing_position_id_rejected(self) -> None:
         from almanak.framework.intents.perp_intents import PerpCloseIntent
 
         compiler = IntentCompiler(chain="bsc", wallet_address=_WALLET, price_oracle=_PRICE_ORACLE)
@@ -143,15 +142,14 @@ class TestPerpClosePrecondition:
             collateral_token="BNB",
             is_long=True,
             max_slippage=Decimal("0.01"),
-            protocol=protocol,
+            protocol="pancakeswap_perps",
             position_id=None,  # missing — must fail
         )
         result = compiler.compile(intent)
         assert result.status == CompilationStatus.FAILED
         assert "position_id" in (result.error or "")
 
-    @pytest.mark.parametrize("protocol", ["aster_perps", "pancakeswap_perps"])
-    def test_close_with_valid_trade_hash_compiles(self, protocol: str) -> None:
+    def test_close_with_valid_trade_hash_compiles(self) -> None:
         from almanak.framework.intents.perp_intents import PerpCloseIntent
 
         compiler = IntentCompiler(chain="bsc", wallet_address=_WALLET, price_oracle=_PRICE_ORACLE)
@@ -161,23 +159,24 @@ class TestPerpClosePrecondition:
             collateral_token="BNB",
             is_long=True,
             max_slippage=Decimal("0.01"),
-            protocol=protocol,
+            protocol="pancakeswap_perps",
             position_id=trade_hash,
         )
         result = compiler.compile(intent)
         assert result.status == CompilationStatus.SUCCESS
         assert result.action_bundle.metadata["position_id"] == trade_hash
-        expected_broker = 0 if protocol == "aster_perps" else 2
-        assert result.action_bundle.metadata["broker_id"] == expected_broker
+        assert result.action_bundle.metadata["broker_id"] == 2
 
 
 class TestReceiptRegistry:
-    def test_both_keys_resolve_to_aster_parser(self) -> None:
-        from almanak.connectors.aster_perps.receipt_parser import AsterPerpsReceiptParser
+    def test_pancakeswap_perps_resolves_to_diamond_parser(self) -> None:
+        from almanak.connectors._aster_perps_core.receipt_parser import AsterPerpsReceiptParser
         from almanak.framework.execution.receipt_registry import ReceiptParserRegistry
 
-        registry = ReceiptParserRegistry()
-        aster_parser = registry.get("aster_perps", chain="bsc")
-        pcs_parser = registry.get("pancakeswap_perps", chain="bsc")
-        assert isinstance(aster_parser, AsterPerpsReceiptParser)
-        assert isinstance(pcs_parser, AsterPerpsReceiptParser)
+        assert isinstance(ReceiptParserRegistry().get("pancakeswap_perps", chain="bsc"), AsterPerpsReceiptParser)
+
+    def test_aster_perps_has_no_diamond_receipt_parser(self) -> None:
+        from almanak.framework.execution.receipt_registry import ReceiptParserRegistry
+
+        with pytest.raises(ValueError, match="Unknown protocol: aster_perps"):
+            ReceiptParserRegistry().get("aster_perps", chain="bsc")

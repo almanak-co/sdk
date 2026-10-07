@@ -555,7 +555,7 @@ class PerpData:
 
     Attributes:
         position_id: Position identifier
-        size_delta: Change in position size
+        size_delta: Change in position size, as USD notional (what the perp accounting handler reads)
         collateral: Collateral amount
         entry_price: Entry price (for opens)
         exit_price: Exit price (for closes)
@@ -582,7 +582,7 @@ class PerpData:
     """
 
     position_id: str | int | None = None
-    size_delta: int | None = None
+    size_delta: int | Decimal | None = None
     collateral: int | None = None
     entry_price: Decimal | None = None
     exit_price: Decimal | None = None

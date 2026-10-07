@@ -787,6 +787,12 @@ async def _reconcile_one(
                     ReconciliationVerdict.UNVERIFIABLE,
                     str(getattr(check, "error", "") or "perp open-state read was unmeasured"),
                 )
+            if getattr(check, "not_applicable", False):
+                # The connector declined the row (e.g. a venue account's cash): no closure claim either way.
+                return (
+                    ReconciliationVerdict.NOT_APPLICABLE,
+                    str(getattr(check, "error", "") or "connector post-condition does not apply to this row"),
+                )
             if getattr(check, "closed", False):
                 return ReconciliationVerdict.DIVERGED_CLOSED, "connector measured the perp position closed"
             return (

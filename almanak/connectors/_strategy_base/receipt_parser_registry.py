@@ -66,8 +66,7 @@ module path. That works because the protocol → module relationship is
 The receipt-parser case is more interesting:
 
 * Multiple keys map to the same connector
-  (``morpho_blue``/``morpho``; ``raydium``/``raydium_clmm``;
-  ``aster_perps``/``pancakeswap_perps``).
+  (``morpho_blue``/``morpho``; ``raydium``/``raydium_clmm``).
 * Several connectors take constructor kwargs (``chain=``,
   ``pool_addresses=``, ``underlying_decimals=``, …), so the registry
   cannot pre-instantiate.

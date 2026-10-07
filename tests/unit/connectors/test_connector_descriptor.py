@@ -168,7 +168,7 @@ MIGRATED_STRATEGY_REGISTRATION = {
     ),
     "across": (("BRIDGE",), ("ethereum", "arbitrum", "base", "optimism", "polygon", "linea")),
     "aerodrome": (("SWAP", "LP_OPEN", "LP_CLOSE"), ("base", "optimism")),
-    "aster_perps": (("PERP_OPEN", "PERP_CLOSE"), ("bsc",)),
+    "aster_perps": (("PERP_OPEN", "PERP_CLOSE", "PERP_DEPOSIT", "PERP_WITHDRAW"), ("bsc",)),
     "balancer_v2": (("FLASH_LOAN",), ("ethereum", "arbitrum", "optimism", "polygon", "base", "avalanche")),
     "benqi": (("SUPPLY", "BORROW", "REPAY", "WITHDRAW"), ("avalanche",)),
     "camelot": (("SWAP",), ("arbitrum",)),
@@ -313,7 +313,6 @@ EXPECTED_RECEIPT_PROVIDER_MODULES = {
     "aave_v3": "almanak.connectors.aave_v3.receipt_parser_provider",
     "across": "almanak.connectors.across.receipt_parser_provider",
     "aerodrome": "almanak.connectors.aerodrome.receipt_parser_provider",
-    "aster_perps": "almanak.connectors.aster_perps.receipt_parser_provider",
     "benqi": "almanak.connectors.benqi.receipt_parser_provider",
     "compound_v3": "almanak.connectors.compound_v3.receipt_parser_provider",
     "curvance": "almanak.connectors.curvance.receipt_parser_provider",
@@ -355,7 +354,7 @@ EXPECTED_GATEWAY_PROVIDER_MODULES = {
     "aerodrome": "almanak.connectors.aerodrome.gateway.provider",
     "aerodrome_slipstream": "almanak.connectors.aerodrome.gateway.provider",
     "agni_finance": "almanak.connectors.uniswap_v3.gateway.agni_provider",
-    "aster_perps": "almanak.connectors._aster_perps_core.gateway.provider",
+    "aster_perps": "almanak.connectors.aster_perps.gateway.provider",
     "balancer_v2": "almanak.connectors.balancer_v2.gateway.provider",
     "beefy": "almanak.connectors.beefy.gateway.provider",
     "benqi": "almanak.connectors.benqi.gateway.provider",
@@ -371,6 +370,7 @@ EXPECTED_GATEWAY_PROVIDER_MODULES = {
     "morpho_blue": "almanak.connectors.morpho_blue.gateway.provider",
     "morpho_vault": "almanak.connectors.morpho_vault.gateway.provider",
     "orca": "almanak.connectors.orca.gateway.provider",
+    "pancakeswap_perps": "almanak.connectors._aster_perps_core.gateway.provider",
     "pancakeswap_v3": "almanak.connectors.pancakeswap_v3.gateway.provider",
     "pendle": "almanak.connectors.pendle.gateway.provider",
     "polymarket": "almanak.connectors.polymarket.gateway.provider",
@@ -411,18 +411,20 @@ EXPECTED_GATEWAY_PROVIDER_ORDER = (
     "sushiswap_v3",
     "agni_finance",
     "morpho_blue",
-    "aster_perps",
+    "pancakeswap_perps",
     "spark",
     "aerodrome_slipstream",
+    "aster_perps",
 )
 
 EXPECTED_GATEWAY_SETTINGS_MODULES = {
     "polymarket": ("almanak.connectors.polymarket.gateway.settings", "PolymarketGatewaySettings"),
     "enso": ("almanak.connectors.enso.gateway.settings", "EnsoGatewaySettings"),
     "pendle": ("almanak.connectors.pendle.gateway.settings", "PendleGatewaySettings"),
+    "aster_perps": ("almanak.connectors.aster_perps.gateway.settings", "AsterPerpsGatewaySettings"),
 }
 
-EXPECTED_GATEWAY_SETTINGS_ORDER = ("polymarket", "enso", "pendle")
+EXPECTED_GATEWAY_SETTINGS_ORDER = ("polymarket", "enso", "pendle", "aster_perps")
 
 EXPECTED_GAS_ESTIMATE_PROVIDER_MODULES = {
     "aave_v3": "almanak.connectors.aave_v3.gas_estimate_provider",
@@ -504,7 +506,7 @@ EXPECTED_COMPILER_MODULES = {
     "morpho_blue": ("almanak.connectors.morpho_blue.compiler", "MorphoBlueCompiler"),
     "morpho_vault": ("almanak.connectors.morpho_vault.compiler", "MorphoVaultCompiler"),
     "orca": ("almanak.connectors.orca.compiler", "OrcaCompiler"),
-    "pancakeswap_perps": ("almanak.connectors._aster_perps_core.compiler", "AsterPerpsCompiler"),
+    "pancakeswap_perps": ("almanak.connectors._aster_perps_core.compiler", "AsterDiamondPerpsCompiler"),
     "pancakeswap_v3": ("almanak.connectors.uniswap_v3.compiler", "UniswapV3Compiler"),
     "pendle": ("almanak.connectors.pendle.compiler", "PendleCompiler"),
     "polymarket": ("almanak.connectors.polymarket.compiler", "PolymarketCompiler"),
@@ -641,6 +643,7 @@ EXPECTED_VAULT_TOOL_PROVIDER_MODULES = {
 }
 
 EXPECTED_RUNNER_HOOK_PROVIDER_MODULES = {
+    "aster_perps": "almanak.connectors.aster_perps.runner_hooks",
     # VIB-5628: builds the sync pool_meta_lookup the receipt parser uses to
     # resolve uncurated Curve pools (MetaRegistry) for leg-labeling.
     "curve": "almanak.connectors.curve.runner_hooks",
@@ -674,6 +677,8 @@ EXPECTED_TEARDOWN_POST_CONDITION_MODULES = {
     # shared _strategy_base/lending_post_condition.py template).
     "aave_v3": "almanak.connectors.aave_v3.teardown_post_condition",
     "aerodrome": "almanak.connectors.aerodrome.teardown_post_condition",
+    # Aster Pro positions live off-chain: closure is measured at the venue via the gateway.
+    "aster_perps": "almanak.connectors.aster_perps.teardown_post_condition",
     "benqi": "almanak.connectors.benqi.teardown_post_condition",
     "euler_v2": "almanak.connectors.euler_v2.teardown_post_condition",
     "gmx_v2": "almanak.connectors.gmx_v2.teardown_post_condition",

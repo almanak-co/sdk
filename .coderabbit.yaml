@@ -14,6 +14,9 @@ reviews:
     - "!.mypy_cache/**"
     - "!docs/internal/reports/**"
     - "!docs/internal/notes/**"
+    # UAT run evidence: raw runner logs, DB dumps and evaluator reports, not
+    # code. A UAT-heavy PR otherwise exceeds the 300-file review limit.
+    - "!docs/internal/uat-runs/**"
     - "!scripts/ai-discussion/**"
     # Machine-generated protobuf stubs (~20k lines regenerated on every proto
     # change): the reviewable artifact is gateway.proto; dragging the stubs

@@ -708,6 +708,7 @@ class TestDeclaredMoneyLegsVIB5218:
             "amount_usd",
             "collateral_token",
             "collateral_amount",
+            "asset",
         ):
             setattr(intent, name, None)
         for name, value in attrs.items():

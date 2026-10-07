@@ -475,13 +475,7 @@ async def claim_observed_single_chain_recovery(
     caller without ownership. It must not proceed with callback restoration.
     """
     from ..execution.plan_completion import prove_completed_evm_plan
-    from ..state.state_manager import StateData
-    from ..state.strategy_state import (
-        STATE_OWNERSHIP_VERSION,
-        STATE_OWNERSHIP_VERSION_KEY,
-        StateValuePreconditionError,
-        split_strategy_persistent_state,
-    )
+    from ..state.strategy_state import StateValuePreconditionError
     from .runner_models import ExecutionBarrierPhase, ExecutionLane
 
     context = expected.recovery_context
@@ -506,6 +500,46 @@ async def claim_observed_single_chain_recovery(
         evidence=evidence.submission_transactions,
         receipts=receipts,
     )
+    return await _claim_recovery_state(runner, expected, recovery_receipts=[receipt.to_dict() for receipt in ordered])
+
+
+async def claim_observed_offchain_recovery(runner: Any, expected: ExecutionProgress) -> tuple[ExecutionProgress, int]:
+    """Claim an off-chain submission the venue has confirmed, before accounting or callbacks.
+
+    Accepts a marker still at PRE_BROADCAST: a runner that died during the
+    venue call never sealed it, and the venue's answer is the evidence.
+    """
+    from ..state.strategy_state import StateValuePreconditionError
+    from .runner_models import ExecutionBarrierPhase, ExecutionLane
+
+    context = expected.recovery_context
+    if (
+        expected.execution_lane is not ExecutionLane.SINGLE_CHAIN
+        or expected.effective_barrier_phase
+        not in {ExecutionBarrierPhase.PRE_BROADCAST, ExecutionBarrierPhase.RECONCILIATION_REQUIRED}
+        or expected.total_steps != 1
+        or context is None
+        or context.strategy_checkpoint is None
+        or context.execution.deployment_id != expected.deployment_id
+    ):
+        raise StateValuePreconditionError("Recovery has no complete original off-chain checkpoint")
+    return await _claim_recovery_state(runner, expected, recovery_receipts=None)
+
+
+async def _claim_recovery_state(
+    runner: Any, expected: ExecutionProgress, *, recovery_receipts: list[dict[str, Any]] | None
+) -> tuple[ExecutionProgress, int]:
+    """CAS the marker to landed-repair-pending, only if marker and checkpoint state are unchanged."""
+    from ..state.state_manager import StateData
+    from ..state.strategy_state import (
+        STATE_OWNERSHIP_VERSION,
+        STATE_OWNERSHIP_VERSION_KEY,
+        StateValuePreconditionError,
+        split_strategy_persistent_state,
+    )
+
+    context = expected.recovery_context
+    assert context is not None
     current = await runner.state_manager.load_state(expected.deployment_id)
     if current is None:
         raise StateValuePreconditionError("Recovery state row disappeared")
@@ -521,8 +555,8 @@ async def claim_observed_single_chain_recovery(
     if json.dumps(actual, sort_keys=True, allow_nan=False) != json.dumps(required, sort_keys=True, allow_nan=False):
         raise StateValuePreconditionError("Recovery marker or pre-callback strategy state changed")
     claimed = ExecutionProgress.from_dict(expected.to_dict())
-    claimed.recovery_receipts = [receipt.to_dict() for receipt in ordered]
-    claimed.mark_landed_repair_pending(0, "canonical plan observed; accounting and callback completion required")
+    claimed.recovery_receipts = recovery_receipts
+    claimed.mark_landed_repair_pending(0, "outcome observed; accounting and callback completion required")
     candidate = StateData(
         deployment_id=current.deployment_id,
         version=current.version,

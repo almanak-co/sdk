@@ -17,12 +17,6 @@ PERP_CLOSE compiles ``closeTrade(bytes32)`` (selector ``0x5177fd3b``) and
 requires ``intent.position_id`` to be a 0x-prefixed bytes32 tradeHash. A
 placeholder hash satisfies the compiler's shape validation; the manifest
 target is the Diamond address, not the trade-specific hash.
-
-Mirrors ``connectors/aster_perps/permission_hints.py``. Duplication is
-intentional: each connector pins its own BSC invariant, so if either
-protocol ever diverges (different chain, different collateral surface), the
-two overrides can evolve independently. See VIB-4121 for the connector
-self-containment rationale.
 """
 
 from __future__ import annotations

@@ -298,9 +298,9 @@ class CLCompilerContext(SwapCompilerContext):
 class PerpCompilerContext(BaseCompilerContext):
     """Perpetuals compiler context.
 
-    Perp connector compilers need the normalized protocol key because several
-    venue surfaces share one implementation while preserving distinct strategy
-    protocol names, e.g. ``aster_perps`` and ``pancakeswap_perps``.
+    Perp connector compilers receive the normalized protocol key so one
+    implementation can serve several strategy protocol names and branch on the
+    one it was invoked for (e.g. to pick a per-venue broker attribution).
     """
 
     protocol: str
@@ -593,6 +593,8 @@ class BasePerpCompiler(BaseProtocolCompiler[PerpCompilerContext]):
             return self.compile_perp_cancel(ctx, intent)
         if intent_type == IntentType.PERP_WITHDRAW:
             return self.compile_perp_withdraw(ctx, intent)
+        if intent_type == IntentType.PERP_DEPOSIT:
+            return self.compile_perp_deposit(ctx, intent)
         return self._unsupported(intent)
 
     @abstractmethod
@@ -621,6 +623,15 @@ class BasePerpCompiler(BaseProtocolCompiler[PerpCompilerContext]):
         unsupported. A connector that supports it overrides this AND declares
         ``IntentType.PERP_WITHDRAW`` in its ``intents`` so the registry routes
         withdraws only to it.
+        """
+        return self._unsupported(intent)
+
+    def compile_perp_deposit(self, ctx: PerpCompilerContext, intent: Any) -> CompilationResult:
+        """Compile a PERP_DEPOSIT intent (wallet funds → venue account).
+
+        Not abstract: only venues with a separate margin account support it. A
+        connector that does overrides this AND declares ``IntentType.PERP_DEPOSIT``
+        in its ``intents`` so the registry routes deposits only to it.
         """
         return self._unsupported(intent)
 

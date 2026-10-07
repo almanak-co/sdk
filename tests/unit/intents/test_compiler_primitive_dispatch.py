@@ -24,6 +24,7 @@ SUPPORTED_ROUTES = [
     (IntentType.PERP_CLOSE, "_compile_perp_via_registry", ()),
     (IntentType.PERP_CANCEL_ORDER, "_compile_perp_via_registry", ()),
     (IntentType.PERP_WITHDRAW, "_compile_perp_via_registry", ()),
+    (IntentType.PERP_DEPOSIT, "_compile_perp_via_registry", ()),
     (IntentType.HOLD, "_compile_hold", ()),
     (IntentType.FLASH_LOAN, "_compile_flash_loan", ()),
     (IntentType.STAKE, "_compile_staking_via_registry", ("STAKE",)),

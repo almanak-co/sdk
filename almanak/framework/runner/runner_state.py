@@ -571,6 +571,13 @@ def _value_via_portfolio_valuer(
     return snapshot
 
 
+def _has_unread_venue_account(snapshot: PortfolioSnapshot | None) -> bool:
+    """Whether the valuer could not read a venue account that may hold strategy money."""
+    if snapshot is None:
+        return False
+    return any((getattr(p, "details", None) or {}).get("venue_account_unread") for p in snapshot.positions)
+
+
 def _value_via_strategy_fallback(
     strategy: StrategyProtocol,
     iteration_number: int,
@@ -586,6 +593,10 @@ def _value_via_strategy_fallback(
     "no valuation path" one.
     """
     if not hasattr(strategy, "get_portfolio_snapshot"):
+        return current
+    if _has_unread_venue_account(current):
+        # The strategy fallback values the wallet only; money held at a venue we
+        # could not read would vanish from its number at full confidence.
         return current
 
     fallback = strategy.get_portfolio_snapshot()
@@ -3040,13 +3051,19 @@ def _extract_transaction_hashes(execution_result: Any) -> list[str]:
     return tx_hashes
 
 
-def _extract_clob_summary(execution_result: Any, intent_type: str | None) -> tuple[str | None, str | None]:
-    if intent_type not in ("PREDICTION_BUY", "PREDICTION_SELL"):
+def _extract_clob_summary(
+    execution_result: Any, intent_type: str | None, *, sent_onchain: bool
+) -> tuple[str | None, str | None]:
+    extracted = getattr(execution_result, "extracted_data", None) or {}
+    clob_status_value = extracted.get("clob_status")
+    # ``clob_status`` is stamped only by the off-chain order lane, so it marks a
+    # venue fill for any intent type (off-chain perp venues included) — but only
+    # when nothing went on-chain, where stale order fields must not surface.
+    offchain_fill = bool(clob_status_value) and not sent_onchain
+    if intent_type not in ("PREDICTION_BUY", "PREDICTION_SELL") and not offchain_fill:
         return None, None
 
-    extracted = getattr(execution_result, "extracted_data", None) or {}
     order_id_value = extracted.get("order_id")
-    clob_status_value = extracted.get("clob_status")
     order_id = str(order_id_value) if order_id_value else None
     clob_status = str(clob_status_value) if clob_status_value else None
     return order_id, clob_status
@@ -3067,7 +3084,7 @@ def _extract_iteration_execution(
         txs_planned = max(txs_planned, len(execution_result.receipts))
     txs_planned = max(txs_planned, txs_sent)
     gas_used = getattr(execution_result, "total_gas_used", 0) or 0
-    order_id, clob_status = _extract_clob_summary(execution_result, intent_type)
+    order_id, clob_status = _extract_clob_summary(execution_result, intent_type, sent_onchain=txs_sent > 0)
     return _IterationExecutionSummary(
         tx_hashes=tx_hashes,
         txs_planned=txs_planned,

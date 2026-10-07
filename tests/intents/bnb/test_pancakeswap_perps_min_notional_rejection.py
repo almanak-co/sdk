@@ -1,6 +1,6 @@
-"""Failure-mode test for Aster Perps minimum-notional enforcement on BSC (VIB-3053).
+"""Failure-mode test for PancakeSwap Perps (legacy Aster Diamond) minimum-notional enforcement on BSC.
 
-Aster's ``TradingCheckerFacet`` enforces a per-pair minimum position notional
+The Diamond's ``TradingCheckerFacet`` enforces a per-pair minimum position notional
 (MinNotionalUsd config, typically $200–$250 per market). Orders below that
 floor revert on-chain with "Position is too small". The SDK compiler accepts
 any positive size — the revert is an on-chain invariant — so this test
@@ -13,8 +13,13 @@ successful protocol event, since no such event is emitted):
   3. Balance conservation — wallet BNB unchanged aside from gas; no pending
      trade registered on-chain.
 
+The Diamond has been reduce-only since ~June 2026. A paused market reverts
+every open for an unrelated reason, which would satisfy the revert assertions
+vacuously, so the ``require_tradeable_pancakeswap_perp_market`` gate skips the test
+instead.
+
 To run:
-    uv run pytest tests/intents/bnb/test_aster_perps_min_notional_rejection.py -v -s
+    uv run pytest tests/intents/bnb/test_pancakeswap_perps_min_notional_rejection.py -v -s
 """
 
 from decimal import Decimal
@@ -22,12 +27,12 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.aster_perps.addresses import ASTER_PERPS
-from almanak.connectors.aster_perps import (
-    ASTER_BROKER_RAW,
-    AsterPerpsReceiptParser,
+from almanak.connectors.pancakeswap_perps import (
+    PCS_BROKER_ID,
+    PancakeSwapPerpsReceiptParser,
     encode_get_pending_trade_calldata,
 )
+from almanak.connectors.pancakeswap_perps.addresses import PANCAKESWAP_PERPS
 from almanak.framework.execution.orchestrator import ExecutionOrchestrator
 from almanak.framework.intents.compiler import IntentCompiler
 from almanak.framework.intents.perp_intents import PerpOpenIntent
@@ -43,8 +48,8 @@ CHAIN_NAME = "bsc"
 
 @pytest.mark.bsc
 @pytest.mark.asyncio
-class TestAsterPerpsMinNotionalRejection:
-    """Verify Aster's on-chain min-notional guard rejects sub-floor opens cleanly."""
+class TestPancakeSwapPerpsMinNotionalRejection:
+    """Verify the Diamond's on-chain min-notional guard rejects sub-floor opens cleanly."""
 
     @pytest.mark.intent(IntentType.PERP_OPEN)
     async def test_open_below_min_notional_reverts_with_balance_conserved(
@@ -53,13 +58,14 @@ class TestAsterPerpsMinNotionalRejection:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         perps_price_oracle: dict[str, Decimal],
+        require_tradeable_pancakeswap_perp_market,
     ):
         """Submit a $10 BTC open; expect revert + balance conservation.
 
-        Aster's BTC/USD min notional on BSC is ~$200 at the time of writing.
+        The Diamond's BTC/USD min notional on BSC is ~$200 at the time of writing.
         A $10 order is unambiguously below the floor — on-chain revert guaranteed.
         """
-        router = ASTER_PERPS[CHAIN_NAME]["router"]
+        router = PANCAKESWAP_PERPS[CHAIN_NAME]["router"]
         # Margin large enough that we're not hitting a "margin too small" guard —
         # we want specifically the notional-size check to fire. 0.1 BNB ≈ $60
         # margin, size $10 (way under any pair's min). Notional=$10, leverage≈0.17x.
@@ -67,7 +73,7 @@ class TestAsterPerpsMinNotionalRejection:
         sub_floor_size_usd = Decimal("10")
 
         print(f"\n{'=' * 80}")
-        print("Test: Aster Perps OPEN below min notional — expect on-chain revert")
+        print("Test: PancakeSwap Perps OPEN below min notional — expect on-chain revert")
         print(f"{'=' * 80}")
 
         bnb_before = web3.eth.get_balance(funded_wallet)
@@ -84,7 +90,7 @@ class TestAsterPerpsMinNotionalRejection:
             size_usd=sub_floor_size_usd,
             is_long=True,
             max_slippage=Decimal("0.01"),
-            protocol="aster_perps",
+            protocol="pancakeswap_perps",
             leverage=Decimal("1"),
         )
         compiler = IntentCompiler(
@@ -99,9 +105,9 @@ class TestAsterPerpsMinNotionalRejection:
             f"{compilation.error}"
         )
         assert compilation.action_bundle is not None
-        assert compilation.action_bundle.metadata["broker_id"] == ASTER_BROKER_RAW
+        assert compilation.action_bundle.metadata["broker_id"] == PCS_BROKER_ID
         print(
-            f"Compile OK: size_usd=${sub_floor_size_usd}, broker_id=0, "
+            f"Compile OK: size_usd=${sub_floor_size_usd}, broker_id=2, "
             f"qty_1e10={compilation.action_bundle.metadata['qty_1e10']}"
         )
 
@@ -110,7 +116,7 @@ class TestAsterPerpsMinNotionalRejection:
         # -----------------------------------------------------------------
         execution = await orchestrator.execute(compilation.action_bundle)
         assert not execution.success, (
-            "Execution should fail: Aster's on-chain min-notional guard must reject this "
+            "Execution should fail: the Diamond's on-chain min-notional guard must reject this "
             "order. If this assertion passes, the min notional has dropped below $10 — update "
             "sub_floor_size_usd to a still-sub-floor value."
         )
@@ -127,7 +133,7 @@ class TestAsterPerpsMinNotionalRejection:
                 )
                 # Receipt parser must not find any MarketPendingTrade (no events
                 # emitted on revert).
-                parser = AsterPerpsReceiptParser(chain=CHAIN_NAME)
+                parser = PancakeSwapPerpsReceiptParser(chain=CHAIN_NAME)
                 parsed = parser.parse_receipt(receipt)
                 assert len(parsed.market_pending_trades) == 0, (
                     "Reverted TX should not emit MarketPendingTrade"
@@ -173,7 +179,7 @@ class TestAsterPerpsMinNotionalRejection:
             f"margin {margin_wei / 1e18} preserved)"
         )
 
-        # No pending trade registered on-chain. The Aster Diamond assigns
+        # No pending trade registered on-chain. The Diamond assigns
         # a tradeHash at MarketPendingTrade emission — if the emit was
         # reverted, the hash was never written. We can't easily look up
         # "any pending trade for this user" without an index, so we

@@ -1,6 +1,6 @@
-"""Aster Perps perps-read decode/value pins + one-folder-one-row wiring (VIB-4930 PR-4).
+"""Legacy Aster Diamond perps-read decode/value pins + registry wiring (``pancakeswap_perps``).
 
-Aster is the SECOND perp venue on the perps-read seam, and unlike the GMX
+The Diamond is the SECOND perp venue on the perps-read seam, and unlike the GMX
 migration it has **no byte-parity oracle** — Aster never had framework perp
 valuation. So the decode is pinned against the connector's own ABI
 (``abis/TradingReaderFacet.json`` → ``getPositionsV2`` →
@@ -34,20 +34,20 @@ from eth_abi import decode as abi_decode
 from eth_abi import encode as abi_encode
 from eth_utils import to_checksum_address
 
+# perps_read internals (private helpers like _aster_market_metadata, _POSITION_TUPLE)
+# now live in the shared _aster_perps_core foundation; test them at their home.
+from almanak.connectors._aster_perps_core import perps_read as diamond_read
+from almanak.connectors._aster_perps_core.addresses import ASTER_PERPS_MARKETS
+from almanak.connectors._aster_perps_core.sdk import (
+    PRICE_DECIMALS,
+    QTY_DECIMALS,
+    SELECTOR_GET_POSITIONS_V2,
+)
 from almanak.connectors._strategy_base.perps_read_base import (
     PerpsPositionQuery,
     PerpsPositionValue,
 )
 from almanak.connectors._strategy_base.perps_read_registry import PerpsReadRegistry
-# perps_read internals (private helpers like _aster_market_metadata, _POSITION_TUPLE)
-# now live in the shared _aster_perps_core foundation; test them at their home.
-from almanak.connectors._aster_perps_core import perps_read as aster_perps
-from almanak.connectors.aster_perps.addresses import ASTER_PERPS_MARKETS
-from almanak.connectors.aster_perps.sdk import (
-    PRICE_DECIMALS,
-    QTY_DECIMALS,
-    SELECTOR_GET_POSITIONS_V2,
-)
 
 # Real BSC pairBase + margin-token addresses from the connector's own tables.
 _BTC = ASTER_PERPS_MARKETS["bsc"]["BTC/USD"]  # BTCB
@@ -102,7 +102,7 @@ def _position_tuple(
 
 
 def _encode(tuples: list[tuple]) -> str:
-    return "0x" + abi_encode([aster_perps._GET_POSITIONS_V2_OUTPUT], [tuples]).hex()
+    return "0x" + abi_encode([diamond_read._GET_POSITIONS_V2_OUTPUT], [tuples]).hex()
 
 
 def _query(**overrides) -> PerpsPositionQuery:
@@ -110,7 +110,7 @@ def _query(**overrides) -> PerpsPositionQuery:
         "chain": "bsc",
         "wallet_address": _ACCOUNT,
         "targets": {"router": to_checksum_address("0x" + "22" * 20)},
-        "markets": aster_perps._markets_for_chain("bsc"),
+        "markets": diamond_read._markets_for_chain("bsc"),
     }
     base.update(overrides)
     return PerpsPositionQuery(**base)
@@ -128,7 +128,7 @@ def test_reduce_decodes_every_field_with_correct_scale():
     blob = _encode([_position_tuple(qty=qty, entry_price=entry, margin=margin, is_long=True)])
 
     # One market blob (BTC); the other two markets returned None (skipped).
-    result = aster_perps._reduce_aster_positions(_query(), [blob, None, None])
+    result = diamond_read._reduce_aster_positions(_query(), [blob, None, None])
     assert result.ok is True
     assert len(result.positions) == 1
     pos = result.positions[0]
@@ -156,7 +156,7 @@ def test_reduce_size_usd_synthesis_round_trips_entry_price():
     qty = int(Decimal("0.3") * 10**QTY_DECIMALS)
     entry = int(Decimal("2500.5") * 10**PRICE_DECIMALS)
     blob = _encode([_position_tuple(pair_base=_ETH, qty=qty, entry_price=entry, margin=1)])
-    pos = aster_perps._reduce_aster_positions(_query(markets=(_ETH,)), [blob]).positions[0]
+    pos = diamond_read._reduce_aster_positions(_query(markets=(_ETH,)), [blob]).positions[0]
     # size_usd / qty == entryPrice (to the reducer's 1e8 truncation).
     size_usd = Decimal(pos.size_in_usd) / Decimal(10**PRICE_DECIMALS)
     tokens = Decimal(pos.size_in_tokens) / Decimal(10**QTY_DECIMALS)
@@ -169,7 +169,7 @@ def test_reduce_multiple_positions_one_pair_long_and_short():
     long_t = _position_tuple(qty=10**10, entry_price=50000 * 10**8, margin=10**18, is_long=True)
     short_t = _position_tuple(qty=2 * 10**10, entry_price=51000 * 10**8, margin=2 * 10**18, is_long=False)
     blob = _encode([long_t, short_t])
-    result = aster_perps._reduce_aster_positions(_query(markets=(_BTC,)), [blob])
+    result = diamond_read._reduce_aster_positions(_query(markets=(_BTC,)), [blob])
     assert result.ok is True
     assert len(result.positions) == 2
     assert {p.is_long for p in result.positions} == {True, False}
@@ -180,7 +180,7 @@ def test_reduce_filters_inactive_zero_qty_positions():
     active = _position_tuple(qty=10**10, entry_price=50000 * 10**8, margin=10**18, is_long=True)
     inactive = _position_tuple(qty=0, entry_price=0, margin=0, is_long=False)
     blob = _encode([active, inactive])
-    result = aster_perps._reduce_aster_positions(_query(markets=(_BTC,)), [blob])
+    result = diamond_read._reduce_aster_positions(_query(markets=(_BTC,)), [blob])
     assert len(result.positions) == 1
     assert result.positions[0].is_long is True
 
@@ -189,7 +189,7 @@ def test_reduce_dropped_struct_fields_do_not_leak():
     """stopLoss/takeProfit/openFee/executionFee/fundingFee/holdingFee sentinels
     in _position_tuple must not appear on the decoded position."""
     blob = _encode([_position_tuple(qty=10**10, entry_price=50000 * 10**8, margin=10**18)])
-    pos = aster_perps._reduce_aster_positions(_query(markets=(_BTC,)), [blob]).positions[0]
+    pos = diamond_read._reduce_aster_positions(_query(markets=(_BTC,)), [blob]).positions[0]
     # The decoded position exposes none of the sentinel values (111/222/333/...).
     leaked = {pos.borrowing_factor, pos.funding_fee_amount_per_size, pos.decreased_at_time}
     assert leaked == {0}
@@ -198,22 +198,22 @@ def test_reduce_dropped_struct_fields_do_not_leak():
 def test_reduce_empty_book_is_measured_not_failed():
     """A successful decode of empty arrays is a measured empty book (ok=True)."""
     empty = _encode([])
-    result = aster_perps._reduce_aster_positions(_query(), [empty, empty, empty])
+    result = diamond_read._reduce_aster_positions(_query(), [empty, empty, empty])
     assert result.ok is True
     assert result.positions == ()
 
 
 def test_reduce_all_markets_none_is_unmeasured():
     """Empty≠Zero: every market blob None (whole read failed) -> ok=False."""
-    assert aster_perps._reduce_aster_positions(_query(), [None, None, None]).ok is False
-    assert aster_perps._reduce_aster_positions(_query(), []).ok is False
+    assert diamond_read._reduce_aster_positions(_query(), [None, None, None]).ok is False
+    assert diamond_read._reduce_aster_positions(_query(), []).ok is False
 
 
 def test_reduce_single_failed_market_is_skipped_not_fatal():
     """One None market is skipped; the others still decode and read stays ok=True."""
     blob = _encode([_position_tuple(qty=10**10, entry_price=50000 * 10**8, margin=10**18)])
     # market0 None (failed), market1 has a position, market2 empty.
-    result = aster_perps._reduce_aster_positions(_query(), [None, blob, _encode([])])
+    result = diamond_read._reduce_aster_positions(_query(), [None, blob, _encode([])])
     assert result.ok is True
     assert len(result.positions) == 1
 
@@ -224,7 +224,7 @@ def test_reduce_garbage_blob_is_skipped():
     still ok=True (measured) with no positions — a garbage blob is not signalled
     as unmeasured, only an all-None read is."""
     good = _encode([_position_tuple(qty=10**10, entry_price=50000 * 10**8, margin=10**18)])
-    result = aster_perps._reduce_aster_positions(_query(), [good, "0xdeadbeef", None])
+    result = diamond_read._reduce_aster_positions(_query(), [good, "0xdeadbeef", None])
     assert result.ok is True
     assert len(result.positions) == 1
 
@@ -236,8 +236,8 @@ def test_reduce_garbage_blob_is_skipped():
 
 def test_build_calls_one_per_market_with_selector_and_args():
     router = to_checksum_address("0x" + "33" * 20)
-    markets = aster_perps._markets_for_chain("bsc")
-    calls = aster_perps._build_aster_calls(_query(targets={"router": router}, markets=markets))
+    markets = diamond_read._markets_for_chain("bsc")
+    calls = diamond_read._build_aster_calls(_query(targets={"router": router}, markets=markets))
     assert len(calls) == len(markets) == 3
     selector_hex = SELECTOR_GET_POSITIONS_V2.hex()
     for call, pair_base in zip(calls, markets, strict=True):
@@ -250,13 +250,13 @@ def test_build_calls_one_per_market_with_selector_and_args():
 
 
 def test_build_calls_fail_closed_on_missing_router_or_markets():
-    markets = aster_perps._markets_for_chain("bsc")
+    markets = diamond_read._markets_for_chain("bsc")
     # No router target -> [].
     assert (
-        aster_perps._build_aster_calls(PerpsPositionQuery(chain="bsc", wallet_address=_ACCOUNT, markets=markets)) == []
+        diamond_read._build_aster_calls(PerpsPositionQuery(chain="bsc", wallet_address=_ACCOUNT, markets=markets)) == []
     )
     # No markets -> [].
-    assert aster_perps._build_aster_calls(_query(markets=())) == []
+    assert diamond_read._build_aster_calls(_query(markets=())) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -266,19 +266,19 @@ def test_build_calls_fail_closed_on_missing_router_or_markets():
 
 @pytest.mark.parametrize("market,symbol", [(_BTC, "BTC"), (_ETH, "ETH"), (_BNB, "BNB")])
 def test_market_metadata_known_markets(market, symbol):
-    meta = aster_perps._aster_market_metadata(market, "bsc")
+    meta = diamond_read._aster_market_metadata(market, "bsc")
     assert meta is not None
     assert meta.index_token_symbol == symbol
     # Aster qty is always 1e10 regardless of the underlying asset's ERC-20
     # decimals -> metadata reports QTY_DECIMALS so the valuer recovers human qty.
     assert meta.index_token_decimals == QTY_DECIMALS == 10
     # Case-insensitive on the pairBase address.
-    assert aster_perps._aster_market_metadata(market.lower(), "bsc") == meta
+    assert diamond_read._aster_market_metadata(market.lower(), "bsc") == meta
 
 
 def test_market_metadata_unknown_returns_none():
-    assert aster_perps._aster_market_metadata("0x" + "ab" * 20, "bsc") is None
-    assert aster_perps._aster_market_metadata(_BTC, "arbitrum") is None  # not deployed
+    assert diamond_read._aster_market_metadata("0x" + "ab" * 20, "bsc") is None
+    assert diamond_read._aster_market_metadata(_BTC, "arbitrum") is None  # not deployed
 
 
 # --------------------------------------------------------------------------- #
@@ -302,7 +302,7 @@ def _value(*, q: Decimal, e: Decimal, m: Decimal, c: Decimal, is_long: bool) -> 
     qty_raw = int(q * 10**QTY_DECIMALS)
     entry_raw = int(e * 10**PRICE_DECIMALS)
     size_usd_raw = (qty_raw * entry_raw) // (10**QTY_DECIMALS)  # mirrors the reducer
-    return aster_perps.value_aster_position(
+    return diamond_read.value_aster_position(
         size_in_usd=size_usd_raw,
         size_in_tokens=qty_raw,
         collateral_amount=int(c * 10**_BSC_USDT_DECIMALS),
@@ -369,7 +369,7 @@ def test_value_non_stable_margin_priced_at_market():
     qty_raw = int(Decimal("1") * 10**QTY_DECIMALS)
     entry_raw = int(Decimal("600") * 10**PRICE_DECIMALS)
     size_usd_raw = (qty_raw * entry_raw) // (10**QTY_DECIMALS)
-    v = aster_perps.value_aster_position(
+    v = diamond_read.value_aster_position(
         size_in_usd=size_usd_raw,
         size_in_tokens=qty_raw,
         collateral_amount=int(Decimal("10") * 10**18),  # 10 WBNB (18 dec)
@@ -387,7 +387,7 @@ def test_value_non_stable_margin_priced_at_market():
 
 
 def test_value_fees_reduce_net_value():
-    v = aster_perps.value_aster_position(
+    v = diamond_read.value_aster_position(
         size_in_usd=(10**10 * 50000 * 10**8) // 10**10,
         size_in_tokens=10**10,
         collateral_amount=5000 * 10**18,
@@ -407,7 +407,7 @@ def test_value_fees_reduce_net_value():
 
 def test_value_zero_qty_and_zero_collateral_are_safe():
     # Zero qty -> zero pnl; zero collateral -> zero leverage (no div-by-zero).
-    v = aster_perps.value_aster_position(
+    v = diamond_read.value_aster_position(
         size_in_usd=0,
         size_in_tokens=0,
         collateral_amount=0,
@@ -426,7 +426,7 @@ def test_value_zero_qty_and_zero_collateral_are_safe():
 def test_value_does_not_use_gmx_1e30_scale():
     """Guard: a 1e8-scaled notional must value as ~$ones, proving Aster's scale is
     1e8 not GMX's 1e30 (a 1e30 divisor would make this ~1e-22, i.e. ~0)."""
-    v = aster_perps.value_aster_position(
+    v = diamond_read.value_aster_position(
         size_in_usd=100 * 10**8,  # $100 in Aster's 1e8 scale
         size_in_tokens=10**10,  # 1 token
         collateral_amount=100 * 10**18,
@@ -441,52 +441,49 @@ def test_value_does_not_use_gmx_1e30_scale():
 
 
 # --------------------------------------------------------------------------- #
-# One-folder-one-row: registry wiring + alias + self-containment
+# Registry wiring + self-containment
 # --------------------------------------------------------------------------- #
 
 
-def test_registry_supports_aster_and_pancakeswap_alias():
-    assert "aster_perps" in PerpsReadRegistry.supported_protocols()
-    assert PerpsReadRegistry.has("aster_perps") is True
-    # pancakeswap_perps is the deprecated alias -> canonical aster_perps.
+def test_registry_serves_diamond_under_pancakeswap_perps_only():
+    assert "pancakeswap_perps" in PerpsReadRegistry.supported_protocols()
     assert PerpsReadRegistry.has("pancakeswap_perps") is True
-    assert PerpsReadRegistry.canonical("pancakeswap_perps") == "aster_perps"
-    assert PerpsReadRegistry.canonical("aster_perps") == "aster_perps"
-    # Both venues coexist (GMX from PR-2, Aster from PR-4).
+    assert PerpsReadRegistry.canonical("pancakeswap_perps") == "pancakeswap_perps"
+    # aster_perps is Aster Pro (off-chain); it has no Diamond position read.
+    assert PerpsReadRegistry.has("aster_perps") is False
+    assert PerpsReadRegistry.canonical("aster_perps") is None
     assert "gmx_v2" in PerpsReadRegistry.supported_protocols()
 
 
 def test_registry_resolve_plan_on_bsc():
-    plan = PerpsReadRegistry.resolve_plan("aster_perps", PerpsPositionQuery(chain="bsc", wallet_address=_ACCOUNT))
-    assert plan is not None
-    # markets auto-filled from the spec's markets_for_chain; one call per market.
-    assert plan.query.markets == aster_perps._markets_for_chain("bsc")
-    assert len(plan.calls) == 3
-    # The alias resolves to the same plan shape.
-    plan_alias = PerpsReadRegistry.resolve_plan(
+    plan = PerpsReadRegistry.resolve_plan(
         "pancakeswap_perps", PerpsPositionQuery(chain="bsc", wallet_address=_ACCOUNT)
     )
-    assert plan_alias is not None
-    assert len(plan_alias.calls) == 3
+    assert plan is not None
+    # markets auto-filled from the spec's markets_for_chain; one call per market.
+    assert plan.query.markets == diamond_read._markets_for_chain("bsc")
+    assert len(plan.calls) == 3
 
 
 def test_registry_resolve_plan_none_off_chain():
     # Aster is BSC-only; on a chain with no router address the plan is None
     # (the fast "not deployed here" gate discovery relies on).
     assert (
-        PerpsReadRegistry.resolve_plan("aster_perps", PerpsPositionQuery(chain="arbitrum", wallet_address=_ACCOUNT))
+        PerpsReadRegistry.resolve_plan(
+            "pancakeswap_perps", PerpsPositionQuery(chain="arbitrum", wallet_address=_ACCOUNT)
+        )
         is None
     )
 
 
 def test_registry_routes_metadata_and_value_to_aster():
-    meta = PerpsReadRegistry.market_metadata("aster_perps", _BTC, "bsc")
+    meta = PerpsReadRegistry.market_metadata("pancakeswap_perps", _BTC, "bsc")
     assert meta is not None and meta.index_token_symbol == "BTC"
-    # Via the alias too.
-    meta_alias = PerpsReadRegistry.market_metadata("pancakeswap_perps", _ETH, "bsc")
-    assert meta_alias is not None and meta_alias.index_token_symbol == "ETH"
+    meta_eth = PerpsReadRegistry.market_metadata("pancakeswap_perps", _ETH, "bsc")
+    assert meta_eth is not None and meta_eth.index_token_symbol == "ETH"
+    assert PerpsReadRegistry.market_metadata("aster_perps", _BTC, "bsc") is None
     val = PerpsReadRegistry.value_position(
-        "aster_perps",
+        "pancakeswap_perps",
         size_in_usd=(10**10 * 50000 * 10**8) // 10**10,  # 1 BTC @ 50000 -> 1e8 USD scale
         size_in_tokens=10**10,  # 1 BTC (1e10 qty scale)
         collateral_amount=5000 * 10**18,
@@ -502,7 +499,7 @@ def test_registry_routes_metadata_and_value_to_aster():
 
 
 def test_spec_shape_is_per_market_single_role():
-    spec = aster_perps.PERPS_READ_SPEC
+    spec = diamond_read.PERPS_READ_SPEC
     # Single contract role (the Diamond router).
     assert spec.contract_kinds == {"router": ("router",)}
     # Per-market venue: markets_for_chain is set (unlike GMX's range read).

@@ -56,6 +56,8 @@ INTENT_CLASS_TO_TYPE: dict[str, str] = {
     "PerpOpenIntent": "PERP_OPEN",
     "PerpCloseIntent": "PERP_CLOSE",
     "PerpCancelIntent": "PERP_CANCEL_ORDER",
+    "PerpDepositIntent": "PERP_DEPOSIT",
+    "PerpWithdrawIntent": "PERP_WITHDRAW",
     "VaultDepositIntent": "VAULT_DEPOSIT",
     "VaultRedeemIntent": "VAULT_REDEEM",
     "BridgeIntent": "BRIDGE",

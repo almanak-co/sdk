@@ -71,8 +71,14 @@ class TestVocabulary:
     def test_factory_defaults(self) -> None:
         intent = Intent.perp_withdraw(amount=Decimal("1"))
         assert intent.asset == "USDC"
-        assert intent.protocol == "hyperliquid"
+        # Several venues support PERP_WITHDRAW; without a chain the venue is
+        # resolved at compile time from the strategy's chain.
+        assert intent.protocol == ""
         assert intent.chain is None
+
+    def test_chain_resolves_the_default_venue(self) -> None:
+        assert Intent.perp_withdraw(amount=Decimal("1"), chain="hyperevm").protocol == "hyperliquid"
+        assert Intent.perp_withdraw(amount=Decimal("1"), chain="bsc").protocol == "aster_perps"
 
     def test_amount_all_marker_accepted(self) -> None:
         intent = Intent.perp_withdraw(amount="all")

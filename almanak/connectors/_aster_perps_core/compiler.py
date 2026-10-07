@@ -1,9 +1,12 @@
-"""Connector-owned compiler for Aster and PancakeSwap perpetual intents."""
+"""Compiler for PancakeSwap Perps on the legacy Aster (ApolloX) Diamond on BSC.
+
+The Diamond has been reduce-only since ~June 2026: opens revert on-chain, closes
+still settle. Aster's live venue is Aster Pro (``almanak.connectors.aster_perps``).
+"""
 
 from __future__ import annotations
 
 import logging
-import warnings
 from decimal import Decimal
 from typing import ClassVar
 
@@ -14,30 +17,15 @@ from almanak.framework.models.reproduction_bundle import ActionBundle
 
 from .adapter import AsterPerpsAdapter, AsterPerpsConfig
 from .addresses import ASTER_PERPS_TOKENS
-from .sdk import ASTER_BROKER_RAW, NATIVE_BNB_ADDRESS, PCS_BROKER_ID
+from .sdk import NATIVE_BNB_ADDRESS, PCS_BROKER_ID
 
 logger = logging.getLogger(__name__)
 
-_PCS_PERPS_KEY_WARNED = False
 
+class AsterDiamondPerpsCompiler(BasePerpCompiler):
+    """Compile PancakeSwap Perps (broker id 2) intents against the legacy Aster Diamond."""
 
-def _warn_pcs_perps_protocol_key_once() -> None:
-    global _PCS_PERPS_KEY_WARNED
-    if _PCS_PERPS_KEY_WARNED:
-        return
-    _PCS_PERPS_KEY_WARNED = True
-    warnings.warn(
-        "protocol='pancakeswap_perps' is deprecated; use protocol='aster_perps' "
-        "unless you intentionally need PancakeSwap broker attribution.",
-        DeprecationWarning,
-        stacklevel=4,
-    )
-
-
-class AsterPerpsCompiler(BasePerpCompiler):
-    """Compile raw Aster and PancakeSwap broker-shim perp intents."""
-
-    protocols: ClassVar[frozenset[str]] = frozenset({"aster_perps", "pancakeswap_perps"})
+    protocols: ClassVar[frozenset[str]] = frozenset({"pancakeswap_perps"})
     intents: ClassVar[frozenset[IntentType]] = frozenset({IntentType.PERP_OPEN, IntentType.PERP_CLOSE})
     chains: ClassVar[frozenset[str]] = frozenset({"bsc"})
 
@@ -225,10 +213,7 @@ class AsterPerpsCompiler(BasePerpCompiler):
 
     def _broker_id(self, protocol: str) -> int | None:
         if protocol == "pancakeswap_perps":
-            _warn_pcs_perps_protocol_key_once()
             return PCS_BROKER_ID
-        if protocol == "aster_perps":
-            return ASTER_BROKER_RAW
         return None
 
     def _unsupported_protocol(self, ctx: PerpCompilerContext, intent_id: str, primitive: str) -> CompilationResult:
@@ -237,7 +222,7 @@ class AsterPerpsCompiler(BasePerpCompiler):
             intent_id=intent_id,
             error=(
                 f"Protocol '{ctx.protocol}' is not supported for {primitive} on "
-                f"{ctx.chain}. Supported: aster_perps, pancakeswap_perps (bsc)."
+                f"{ctx.chain}. Supported: pancakeswap_perps (bsc)."
             ),
         )
 
@@ -346,4 +331,4 @@ class AsterPerpsCompiler(BasePerpCompiler):
         return None
 
 
-__all__ = ["AsterPerpsCompiler"]
+__all__ = ["AsterDiamondPerpsCompiler"]

@@ -1,0 +1,152 @@
+syntax = "proto3";
+
+// Aster Pro (off-chain order book) proxy. The gateway holds the main-wallet
+// key and the approved agent key, signs every request, and talks to
+// fapi.asterdex.com; the strategy container only sends these RPCs.
+// ``package`` matches the gateway proto so method paths share its namespace.
+package almanak.gateway.proto;
+
+service AsterPerpsService {
+  rpc GetMarket(AsterGetMarketRequest) returns (AsterMarketResponse);
+  rpc PlaceMarketOrder(AsterPlaceMarketOrderRequest) returns (AsterOrderResponse);
+  rpc GetOrder(AsterGetOrderRequest) returns (AsterOrderResponse);
+  rpc GetPositions(AsterGetPositionsRequest) returns (AsterPositionsResponse);
+  rpc GetBalances(AsterGetBalancesRequest) returns (AsterBalancesResponse);
+  rpc Withdraw(AsterWithdrawRequest) returns (AsterWithdrawResponse);
+  rpc FindWithdrawal(AsterFindWithdrawalRequest) returns (AsterFindWithdrawalResponse);
+}
+
+message AsterGetMarketRequest {
+  string symbol = 1;  // e.g. "ETHUSDT"
+}
+
+message AsterMarketResponse {
+  bool success = 1;
+  string error = 2;
+  string symbol = 3;
+  string status = 4;
+  string mark_price = 5;   // Decimal string
+  string step_size = 6;
+  string min_qty = 7;
+  string min_notional = 8;
+}
+
+message AsterPlaceMarketOrderRequest {
+  string symbol = 1;
+  bool is_long = 2;             // direction of the POSITION being opened or closed
+  string notional_usd = 3;      // open: target notional, rounded DOWN to the step size
+  bool close_position = 4;      // close: flatten the whole one-way position (reduceOnly)
+  uint32 leverage = 5;          // open: set before ordering; 0 leaves the account setting
+  string client_order_id = 6;   // idempotency key; reconcile by it on unknown outcome
+  string wallet_address = 7;    // must equal the gateway's configured main wallet
+  string max_slippage = 8;      // fraction (0.01 = 1%): the order is a LIMIT IOC bounded at mark x (1 +/- max_slippage)
+}
+
+message AsterOrderResponse {
+  bool success = 1;
+  string error = 2;
+  bool outcome_unknown = 3;     // transport/5xx: order may exist, reconcile by client_order_id
+  int64 order_id = 4;
+  string client_order_id = 5;
+  string status = 6;            // Aster order status: NEW / FILLED / PARTIALLY_FILLED / ...
+  string side = 7;
+  string executed_qty = 8;
+  string avg_price = 9;
+  string cum_quote = 10;        // executed notional in quote asset (USDT)
+  string requested_qty = 11;
+  string fee = 12;              // summed commission over the order's fills; "" when unread
+  string fee_asset = 13;
+  string realized_pnl = 14;     // summed over the order's fills; "" when unread
+  bool order_not_found = 15;    // GetOrder: the venue has no order under this client id (it never filled)
+}
+
+message AsterGetOrderRequest {
+  string symbol = 1;
+  string client_order_id = 2;
+  string wallet_address = 3;
+  bool close_position = 4;      // the order closed a position: only a complete fill is success
+}
+
+message AsterGetPositionsRequest {
+  string symbol = 1;            // empty = all symbols
+  string wallet_address = 2;
+}
+
+message AsterPosition {
+  string symbol = 1;
+  string position_amt = 2;      // signed: >0 long, <0 short
+  string entry_price = 3;
+  string mark_price = 4;
+  string unrealized_pnl = 5;
+  string leverage = 6;
+  string notional = 7;
+  string liquidation_price = 8;
+  string position_side = 9;
+}
+
+message AsterPositionsResponse {
+  bool success = 1;
+  string error = 2;
+  repeated AsterPosition positions = 3;
+}
+
+message AsterGetBalancesRequest {
+  string wallet_address = 1;
+}
+
+message AsterBalance {
+  string asset = 1;
+  string balance = 2;
+  string available_balance = 3;
+  string cross_unrealized_pnl = 4;
+}
+
+message AsterPendingTransfer {
+  string type = 1;              // DEPOSIT or WITHDRAW
+  string asset = 2;
+  string amount = 3;            // gross amount as recorded by the venue
+  string fee = 4;               // withdrawals: current venue fee for the chain; "" when unknown
+  string transfer_id = 5;
+}
+
+message AsterBalancesResponse {
+  bool success = 1;
+  string error = 2;
+  repeated AsterBalance balances = 3;
+  // Deposits not yet credited and withdrawals not yet paid out (venue state PROCESSING).
+  repeated AsterPendingTransfer pending_transfers = 4;
+}
+
+message AsterWithdrawRequest {
+  string asset = 1;             // margin asset, e.g. "USDT"
+  string amount = 2;            // gross amount (fee deducted from it), or "all" for the full withdrawable balance
+  string wallet_address = 3;    // must equal the gateway's main wallet; also the only receiver
+  reserved 4;
+  string client_request_id = 5; // the intent's request id: reconciliation matches an accepted withdrawal by it; a re-send is refused unless it failed
+}
+
+message AsterWithdrawResponse {
+  bool success = 1;
+  string error = 2;
+  bool outcome_unknown = 3;     // transport/5xx: the withdrawal may have been accepted
+  string withdraw_id = 4;
+  string amount = 5;
+  string fee = 6;
+  string receiver = 7;
+}
+
+message AsterFindWithdrawalRequest {
+  string wallet_address = 1;
+  int64 since_ms = 2;           // withdrawals the venue recorded at or after this time (epoch ms)
+  string client_request_id = 3; // the attempt's request id; matched exactly when this gateway accepted it
+}
+
+message AsterFindWithdrawalResponse {
+  bool success = 1;
+  string error = 2;
+  bool found = 3;               // exactly one withdrawal recorded since since_ms
+  bool not_found = 4;           // none recorded, and enough time has passed that none will be
+  string withdraw_id = 5;
+  string amount = 6;            // gross amount as recorded by the venue
+  string fee = 7;               // current venue fee for the chain
+}

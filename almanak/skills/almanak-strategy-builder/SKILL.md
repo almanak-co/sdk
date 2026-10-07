@@ -1891,7 +1891,7 @@ The connector descriptor registry is the post-VIB-4298 source of truth. Connecto
 | Connector | Type | Config Name | Chains |
 |-----------|------|-------------|--------|
 | Across | Bridge | `across` | Ethereum, Arbitrum, Optimism, Base, Polygon, Linea |
-| Aster Perps | Perp | `aster_perps` | BNB Chain |
+| Aster Pro | Perp (off-chain order book; USDT margin deposited in the Aster account) | `aster_perps` | BNB Chain |
 | Camelot | DEX | `camelot` | Arbitrum |
 | Curvance | Lending | `curvance` | Monad |
 | Drift | Perp | `drift` | Solana |
@@ -1906,7 +1906,7 @@ The connector descriptor registry is the post-VIB-4298 source of truth. Connecto
 | Meteora | DEX | `meteora` | Solana |
 | Morpho Vault | Vault | `morpho_vault` | Ethereum, Base |
 | Orca | DEX | `orca` | Solana |
-| PancakeSwap Perps | Perp | `pancakeswap_perps` | BNB Chain |
+| PancakeSwap Perps | Perp (legacy Aster Diamond, reduce-only: closes only) | `pancakeswap_perps` | BNB Chain |
 | Raydium | DEX | `raydium` | Solana |
 | Spark | Lending | `spark` | Ethereum |
 | Stargate | Bridge | `stargate` | Ethereum, Arbitrum, Optimism, Base, Polygon, BNB Chain, Avalanche |

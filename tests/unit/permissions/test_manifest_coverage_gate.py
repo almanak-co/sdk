@@ -158,14 +158,19 @@ class TestClassifyPermissions:
 class TestHostedRelevance:
     @pytest.mark.parametrize("chain", ["arbitrum", "base", "ethereum", "optimism", "polygon"])
     def test_evm_chains_with_safe_stack_are_hosted_relevant(self, chain: str) -> None:
-        assert _hosted_relevant(chain) is True
+        assert _hosted_relevant(chain, "uniswap_v3") is True
 
     def test_solana_is_not_hosted_relevant(self) -> None:
         """Zodiac/Safe is EVM-only — enforcement cannot break a Solana triple."""
-        assert _hosted_relevant("solana") is False
+        assert _hosted_relevant("solana", "jupiter") is False
 
     def test_unknown_chain_is_not_hosted_relevant(self) -> None:
-        assert _hosted_relevant("definitely_not_a_chain") is False
+        assert _hosted_relevant("definitely_not_a_chain", "uniswap_v3") is False
+
+    def test_safe_unsupported_connector_is_not_hosted_relevant(self) -> None:
+        """An EOA-only venue is refused in Safe mode, so enforcement cannot break it."""
+        assert _hosted_relevant("bsc", "uniswap_v3") is True
+        assert _hosted_relevant("bsc", "aster_perps") is False
 
 
 class TestTripleEnumeration:

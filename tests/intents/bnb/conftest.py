@@ -14,9 +14,10 @@ from decimal import Decimal
 import pytest
 from web3 import Web3
 
-from almanak.connectors.aster_perps.addresses import ASTER_PERPS, ASTER_PERPS_MARKETS
-from almanak.connectors.aster_perps.sdk import (
+from almanak.connectors._aster_perps_core.addresses import ASTER_PERPS_MARKETS, PANCAKESWAP_PERPS
+from almanak.connectors._aster_perps_core.sdk import (
     NATIVE_BNB_ADDRESS,
+    PCS_BROKER_ID,
     PRICE_DECIMALS,
     OpenTradeStruct,
     encode_open_market_trade_calldata,
@@ -299,7 +300,7 @@ def perps_price_oracle(web3: Web3) -> dict[str, Decimal]:
     the fork block (the on-chain oracle is fixed at that block), satisfying the
     session/module-scope requirement for fork-aligned price fixtures.
     """
-    router = ASTER_PERPS[CHAIN_NAME]["router"]
+    router = PANCAKESWAP_PERPS[CHAIN_NAME]["router"]
     markets = ASTER_PERPS_MARKETS[CHAIN_NAME]
 
     def price_for(symbol: str, market: str) -> Decimal:
@@ -320,13 +321,11 @@ def perps_price_oracle(web3: Web3) -> dict[str, Decimal]:
 # =============================================================================
 # Perp market availability gate (skip open-path tests when the venue is paused)
 # =============================================================================
-# Aster's TradingCheckerFacet reverts an open with "The pair is temporarily
-# unavailable for trading" when a market is suspended on-chain — a real,
-# fork-block-dependent condition (the whole Aster/PCS venue was suspended at the
-# 2026-W23 pin: BTC, ETH and BNB all reverted). No open can succeed against a
-# paused market regardless of price or size, so the open-path perp tests skip
-# cleanly here rather than hard-fail CI; coverage resumes automatically once the
-# market is live again at a later fork block.
+# The legacy Diamond's TradingCheckerFacet reverts an open with "The pair is
+# temporarily unavailable for trading" when a market is suspended on-chain. The
+# whole venue has been reduce-only since ~June 2026 (BTC, ETH and BNB all
+# revert), so on a current fork block every open-path perp test skips here; only
+# a fork pinned before the suspension exercises them.
 _PERP_MARKET_UNAVAILABLE_MARKERS = ("unavailable for trading", "temporarily unavailable")
 
 
@@ -347,10 +346,10 @@ def _aster_perp_open_unavailable(web3: Web3, base: str, price: Decimal) -> str |
         amount_in=margin,
         qty=usd_size_to_qty(Decimal("500"), price),
         price=slippage_to_limit_price(price, Decimal("0.01"), is_long=True),
-        broker=0,
+        broker=PCS_BROKER_ID,
     )
     data = "0x" + encode_open_market_trade_calldata(trade, native=True).hex()
-    router = Web3.to_checksum_address(ASTER_PERPS[CHAIN_NAME]["router"])
+    router = Web3.to_checksum_address(PANCAKESWAP_PERPS[CHAIN_NAME]["router"])
     probe = Web3.to_checksum_address(TEST_WALLET)
     call = {"from": probe, "to": router, "data": data, "value": margin}
     try:
@@ -362,7 +361,7 @@ def _aster_perp_open_unavailable(web3: Web3, base: str, price: Decimal) -> str |
 
 
 @pytest.fixture
-def require_tradeable_aster_perp_market(web3: Web3, perps_price_oracle: dict[str, Decimal]) -> None:
+def require_tradeable_pancakeswap_perp_market(web3: Web3, perps_price_oracle: dict[str, Decimal]) -> None:
     """Skip the test when the Aster/PancakeSwap BTC/USD perp market is paused.
 
     Every open-path perp test on BSC opens BTC/USD, so one pre-flight probe of
@@ -443,11 +442,6 @@ def pcs_perps_keeper_fulfill(web3, price_request_id: str, price_1e8: int) -> dic
         AssertionError: if the Anvil fork is not in a state where impersonation
             can succeed, or if the fulfill TX reverts.
     """
-    from almanak.connectors.aster_perps.addresses import PANCAKESWAP_PERPS
-    from almanak.connectors.pancakeswap_perps.sdk import (
-        _check_address as _addr_ok,  # noqa: F401 (sanity import)
-    )
-
     router = PANCAKESWAP_PERPS["bsc"]["router"]
     # Known mainnet holder of PRICE_FEEDER_ROLE on ApolloX Diamond.
     keeper = Web3.to_checksum_address("0x2b7363708984aa25a90450cfca7bedaf6804115c")
@@ -512,14 +506,14 @@ def pcs_perps_keeper_fulfill(web3, price_request_id: str, price_1e8: int) -> dic
 # =============================================================================
 
 
-async def open_aster_perps_position_via_intent(
+async def open_pancakeswap_perps_position_via_intent(
     *,
     orchestrator: ExecutionOrchestrator,
     web3: Web3,
     funded_wallet: str,
     anvil_rpc_url: str,
     perps_price_oracle: dict,
-    protocol: str,  # "aster_perps" or "pancakeswap_perps"
+    protocol: str = "pancakeswap_perps",
     market: str,
     collateral_amount,  # Decimal
     size_usd,  # Decimal
@@ -537,7 +531,7 @@ async def open_aster_perps_position_via_intent(
     Routing through the orchestrator works the same regardless of fixture
     mode: under Zodiac it wraps the call into ``execTransactionWithRole``;
     under ``no_zodiac`` it submits directly. Returns the open receipt dict
-    so callers can extract the tradeHash via ``AsterPerpsReceiptParser``.
+    so callers can extract the tradeHash via ``PancakeSwapPerpsReceiptParser``.
 
     Args:
         orchestrator: function-scoped orchestrator from the test fixture.
@@ -546,9 +540,8 @@ async def open_aster_perps_position_via_intent(
             under ``no_zodiac``).
         anvil_rpc_url: RPC URL the IntentCompiler reads from.
         perps_price_oracle: in-memory price map (BTC, BNB, USDT, …).
-        protocol: ``aster_perps`` (broker_id=0) or ``pancakeswap_perps``
-            (broker_id=2). Routes to the same Diamond router with different
-            broker attribution in calldata.
+        protocol: protocol key; ``pancakeswap_perps`` (broker_id=2) is the
+            only key that compiles to the legacy Diamond router.
         market: e.g. ``"BTC/USD"``.
         collateral_amount: native BNB amount as Decimal.
         size_usd: notional size in USD as Decimal.
@@ -556,7 +549,7 @@ async def open_aster_perps_position_via_intent(
 
     Returns:
         Receipt dict from the open TX, suitable for
-        ``AsterPerpsReceiptParser.parse_receipt(...)``.
+        ``PancakeSwapPerpsReceiptParser.parse_receipt(...)``.
     """
     from almanak.framework.intents.compiler import IntentCompiler
     from almanak.framework.intents.perp_intents import PerpOpenIntent

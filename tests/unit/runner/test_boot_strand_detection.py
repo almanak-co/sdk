@@ -167,9 +167,8 @@ def test_classify_lending_and_perps_scannable():
 
 def test_classify_perps_scannability_tracks_reader_registry():
     # Scannability is driven by the ACTUAL reader registry, not the broader
-    # conceptual perp membership. ``pancakeswap_perps`` is a DEPRECATED ALIAS for
-    # ``aster_perps`` (same venue) and resolves through PerpsReadRegistry.canonical
-    # to a real reader, so it is correctly scannable — never falsely undetectable.
+    # conceptual perp membership. ``pancakeswap_perps`` owns the legacy Aster
+    # Diamond perps read, so it is correctly scannable — never falsely undetectable.
     lending, perps, undetectable = _classify_protocols(["pancakeswap_perps"], [])
     assert lending == []
     assert perps == ["pancakeswap_perps"]
@@ -438,3 +437,53 @@ async def test_lending_alias_aave_vs_aave_v3_no_false_halt(monkeypatch):
 
     report = await detect_boot_strands(runner, strategy, "deployment:abc")
     assert not report.has_drift
+
+
+def test_classify_venue_account_is_scannable_only_on_its_account_chain():
+    assert _classify_protocols(["aster_perps"], [], "bsc")[1] == ["aster_perps"]
+    lending, perps, undetectable = _classify_protocols(["aster_perps"], [], "arbitrum")
+    assert perps == [] and [p for p, _ in undetectable] == ["aster_perps"]
+
+
+def _venue_account_row(open_positions):
+    return PositionInfo(
+        position_type=PositionType.PERP,
+        position_id="aster_perps:account",
+        chain="bsc",
+        protocol="aster_perps",
+        value_usd=Decimal("2.5"),
+        details={"market": "aster_perps:account", "valuation_source": "venue_account", "open_positions": open_positions},
+    )
+
+
+@pytest.mark.asyncio
+async def test_idle_venue_cash_is_not_a_strand(monkeypatch):
+    _patch_discovery(monkeypatch, [_venue_account_row([])])
+    runner = _FakeRunner(_FakeStateManager(), live=True)
+    strategy = _FakeStrategy(chain="bsc", wallet="0xwallet", protocols=["aster_perps"], tracked_tokens=[])
+
+    report = await detect_boot_strands(runner, strategy, "deployment:abc")
+    assert report.scanned_protocols == ["aster_perps"] and not report.has_drift
+
+
+@pytest.mark.asyncio
+async def test_open_venue_position_without_a_record_halts_in_live_mode(monkeypatch):
+    _patch_discovery(monkeypatch, [_venue_account_row([{"market": "ETHUSDT", "side": "long", "size": "0.002"}])])
+    runner = _FakeRunner(_FakeStateManager(), live=True)
+    strategy = _FakeStrategy(chain="bsc", wallet="0xwallet", protocols=["aster_perps"], tracked_tokens=[])
+
+    with pytest.raises(OnChainStrandError):
+        await enforce_no_boot_strands(runner, strategy, "deployment:abc")
+
+
+@pytest.mark.asyncio
+async def test_unread_venue_account_is_a_scan_error_not_a_strand(monkeypatch):
+    unread = _venue_account_row([])
+    unread.details.pop("valuation_source")
+    unread.details["venue_account_unread"] = True
+    _patch_discovery(monkeypatch, [unread], errors=["Venue-account read failed for aster_perps on bsc: boom"])
+    runner = _FakeRunner(_FakeStateManager(), live=True)
+    strategy = _FakeStrategy(chain="bsc", wallet="0xwallet", protocols=["aster_perps"], tracked_tokens=[])
+
+    report = await detect_boot_strands(runner, strategy, "deployment:abc")
+    assert not report.has_drift and report.scan_errors

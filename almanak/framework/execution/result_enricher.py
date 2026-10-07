@@ -304,6 +304,10 @@ class ResultEnricher:
         # Withdrawing free venue margin is an asynchronous cash movement, not
         # a trade; wallet balance deltas capture the settled amount and fees.
         "PERP_WITHDRAW": [],
+        # Depositing into a venue account is a cash movement, not a trade; the
+        # wallet debit is the ledgered transaction and the venue account read
+        # values the credit.
+        "PERP_DEPOSIT": [],
     }
 
     # Protocol overlays append fields after the generic spec with
@@ -656,13 +660,17 @@ class ResultEnricher:
             is_solana = is_solana_chain(chain_str)
 
             parser_kwargs = self._build_parser_kwargs(protocol, context.chain)
-            try:
-                parser = self.parser_registry.get(protocol, **parser_kwargs)
-            except ValueError as e:
-                warning = f"Parser not found for {protocol}: {e}"
-                logger.info(warning)
-                result.extraction_warnings.append(warning)
+            if not getattr(result, "transaction_results", None) and not additional_receipts:
+                # An off-chain venue fill carries no receipt; there is nothing to parse.
                 parser = None
+            else:
+                try:
+                    parser = self.parser_registry.get(protocol, **parser_kwargs)
+                except ValueError as e:
+                    warning = f"Parser not found for {protocol}: {e}"
+                    logger.info(warning)
+                    result.extraction_warnings.append(warning)
+                    parser = None
 
             if parser is not None:
                 parser_name = type(parser).__name__.lower()

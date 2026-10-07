@@ -121,12 +121,12 @@ class TestHasPerpsProtocol:
         assert _has_perps_protocol(["gmx"]) is True
         assert _perps_protocols_to_scan(["gmx"]) == ["gmx_v2"]
 
-    def test_aster_perps(self):
-        assert _has_perps_protocol(["aster_perps"]) is True
+    def test_aster_perps_has_no_onchain_perps_read(self):
+        assert _has_perps_protocol(["aster_perps"]) is False
 
-    def test_pancakeswap_perps_alias(self):
+    def test_pancakeswap_perps(self):
         assert _has_perps_protocol(["pancakeswap_perps"]) is True
-        assert _perps_protocols_to_scan(["pancakeswap_perps"]) == ["aster_perps"]
+        assert _perps_protocols_to_scan(["pancakeswap_perps"]) == ["pancakeswap_perps"]
 
     def test_case_insensitive(self):
         assert _has_perps_protocol(["HYPERLIQUID"]) is True

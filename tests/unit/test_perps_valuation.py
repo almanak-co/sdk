@@ -610,8 +610,8 @@ class TestPositionDiscoveryPerps:
 
         service = PositionDiscoveryService(gateway_client=None)
         service._perps_reader = MagicMock()
-        # Discovery iterates EVERY registered perp venue (gmx_v2 + aster_perps as
-        # of VIB-4930 PR-4); on Arbitrum only GMX is deployed, so the reader is
+        # Discovery iterates EVERY registered perp venue (gmx_v2, hyperliquid,
+        # pancakeswap_perps); on Arbitrum only GMX is deployed, so the reader is
         # protocol-aware here — GMX returns the ETH long, the BSC-only venue
         # reads ``ok=False`` (its resolve_plan is None off-chain). This mirrors
         # the real multi-venue scan instead of returning positions for every
@@ -702,7 +702,7 @@ class TestPositionDiscoveryPerps:
         With the real registry, every venue's ``resolve_plan`` returns ``None``
         on a chain where its reader/data-store address is absent from
         ``AddressRegistry`` (here ``ethereum`` — neither ``gmx_v2`` nor
-        ``aster_perps`` is deployed). Discovery skips each silently BEFORE
+        ``pancakeswap_perps`` is deployed). Discovery skips each silently BEFORE
         issuing a read (the not-deployed gate), so no error is recorded and no
         phantom-empty position is emitted. Mirrors the lending precedent
         (``_scan_lending_protocol`` ``continue``s silently on an unresolved
@@ -736,7 +736,7 @@ class TestPositionDiscoveryPerps:
         ``arbitrum`` has ``gmx_v2`` deployed (``resolve_plan`` resolves), so an
         ``ok=False`` read there is a genuine gateway/RPC/decode failure — NOT a
         not-deployed signal — and MUST be surfaced, not swallowed. The other
-        registered venue (``aster_perps``) is not deployed on Arbitrum
+        registered venue (``pancakeswap_perps``) is not deployed on Arbitrum
         (``resolve_plan`` is ``None``) and is therefore skipped silently. Exactly
         one error is recorded, and it names the deployed venue that failed.
         """
@@ -769,7 +769,7 @@ class TestPositionDiscoveryPerps:
         ``AddressRegistry`` for ``config.chain``, ``resolve_plan`` returns
         ``None`` (the not-deployed gate) and discovery skips the venue BEFORE
         any read. With the real registry, scanning ``ethereum`` hits this exact
-        path for every registered venue (neither ``gmx_v2`` nor ``aster_perps``
+        path for every registered venue (neither ``gmx_v2`` nor ``pancakeswap_perps``
         is deployed there). Discovery must treat this as "nothing here", not as
         a failure worth surfacing — matching the lending behaviour for an
         unresolved reserve.
@@ -891,40 +891,12 @@ class TestAuditFixes:
         assert positions[0].details.get("market") == "0x70d95587"
         assert positions[0].details.get("wallet_address") == "0xW"
 
-    def test_perps_dedup_collapses_alias_across_sources(self):
-        """Fix P1: a strategy-reported perp alias and a discovery-stamped canonical
-        name for the SAME venue collapse to ONE position (no double-count).
-
-        ``pancakeswap_perps`` is the deprecated alias for ``aster_perps`` (PCS
-        Perps is broker id=2 on the Aster Diamond). Before the dedup key
-        canonicalised perp aliases, a strategy reporting ``pancakeswap_perps``
-        and discovery stamping ``aster_perps`` for the same (chain, market,
-        is_long) keyed distinctly and BOTH survived, double-counting the perp.
-        The canonical key must now collapse them onto the discovery row.
-        """
+    def _positions_after_dedup(self, strategy_pos: PositionInfo, discovered_pos: PositionInfo) -> list:
         from unittest.mock import patch
 
         from almanak.framework.valuation.portfolio_valuer import PortfolioValuer
 
         valuer = PortfolioValuer(gateway_client=None)
-
-        strategy_pos = PositionInfo(
-            position_type=PositionType.PERP,
-            position_id="pcs-ETH/USD-usdc-perp",  # Strategy's custom format
-            chain="bsc",
-            protocol="pancakeswap_perps",  # Deprecated alias for aster_perps
-            value_usd=Decimal("2500"),
-            details={"market": "0xMARKET", "is_long": True, "wallet_address": "0xW"},
-        )
-        discovered_pos = PositionInfo(
-            position_type=PositionType.PERP,
-            position_id="aster-0xmarket-0xusdc-long",  # Discovery format
-            chain="bsc",
-            protocol="aster_perps",  # Canonical name
-            value_usd=Decimal("0"),
-            details={"market": "0xMARKET", "is_long": True},
-        )
-
         with patch.object(valuer, "_get_strategy_positions", return_value=([strategy_pos], False)):
             mock_discovery = MagicMock()
             mock_result = MagicMock()
@@ -940,13 +912,62 @@ class TestAuditFixes:
 
                 strategy = MagicMock()
                 strategy.deployment_id = "test"
-                strategy.chain = "bsc"
+                strategy.chain = strategy_pos.chain
                 strategy._get_tracked_tokens.return_value = []
 
-                positions, total, incomplete = valuer._get_positions(strategy, market, {})
+                positions, _total, _incomplete = valuer._get_positions(strategy, market, {})
+        return positions
 
-        # Alias + canonical for the same venue/market/side collapse to ONE.
-        assert len(positions) == 1
+    def test_perps_dedup_collapses_alias_across_sources(self):
+        """Fix P1: a strategy-reported perp alias and a discovery-stamped canonical
+        name for the SAME venue collapse to ONE position (no double-count).
+
+        ``gmx`` is a manifest-declared alias for ``gmx_v2``. Without alias
+        canonicalisation in the dedup key, a strategy reporting ``gmx`` and
+        discovery stamping ``gmx_v2`` for the same (chain, market, is_long)
+        would key distinctly and BOTH survive, double-counting the perp.
+        """
+        strategy_pos = PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="gmx-ETH/USD-usdc-perp",  # Strategy's custom format
+            chain="arbitrum",
+            protocol="gmx",
+            value_usd=Decimal("2500"),
+            details={"market": "0xMARKET", "is_long": True, "wallet_address": "0xW"},
+        )
+        discovered_pos = PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="gmx-0xmarket-0xusdc-long",  # Discovery format
+            chain="arbitrum",
+            protocol="gmx_v2",
+            value_usd=Decimal("0"),
+            details={"market": "0xMARKET", "is_long": True},
+        )
+
+        assert len(self._positions_after_dedup(strategy_pos, discovered_pos)) == 1
+
+    def test_perps_dedup_keeps_aster_pro_and_diamond_venues_distinct(self):
+        """``aster_perps`` (Aster Pro, off-chain) and ``pancakeswap_perps`` (the
+        legacy Aster Diamond) are different venues, so same-market rows from each
+        must both survive the dedup."""
+        strategy_pos = PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="aster-pro-ETHUSDT-long",
+            chain="bsc",
+            protocol="aster_perps",
+            value_usd=Decimal("2500"),
+            details={"market": "0xMARKET", "is_long": True, "wallet_address": "0xW"},
+        )
+        discovered_pos = PositionInfo(
+            position_type=PositionType.PERP,
+            position_id="aster-0xmarket-0xusdc-long",
+            chain="bsc",
+            protocol="pancakeswap_perps",
+            value_usd=Decimal("10"),
+            details={"market": "0xMARKET", "is_long": True},
+        )
+
+        assert len(self._positions_after_dedup(strategy_pos, discovered_pos)) == 2
 
 
 # =============================================================================
@@ -962,7 +983,12 @@ def test_framework_valuation_perp_path_imports_no_connector():
     """
     repo_root = Path(__file__).resolve().parents[2]
     valuation_dir = repo_root / "almanak" / "framework" / "valuation"
-    forbidden_imports = ("almanak.connectors.gmx_v2", "almanak.connectors.aster_perps")
+    forbidden_imports = (
+        "almanak.connectors.gmx_v2",
+        "almanak.connectors.aster_perps",
+        "almanak.connectors.pancakeswap_perps",
+        "almanak.connectors._aster_perps_core",
+    )
 
     offenders: list[str] = []
     for py in sorted(valuation_dir.rglob("*.py")):
@@ -994,7 +1020,7 @@ def test_framework_valuation_perp_path_names_no_venue():
     """
     repo_root = Path(__file__).resolve().parents[2]
     valuation_dir = repo_root / "almanak" / "framework" / "valuation"
-    forbidden_strings = ("gmx_v2", "aster_perps")
+    forbidden_strings = ("gmx_v2", "aster_perps", "pancakeswap_perps")
 
     offenders: list[str] = []
     for py in sorted(valuation_dir.rglob("*.py")):

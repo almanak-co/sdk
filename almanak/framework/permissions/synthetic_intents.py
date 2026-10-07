@@ -85,7 +85,7 @@ _PERP_INTENT_TYPES = frozenset({IntentType.PERP_OPEN, IntentType.PERP_CLOSE})
 # 0x7489ec23 — distinct from the ``multicall`` selector open/close discovery
 # grants). Keeping it out of the shared ``_PERP_INTENT_TYPES`` set means widening
 # the *validation* universe below does NOT hand a cancel builder to the other
-# perp connectors (hyperliquid / aster_perps / pancakeswap_perps / drift): the
+# perp connectors (hyperliquid / pancakeswap_perps / drift): the
 # builder itself gates on the connector DECLARING PERP_CANCEL_ORDER
 # (``_build_perp_cancel_intents``), and only gmx_v2 does. It still contributes to
 # the ``perp`` slug-membership fold so a hypothetical cancel-only connector would
@@ -912,7 +912,7 @@ def _build_perp_cancel_intents(protocol: str, chain: str) -> list[AnyIntent]:
     ``synthetic_discovery_intents`` — NOT on the broad ``_perp_protocols()``
     membership. Cancel is a gmx_v2-only strategy and teardown verb (VIB-5569,
     ALM-3101); every
-    other perp connector (hyperliquid / aster_perps / pancakeswap_perps / drift)
+    other perp connector (hyperliquid / pancakeswap_perps / drift)
     is in ``_perp_protocols()`` but has no cancel compile path, so gating on
     declaration keeps a cancel builder from being handed to a connector that would
     fail to compile it. Emits a direct ``ExchangeRouter.cancelOrder(bytes32)`` call

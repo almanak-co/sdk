@@ -32,6 +32,8 @@ class IntentType(Enum):
     # movement, not a trade — no position, no PnL). On Hyperliquid this is a
     # CoreWriter spotSend HyperCore→HyperEVM bridge (VIB-5617). NO_ACCOUNTING category.
     PERP_WITHDRAW = "PERP_WITHDRAW"
+    # Cash movement wallet -> perp venue account (mirror of PERP_WITHDRAW).
+    PERP_DEPOSIT = "PERP_DEPOSIT"
     BRIDGE = "BRIDGE"
     ENSURE_BALANCE = "ENSURE_BALANCE"
     FLASH_LOAN = "FLASH_LOAN"

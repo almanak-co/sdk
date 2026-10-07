@@ -213,6 +213,7 @@ class TestEnvelopeDefinition:
         assert refused == {
             IntentType.PERP_CANCEL_ORDER,
             IntentType.PERP_WITHDRAW,
+            IntentType.PERP_DEPOSIT,
             IntentType.BRIDGE,
             IntentType.ENSURE_BALANCE,
             IntentType.FLASH_LOAN,

@@ -299,6 +299,19 @@ class ClobExecutionResult:
     # VIB-3710: pUSD operator fee charged at match time. None when the order
     # did not match or when the response did not carry a fee field.
     fee_pusd: Decimal | None = None
+    # Venue-measured fields merged into ``ExecutionResult.extracted_data`` so
+    # connector runner hooks can derive accounting payloads from them.
+    venue_data: dict[str, Any] = field(default_factory=dict)
+    # The submission may or may not have executed (transport failure, the venue
+    # did not answer). Never a plain failure: the runner holds a replay barrier
+    # and reconciles through the handler before any further decision.
+    outcome_unknown: bool = False
+    # The failure is definitive: nothing executed beyond what the result
+    # reports (the venue answered, or the request never left the gateway), and
+    # re-sending is deduplicated by the venue. Only a handler that positively
+    # knows this sets it; a failure without it is treated as possibly executed
+    # (fail closed).
+    venue_answered: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -314,6 +327,7 @@ class ClobExecutionResult:
             "submitted_at": self.submitted_at.isoformat(),
             "setup_txs": list(self.setup_txs),
             "fee_pusd": str(self.fee_pusd) if self.fee_pusd is not None else None,
+            "outcome_unknown": self.outcome_unknown,
         }
 
     def to_prediction_fill(self) -> "PredictionFill | None":

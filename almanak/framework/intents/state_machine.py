@@ -140,6 +140,11 @@ class IntentState(Enum):
     VALIDATING_PERP_WITHDRAW = auto()
     SADFLOW_PERP_WITHDRAW = auto()
 
+    # PERP_DEPOSIT intent states (deposit wallet funds into a venue account)
+    PREPARING_PERP_DEPOSIT = auto()
+    VALIDATING_PERP_DEPOSIT = auto()
+    SADFLOW_PERP_DEPOSIT = auto()
+
     # HOLD intent states (simplified - just completes)
     PREPARING_HOLD = auto()
     VALIDATING_HOLD = auto()
@@ -238,6 +243,7 @@ def get_preparing_state(intent_type: IntentType) -> IntentState:
         IntentType.PERP_CLOSE: IntentState.PREPARING_PERP_CLOSE,
         IntentType.PERP_CANCEL_ORDER: IntentState.PREPARING_PERP_CANCEL_ORDER,
         IntentType.PERP_WITHDRAW: IntentState.PREPARING_PERP_WITHDRAW,
+        IntentType.PERP_DEPOSIT: IntentState.PREPARING_PERP_DEPOSIT,
         IntentType.HOLD: IntentState.PREPARING_HOLD,
         IntentType.STAKE: IntentState.PREPARING_STAKE,
         IntentType.UNSTAKE: IntentState.PREPARING_UNSTAKE,
@@ -279,6 +285,7 @@ def get_validating_state(intent_type: IntentType) -> IntentState:
         IntentType.PERP_CLOSE: IntentState.VALIDATING_PERP_CLOSE,
         IntentType.PERP_CANCEL_ORDER: IntentState.VALIDATING_PERP_CANCEL_ORDER,
         IntentType.PERP_WITHDRAW: IntentState.VALIDATING_PERP_WITHDRAW,
+        IntentType.PERP_DEPOSIT: IntentState.VALIDATING_PERP_DEPOSIT,
         IntentType.HOLD: IntentState.VALIDATING_HOLD,
         IntentType.STAKE: IntentState.VALIDATING_STAKE,
         IntentType.UNSTAKE: IntentState.VALIDATING_UNSTAKE,
@@ -320,6 +327,7 @@ def get_sadflow_state(intent_type: IntentType) -> IntentState:
         IntentType.PERP_CLOSE: IntentState.SADFLOW_PERP_CLOSE,
         IntentType.PERP_CANCEL_ORDER: IntentState.SADFLOW_PERP_CANCEL_ORDER,
         IntentType.PERP_WITHDRAW: IntentState.SADFLOW_PERP_WITHDRAW,
+        IntentType.PERP_DEPOSIT: IntentState.SADFLOW_PERP_DEPOSIT,
         IntentType.HOLD: IntentState.SADFLOW_HOLD,
         IntentType.STAKE: IntentState.SADFLOW_STAKE,
         IntentType.UNSTAKE: IntentState.SADFLOW_UNSTAKE,
@@ -354,6 +362,7 @@ def is_preparing_state(state: IntentState) -> bool:
         IntentState.PREPARING_PERP_CLOSE,
         IntentState.PREPARING_PERP_CANCEL_ORDER,
         IntentState.PREPARING_PERP_WITHDRAW,
+        IntentState.PREPARING_PERP_DEPOSIT,
         IntentState.PREPARING_HOLD,
         IntentState.PREPARING_STAKE,
         IntentState.PREPARING_UNSTAKE,
@@ -387,6 +396,7 @@ def is_validating_state(state: IntentState) -> bool:
         IntentState.VALIDATING_PERP_CLOSE,
         IntentState.VALIDATING_PERP_CANCEL_ORDER,
         IntentState.VALIDATING_PERP_WITHDRAW,
+        IntentState.VALIDATING_PERP_DEPOSIT,
         IntentState.VALIDATING_HOLD,
         IntentState.VALIDATING_STAKE,
         IntentState.VALIDATING_UNSTAKE,
@@ -420,6 +430,7 @@ def is_sadflow_state(state: IntentState) -> bool:
         IntentState.SADFLOW_PERP_CLOSE,
         IntentState.SADFLOW_PERP_CANCEL_ORDER,
         IntentState.SADFLOW_PERP_WITHDRAW,
+        IntentState.SADFLOW_PERP_DEPOSIT,
         IntentState.SADFLOW_HOLD,
         IntentState.SADFLOW_STAKE,
         IntentState.SADFLOW_UNSTAKE,

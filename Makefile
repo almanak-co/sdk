@@ -491,10 +491,10 @@ crap-diff-fresh:
 COMPLEXITY_PATH ?= $(if $(FILE),$(FILE),almanak/)
 complexity:
 	@echo "== Cyclomatic complexity (rank C+ only) =="
-	uv run radon cc $(COMPLEXITY_PATH) -s -a -nc --exclude 'almanak/gateway/proto/*,almanak/connectors/polymarket/proto/*,almanak/demo_strategies/*'
+	uv run radon cc $(COMPLEXITY_PATH) -s -a -nc --exclude 'almanak/gateway/proto/*,almanak/connectors/polymarket/proto/*,almanak/connectors/aster_perps/proto/*,almanak/demo_strategies/*'
 	@echo
 	@echo "== Maintainability Index (rank B and below) =="
-	uv run radon mi $(COMPLEXITY_PATH) -s -nb --exclude 'almanak/gateway/proto/*,almanak/connectors/polymarket/proto/*,almanak/demo_strategies/*'
+	uv run radon mi $(COMPLEXITY_PATH) -s -nb --exclude 'almanak/gateway/proto/*,almanak/connectors/polymarket/proto/*,almanak/connectors/aster_perps/proto/*,almanak/demo_strategies/*'
 
 # Run nightly-only visual Market Data API contract tests
 test-nightly-visual:
@@ -628,6 +628,8 @@ proto: ## Regenerate gateway gRPC stubs from proto files
 	sed -i.bak 's/import gateway_pb2 as gateway__pb2/from almanak.gateway.proto import gateway_pb2 as gateway__pb2/' ./almanak/gateway/proto/gateway_pb2_grpc.py && rm -f ./almanak/gateway/proto/gateway_pb2_grpc.py.bak
 	uv run python -m grpc_tools.protoc -I./almanak/connectors/polymarket/proto --python_out=./almanak/connectors/polymarket/proto --grpc_python_out=./almanak/connectors/polymarket/proto --mypy_out=./almanak/connectors/polymarket/proto ./almanak/connectors/polymarket/proto/*.proto
 	sed -i.bak 's/import polymarket_pb2 as polymarket__pb2/from almanak.connectors.polymarket.proto import polymarket_pb2 as polymarket__pb2/' ./almanak/connectors/polymarket/proto/polymarket_pb2_grpc.py && rm -f ./almanak/connectors/polymarket/proto/polymarket_pb2_grpc.py.bak
+	uv run python -m grpc_tools.protoc -I./almanak/connectors/aster_perps/proto --python_out=./almanak/connectors/aster_perps/proto --grpc_python_out=./almanak/connectors/aster_perps/proto --mypy_out=./almanak/connectors/aster_perps/proto ./almanak/connectors/aster_perps/proto/*.proto
+	sed -i.bak 's/^import aster_perps_pb2 as aster__perps__pb2/from almanak.connectors.aster_perps.proto import aster_perps_pb2 as aster__perps__pb2/' ./almanak/connectors/aster_perps/proto/aster_perps_pb2_grpc.py && rm -f ./almanak/connectors/aster_perps/proto/aster_perps_pb2_grpc.py.bak
 
 # Check that generated proto files are up-to-date (CI)
 proto-check:

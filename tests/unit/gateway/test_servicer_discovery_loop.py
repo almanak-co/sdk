@@ -45,6 +45,7 @@ def test_registry_advertises_exactly_the_expected_servicer_providers() -> None:
     assert protocols == {
         ProtocolName("polymarket"),
         ProtocolName("enso"),
+        ProtocolName("aster_perps"),
     }
 
 

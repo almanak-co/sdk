@@ -3040,6 +3040,7 @@ class StrategyRunner:
             IntentType.PERP_OPEN,
             IntentType.VAULT_DEPOSIT,
             IntentType.BRIDGE,
+            IntentType.PERP_DEPOSIT,
         }
         intent_type = getattr(intent, "intent_type", None)
         if intent_type not in _WALLET_FUNDED_TYPES:
@@ -3052,6 +3053,7 @@ class StrategyRunner:
             or getattr(intent, "token", None)
             or getattr(intent, "token_in", None)
             or getattr(intent, "collateral_token", None)
+            or getattr(intent, "asset", None)
         )
 
         if balance_token and market is not None:
@@ -7595,25 +7597,16 @@ class StrategyRunner:
         # the hardcoded chain=="polygon" gate + the direct connector imports). The
         # handler owns its gateway-routed client; state.clob_client stays unset (its
         # only use is a no-op close() on teardown).
-        if state.gateway_client is not None:
-            from almanak.connectors._strategy_base.compiler_registry import CompilerRegistry
-            from almanak.connectors._strategy_base.prediction_execute_registry import (
-                PredictionExecuteRegistry,
-            )
+        from almanak.framework.execution.offchain_venue import build_offchain_handler
 
-            # Resolve the CLOB handler by the intent's protocol (falling back to the
-            # compiler's default prediction protocol), not the first buildable handler
-            # for the chain: on a chain with >1 prediction connector, compile/outbox
-            # could target one protocol while execution binds another.
-            resolved_protocol = (
-                (getattr(intent, "protocol", "") or "") or CompilerRegistry.default_protocol("PREDICTION") or ""
-            )
-            if resolved_protocol:
-                handler = PredictionExecuteRegistry.build_handler(
-                    resolved_protocol, gateway_client=state.gateway_client
-                )
-                if handler is not None:
-                    state.clob_handler = handler
+        handler = build_offchain_handler(
+            protocol=getattr(intent, "protocol", "") or "",
+            chain=state.strategy.chain,
+            gateway_client=state.gateway_client,
+            wallet=getattr(state.strategy, "wallet_address", None),
+        )
+        if handler is not None:
+            state.clob_handler = handler
 
         # Build compiler config.
         #
@@ -9254,6 +9247,7 @@ class StrategyRunner:
             # but we use cast for type checker since orchestrator is Union type
             single_chain_orch = cast(ExecutionOrchestrator, self.execution_orchestrator)
 
+            from almanak.framework.execution.offchain_venue import offchain_reconciliation_error
             from almanak.framework.execution.reconciliation import (
                 failed_submission_allows_recompile,
                 failed_submission_requires_reconciliation,
@@ -9262,15 +9256,22 @@ class StrategyRunner:
             )
 
             broadcast_marker: ExecutionProgress | None = None
-            # Route CLOB bundles to the connector-built CLOB handler (off-chain orders),
-            # all other bundles to the on-chain ExecutionOrchestrator.
-            if state.clob_handler and state.clob_handler.can_handle(step_result.action_bundle):
-                execution_result = await self._single_chain_execute_clob(state, step_result)
+            offchain = bool(state.clob_handler and state.clob_handler.can_handle(step_result.action_bundle))
+            offchain_unknown = False
+            # Route off-chain venue bundles to the connector-built handler, all
+            # other bundles to the on-chain ExecutionOrchestrator. Both lanes hold
+            # the same durable no-replay barrier across the submission.
+            if offchain:
+                (
+                    execution_result,
+                    broadcast_marker,
+                    offchain_unknown,
+                ) = await self._single_chain_execute_offchain_guarded(state, step_result, execution_context)
             else:
                 execution_result, broadcast_marker = await self._single_chain_execute_onchain_guarded(
                     state, step_result, execution_context, single_chain_orch
                 )
-                state.replay_barrier = broadcast_marker
+            state.replay_barrier = broadcast_marker
 
             # Convert ExecutionResult to TransactionReceipt for state machine.
             # A failed gateway result can intentionally carry hashes with NO
@@ -9282,19 +9283,29 @@ class StrategyRunner:
             receipt_error = execution_result.error
             plan_hash = str(getattr(execution_result, "execution_plan_hash", ""))
             recompile_allowed = bool(
-                broadcast_marker is not None
+                not offchain
+                and broadcast_marker is not None
                 and not execution_result.success
                 and plan_hash
                 and failed_submission_allows_recompile(execution_result, expected_plan_hash=plan_hash)
             )
+            # An off-chain venue answers definitively (filled / rejected) or not
+            # at all; only the latter may have executed without our knowledge.
             reconciliation_required = bool(
                 broadcast_marker is not None
                 and not execution_result.success
-                and not recompile_allowed
-                and failed_submission_requires_reconciliation(execution_result)
+                and (
+                    offchain_unknown
+                    if offchain
+                    else not recompile_allowed and failed_submission_requires_reconciliation(execution_result)
+                )
             )
             if reconciliation_required:
-                receipt_error = reconciliation_required_error(execution_result)
+                receipt_error = (
+                    offchain_reconciliation_error(execution_result)
+                    if offchain
+                    else reconciliation_required_error(execution_result)
+                )
                 execution_result.error = receipt_error
             await self._single_chain_persist_failed_attempt(state, execution_result)
             await self._single_chain_seal_broadcast_marker(
@@ -9436,14 +9447,10 @@ class StrategyRunner:
         if hasattr(self.execution_orchestrator, "reset_nonce_cache"):
             self.execution_orchestrator.reset_nonce_cache()
 
-    async def _single_chain_execute_onchain_guarded(
-        self,
-        state: SingleChainExecutionState,
-        step_result: Any,
-        execution_context: ExecutionContext,
-        orchestrator: ExecutionOrchestrator,
-    ) -> tuple[ExecutionResult, ExecutionProgress]:
-        """Persist a replay barrier before an on-chain submission can begin."""
+    async def _persist_pre_broadcast_marker(
+        self, state: SingleChainExecutionState, step_result: Any, execution_context: ExecutionContext
+    ) -> ExecutionProgress:
+        """Durably record the attempt before a submission can begin (the no-replay barrier)."""
         from almanak.framework.execution.reconciliation import RECONCILIATION_REQUIRED_PREFIX
 
         pending_error = (
@@ -9494,11 +9501,41 @@ class StrategyRunner:
             raise RuntimeError(
                 f"Pre-broadcast checkpoint persistence failed ({type(exc).__name__}); execution was not submitted"
             ) from exc
+        return marker
+
+    async def _single_chain_execute_onchain_guarded(
+        self,
+        state: SingleChainExecutionState,
+        step_result: Any,
+        execution_context: ExecutionContext,
+        orchestrator: ExecutionOrchestrator,
+    ) -> tuple[ExecutionResult, ExecutionProgress]:
+        """Persist a replay barrier before an on-chain submission can begin."""
+        marker = await self._persist_pre_broadcast_marker(state, step_result, execution_context)
         try:
             result = await self._single_chain_execute_onchain(state, step_result, execution_context, orchestrator)
         except Exception as exc:
-            raise RuntimeError(f"{pending_error}; execution raised: {exc}") from exc
+            raise RuntimeError(f"{marker.failure_error}; execution raised: {exc}") from exc
         return result, marker
+
+    async def _single_chain_execute_offchain_guarded(
+        self, state: SingleChainExecutionState, step_result: Any, execution_context: ExecutionContext
+    ) -> tuple[ExecutionResult, ExecutionProgress, bool]:
+        """Persist a replay barrier, then submit through the off-chain venue handler.
+
+        Returns the result, the marker, and whether the venue outcome is unknown
+        (the marker must then stay sealed until the handler reconciles it).
+        """
+        from almanak.framework.execution.offchain_venue import offchain_execution_result
+
+        marker = await self._persist_pre_broadcast_marker(state, step_result, execution_context)
+        try:
+            clob_result = await state.clob_handler.execute(step_result.action_bundle)
+        except Exception as exc:
+            raise RuntimeError(f"{marker.failure_error}; off-chain execution raised: {exc}") from exc
+        execution_result = offchain_execution_result(clob_result)
+        state.last_execution_result = execution_result
+        return execution_result, marker, bool(getattr(clob_result, "outcome_unknown", False))
 
     async def _single_chain_seal_broadcast_marker(
         self,
@@ -9642,32 +9679,6 @@ class StrategyRunner:
                 await self._flush_strategy_pending_save_strict(strategy)
         except Exception as exc:
             raise RuntimeError(f"Landed {lane} strategy state could not be persisted; replay barrier retained") from exc
-
-    async def _single_chain_execute_clob(self, state: SingleChainExecutionState, step_result: Any) -> ExecutionResult:
-        """Execute a Polymarket CLOB bundle via the connector-built CLOB handler."""
-        clob_result = await state.clob_handler.execute(step_result.action_bundle)
-        execution_result = ExecutionResult(
-            success=clob_result.success,
-            phase=ExecutionPhase.COMPLETE,
-            completed_at=datetime.now(UTC),
-            error=clob_result.error,
-        )
-        execution_result.extracted_data = {
-            "clob_status": clob_result.status.value,
-        }
-        if clob_result.order_id:
-            execution_result.extracted_data["order_id"] = clob_result.order_id
-        # VIB-3218: attach PredictionFill so strategies can
-        # distinguish "order accepted" from "order filled"
-        # without reaching into clob_handler internals.
-        # requested_size may be absent (e.g. SELL "all") --
-        # skip PredictionFill if we don't have it; strategies
-        # should then rely on post-execution balance reads.
-        prediction_fill = clob_result.to_prediction_fill()
-        if prediction_fill is not None:
-            execution_result.prediction_fill = prediction_fill
-        state.last_execution_result = execution_result
-        return execution_result
 
     async def _single_chain_execute_onchain(
         self,
@@ -10611,6 +10622,21 @@ class StrategyRunner:
             )
         return SimpleNamespace(error=error)
 
+    async def _book_final_offchain_fill(
+        self, strategy: Any, intent: Any, failed_ledger_id: str | None, terminal_result: Any
+    ) -> None:
+        """Book an off-chain venue's partial fill on an intent that finally failed, once.
+
+        Retries of the same intent re-aggregate every fill, so only this final
+        failed row carries it.
+        """
+        if not failed_ledger_id or terminal_result is None:
+            return
+        from almanak.framework.execution.offchain_venue import has_offchain_fill
+
+        if has_offchain_fill(terminal_result):
+            await self._write_outbox_and_fire_processor(strategy, intent, failed_ledger_id)
+
     async def _single_chain_handle_failure(self, state: SingleChainExecutionState) -> IterationResult:
         """Finalize the state-machine-FAILED path: diagnostics, alert, result.
 
@@ -10692,6 +10718,7 @@ class StrategyRunner:
                 protocol=(getattr(intent, "protocol", "") or "").lower(),
             ),
         )
+        await self._book_final_offchain_fill(strategy, intent, failed_ledger_id, terminal_result)
         # VIB-4043 / PR4: emit timeline failure breadcrumb pointing at
         # the just-written ledger row (or empty when no row was written).
         self._emit_execution_timeline_event(
@@ -10824,6 +10851,13 @@ class StrategyRunner:
             return None
 
         if saved_progress.is_reconciliation_required:
+            from .offchain_recovery import offchain_metadata, recover_pending_offchain
+
+            if offchain_metadata(saved_progress) is not None:
+                # The venue's answer releases the barrier (proven non-execution)
+                # or completes the submission; until then the strategy is held.
+                return await recover_pending_offchain(self, strategy, saved_progress, start_time)
+
             from .single_chain_recovery import recover_pending_single_chain
 
             recovered = await recover_pending_single_chain(self, strategy, saved_progress, start_time)

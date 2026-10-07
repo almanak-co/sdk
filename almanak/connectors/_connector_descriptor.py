@@ -646,7 +646,7 @@ class PerpsReadDecl:
 
     ``spec`` names the connector's module-level ``PerpsReadSpec``. ``aliases``
     are perps-scoped protocol aliases resolving to this connector's canonical
-    key (e.g. the deprecated ``"pancakeswap_perps"`` -> ``aster_perps``).
+    key (e.g. ``"gmx"`` -> ``gmx_v2``).
     """
 
     spec: ImportRef
@@ -1452,6 +1452,14 @@ class Connector:
     # ``fungible_lp``, while Curve declares ``fungible_lp`` and cannot be clamped until
     # its post-condition stops reading a residual as failure.
     fungible_lp_close: FungibleLpCloseDecl | None = None
+    # ``False`` declares that the venue cannot be operated from a Safe: its
+    # account authorization accepts only EOA signatures, so a Safe-held account
+    # could never trade. Safe-mode runs refuse such a connector at startup, and
+    # permission coverage does not count its triples as hosted (Safe-path) gaps.
+    safe_supported: bool = True
+    # Venue holding the strategy's money in an account of its own (e.g. an
+    # off-chain order book's margin balance); valuation counts its equity.
+    venue_account_read: ImportRef | None = None
     prediction_read: ImportRef | None = None
     prediction_execute: ImportRef | None = None
     gateway_stub: ImportRef | None = None
@@ -1541,6 +1549,12 @@ class Connector:
         self._validate_backtest_risk()
         self._validate_metadata_amount_encoding()
         self._validate_fungible_lp()
+        if not isinstance(self.safe_supported, bool):
+            raise ValueError(f"Connector.safe_supported must be a bool, got {self.safe_supported!r}")
+        if self.venue_account_read is not None and not isinstance(self.venue_account_read, ImportRef):
+            raise ValueError(
+                f"Connector.venue_account_read must be None or an ImportRef, got {self.venue_account_read!r}"
+            )
         self._validate_receipt_parser_kwargs()
         if self.execution_evidence_keys != ():
             self._validate_non_empty_string_tuple("execution_evidence_keys", self.execution_evidence_keys)
@@ -2645,6 +2659,14 @@ class ConnectorRegistry:
     def with_prediction_read(self) -> tuple[Connector, ...]:
         """Return connectors that publish prediction-read specs."""
         return tuple(d for d in self.all() if d.prediction_read is not None)
+
+    def with_venue_account_read(self) -> tuple[Connector, ...]:
+        """Return connectors that publish venue-account reads."""
+        return tuple(d for d in self.all() if d.venue_account_read is not None)
+
+    def safe_unsupported_names(self) -> frozenset[str]:
+        """Names of connectors that declare they cannot be operated from a Safe."""
+        return frozenset(d.name for d in self.all() if not d.safe_supported)
 
     def with_prediction_execute(self) -> tuple[Connector, ...]:
         """Return connectors that publish prediction CLOB-execution specs."""

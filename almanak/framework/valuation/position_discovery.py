@@ -115,12 +115,14 @@ class PositionDiscoveryService:
     """
 
     def __init__(self, gateway_client: object | None = None) -> None:
+        self._gateway = gateway_client
         self._lp_reader = LPPositionReader(gateway_client)
         self._lending_reader = LendingPositionReader(gateway_client)
         self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
 
     def set_gateway_client(self, gateway_client: object | None) -> None:
         """Update the gateway client (called when connection is established)."""
+        self._gateway = gateway_client
         self._lp_reader = LPPositionReader(gateway_client)
         self._lending_reader = LendingPositionReader(gateway_client)
         self._perps_reader = PerpsPositionReader.from_gateway_client(gateway_client)
@@ -149,6 +151,8 @@ class PositionDiscoveryService:
         # Discover perpetual positions (GMX V2)
         if _has_perps_protocol(config.protocols):
             self._discover_perps(config, result)
+
+        self._discover_venue_accounts(config, result)
 
         if result.has_positions:
             logger.info(
@@ -374,6 +378,86 @@ class PositionDiscoveryService:
                     )
                 )
 
+    def _discover_venue_accounts(self, config: DiscoveryConfig, result: DiscoveryResult) -> None:
+        """Read venue-held accounts (margin at an off-chain venue) as one row each.
+
+        The row's value is the account equity, which already contains the
+        unrealized PnL of every position in it, so the venue's positions are
+        listed in ``details`` and never valued separately. A successful read makes
+        discovery authoritative for the venue (strategy perp stubs are dropped).
+        """
+        from almanak.connectors._strategy_base.venue_account_read_base import VENUE_ACCOUNT_VALUATION_SOURCE
+        from almanak.connectors._strategy_base.venue_account_read_registry import VenueAccountReadRegistry
+
+        protocols = VenueAccountReadRegistry.protocols_to_read(config.protocols, config.chain)
+        if not protocols:
+            return
+        if self._gateway is None:
+            result.errors.append(f"Venue-account read skipped for {protocols}: no gateway client")
+            return
+        for protocol in protocols:
+            read = VenueAccountReadRegistry.read(
+                protocol, gateway_client=self._gateway, chain=config.chain, wallet_address=config.wallet_address
+            )
+            if not read.ok or read.equity_usd is None:
+                result.errors.append(f"Venue-account read failed for {protocol} on {config.chain}: {read.error}")
+                logger.warning("Venue-account read failed for %s on %s: %s", protocol, config.chain, read.error)
+                # The venue may hold strategy money we could not read: stand in an
+                # unpriceable row so the snapshot is UNAVAILABLE (excluded from PnL
+                # and drawdown) instead of silently understating NAV.
+                result.positions.append(
+                    PositionInfo(
+                        position_type=PositionType.PERP,
+                        position_id=f"{protocol}:account",
+                        chain=config.chain,
+                        protocol=protocol,
+                        value_usd=Decimal("0"),
+                        details={
+                            "market": f"{protocol}:account",
+                            "is_long": True,
+                            "wallet_address": config.wallet_address,
+                            "venue_account_unread": True,
+                            "unavailable_reason": read.error or "venue-account read failed",
+                        },
+                    )
+                )
+                continue
+            result.perp_protocols_ok.add(protocol)
+            if read.is_empty:
+                continue
+            result.positions.append(
+                PositionInfo(
+                    position_type=PositionType.PERP,
+                    position_id=f"{protocol}:account",
+                    chain=config.chain,
+                    protocol=protocol,
+                    value_usd=read.equity_usd,
+                    details={
+                        "market": f"{protocol}:account",
+                        "is_long": True,
+                        "wallet_address": config.wallet_address,
+                        "valuation_source": VENUE_ACCOUNT_VALUATION_SOURCE,
+                        "cash_usd": None if read.cash_usd is None else str(read.cash_usd),
+                        "unrealized_pnl_usd": None if read.unrealized_pnl_usd is None else str(read.unrealized_pnl_usd),
+                        **read.details,
+                        "open_positions": [
+                            {
+                                "market": p.market,
+                                "side": "long" if p.is_long else "short",
+                                "size": str(p.size),
+                                "entry_price": None if p.entry_price is None else str(p.entry_price),
+                                "mark_price": None if p.mark_price is None else str(p.mark_price),
+                                "unrealized_pnl_usd": None
+                                if p.unrealized_pnl_usd is None
+                                else str(p.unrealized_pnl_usd),
+                                "leverage": None if p.leverage is None else str(p.leverage),
+                            }
+                            for p in read.positions
+                        ],
+                    },
+                )
+            )
+
     @staticmethod
     def _resolve_token_addresses(symbols: list[str], chain: str) -> dict[str, str]:
         """Resolve token symbols to addresses for on-chain queries.
@@ -462,7 +546,7 @@ def _perps_protocols_to_scan(protocols: list[str]) -> list[str]:
     HyperCore position undiscovered and unvalued (VIB-5768 / VIB-5576).
 
     ``PerpsReadRegistry.canonical`` resolves aliases (e.g. ``"gmx"`` ->
-    ``"gmx_v2"``, ``"pancakeswap_perps"`` -> ``"aster_perps"``), so the historical
+    ``"gmx_v2"``), so the historical
     short protocol names a strategy may declare still map onto their canonical
     reader — no ``"gmx"`` special-case needed.
     """

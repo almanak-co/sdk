@@ -5,7 +5,7 @@ coverage for: ``_init_single_chain_state``, ``_single_chain_state_machine_loop``
 ``_single_chain_execute_step`` (non-dry-run paths),
 ``_single_chain_slippage_guard``, ``_single_chain_handle_recon_incident``,
 ``_single_chain_handle_success``, ``_single_chain_handle_failure``,
-``_single_chain_execute_clob``, ``_single_chain_execute_onchain``, plus the
+``offchain_execution_result``, ``_single_chain_execute_onchain``, plus the
 static helper ``_build_single_chain_price_oracle``.
 """
 
@@ -790,41 +790,29 @@ class TestSingleChainHandleFailure:
 
 
 # =============================================================================
-# _single_chain_execute_clob
+# offchain_execution_result (the off-chain handler result conversion)
 # =============================================================================
 
 
-class TestSingleChainExecuteClob:
-    @pytest.mark.asyncio
-    async def test_clob_success_populates_execution_result(self) -> None:
-        runner = _make_runner()
-        strategy = _make_strategy()
-        state = _make_state(strategy)
-        clob_handler = MagicMock()
+class TestOffchainExecutionResult:
+    def test_success_populates_execution_result(self) -> None:
+        from almanak.framework.execution.offchain_venue import offchain_execution_result
+
         clob_result = SimpleNamespace(
             success=True,
             error=None,
             order_id="order-123",
             status=SimpleNamespace(value="FILLED"),
-            to_prediction_fill=lambda: None,  # no fill detail
+            to_prediction_fill=lambda: None,
         )
-        clob_handler.execute = AsyncMock(return_value=clob_result)
-        state.clob_handler = clob_handler
-
-        step_result = SimpleNamespace(action_bundle=SimpleNamespace(transactions=[]))
-        execution_result = await runner._single_chain_execute_clob(state, step_result)
-
+        execution_result = offchain_execution_result(clob_result)
         assert execution_result.success is True
         assert execution_result.extracted_data["clob_status"] == "FILLED"
         assert execution_result.extracted_data["order_id"] == "order-123"
-        assert state.last_execution_result is execution_result
 
-    @pytest.mark.asyncio
-    async def test_clob_with_prediction_fill_attaches_it(self) -> None:
-        runner = _make_runner()
-        strategy = _make_strategy()
-        state = _make_state(strategy)
-        clob_handler = MagicMock()
+    def test_prediction_fill_is_attached(self) -> None:
+        from almanak.framework.execution.offchain_venue import offchain_execution_result
+
         prediction_fill = MagicMock()
         clob_result = SimpleNamespace(
             success=True,
@@ -833,20 +821,11 @@ class TestSingleChainExecuteClob:
             status=SimpleNamespace(value="FILLED"),
             to_prediction_fill=lambda: prediction_fill,
         )
-        clob_handler.execute = AsyncMock(return_value=clob_result)
-        state.clob_handler = clob_handler
+        assert offchain_execution_result(clob_result).prediction_fill is prediction_fill
 
-        execution_result = await runner._single_chain_execute_clob(
-            state, SimpleNamespace(action_bundle=SimpleNamespace())
-        )
-        assert execution_result.prediction_fill is prediction_fill
+    def test_failure_has_no_order_id_in_extracted_data(self) -> None:
+        from almanak.framework.execution.offchain_venue import offchain_execution_result
 
-    @pytest.mark.asyncio
-    async def test_clob_failure_has_no_order_id_in_extracted_data(self) -> None:
-        runner = _make_runner()
-        strategy = _make_strategy()
-        state = _make_state(strategy)
-        clob_handler = MagicMock()
         clob_result = SimpleNamespace(
             success=False,
             error="rejected",
@@ -854,12 +833,7 @@ class TestSingleChainExecuteClob:
             status=SimpleNamespace(value="REJECTED"),
             to_prediction_fill=lambda: None,
         )
-        clob_handler.execute = AsyncMock(return_value=clob_result)
-        state.clob_handler = clob_handler
-
-        execution_result = await runner._single_chain_execute_clob(
-            state, SimpleNamespace(action_bundle=SimpleNamespace())
-        )
+        execution_result = offchain_execution_result(clob_result)
         assert execution_result.success is False
         assert "order_id" not in execution_result.extracted_data
         assert execution_result.extracted_data["clob_status"] == "REJECTED"

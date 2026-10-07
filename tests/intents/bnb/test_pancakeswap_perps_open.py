@@ -73,7 +73,7 @@ class TestPancakeSwapPerpsOpenIntent:
         funded_wallet: str,
         orchestrator: ExecutionOrchestrator,
         perps_price_oracle: dict[str, Decimal],
-        require_tradeable_aster_perp_market,
+        require_tradeable_pancakeswap_perp_market,
     ):
         """Open a long BTC/USD position with 0.3 BNB native margin.
 
@@ -84,7 +84,7 @@ class TestPancakeSwapPerpsOpenIntent:
           4. Balance delta: BNB decreased by exactly margin + gas; pending trade
              exists on-chain
         """
-        from almanak.connectors.aster_perps.addresses import PANCAKESWAP_PERPS
+        from almanak.connectors.pancakeswap_perps.addresses import PANCAKESWAP_PERPS
 
         router = PANCAKESWAP_PERPS[CHAIN_NAME]["router"]
         # ApolloX enforces a minimum position notional (TradingCheckerFacet:

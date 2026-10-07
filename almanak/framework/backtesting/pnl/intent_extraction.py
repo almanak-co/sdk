@@ -36,6 +36,7 @@ _CLASS_NAME_INTENT_TYPES: tuple[tuple[tuple[str, ...], IntentType], ...] = (
     (("PERP_CLOSE", "PERPCLOSE"), IntentType.PERP_CLOSE),
     (("PERP_CANCEL_ORDER", "PERPCANCELORDER"), IntentType.PERP_CANCEL_ORDER),
     (("PERP_WITHDRAW", "PERPWITHDRAW"), IntentType.PERP_WITHDRAW),
+    (("PERP_DEPOSIT", "PERPDEPOSIT"), IntentType.PERP_DEPOSIT),
     (("SUPPLY",), IntentType.SUPPLY),
     (("WITHDRAW",), IntentType.WITHDRAW),
     (("BORROW",), IntentType.BORROW),

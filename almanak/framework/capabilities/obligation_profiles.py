@@ -69,6 +69,7 @@ _INTENT_SEMANTICS: dict[IntentType, IntentSemantics] = {
     IntentType.PERP_CLOSE: IntentSemantics.POSITION_DECREASE_OR_CLOSE,
     IntentType.PERP_CANCEL_ORDER: IntentSemantics.NON_POSITION_RECOVERY,
     IntentType.PERP_WITHDRAW: IntentSemantics.NON_POSITION_RECOVERY,
+    IntentType.PERP_DEPOSIT: IntentSemantics.ATOMIC_EXECUTION,
     IntentType.BRIDGE: IntentSemantics.ATOMIC_EXECUTION,
     IntentType.ENSURE_BALANCE: IntentSemantics.NO_OPERATION,
     IntentType.FLASH_LOAN: IntentSemantics.ATOMIC_EXECUTION,

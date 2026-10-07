@@ -1,14 +1,14 @@
 """Shared Aster perp implementation (foundation core).
 
-Single source of truth for the Aster Diamond perp venue (Aster / ApolloX on
-BSC), consumed by the thin ``aster_perps`` and ``pancakeswap_perps`` connector
-manifests. Underscore-prefixed so it is never discovered as a connector and is
-treated as foundation by the connector-isolation guards: deleting either leaf
-connector must not strand this implementation.
+Single source of truth for the legacy Aster Diamond perp venue (Aster / ApolloX
+on BSC, reduce-only since ~June 2026), consumed by the ``pancakeswap_perps``
+connector manifest (broker id = 2). Underscore-prefixed so it is never
+discovered as a connector and is treated as foundation by the
+connector-isolation guards. Aster's live venue, Aster Pro, is the separate
+off-chain ``aster_perps`` connector and does not use this package.
 
-PancakeSwap Perps runs on top of Aster as broker id = 2; raw Aster use is
-broker id = 0. The package-level lazy exports below mirror the public API both
-leaves expose; the actual implementation lives in the sibling modules
+The package-level lazy exports below mirror the public API ``pancakeswap_perps``
+exposes; the actual implementation lives in the sibling modules
 (``sdk``, ``adapter``, ``receipt_parser``, ``compiler``, ``perps_read``,
 ``addresses``, ``gateway``). Lazy access keeps importing a submodule (e.g.
 ``addresses`` during descriptor discovery) free of registration side effects.

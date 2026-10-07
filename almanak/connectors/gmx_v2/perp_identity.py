@@ -25,8 +25,8 @@ Verified against the mainnet run of record: with the observed wallet, the
 Arbitrum ETH/USD market, USDC collateral and ``isLong=true`` this reproduces
 ``0xbf58e0307a44a17ea51e30850651f5269c9fc0f306990576c015e9a88ac9bafa``
 byte-identically; ``isLong=false`` yields a different key. **Do not assume other
-venues have such a formula** — ``aster_perps`` / ``pancakeswap_perps`` assign a
-``tradeHash`` per open call with no pure function to it at all.
+venues have such a formula** — ``pancakeswap_perps`` (the legacy Aster Diamond)
+assigns a ``tradeHash`` per open call with no pure function to it at all.
 
 The ``sem`` token is where the symbol-vs-address polysemy is resolved, on BOTH
 axes and chain-scoped. The MARKET axis is address-first: address-shaped values

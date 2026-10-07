@@ -1204,6 +1204,7 @@ from .lending_intents import (  # noqa: E402, F401
 from .perp_intents import (  # noqa: E402, F401
     PerpCancelIntent,
     PerpCloseIntent,
+    PerpDepositIntent,
     PerpOpenIntent,
     PerpWithdrawIntent,
 )
@@ -1232,6 +1233,7 @@ type AnyIntent = (
     | PerpCloseIntent
     | PerpCancelIntent
     | PerpWithdrawIntent
+    | PerpDepositIntent
     | FlashLoanIntent
     | StakeIntent
     | UnstakeIntent
@@ -2337,6 +2339,46 @@ class Intent:
         return PerpWithdrawIntent(**fields)
 
     @staticmethod
+    def perp_deposit(
+        amount: Decimal | Literal["all"],
+        asset: str,
+        protocol: str | None = None,
+        chain: str | None = None,
+        registry_handle: str | None = None,
+    ) -> PerpDepositIntent:
+        """Create a perp-venue deposit intent (wallet → venue account).
+
+        A cash movement, not a trade: it moves wallet tokens into the venue's
+        margin account. No position, no PnL; the account is valued through the
+        venue's account read, so NAV is unchanged by the move.
+
+        Args:
+            amount: Amount to deposit in human token terms, or ``"all"`` to chain
+                the previous step's output.
+            asset: Margin token symbol or address (e.g. ``"USDT"`` for Aster Pro).
+            protocol: Perp venue receiving the funds. ``None`` resolves to the venue
+                that operates on the strategy's chain.
+            chain: Chain to deposit from (defaults to strategy's primary chain).
+
+        Returns:
+            PerpDepositIntent: The created perp deposit intent.
+
+        Example:
+            ```python
+            intent = Intent.perp_deposit(amount=Decimal("5"), asset="USDT", protocol="aster_perps")
+            ```
+        """
+        fields: dict[str, Any] = {
+            "amount": amount,
+            "asset": asset,
+            "chain": chain,
+            "registry_handle": registry_handle,
+        }
+        if protocol is not None:
+            fields["protocol"] = protocol
+        return PerpDepositIntent(**fields)
+
+    @staticmethod
     def bridge(
         token: str,
         amount: Decimal | Literal["all"],
@@ -3177,6 +3219,7 @@ class Intent:
             IntentType.PERP_CLOSE.value: PerpCloseIntent,
             IntentType.PERP_CANCEL_ORDER.value: PerpCancelIntent,
             IntentType.PERP_WITHDRAW.value: PerpWithdrawIntent,
+            IntentType.PERP_DEPOSIT.value: PerpDepositIntent,
             IntentType.FLASH_LOAN.value: FlashLoanIntent,
             IntentType.STAKE.value: StakeIntent,
             IntentType.UNSTAKE.value: UnstakeIntent,

@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import pytest
 
-from almanak.connectors.aster_perps.receipt_parser import (
+from almanak.connectors._aster_perps_core.receipt_parser import (
     AsterPerpsReceiptParser,
 )
-from almanak.connectors.aster_perps.sdk import (
+from almanak.connectors._aster_perps_core.sdk import (
     EVENT_MARKET_PENDING_TRADE,
 )
 

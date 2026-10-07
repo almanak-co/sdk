@@ -1,7 +1,6 @@
-"""AsterPerpsAdapter / AsterPerpsConfig validation (VIB-3045).
+"""Legacy Aster Diamond adapter / config validation (PancakeSwap Perps venue).
 
-Locks the "broker_id is required" invariant that replaced the old
-``PancakeSwapPerpsConfig.broker_id = 2`` default.
+Locks the "broker_id is required" invariant on the shared core adapter.
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ from decimal import Decimal
 
 import pytest
 
-from almanak.connectors.aster_perps import (
+from almanak.connectors._aster_perps_core import (
     ASTER_BROKER_RAW,
     PCS_BROKER_ID,
     AsterPerpsAdapter,

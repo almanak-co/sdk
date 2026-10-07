@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from eth_abi import decode as abi_decode
 
-from almanak.connectors.aster_perps.sdk import (
+from almanak.connectors._aster_perps_core.sdk import (
     NATIVE_BNB_ADDRESS,
     SELECTOR_OPEN_MARKET_TRADE,
     SELECTOR_OPEN_MARKET_TRADE_BNB,

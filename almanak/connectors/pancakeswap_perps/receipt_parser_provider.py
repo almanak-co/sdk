@@ -1,17 +1,7 @@
-"""Strategy-side receipt-parser connector for PancakeSwap Perps shim (VIB-4854 / W2).
+"""Strategy-side receipt-parser connector for PancakeSwap Perps.
 
-PancakeSwap Perps is a legacy alias for Aster Perps — the perp venue
-re-branded after the on-chain canonical name changed. The shim module
-``almanak/connectors/pancakeswap_perps/receipt_parser.py`` re-exports
-the Aster parser class under the legacy ``PancakeSwapPerpsReceiptParser``
-name; both ``aster_perps`` and ``pancakeswap_perps`` callers resolve
-to the same underlying parser.
-
-The shim keeps a separate connector (and a separate registry key) so
-the legacy intent payloads and historical position rows that record
-``protocol="pancakeswap_perps"`` continue to dispatch — and so the
-``test_receipt_parser_registry_completeness`` guard ("every
-receipt_parser.py file has a registered class") still holds.
+``almanak/connectors/pancakeswap_perps/receipt_parser.py`` re-exports the
+legacy Aster Diamond parser under the ``PancakeSwapPerpsReceiptParser`` name.
 """
 
 from __future__ import annotations

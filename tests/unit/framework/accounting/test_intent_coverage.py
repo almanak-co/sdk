@@ -211,6 +211,10 @@ def test_no_intent_type_is_silently_unhandled() -> None:
         # credit, net of the ~$1 HyperCore fee, is captured by the balance snapshot
         # + a ledger row). Deliberately NO_ACCOUNTING; see taxonomy.py PERP_WITHDRAW.
         "PERP_WITHDRAW",
+        # A perp-venue deposit is the mirror cash movement (wallet → venue account):
+        # the ledger carries the wallet debit and the venue-account read values the
+        # credit. Deliberately NO_ACCOUNTING; see taxonomy.py PERP_DEPOSIT.
+        "PERP_DEPOSIT",
         # Not yet implemented (Phase 2+)
         "STAKE",
         "UNSTAKE",
