@@ -120,7 +120,7 @@ logger = logging.getLogger(__name__)
 # per-lifecycle ``net_pnl_usd`` / ``collected_fees_usd``.  v3 bumped the
 # formula so ``attribute_perp`` persists ``funding_fee_usd`` raw value in the
 # attribution dict to survive ``recompute_attribution()`` cycles (VIB-3519).
-CURRENT_VERSION = 4
+CURRENT_VERSION = 5
 
 
 def select_open_for_lp_close(
@@ -204,7 +204,7 @@ def _protocol_fee_or_none(event: dict) -> Decimal | None:
     if raw is None or raw == "":
         return None
     try:
-        return Decimal(str(raw))
+        return _optional_finite_decimal(raw)
     except (InvalidOperation, ValueError, TypeError):
         logger.warning("PnL attribution: malformed protocol_fees_usd=%r, treating as unknown", raw)
         return None
@@ -819,7 +819,7 @@ def attribute_lp(
         "fees_token1": str(fees_token1),
         "fee_pnl_usd": None if fee_pnl is None else str(fee_pnl),
         "impermanent_loss_usd": None if il is None else str(il),
-        "price_pnl_usd": str(price_pnl),
+        "price_pnl_usd": None if price_pnl is None else str(price_pnl),
         "gas_usd": str(total_gas),
         "net_pnl_usd": str(net_pnl),
         "amount0_recovered": str(amount0_recovered),
@@ -987,10 +987,32 @@ def _funding_fee_from_close(close_event: dict) -> Decimal | None:
     if val is None:
         return None
     try:
-        return Decimal(str(val))
+        return _optional_finite_decimal(val)
     except (InvalidOperation, ValueError, TypeError):
         logger.warning("PnL attribution: malformed funding_fee_usd=%r in attribution_json, treating as unknown", val)
         return None
+
+
+def _optional_finite_decimal(value: Any) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        result = Decimal(str(value))
+        return result if result.is_finite() else None
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _perp_economics(event: dict) -> dict:
+    raw = event.get("attribution_json")
+    if isinstance(raw, str):
+        if len(raw) > 1_048_576:
+            return {}
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+    return raw if isinstance(raw, dict) else {}
 
 
 def attribute_perp(open_event: dict, close_event: dict) -> dict:
@@ -1012,20 +1034,26 @@ def attribute_perp(open_event: dict, close_event: dict) -> dict:
         means a measured zero (e.g. position held for <1 funding period).
         ``net_pnl_usd`` includes ``funding_pnl_usd`` when known.
     """
-    entry_price = _dec(open_event.get("entry_price") or close_event.get("entry_price"))
-    mark_price = _dec(close_event.get("mark_price"))
-    unrealized_pnl = _dec(close_event.get("unrealized_pnl"))
-    leverage = _dec(close_event.get("leverage") or open_event.get("leverage"))
+    entry_price = _optional_finite_decimal(open_event.get("entry_price") or close_event.get("entry_price"))
+    mark_price = _optional_finite_decimal(close_event.get("mark_price"))
+    leverage = _optional_finite_decimal(close_event.get("leverage") or open_event.get("leverage"))
     is_long = close_event.get("is_long")
     if is_long is None:
         is_long = open_event.get("is_long")
 
-    open_gas = _dec(open_event.get("gas_usd"))
-    close_gas = _dec(close_event.get("gas_usd"))
-    total_gas = open_gas + close_gas
+    open_gas = _optional_finite_decimal(open_event.get("gas_usd"))
+    close_gas = _optional_finite_decimal(close_event.get("gas_usd"))
+    total_gas = None if open_gas is None or close_gas is None else open_gas + close_gas
 
-    # Price PnL from protocol's unrealized_pnl (already signed for direction)
-    price_pnl = unrealized_pnl
+    economics = _perp_economics(close_event)
+    realized = _optional_finite_decimal(economics.get("realized_pnl"))
+    price_pnl = realized if "realized_pnl" in economics else _optional_finite_decimal(close_event.get("unrealized_pnl"))
+    observed_exit = _optional_finite_decimal(economics.get("exit_price"))
+    if observed_exit is not None:
+        mark_price = observed_exit
+    observed_leverage = _optional_finite_decimal(economics.get("venue_leverage"))
+    if observed_leverage is not None:
+        leverage = observed_leverage
 
     # Fee PnL (VIB-3205): real protocol fees paid on open+close tx. Replaces
     # the v1 ``-gas`` proxy. None when the connector does not yet emit
@@ -1041,18 +1069,19 @@ def attribute_perp(open_event: dict, close_event: dict) -> dict:
     raw_funding = _funding_fee_from_close(close_event)
     funding_pnl: Decimal | None = None if raw_funding is None else -raw_funding
 
-    # net_pnl includes funding when known. Using (x or 0) keeps the formula
-    # consistent: None (unknown) contributes 0 to net rather than crashing.
-    net_pnl = price_pnl + (fee_pnl or Decimal("0")) + (funding_pnl or Decimal("0")) - total_gas
+    trade_pnl = None if price_pnl is None or fee_pnl is None else price_pnl + fee_pnl
+    net_pnl = (
+        None if trade_pnl is None or funding_pnl is None or total_gas is None else trade_pnl + funding_pnl - total_gas
+    )
 
     return {
         "version": CURRENT_VERSION,
         "position_type": "PERP",
-        "entry_price": str(entry_price),
-        "exit_price": str(mark_price),
-        "leverage": str(leverage),
+        "entry_price": None if entry_price is None else str(entry_price),
+        "exit_price": None if mark_price is None else str(mark_price),
+        "leverage": None if leverage is None else str(leverage),
         "is_long": is_long,
-        "price_pnl_usd": str(price_pnl),
+        "price_pnl_usd": None if price_pnl is None else str(price_pnl),
         "fee_pnl_usd": None if fee_pnl is None else str(fee_pnl),
         "funding_pnl_usd": None if funding_pnl is None else str(funding_pnl),
         # VIB-3519: persist the raw funding_fee_usd alongside funding_pnl_usd so
@@ -1061,8 +1090,11 @@ def attribute_perp(open_event: dict, close_event: dict) -> dict:
         # the computed attribution dict (which lacks funding_fee_usd), and the
         # second recompute silently drops funding_pnl_usd.
         "funding_fee_usd": None if raw_funding is None else str(raw_funding),
-        "gas_usd": str(total_gas),
-        "net_pnl_usd": str(net_pnl),
+        **({"realized_pnl": None if realized is None else str(realized)} if "realized_pnl" in economics else {}),
+        "venue_leverage": None if observed_leverage is None else str(observed_leverage),
+        "gas_usd": None if total_gas is None else str(total_gas),
+        "trade_pnl_usd": None if trade_pnl is None else str(trade_pnl),
+        "net_pnl_usd": None if net_pnl is None else str(net_pnl),
     }
 
 

@@ -1156,6 +1156,55 @@ def _apply_swap_fallback(event: PositionEvent, ctx: IntentEventContext) -> None:
         event.amount1 = str(getattr(swap, "amount_out_decimal", "") or "")
 
 
+def _stamp_perp_funding(event: PositionEvent, extracted: dict[str, Any], perp: Any) -> None:
+    # Funding fee may arrive top-level, not inside perp_data; read both.
+    raw_funding = extracted.get("funding_fee_usd")
+    if raw_funding is None and perp is not None:
+        raw_funding = getattr(perp, "funding_fee_usd", None)
+
+    # Persist it in the attribution sidecar without a schema change;
+    # missing stays unknown, never promoted to zero.
+    if raw_funding is not None and event.event_type == PositionEventType.CLOSE:
+        try:
+            existing = json.loads(event.attribution_json or "{}")
+            if not isinstance(existing, dict):
+                existing = {}
+            existing["funding_fee_usd"] = str(raw_funding)
+            event.attribution_json = json.dumps(existing)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to stamp funding_fee_usd into attribution_json", exc_info=True)
+
+
+def _stamp_perp_close_economics(event: PositionEvent, perp: Any) -> None:
+    if event.event_type == PositionEventType.CLOSE:
+        try:
+            economics = json.loads(event.attribution_json or "{}")
+        except (ValueError, TypeError):
+            economics = {}
+        if not isinstance(economics, dict):
+            economics = {}
+        for field in ("exit_price", "realized_pnl", "venue_leverage"):
+            value = getattr(perp, field, None)
+            if value is not None:
+                economics[field] = str(value)
+        event.attribution_json = json.dumps(economics)
+
+
+def _apply_perp_position_id(event: PositionEvent, ctx: IntentEventContext, perp: Any) -> None:
+    if hasattr(perp, "position_id") and perp.position_id:
+        new_pid = str(perp.position_id)
+        if event.position_id and event.position_id != new_pid:
+            logger.warning(
+                "perp.position_id=%s differs from already-set event.position_id=%s "
+                "(deployment=%s protocol=%s); perp wins. See issue #1709.",
+                new_pid,
+                event.position_id,
+                ctx.deployment_id,
+                event.protocol,
+            )
+        event.position_id = new_pid
+
+
 def _apply_perp(event: PositionEvent, ctx: IntentEventContext) -> None:
     """Phase ζ — enrich with perp_data.
 
@@ -1176,43 +1225,21 @@ def _apply_perp(event: PositionEvent, ctx: IntentEventContext) -> None:
     """
     perp = ctx.extracted.get("perp_data")
 
-    # Funding fee may arrive top-level, not inside perp_data; read both.
-    raw_funding = ctx.extracted.get("funding_fee_usd")
-    if raw_funding is None and perp is not None:
-        raw_funding = getattr(perp, "funding_fee_usd", None)
-
-    # Persist it in the attribution sidecar without a schema change;
-    # missing stays unknown, never promoted to zero.
-    if raw_funding is not None and event.event_type == PositionEventType.CLOSE:
-        try:
-            existing = json.loads(event.attribution_json or "{}")
-            if not isinstance(existing, dict):
-                existing = {}
-            existing["funding_fee_usd"] = str(raw_funding)
-            event.attribution_json = json.dumps(existing)
-        except Exception:  # noqa: BLE001
-            logger.debug("Failed to stamp funding_fee_usd into attribution_json", exc_info=True)
+    _stamp_perp_funding(event, ctx.extracted, perp)
 
     if not perp:
         return
+
+    _stamp_perp_close_economics(event, perp)
 
     event.leverage = str(getattr(perp, "leverage", "") or "")
     event.entry_price = str(getattr(perp, "entry_price", "") or "")
     event.mark_price = str(getattr(perp, "mark_price", "") or "")
     event.unrealized_pnl = str(getattr(perp, "unrealized_pnl", "") or "")
-    event.is_long = getattr(perp, "is_long", None)
-    if hasattr(perp, "position_id") and perp.position_id:
-        new_pid = str(perp.position_id)
-        if event.position_id and event.position_id != new_pid:
-            logger.warning(
-                "perp.position_id=%s differs from already-set event.position_id=%s "
-                "(deployment=%s protocol=%s); perp wins. See issue #1709.",
-                new_pid,
-                event.position_id,
-                ctx.deployment_id,
-                event.protocol,
-            )
-        event.position_id = new_pid
+    observed_side = getattr(perp, "is_long", None)
+    if isinstance(observed_side, bool):
+        event.is_long = observed_side
+    _apply_perp_position_id(event, ctx, perp)
 
 
 def _apply_collect_fees(event: PositionEvent, ctx: IntentEventContext) -> None:

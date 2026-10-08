@@ -155,7 +155,7 @@ def test_perp_open_payload_is_schema_valid_with_identity() -> None:
     assert "size_usd" not in payload  # canonical schema key only
 
     # VIB-5941 (B3): the perp payload contract bumped to primitive_version 2.
-    assert payload["primitive_version"] == 2
+    assert payload["primitive_version"] == 3
 
     # Validates against the frozen schema (with the row-protocol projection).
     validated = validate_payload("PERP_OPEN", {**payload, "protocol": "gmx_v2"})

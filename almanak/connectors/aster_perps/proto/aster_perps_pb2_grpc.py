@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from almanak.connectors.aster_perps.proto import aster_perps_pb2 as aster__perps__pb2
+from . import aster_perps_pb2 as aster__perps__pb2
 
 GRPC_GENERATED_VERSION = '1.76.0'
 GRPC_VERSION = grpc.__version__
@@ -59,6 +59,11 @@ class AsterPerpsServiceStub(object):
                 request_serializer=aster__perps__pb2.AsterGetBalancesRequest.SerializeToString,
                 response_deserializer=aster__perps__pb2.AsterBalancesResponse.FromString,
                 _registered_method=True)
+        self.GetWithdrawalPayout = channel.unary_unary(
+                '/almanak.gateway.proto.AsterPerpsService/GetWithdrawalPayout',
+                request_serializer=aster__perps__pb2.AsterWithdrawalPayoutRequest.SerializeToString,
+                response_deserializer=aster__perps__pb2.AsterWithdrawalPayoutResponse.FromString,
+                _registered_method=True)
         self.Withdraw = channel.unary_unary(
                 '/almanak.gateway.proto.AsterPerpsService/Withdraw',
                 request_serializer=aster__perps__pb2.AsterWithdrawRequest.SerializeToString,
@@ -104,6 +109,12 @@ class AsterPerpsServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def GetWithdrawalPayout(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def Withdraw(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
@@ -143,6 +154,11 @@ def add_AsterPerpsServiceServicer_to_server(servicer, server):
                     servicer.GetBalances,
                     request_deserializer=aster__perps__pb2.AsterGetBalancesRequest.FromString,
                     response_serializer=aster__perps__pb2.AsterBalancesResponse.SerializeToString,
+            ),
+            'GetWithdrawalPayout': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetWithdrawalPayout,
+                    request_deserializer=aster__perps__pb2.AsterWithdrawalPayoutRequest.FromString,
+                    response_serializer=aster__perps__pb2.AsterWithdrawalPayoutResponse.SerializeToString,
             ),
             'Withdraw': grpc.unary_unary_rpc_method_handler(
                     servicer.Withdraw,
@@ -290,6 +306,33 @@ class AsterPerpsService(object):
             '/almanak.gateway.proto.AsterPerpsService/GetBalances',
             aster__perps__pb2.AsterGetBalancesRequest.SerializeToString,
             aster__perps__pb2.AsterBalancesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetWithdrawalPayout(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/almanak.gateway.proto.AsterPerpsService/GetWithdrawalPayout',
+            aster__perps__pb2.AsterWithdrawalPayoutRequest.SerializeToString,
+            aster__perps__pb2.AsterWithdrawalPayoutResponse.FromString,
             options,
             channel_credentials,
             insecure,

@@ -186,6 +186,7 @@ class AsterOrderHandler:
             venue_data={
                 ASTER_WITHDRAW_KEY: {
                     "withdraw_id": withdraw_id,
+                    "client_request_id": request.get("client_request_id"),
                     "asset": request["asset"],
                     "amount": amount,
                     "fee": fee,

@@ -53,14 +53,8 @@ class PerpAccountingEvent:
     schema_version: int = 1
     # VIB-4166 (T6) — see ``almanak.framework.accounting.payload_schemas`` module
     # docstring for the bump policy. Class attribute so the augment chokepoint
-    # has a sane fallback when writers don't override it; the chokepoint
-    # overwrites with the canonical per-primitive value
-    # (``PRIMITIVE_VERSIONS[Primitive.PERP]``) at write time.
-    # VIB-5941 (v1→v2): kept in lock-step with ``PRIMITIVE_VERSIONS[Primitive.PERP]``
-    # so the unaugmented ``to_payload_json`` fallback (tests / debug) matches the
-    # production augment stamp — the perp payload field-set changed (size_usd→size,
-    # intent-known is_long, nullable close-size + unavailable_reason invariant).
-    primitive_version: int = 2
+    # The writer stamps the same version from the canonical primitive registry.
+    primitive_version: int = 3
 
     def __init__(
         self,
@@ -84,6 +78,9 @@ class PerpAccountingEvent:
         venue_leverage: Decimal | None = None,
         venue_margin_mode: str | None = None,
         requested_leverage: Decimal | None = None,
+        exit_price: Decimal | None = None,
+        open_fee_usd: Decimal | None = None,
+        close_fee_usd: Decimal | None = None,
     ) -> None:
         self.identity = identity
         self.event_type = event_type.value
@@ -108,6 +105,9 @@ class PerpAccountingEvent:
         self.venue_leverage = venue_leverage
         self.venue_margin_mode = venue_margin_mode
         self.requested_leverage = requested_leverage
+        self.exit_price = exit_price
+        self.open_fee_usd = open_fee_usd
+        self.close_fee_usd = close_fee_usd
 
     def to_payload_json(self) -> str:
         def _enc(v: Any) -> Any:
@@ -134,6 +134,9 @@ class PerpAccountingEvent:
                 "is_long": self.is_long,
                 "leverage": _enc(self.leverage),
                 "entry_price": _enc(self.entry_price),
+                "exit_price": _enc(self.exit_price),
+                "open_fee_usd": _enc(self.open_fee_usd),
+                "close_fee_usd": _enc(self.close_fee_usd),
                 "realized_pnl_usd": _enc(self.realized_pnl_usd),
                 "funding_paid_usd": _enc(self.funding_paid_usd),
                 # VIB-5724 — venue-observed leverage / margin mode + the intent's

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from almanak.framework.accounting.ledger_guard import landed
+from almanak.framework.accounting.venue_receipts import venue_receipt_identity
 
 _VALID_ROLES = frozenset({"APPROVAL", "ACTION", "INCIDENTAL"})
 
@@ -202,6 +203,20 @@ def _evaluate_landed_row(
             )
         ]
     extracted = _decode_extracted_data(raw_extracted)
+    if extracted is not None and "venue_receipt" in extracted:
+        identity = venue_receipt_identity(row, extracted)
+        if identity is None:
+            return 0, [
+                ReceiptSetFinding("venue_receipt_invalid", row_id, "unsupported or contradictory venue evidence")
+            ]
+        if identity in seen_hashes:
+            return 0, [
+                ReceiptSetFinding(
+                    "venue_receipt_duplicate", row_id, f"venue evidence already used by {seen_hashes[identity]}"
+                )
+            ]
+        seen_hashes[identity] = row_id
+        return 0, []
     sub_transactions = extracted.get("sub_transactions") if extracted is not None else None
     if not isinstance(sub_transactions, list) or not sub_transactions:
         return 0, [
@@ -307,6 +322,21 @@ def evaluate_landed_receipt_sets(rows: list[Any]) -> ReceiptSetEvaluation:
         sub_transactions=sub_transaction_count,
         findings=tuple(findings),
     )
+
+
+def validated_venue_row_ids(rows: list[Any]) -> frozenset[str]:
+    claims: dict[str, list[str]] = {}
+    for index, row in enumerate(rows):
+        if not landed(_optional_field(row, "success"), _optional_field(row, "error"), _optional_field(row, "tx_hash")):
+            continue
+        _, findings = _evaluate_landed_row(row, index=index, seen_hashes={})
+        if findings:
+            continue
+        extracted = _decode_extracted_data(_optional_field(row, "extracted_data_json"))
+        identity = venue_receipt_identity(row, extracted or {})
+        if identity:
+            claims.setdefault(identity, []).append(_row_id(row, index))
+    return frozenset(ids[0] for ids in claims.values() if len(ids) == 1)
 
 
 def validated_landed_receipt_hashes(rows: list[Any]) -> frozenset[str]:

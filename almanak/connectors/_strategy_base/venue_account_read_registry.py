@@ -12,7 +12,11 @@ import importlib
 import logging
 from typing import Any, ClassVar
 
-from almanak.connectors._strategy_base.venue_account_read_base import VenueAccountRead, VenueAccountReadSpec
+from almanak.connectors._strategy_base.venue_account_read_base import (
+    SettledVenueTransfer,
+    VenueAccountRead,
+    VenueAccountReadSpec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +89,30 @@ class VenueAccountReadRegistry:
         except Exception as exc:  # noqa: BLE001 — unmeasured, never a fabricated empty account
             logger.warning("venue-account read for %s failed", protocol, exc_info=True)
             return VenueAccountRead(ok=False, error=f"{type(exc).__name__}: {exc}")
+
+    @classmethod
+    def receipt_identity(cls, protocol: Any, *, row: Any, extracted: dict[str, Any]) -> str | None:
+        """Validate a persisted execution without performing any venue read."""
+        try:
+            spec = cls._load_spec(cls._normalize(protocol))
+            if spec is None or spec.validate_execution_receipt is None:
+                return None
+            return spec.validate_execution_receipt(row, extracted)
+        except Exception:  # noqa: BLE001 — unsupported or broken validators cannot attest execution
+            logger.warning("venue execution receipt validation failed", exc_info=True)
+            return None
+
+    @classmethod
+    def settled_transfers(
+        cls, protocol: str, *, gateway_client: Any, chain: str, wallet_address: str, transfers: list[dict[str, Any]]
+    ) -> tuple[SettledVenueTransfer, ...]:
+        """Read exact payout evidence; errors propagate so the scanner defers."""
+        spec = cls._load_spec(cls._normalize(protocol))
+        if spec is None or spec.read_settled_transfers is None or chain not in spec.chains:
+            return ()
+        return spec.read_settled_transfers(
+            gateway_client=gateway_client, chain=chain, wallet_address=wallet_address, transfers=transfers
+        )
 
     @classmethod
     def reset_cache(cls) -> None:

@@ -525,3 +525,76 @@ class AsterFindWithdrawalResponse(_message.Message):
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___AsterFindWithdrawalResponse: _TypeAlias = AsterFindWithdrawalResponse  # noqa: Y015
+
+@_typing.final
+class AsterWithdrawalPayoutRequest(_message.Message):
+    """Read-only confirmation of a withdrawal already recorded in the strategy ledger."""
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    WALLET_ADDRESS_FIELD_NUMBER: _builtins.int
+    WITHDRAWAL_ID_FIELD_NUMBER: _builtins.int
+    ASSET_FIELD_NUMBER: _builtins.int
+    GROSS_AMOUNT_FIELD_NUMBER: _builtins.int
+    FEE_AMOUNT_FIELD_NUMBER: _builtins.int
+    wallet_address: _builtins.str
+    withdrawal_id: _builtins.str
+    asset: _builtins.str
+    gross_amount: _builtins.str
+    fee_amount: _builtins.str
+    def __init__(
+        self,
+        *,
+        wallet_address: _builtins.str = ...,
+        withdrawal_id: _builtins.str = ...,
+        asset: _builtins.str = ...,
+        gross_amount: _builtins.str = ...,
+        fee_amount: _builtins.str = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["asset", b"asset", "fee_amount", b"fee_amount", "gross_amount", b"gross_amount", "wallet_address", b"wallet_address", "withdrawal_id", b"withdrawal_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___AsterWithdrawalPayoutRequest: _TypeAlias = AsterWithdrawalPayoutRequest  # noqa: Y015
+
+@_typing.final
+class AsterWithdrawalPayoutResponse(_message.Message):
+    DESCRIPTOR: _descriptor.Descriptor
+
+    SUCCESS_FIELD_NUMBER: _builtins.int
+    ERROR_FIELD_NUMBER: _builtins.int
+    SETTLED_FIELD_NUMBER: _builtins.int
+    WITHDRAWAL_ID_FIELD_NUMBER: _builtins.int
+    TX_HASH_FIELD_NUMBER: _builtins.int
+    LOG_INDEX_FIELD_NUMBER: _builtins.int
+    TOKEN_ADDRESS_FIELD_NUMBER: _builtins.int
+    RECEIVER_FIELD_NUMBER: _builtins.int
+    RAW_AMOUNT_FIELD_NUMBER: _builtins.int
+    BLOCK_NUMBER_FIELD_NUMBER: _builtins.int
+    success: _builtins.bool
+    error: _builtins.str
+    settled: _builtins.bool
+    withdrawal_id: _builtins.str
+    tx_hash: _builtins.str
+    log_index: _builtins.int
+    token_address: _builtins.str
+    receiver: _builtins.str
+    raw_amount: _builtins.str
+    block_number: _builtins.int
+    def __init__(
+        self,
+        *,
+        success: _builtins.bool = ...,
+        error: _builtins.str = ...,
+        settled: _builtins.bool = ...,
+        withdrawal_id: _builtins.str = ...,
+        tx_hash: _builtins.str = ...,
+        log_index: _builtins.int = ...,
+        token_address: _builtins.str = ...,
+        receiver: _builtins.str = ...,
+        raw_amount: _builtins.str = ...,
+        block_number: _builtins.int = ...,
+    ) -> None: ...
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["block_number", b"block_number", "error", b"error", "log_index", b"log_index", "raw_amount", b"raw_amount", "receiver", b"receiver", "settled", b"settled", "success", b"success", "token_address", b"token_address", "tx_hash", b"tx_hash", "withdrawal_id", b"withdrawal_id"]  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+
+Global___AsterWithdrawalPayoutResponse: _TypeAlias = AsterWithdrawalPayoutResponse  # noqa: Y015

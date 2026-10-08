@@ -131,6 +131,24 @@ class GatewayAsterPerpsClient:
             for p in response.positions
         ]
 
+    def get_withdrawal_payout(self, *, wallet_address: str, transfer: dict[str, Any]) -> Any:
+        try:
+            response = self._stub().GetWithdrawalPayout(
+                aster_perps_pb2.AsterWithdrawalPayoutRequest(
+                    wallet_address=wallet_address,
+                    withdrawal_id=transfer["transfer_id"],
+                    asset=transfer["asset"],
+                    gross_amount=transfer["gross_amount"],
+                    fee_amount=transfer["fee_amount"],
+                ),
+                timeout=self._timeout,
+            )
+        except grpc.RpcError as exc:
+            raise AsterGatewayError(f"GetWithdrawalPayout RPC failed: {exc.details()}") from exc
+        if not response.success:
+            raise AsterGatewayError(f"GetWithdrawalPayout failed: {response.error}")
+        return response
+
     def get_balances(self, *, wallet_address: str) -> list[AsterBalance]:
         return self.get_account(wallet_address=wallet_address).balances
 

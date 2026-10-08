@@ -156,6 +156,71 @@ class TestEmptyIsNotZero:
         assert Decimal(decomp["Σ_perp_trading_fee_usd"]) == Decimal("0")
         assert decomp["Σ_perp_trading_fee_unmeasured_count"] == "1"
 
+    @pytest.mark.parametrize("settled", [False, True])
+    def test_v3_full_close_without_size_does_not_require_a_notional_measurement(self, tmp_path, settled):
+        close = _close_payload(realized_pnl_usd="0")
+        close.update(
+            primitive_version=3,
+            size=None,
+            close_fee_usd="0",
+            confidence="ESTIMATED",
+            unavailable_reason="full-close size unmeasured",
+        )
+        db = tmp_path / "g6.sqlite"
+        settlement = (
+            _settlement_payload(realized_pnl_usd="0", position_fee_usd="0", keeper_execution_fee_usd="0")
+            if settled
+            else None
+        )
+        _build_minimal_perp_db(db, settlement, close)
+        report = run_against_sqlite(db, primitive="perp")
+        cell = next(c for c in report.cells if c.cell_id == "G6")
+        assert cell.status == "PASS", cell.diagnostic
+        assert report.g6_decomposition["Σ_perp_notional_null_count"] == ("0" if settled else "1")
+        assert report.g6_decomposition["ε_scaling_base_usd"] == ("2000" if settled else "0")
+        with sqlite3.connect(db) as conn:
+            persisted = json.loads(
+                conn.execute("SELECT payload_json FROM accounting_events WHERE id = 'ae-close'").fetchone()[0]
+            )
+        assert persisted["size"] is None
+
+    @pytest.mark.parametrize("state", [None, "EXECUTED", "CANCELLED", "FROZEN"])
+    @pytest.mark.parametrize("event_type", ["PERP_OPEN", "PERP_CLOSE"])
+    def test_v3_keeper_submission_does_not_require_inline_fees(self, tmp_path, state, event_type):
+        close = _close_payload(realized_pnl_usd="0")
+        close.update(primitive_version=3, close_fee_usd=None)
+        if event_type == "PERP_OPEN":
+            close = {
+                key: value
+                for key, value in close.items()
+                if key
+                not in {"exit_price", "close_fee_usd", "realized_pnl_usd", "funding_paid_usd", "funding_received_usd"}
+            }
+            close.update(event_type=event_type, entry_price="2625", open_fee_usd=None)
+        settlement = (
+            None
+            if state is None
+            else _settlement_payload(
+                state=state,
+                realized_pnl_usd="0",
+                position_fee_usd="0",
+                borrowing_fee_usd="0",
+                keeper_execution_fee_usd="0",
+            )
+        )
+        if settlement is not None:
+            settlement["is_open"] = event_type == "PERP_OPEN"
+        db = tmp_path / "g6.sqlite"
+        _build_minimal_perp_db(db, settlement, close)
+        if event_type == "PERP_OPEN":
+            with sqlite3.connect(db) as conn:
+                conn.execute("UPDATE transaction_ledger SET intent_type = ?", (event_type,))
+                conn.execute("UPDATE accounting_events SET event_type = ? WHERE id = 'ae-close'", (event_type,))
+        report = run_against_sqlite(db, primitive="perp")
+        cell = next(c for c in report.cells if c.cell_id == "G6")
+        assert cell.status == "PASS", cell.diagnostic
+        assert report.g6_decomposition["Σ_perp_execution_fee_null_count"] == "0"
+
 
 # ─── synthetic DB builder ────────────────────────────────────────────────────
 
@@ -306,7 +371,7 @@ def _build_minimal_perp_db(db_path: Path, settlement_payload: dict | None, close
                     "pk",
                     ledger_id,
                     "0xt",
-                    "HIGH",
+                    payload["confidence"],
                     json.dumps(payload),
                     1,
                 ),
@@ -320,7 +385,32 @@ def _build_minimal_perp_db(db_path: Path, settlement_payload: dict | None, close
                 " available_cash_usd, deployed_capital_usd, value_confidence, positions_json,"
                 " token_prices_json, wallet_balances_json, chain, created_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (dep, "c1", "paper", ts, i, total, "0", "0", "HIGH", "[]", "{}", "[]", "arbitrum", ts),
+                (
+                    dep,
+                    "c1",
+                    "paper",
+                    ts,
+                    i,
+                    total,
+                    "0",
+                    "0",
+                    "HIGH",
+                    json.dumps(
+                        {
+                            "positions": [],
+                            "metadata": {
+                                "wallet_scope": {
+                                    "schema_version": 1,
+                                    "chain_wallets": {"arbitrum": "0x" + "11" * 20},
+                                }
+                            },
+                        }
+                    ),
+                    "{}",
+                    "[]",
+                    "arbitrum",
+                    ts,
+                ),
             )
         conn.execute(
             "INSERT INTO portfolio_metrics VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",

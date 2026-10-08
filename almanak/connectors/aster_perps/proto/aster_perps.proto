@@ -12,6 +12,7 @@ service AsterPerpsService {
   rpc GetOrder(AsterGetOrderRequest) returns (AsterOrderResponse);
   rpc GetPositions(AsterGetPositionsRequest) returns (AsterPositionsResponse);
   rpc GetBalances(AsterGetBalancesRequest) returns (AsterBalancesResponse);
+  rpc GetWithdrawalPayout(AsterWithdrawalPayoutRequest) returns (AsterWithdrawalPayoutResponse);
   rpc Withdraw(AsterWithdrawRequest) returns (AsterWithdrawResponse);
   rpc FindWithdrawal(AsterFindWithdrawalRequest) returns (AsterFindWithdrawalResponse);
 }
@@ -150,4 +151,25 @@ message AsterFindWithdrawalResponse {
   string withdraw_id = 5;
   string amount = 6;            // gross amount as recorded by the venue
   string fee = 7;               // current venue fee for the chain
+}
+
+// Read-only confirmation of a withdrawal already recorded in the strategy ledger.
+message AsterWithdrawalPayoutRequest {
+  string wallet_address = 1;
+  string withdrawal_id = 2;
+  string asset = 3;
+  string gross_amount = 4;
+  string fee_amount = 5;
+}
+message AsterWithdrawalPayoutResponse {
+  bool success = 1;
+  string error = 2;
+  bool settled = 3;
+  string withdrawal_id = 4;
+  string tx_hash = 5;
+  uint32 log_index = 6;
+  string token_address = 7;
+  string receiver = 8;
+  string raw_amount = 9;
+  uint64 block_number = 10;
 }

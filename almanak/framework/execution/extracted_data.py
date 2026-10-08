@@ -595,18 +595,20 @@ class PerpData:
     venue_leverage: Decimal | None = None
     venue_margin_mode: str | None = None
     leverage_requested: Decimal | None = None
+    is_long: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "position_id": str(self.position_id) if self.position_id else None,
-            "size_delta": str(self.size_delta) if self.size_delta else None,
-            "collateral": str(self.collateral) if self.collateral else None,
-            "entry_price": str(self.entry_price) if self.entry_price else None,
-            "exit_price": str(self.exit_price) if self.exit_price else None,
-            "leverage": str(self.leverage) if self.leverage else None,
-            "realized_pnl": str(self.realized_pnl) if self.realized_pnl else None,
-            "fees_paid": str(self.fees_paid) if self.fees_paid else None,
+            "is_long": self.is_long,
+            "size_delta": str(self.size_delta) if self.size_delta is not None else None,
+            "collateral": str(self.collateral) if self.collateral is not None else None,
+            "entry_price": str(self.entry_price) if self.entry_price is not None else None,
+            "exit_price": str(self.exit_price) if self.exit_price is not None else None,
+            "leverage": str(self.leverage) if self.leverage is not None else None,
+            "realized_pnl": str(self.realized_pnl) if self.realized_pnl is not None else None,
+            "fees_paid": str(self.fees_paid) if self.fees_paid is not None else None,
             "funding_fee_usd": str(self.funding_fee_usd) if self.funding_fee_usd is not None else None,
             # Empty≠Zero: serialize measured values (including a measured 0) as-is;
             # only an unmeasured (None) venue read serializes to null.

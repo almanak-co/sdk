@@ -692,6 +692,43 @@ def test_hook_books_the_measured_fill_size_not_the_request() -> None:
     assert result.extracted_data["perp_data"].size_delta == Decimal("5.455")
 
 
+@pytest.mark.parametrize("scenario", ["unique", "ambiguous", "unreadable"])
+def test_hook_records_observed_leverage_without_substituting_the_request(monkeypatch, scenario) -> None:
+    from almanak.connectors.aster_perps.gateway_client import AsterGatewayError
+
+    def positions(**kwargs):
+        if scenario == "unreadable":
+            raise AsterGatewayError("position read unavailable")
+        observed = SimpleNamespace(symbol="ETHUSDT", position_amt=Decimal("0.002"), leverage=Decimal(3))
+        opposite = SimpleNamespace(symbol="ETHUSDT", position_amt=Decimal("-0.002"), leverage=Decimal(7))
+        return [observed, observed] if scenario == "ambiguous" else [observed, opposite]
+
+    monkeypatch.setattr(
+        "almanak.connectors.aster_perps.gateway_client.GatewayAsterPerpsClient",
+        lambda gateway: SimpleNamespace(get_positions=positions),
+    )
+    result = _result({"symbol": "ETHUSDT", "reduce_only": False, "is_long": True, "leverage_requested": 5})
+    AsterPerpsRunnerHookConnector().enrich_result(result, gateway_client=object(), chain="bsc")
+    perp = result.extracted_data["perp_data"]
+    assert perp.leverage_requested == Decimal(5)
+    assert perp.leverage == (Decimal(3) if scenario == "unique" else None)
+    assert perp.venue_leverage == perp.leverage
+
+
+def test_hook_keeps_measured_zero_fee_when_result_is_frozen() -> None:
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class Result:
+        extracted_data: dict
+        protocol_fees: None = None
+
+    result = Result({"aster_order": {"reduce_only": True, "fee_asset": "USDT", "fee": "0"}})
+    AsterPerpsRunnerHookConnector().enrich_result(result, gateway_client=None, chain="bsc")
+    assert result.protocol_fees is None
+    assert result.extracted_data["protocol_fees"].perp_fee_usd == Decimal(0)
+
+
 def test_hook_books_exit_and_realized_pnl_on_close() -> None:
     result = _result(
         {
@@ -1390,3 +1427,19 @@ async def test_account_scoped_calls_without_a_wallet_are_refused(call: Any) -> N
     response = await call(_servicer(client))
     assert not response.success and "wallet_address is required" in response.error
     assert not _sent(client) and not _placed(client)
+
+
+@pytest.mark.parametrize("is_long", [True, False])
+@pytest.mark.parametrize("flat_only", [True, False])
+def test_hook_excludes_flat_positions_from_observed_leverage(monkeypatch, is_long, flat_only) -> None:
+    flat = SimpleNamespace(symbol="ETHUSDT", position_amt=Decimal(0), leverage=Decimal(9))
+    active = SimpleNamespace(
+        symbol="ETHUSDT", position_amt=Decimal("0.002") if is_long else Decimal("-0.002"), leverage=Decimal(3)
+    )
+    monkeypatch.setattr(
+        "almanak.connectors.aster_perps.gateway_client.GatewayAsterPerpsClient",
+        lambda gateway: SimpleNamespace(get_positions=lambda **kwargs: [flat] if flat_only else [flat, active]),
+    )
+    result = _result({"symbol": "ETHUSDT", "reduce_only": False, "is_long": is_long, "leverage_requested": 5})
+    AsterPerpsRunnerHookConnector().enrich_result(result, gateway_client=object(), chain="bsc")
+    assert result.extracted_data["perp_data"].venue_leverage == (None if flat_only else Decimal(3))

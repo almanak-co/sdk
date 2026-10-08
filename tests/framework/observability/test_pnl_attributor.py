@@ -119,8 +119,8 @@ class TestAttributePerp:
         assert result["gas_usd"] == "3.50"
         assert result["fee_pnl_usd"] is None  # unknown — neither event carried protocol_fees_usd
         assert result["funding_pnl_usd"] is None  # VIB-3205 follow-up
-        # net = price_pnl + (fee_pnl or 0) - gas = 500 + 0 - 3.50 = 496.50
-        assert result["net_pnl_usd"] == "496.50"
+        # A full net result requires measured execution fees and funding.
+        assert result["net_pnl_usd"] is None
 
     def test_perp_short_loss(self):
         open_evt = {"entry_price": "2000", "is_long": False, "gas_usd": "2.00"}
@@ -129,13 +129,13 @@ class TestAttributePerp:
 
         assert result["is_long"] is False
         assert result["price_pnl_usd"] == "-300"
-        # net = -300 + 0 - 3 = -303
-        assert result["net_pnl_usd"] == "-303.00"
+        # Missing fees and funding leave net unmeasured.
+        assert result["net_pnl_usd"] is None
 
     def test_perp_missing_values(self):
         result = attribute_perp({}, {})
         assert result["version"] == CURRENT_VERSION
-        assert result["net_pnl_usd"] == "0"
+        assert result["net_pnl_usd"] is None
 
 
 # --- compute_attribution dispatch tests ---
@@ -160,7 +160,7 @@ class TestComputeAttribution:
             )
         )
         assert result["position_type"] == "PERP"
-        assert result["net_pnl_usd"] == "50"
+        assert result["net_pnl_usd"] is None
 
     def test_unknown_type_returns_empty(self):
         assert compute_attribution({"position_type": "STAKE"}, {"position_type": "STAKE"}) == "{}"
@@ -441,8 +441,8 @@ class TestFeePnlFromProtocolFees:
         assert result["fee_pnl_usd"] == "-8.50"
         # funding_pnl_usd is None when no funding_fee_usd in attribution_json
         assert result["funding_pnl_usd"] is None
-        # net = 500 + (-8.50) + 0 - 2.00 = 489.50
-        assert result["net_pnl_usd"] == "489.50"
+        assert result["trade_pnl_usd"] == "491.50"
+        assert result["net_pnl_usd"] is None
 
 
 # --- VIB-3497: funding PnL attribution tests ---
@@ -475,8 +475,8 @@ class TestPerpFundingAttribution:
         result = attribute_perp(open_evt, close_evt)
 
         assert result["funding_pnl_usd"] == "-12.50", "funding_pnl_usd must be -funding_fee_usd (cost is negative)"
-        # net = 500 + 0 (fee unknown) + (-12.50) - 2.00 = 485.50
-        assert result["net_pnl_usd"] == "485.50", "net_pnl_usd must include funding cost"
+        # Funding is measured, but execution fees are not.
+        assert result["net_pnl_usd"] is None, "net_pnl_usd must include funding cost"
         assert result["price_pnl_usd"] == "500"
 
     def test_attribute_perp_funding_none_when_unavailable(self):
@@ -502,8 +502,8 @@ class TestPerpFundingAttribution:
         assert result["funding_pnl_usd"] is None, (
             "Missing funding data must propagate as None, not 0. None = unavailable; Decimal('0') = measured zero."
         )
-        # net excludes the unknown funding term
-        assert result["net_pnl_usd"] == "498.00"  # 500 - 2.00
+        # Missing components leave the full net result unknown.
+        assert result["net_pnl_usd"] is None  # 500 - 2.00
 
     def test_attribute_perp_funding_zero_distinct_from_unknown(self):
         """Measured zero funding (e.g. short hold) yields funding_pnl_usd = '0'.
@@ -523,7 +523,7 @@ class TestPerpFundingAttribution:
 
         assert result["funding_pnl_usd"] is not None, "Measured zero must not become None"
         assert result["funding_pnl_usd"] == "0", "Measured zero funding_pnl_usd = '0'"
-        assert result["net_pnl_usd"] == "100"  # 100 + 0 + 0 - 0
+        assert result["net_pnl_usd"] is None  # Execution fees remain unmeasured.
 
 
 class TestVIB3519FundingFeePreservation:

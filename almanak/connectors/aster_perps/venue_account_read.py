@@ -10,10 +10,12 @@ from decimal import Decimal
 from typing import Any
 
 from almanak.connectors._strategy_base.venue_account_read_base import (
+    SettledVenueTransfer,
     VenueAccountPosition,
     VenueAccountRead,
     VenueAccountReadSpec,
 )
+from almanak.connectors.aster_perps.accounting_receipts import venue_receipt_identity
 from almanak.connectors.aster_perps.compiler import SUPPORTED_CHAINS
 from almanak.connectors.aster_perps.gateway_client import (
     AsterGatewayError,
@@ -90,6 +92,37 @@ def read_aster_account(*, gateway_client: Any, chain: str, wallet_address: str) 
     )
 
 
-VENUE_ACCOUNT_READ_SPEC = VenueAccountReadSpec(read_account=read_aster_account, chains=SUPPORTED_CHAINS)
+def read_settled_transfers(
+    *, gateway_client: Any, chain: str, wallet_address: str, transfers: list[dict[str, Any]]
+) -> tuple[SettledVenueTransfer, ...]:
+    client = GatewayAsterPerpsClient(gateway_client)
+    result = []
+    for transfer in transfers:
+        response = client.get_withdrawal_payout(wallet_address=wallet_address, transfer=transfer)
+        if not response.settled:
+            continue
+        if response.withdrawal_id != transfer["transfer_id"] or response.receiver.lower() != wallet_address.lower():
+            raise AsterGatewayError("payout identity differs from ledger withdrawal")
+        result.append(
+            SettledVenueTransfer(
+                transfer_id=response.withdrawal_id,
+                chain=chain,
+                tx_hash=response.tx_hash,
+                log_index=response.log_index,
+                token_address=response.token_address,
+                receiver=response.receiver,
+                raw_amount=int(response.raw_amount),
+                block_number=response.block_number,
+            )
+        )
+    return tuple(result)
 
-__all__ = ["VENUE_ACCOUNT_READ_SPEC", "read_aster_account"]
+
+VENUE_ACCOUNT_READ_SPEC = VenueAccountReadSpec(
+    read_account=read_aster_account,
+    chains=SUPPORTED_CHAINS,
+    read_settled_transfers=read_settled_transfers,
+    validate_execution_receipt=venue_receipt_identity,
+)
+
+__all__ = ["VENUE_ACCOUNT_READ_SPEC", "read_aster_account", "read_settled_transfers"]

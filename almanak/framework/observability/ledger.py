@@ -1016,6 +1016,14 @@ def _extract_tokens_and_amounts(
         token_in = getattr(intent, "collateral_token", "") or ""
         amount_in = _measured_amount_to_row(getattr(intent, "collateral_amount", None))
         return (token_in, "", amount_in, "", "", None)
+    if intent_type == "PERP_WITHDRAW":
+        extracted = getattr(result, "extracted_data", None) or {}
+        from almanak.framework.accounting.venue_receipts import cash_transfer
+
+        transfer = cash_transfer(extracted)
+        if transfer is not None:
+            asset = transfer.get("asset") or ""
+            return ("", asset, "", _measured_amount_to_row(transfer.get("net_amount")), "", None)
     if intent_type in ("REPAY", "WITHDRAW", "DELEVERAGE"):
         # Deleverage closes borrow exposure, so it uses the lending receipt
         # path to capture resolved repaid amounts.
@@ -1985,6 +1993,7 @@ def deserialize_extracted_data(json_str: str) -> dict[str, Any]:
         LPCloseData,
         LPOpenData,
         PerpData,
+        ProtocolFees,
         StakeData,
         SupplyData,
         SwapAmounts,
@@ -1997,6 +2006,7 @@ def deserialize_extracted_data(json_str: str) -> dict[str, Any]:
         "BorrowData": BorrowData,
         "SupplyData": SupplyData,
         "PerpData": PerpData,
+        "ProtocolFees": ProtocolFees,
         "StakeData": StakeData,
     }
 

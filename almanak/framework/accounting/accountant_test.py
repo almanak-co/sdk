@@ -44,12 +44,13 @@ from almanak.framework.accounting.payload_schemas import (
     is_v1_event_type,
     validate_payload,
 )
-from almanak.framework.accounting.receipt_set import evaluate_landed_receipt_sets
+from almanak.framework.accounting.receipt_set import evaluate_landed_receipt_sets, validated_venue_row_ids
 from almanak.framework.accounting.scorecard_profiles import (
     G6Bases,
     ScorecardCtx,
     ScorecardProfile,
 )
+from almanak.framework.accounting.venue_receipts import cash_transfer
 from almanak.framework.observability.position_events import (
     PositionEventType,
     PositionType,
@@ -1068,7 +1069,8 @@ def _cell_g1_money_trail(
     # Do not filter them by tx_hash: unmeasured rows without a captured hash must fail too.
     degraded = [r for r in rows if _degraded_rule(r.get("error"))]
     # Keep degraded rows in the hash check if verdict branches are reordered.
-    missing_hash = [r for r in (*successful, *degraded) if not r.get("tx_hash")]
+    venue_ids = validated_venue_row_ids(rows)
+    missing_hash = [r for r in (*successful, *degraded) if not r.get("tx_hash") and str(r.get("id")) not in venue_ids]
     missing_token_amounts = [
         r for r in successful if r.get("intent_type") == "SWAP" and not (r.get("amount_in") and r.get("amount_out"))
     ]
@@ -2136,6 +2138,23 @@ def _g6_settlement_cost_usd(p: dict[str, Any]) -> tuple[Decimal | None, Decimal 
     return trading, _dec(p.get("keeper_execution_fee_usd"))
 
 
+def _perp_notional_usd(
+    payload: dict[str, Any], price_key: str, *, settlement: dict[str, Any] | None = None
+) -> Decimal | None:
+    size = _dec(payload.get("size"))
+    if size is None:
+        settled_size = _dec((settlement or {}).get("size_delta_usd"))
+        return abs(settled_size) if settled_size is not None and settled_size.is_finite() else None
+    # Version 2 changed size from base quantity to USD notional.
+    version = payload.get("primitive_version", 1)
+    if type(version) is int and version in (2, 3):
+        return abs(size)
+    if type(version) is not int or version != 1:
+        return None
+    price = _dec(payload.get(price_key))
+    return None if price is None else abs(size * price)
+
+
 def _cell_g6_reconciliation(  # noqa: C901
     snapshots: list[dict[str, Any]],
     ledger: list[dict[str, Any]],
@@ -2251,6 +2270,11 @@ def _cell_g6_reconciliation(  # noqa: C901
 
     # Settlement fees are positive cost subtotals and are negated into the net fee bucket.
     sum_perp_trading_fee = Decimal(0)
+    sum_venue_withdrawal_fee = Decimal(0)
+    null_venue_withdrawal_fee = 0
+    null_perp_notional = 0
+    null_perp_execution_fee = 0
+    venue_row_ids = validated_venue_row_ids(ledger)
     sum_perp_keeper_fee = Decimal(0)
     perp_settlement_fee_unmeasured = 0
     perp_keeper_fee_unmeasured = 0
@@ -2261,12 +2285,31 @@ def _cell_g6_reconciliation(  # noqa: C901
         gas = _dec(r.get("gas_usd"))
         if gas is not None:
             sum_gas += gas
+        extracted = _json(r.get("extracted_data_json"))
+        if _row_landed(r) and r.get("intent_type") == "PERP_WITHDRAW" and "venue_receipt" in extracted:
+            transfer = cash_transfer(extracted)
+            fee = _dec(transfer.get("fee_usd")) if transfer is not None else None
+            if str(r.get("id")) not in venue_row_ids or fee is None:
+                null_venue_withdrawal_fee += 1
+            else:
+                sum_venue_withdrawal_fee += fee
 
     # Event order is required for the running BORROW-to-REPAY debt balance.
     for r in acct_events:
         p = acct_payloads.get(r.get("id"), {})
         et = r.get("event_type")
         rpnl = _dec(p.get("realized_pnl_usd"))
+        if (
+            p.get("primitive_version") == 3
+            and et in ("PERP_OPEN", "PERP_CLOSE")
+            and str(r.get("ledger_entry_id") or "") not in settlement_by_link
+        ):
+            fee_key = "open_fee_usd" if et == "PERP_OPEN" else "close_fee_usd"
+            fee = _dec(p.get(fee_key))
+            if fee is not None:
+                sum_perp_trading_fee += fee
+            elif str(r.get("ledger_entry_id") or "") in venue_row_ids:
+                null_perp_execution_fee += 1
         if et == "SWAP":
             # Prefer matched-portion PnL for partial swaps; legacy payloads fall back.
             matched = _dec(p.get("realized_pnl_usd_matched"))
@@ -2374,17 +2417,19 @@ def _cell_g6_reconciliation(  # noqa: C901
                 null_perp_rpnl += 1
             else:
                 sum_perp += rpnl
-            size = _dec(p.get("size"))
-            exit_price = _dec(p.get("exit_price"))
-            if size is not None and exit_price is not None:
-                notional = abs(size) * abs(exit_price)
+            notional = _perp_notional_usd(p, "exit_price", settlement=s)
+            if notional is None and p.get("primitive_version") not in (None, 1, 2):
+                null_perp_notional += 1
+            if notional is not None:
                 if notional > max_perp_notional:
                     max_perp_notional = notional
         if et == "PERP_OPEN":
-            size = _dec(p.get("size"))
-            entry_price = _dec(p.get("entry_price"))
-            if size is not None and entry_price is not None:
-                notional = abs(size) * abs(entry_price)
+            notional = _perp_notional_usd(
+                p, "entry_price", settlement=settlement_by_link.get(str(r.get("ledger_entry_id") or ""))
+            )
+            if notional is None and p.get("primitive_version") not in (None, 1, 2):
+                null_perp_notional += 1
+            if notional is not None:
                 if notional > max_perp_notional:
                     max_perp_notional = notional
         if et == "PERP_SETTLEMENT":
@@ -2455,7 +2500,7 @@ def _cell_g6_reconciliation(  # noqa: C901
     null_inventory_reval = 0 if inv.total_usd is not None else 1
 
     # Perp fees are costs; keep their positive subtotals separate but negate them into net fees.
-    sum_fees -= sum_perp_trading_fee
+    sum_fees -= sum_perp_trading_fee + sum_venue_withdrawal_fee
     sum_fees -= sum_perp_keeper_fee
     # G6 does not yet refuse wallet endpoints during in-flight native escrow, so
     # such a window can report a loud residual even when these cost terms are correct.
@@ -2493,6 +2538,8 @@ def _cell_g6_reconciliation(  # noqa: C901
         "Σ_lp_fees_null_count": null_lp_fees,
         "Σ_perp_usd_null_count": null_perp_rpnl,
         "Σ_funding_usd_null_count": null_perp_funding,
+        "Σ_venue_withdrawal_fee_null_count": null_venue_withdrawal_fee,
+        "Σ_perp_execution_fee_null_count": null_perp_execution_fee,
         "Σ_interest_supply_null_count": null_withdraw_interest,
         "Σ_interest_borrow_null_count": null_repay_interest,
         # Missing marks or basis make inventory revaluation unmeasured, not zero.
@@ -2531,7 +2578,10 @@ def _cell_g6_reconciliation(  # noqa: C901
         "Σ_fees_usd": str(sum_fees),
         # These subtotals are positive costs; Σ_fees_usd carries them negated.
         "Σ_perp_trading_fee_usd": str(sum_perp_trading_fee),
+        "Σ_venue_withdrawal_fee_usd": str(sum_venue_withdrawal_fee),
         "Σ_perp_keeper_fee_usd": str(sum_perp_keeper_fee),
+        # Unmeasured notional only narrows the tolerance; it is not a PnL component.
+        "Σ_perp_notional_null_count": str(null_perp_notional),
         # Legacy settlements omit these fields, so missing-fee counts remain forensic
         # rather than failing until the persisted corpus can support strictness.
         "Σ_perp_trading_fee_unmeasured_count": str(perp_settlement_fee_unmeasured),

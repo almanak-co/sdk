@@ -175,6 +175,8 @@ def handle_perp(
     # ── Intent-known identity + venue-observed truth (VIB-5941) ───────────────
     metrics = _resolve_perp_size_and_side(extracted, perp_data)
     venue_leverage, venue_margin_mode, requested_leverage = _venue_truth_fields(perp_data)
+    fees = extracted.get("protocol_fees")
+    fee_usd = _safe_decimal(getattr(fees, "perp_fee_usd", None))
 
     # ── Identity / ID ────────────────────────────────────────────────────────
     _id_seed = tx_hash or ledger_entry_id or position_key
@@ -209,6 +211,11 @@ def handle_perp(
         venue_leverage=venue_leverage,
         venue_margin_mode=venue_margin_mode,
         requested_leverage=requested_leverage,
+        exit_price=_safe_decimal(getattr(perp_data, "exit_price", None)),
+        open_fee_usd=fee_usd if event_type in {PerpEventType.PERP_OPEN, PerpEventType.PERP_INCREASE} else None,
+        close_fee_usd=fee_usd
+        if event_type in {PerpEventType.PERP_CLOSE, PerpEventType.PERP_DECREASE, PerpEventType.PERP_LIQUIDATE}
+        else None,
     )
 
 

@@ -23,6 +23,7 @@ from almanak.core.chains import ChainRegistry
 from almanak.core.enums import ChainFamily
 
 from ..accounting.capital_flows import (
+    FlowClassification,
     ScanStatus,
     TokenInfo,
     TransferObservation,
@@ -30,7 +31,8 @@ from ..accounting.capital_flows import (
     scan_chain_transfers,
 )
 from ..accounting.ledger_guard import landed
-from ..accounting.receipt_set import validated_landed_receipt_hashes
+from ..accounting.receipt_set import validated_landed_receipt_hashes, validated_venue_row_ids
+from ..accounting.venue_receipts import cash_transfer
 from ..deployment import is_hosted
 from ..intents.vocabulary import AnyIntent, BorrowIntent, HoldIntent, PerpCloseIntent, PerpOpenIntent
 from ..models.run_mode import RunMode
@@ -1535,6 +1537,41 @@ async def _initialize_capital_flow_era(
     return start_era(prior, cursors=cursors, deposits_usd=deposits, withdrawals_usd=withdrawals), None
 
 
+async def _venue_payout_evidence(runner: Any, ledger_rows: list[Any]) -> tuple[Any, ...]:
+    from almanak.connectors._strategy_base.venue_account_read_registry import VenueAccountReadRegistry
+
+    valid_ids = validated_venue_row_ids(ledger_rows)
+    claims: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in ledger_rows:
+        row = dict(row) if hasattr(row, "keys") else vars(row)
+        if str(row.get("id")) not in valid_ids or row.get("intent_type") != "PERP_WITHDRAW":
+            continue
+        extracted = row.get("extracted_data_json")
+        extracted = json.loads(extracted) if isinstance(extracted, str) else extracted
+        transfer = cash_transfer(extracted or {})
+        if transfer is not None:
+            claims.setdefault((row["protocol"], row["chain"]), []).append(transfer)
+    result: list[Any] = []
+    for (protocol, chain), transfers in claims.items():
+        wallet = _capital_flow_wallet(runner, chain)
+        if wallet is None:
+            raise ValueError("venue payout wallet is unmeasured")
+        own_transfers = [t for t in transfers if t["receiver"].lower() == wallet.lower()]
+        if not own_transfers:
+            continue
+        result.extend(
+            await asyncio.to_thread(
+                VenueAccountReadRegistry.settled_transfers,
+                protocol,
+                gateway_client=runner._get_gateway_client(),
+                chain=chain,
+                wallet_address=wallet,
+                transfers=own_transfers,
+            )
+        )
+    return tuple(result)
+
+
 async def _scan_capital_flow_interval(
     runner: Any,
     snapshot: PortfolioSnapshot,
@@ -1555,7 +1592,14 @@ async def _scan_capital_flow_interval(
     primary = (getattr(runner, "_primary_chain_lower", None) or getattr(snapshot, "chain", "") or "").strip().lower()
     strategy_tx_hashes = _capital_flow_strategy_tx_hashes(ledger_rows)
 
-    resolved = tally_pending(unmatched_pending(record.pending_unclassified, strategy_tx_hashes))
+    try:
+        payouts = await _venue_payout_evidence(runner, ledger_rows)
+    except Exception:  # noqa: BLE001 — failed reads cannot advance a provenance cursor
+        logger.warning("capital_flows: venue payout evidence deferred", exc_info=True)
+        return record, DETAIL_SCAN_DEFERRED
+    snapshot.snapshot_metadata["settled_venue_transfers"] = [dataclasses.asdict(e) for e in payouts]
+    pending = unmatched_pending(record.pending_unclassified, strategy_tx_hashes)
+    resolved = tally_pending(tuple(p for p in pending if not any(e.matches(p) for e in payouts)))
 
     observations: list[TransferObservation] = []
     cursors: dict[str, int] = {}
@@ -1593,7 +1637,12 @@ async def _scan_capital_flow_interval(
             return dataclasses.replace(poison(record, REASON_SCAN_GAP), cursors=advanced), None
 
         cursors[chain] = result.to_block
-        observations.extend(result.observations)
+        observations.extend(
+            dataclasses.replace(obs, classification=FlowClassification.STRATEGY_TX)
+            if any(e.matches(obs) for e in payouts)
+            else obs
+            for obs in result.observations
+        )
 
     summary = summarize_interval(observations, _capital_flow_price_lookup(snapshot))
     nav = (snapshot.total_value_usd or Decimal("0")) + (snapshot.available_cash_usd or Decimal("0"))

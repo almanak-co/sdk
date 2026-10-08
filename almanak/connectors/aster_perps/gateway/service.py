@@ -821,6 +821,69 @@ class AsterPerpsServiceServicer(aster_perps_pb2_grpc.AsterPerpsServiceServicer):
             for chain_id, chain in (entry.get("chainBalances") or {}).items()
         }
 
+    async def GetWithdrawalPayout(
+        self, request: aster_perps_pb2.AsterWithdrawalPayoutRequest, _context: grpc.aio.ServicerContext
+    ) -> aster_perps_pb2.AsterWithdrawalPayoutResponse:
+        client, error = self._client_for(request.wallet_address)
+        response_type = aster_perps_pb2.AsterWithdrawalPayoutResponse
+        if client is None:
+            return response_type(success=False, error=error)
+        try:
+            return await self._withdrawal_payout(client, request)
+        except (AsterApiError, AsterUnknownOutcomeError, ValueError, TypeError, KeyError) as exc:
+            return response_type(success=False, error=str(exc))
+
+    async def _withdrawal_payout(
+        self, client: AsterProApiClient, request: aster_perps_pb2.AsterWithdrawalPayoutRequest
+    ) -> aster_perps_pb2.AsterWithdrawalPayoutResponse:
+        from almanak.connectors.aster_perps.gateway.payout import payout_log
+        from almanak.framework.data.tokens.resolver import get_token_resolver
+
+        response_type = aster_perps_pb2.AsterWithdrawalPayoutResponse
+        gross, fee = _decimal(request.gross_amount), _decimal(request.fee_amount)
+        if gross is None or fee is None or not gross.is_finite() or not fee.is_finite() or not gross > fee >= 0:
+            raise ValueError("withdrawal claim has invalid gross amount or fee")
+        history = await client.transfer_history()
+        matches = [r for r in history if str(r.get("id", "")) == request.withdrawal_id and _is_withdrawal(r)]
+        if len(matches) != 1:
+            raise ValueError("withdrawal ID is not unique in authenticated venue history")
+        record = matches[0]
+        if str(record.get("chainId")) != str(WITHDRAW_CHAIN_ID) or record.get("asset") != request.asset:
+            raise ValueError("withdrawal asset or chain differs from ledger evidence")
+        if _decimal(record.get("amount")) != gross:
+            raise ValueError("withdrawal gross amount differs from authenticated history")
+        receiver = str(record.get("address") or record.get("receiver") or client.user_address)
+        if receiver.lower() != request.wallet_address.lower():
+            raise ValueError("withdrawal receiver differs from gateway wallet")
+        state = str(record.get("state", "")).upper()
+        if state in _FAILED_STATES:
+            return response_type(success=True, settled=False, withdrawal_id=request.withdrawal_id)
+        if state == "PROCESSING" or (state == "SUCCESS" and not record.get("txHash")):
+            return response_type(success=True, settled=False, withdrawal_id=request.withdrawal_id)
+        if state != "SUCCESS":
+            raise ValueError("withdrawal did not succeed")
+        tx_hash = str(record["txHash"])
+        web3 = get_cached_web3("bsc")
+        try:
+            receipt = await asyncio.to_thread(web3.eth.get_transaction_receipt, tx_hash)
+        except TransactionNotFound:
+            return response_type(success=True, settled=False, withdrawal_id=request.withdrawal_id)
+        except Exception as exc:  # noqa: BLE001 — unreadable evidence remains unknown
+            raise AsterApiError(f"payout receipt unreadable: {exc}") from exc
+        if int(receipt.get("status") or 0) != 1:
+            return response_type(success=True, settled=False, withdrawal_id=request.withdrawal_id)
+        token = get_token_resolver().resolve(request.asset, "bsc", skip_gateway=True)
+        evidence = payout_log(receipt, token=token.address, receiver=receiver, net=gross - fee, decimals=token.decimals)
+        return response_type(
+            success=True,
+            settled=True,
+            withdrawal_id=request.withdrawal_id,
+            tx_hash=tx_hash,
+            token_address=token.address,
+            receiver=receiver,
+            **evidence,
+        )
+
     async def GetBalances(
         self, request: aster_perps_pb2.AsterGetBalancesRequest, _context: grpc.aio.ServicerContext
     ) -> aster_perps_pb2.AsterBalancesResponse:

@@ -188,6 +188,9 @@
         "is_long": null,
         "leverage": null,
         "entry_price": null,
+        "exit_price": null,
+        "open_fee_usd": null,
+        "close_fee_usd": null,
         "realized_pnl_usd": null,
         "funding_paid_usd": null,
         "venue_leverage": null,
@@ -196,7 +199,7 @@
         "confidence": "ESTIMATED",
         "unavailable_reason": "entry_price and realized_pnl require perp receipt parser (pending); position size requires perp receipt parser (pending)",
         "schema_version": 1,
-        "primitive_version": 2
+        "primitive_version": 3
       }
     },
     {

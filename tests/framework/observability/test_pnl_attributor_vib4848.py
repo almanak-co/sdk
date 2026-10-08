@@ -68,8 +68,8 @@ def _close_attr(*, prices=None, method=None, confidence=None, fees_total_usd=Non
 class TestCurrentVersionBump:
     """v3 → v4 bump pins the formula change so recompute fires on legacy rows."""
 
-    def test_current_version_is_v4(self) -> None:
-        assert CURRENT_VERSION == 4
+    def test_current_version_is_v5(self) -> None:
+        assert CURRENT_VERSION == 5
 
 
 class TestT9FeeAdjustedImpermanentLoss:

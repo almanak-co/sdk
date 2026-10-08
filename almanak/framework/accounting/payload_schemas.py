@@ -195,19 +195,9 @@ PRIMITIVE_VERSIONS: dict[Primitive, int] = {
     Primitive.LENDING: PRIMITIVE_VERSION_DEFAULT,
     Primitive.CDP: PRIMITIVE_VERSION_DEFAULT,
     Primitive.LIQUIDATION: PRIMITIVE_VERSION_DEFAULT,
-    # VIB-5941 (v1→v2): the PERP payload contract changed — the position size is
-    # now emitted under the canonical schema key ``size`` (was the non-schema
-    # ``size_usd``, which left the required ``size`` field absent and FAILed
-    # validation), ``PERP_OPEN.is_long`` is now the intent-known truth instead of
-    # a dropped ``None``, and ``PERP_CLOSE.size`` is required-but-nullable with a
-    # new invariant (``unavailable_reason`` required when size is None — a full
-    # close's size is unmeasured until the perp receipt parser, VIB-5717). The
-    # SET of fields the primitive emits changed, so the primitive contract bumps
-    # (mirrors the VIB-4905 SWAP v1→v2 field-set bump above). Old rows on disk
-    # keep their v1 stamp; new rows stamp v2 — exactly the disambiguation the
-    # per-primitive version exists for. The lot-matching ALGORITHM is unchanged,
-    # so ``MATCHING_POLICY_VERSIONS[Primitive.PERP]`` is NOT bumped.
-    Primitive.PERP: 2,
+    # Size is USD notional; inline execution economics carry gross realized PnL
+    # separately from observed open/close fees. Older rows retain their stamp.
+    Primitive.PERP: 3,
     Primitive.UTILITY: PRIMITIVE_VERSION_DEFAULT,
     # VIB-4905 (v1→v2): SwapEventPayload contract extension — additive
     # three-field bundle for partial-match disposals

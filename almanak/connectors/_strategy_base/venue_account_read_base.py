@@ -20,6 +20,7 @@ from typing import Any
 __all__ = [
     "VENUE_ACCOUNT_VALUATION_SOURCE",
     "VenueAccountPosition",
+    "SettledVenueTransfer",
     "VenueAccountRead",
     "VenueAccountReadSpec",
 ]
@@ -68,6 +69,30 @@ class VenueAccountRead:
 
 
 @dataclass(frozen=True)
+class SettledVenueTransfer:
+    """One exact, gateway-confirmed payout log for a ledger withdrawal."""
+
+    transfer_id: str
+    chain: str
+    tx_hash: str
+    log_index: int
+    token_address: str
+    receiver: str
+    raw_amount: int
+    block_number: int
+
+    def matches(self, transfer: Any) -> bool:
+        return (
+            transfer.chain == self.chain
+            and transfer.tx_hash.lower() == self.tx_hash.lower()
+            and transfer.log_index == self.log_index
+            and transfer.token_address.lower() == self.token_address.lower()
+            and transfer.raw_amount == self.raw_amount
+            and str(transfer.direction) == "IN"
+        )
+
+
+@dataclass(frozen=True)
 class VenueAccountReadSpec:
     """Connector-published descriptor for a venue-account read.
 
@@ -75,14 +100,21 @@ class VenueAccountReadSpec:
         read_account: ``(*, gateway_client, chain, wallet_address) -> VenueAccountRead``.
             Must not raise: failures return ``ok=False``.
         chains: Chains whose wallets own an account on the venue.
+        read_settled_transfers: Optional gateway-backed confirmation of exact payout logs.
+        validate_execution_receipt: Optional pure validator returning a unique execution identity.
     """
 
     read_account: Callable[..., VenueAccountRead]
     chains: frozenset[str]
+    read_settled_transfers: Callable[..., tuple[SettledVenueTransfer, ...]] | None = None
+    validate_execution_receipt: Callable[[Any, dict[str, Any]], str | None] | None = None
 
     def __post_init__(self) -> None:
         if not callable(self.read_account):
             raise TypeError(f"read_account must be callable, got {type(self.read_account).__name__}.")
+        for callback in (self.read_settled_transfers, self.validate_execution_receipt):
+            if callback is not None and not callable(callback):
+                raise TypeError("venue evidence callbacks must be callable or None")
         if isinstance(self.chains, str | bytes):
             raise TypeError("chains must be a frozenset[str], not a bare string.")
         coerced = frozenset(self.chains)

@@ -559,7 +559,7 @@ class TestPerpAccountingBuilder:
         assert payload["size"] == "1000"
         assert "size_usd" not in payload
         assert payload["is_long"] is True
-        assert payload["primitive_version"] == 2
+        assert payload["primitive_version"] == 3
 
 
 # ---------------------------------------------------------------------------

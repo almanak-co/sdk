@@ -109,6 +109,8 @@ class PendingUnclassified:
     direction: str  # "IN" | "OUT"
     block: int
     value_usd: Decimal | None
+    log_index: int | None = None
+    raw_amount: int | None = None
 
     def to_record(self) -> dict[str, Any]:
         """JSON-safe form; ``value_usd`` stays ``None`` when unpriceable."""
@@ -119,6 +121,8 @@ class PendingUnclassified:
             "direction": self.direction,
             "block": self.block,
             "value_usd": None if self.value_usd is None else str(self.value_usd),
+            "log_index": self.log_index,
+            "raw_amount": None if self.raw_amount is None else str(self.raw_amount),
         }
 
     @classmethod
@@ -134,6 +138,8 @@ class PendingUnclassified:
                 direction="IN" if str(raw.get("direction")) == "IN" else "OUT",
                 block=int(raw.get("block", 0)),
                 value_usd=_parse_optional_decimal(raw.get("value_usd")),
+                log_index=None if raw.get("log_index") is None else int(raw["log_index"]),
+                raw_amount=None if raw.get("raw_amount") is None else int(raw["raw_amount"]),
             )
         except (KeyError, TypeError, ValueError, InvalidOperation):
             return None
@@ -386,6 +392,8 @@ def summarize_interval(observations: Sequence[TransferObservation], price_of: Pr
                     direction=("IN" if obs.classification is FlowClassification.UNCLASSIFIED_IN else "OUT"),
                     block=obs.block_number,
                     value_usd=value,
+                    log_index=obs.log_index,
+                    raw_amount=obs.raw_amount,
                 )
             )
 
