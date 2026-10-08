@@ -539,7 +539,7 @@ class TestFundingRateProviderDefaults:
 
     def test_supported_protocols_manifest_derived(self):
         """The accepted identifier set derives from connector manifests."""
-        assert supported_protocols() == ["gmx", "gmx_v2", "hyperliquid"]
+        assert supported_protocols() == ["aster_perps", "gmx", "gmx_v2", "hyperliquid"]
 
 
 class TestFundingRateProviderSerialization:

@@ -491,7 +491,8 @@ class TestConstants:
     def test_supported_venues(self) -> None:
         assert "gmx_v2" in SUPPORTED_VENUES
         assert "hyperliquid" in SUPPORTED_VENUES
-        assert len(SUPPORTED_VENUES) == 2
+        assert "aster_perps" in SUPPORTED_VENUES
+        assert len(SUPPORTED_VENUES) == 3
 
     def test_supported_markets(self) -> None:
         assert SUPPORTED_MARKETS["gmx_v2"] == []

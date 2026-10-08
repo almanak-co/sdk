@@ -46,6 +46,7 @@ class Venue(StrEnum):
 
     GMX_V2 = "gmx_v2"
     HYPERLIQUID = "hyperliquid"
+    ASTER_PERPS = "aster_perps"
 
 
 SUPPORTED_VENUES: list[str] = [v.value for v in Venue]

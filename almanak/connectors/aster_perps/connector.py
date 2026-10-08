@@ -7,12 +7,14 @@ from datetime import date
 from almanak.connectors._base.types import ProtocolKind
 from almanak.connectors._connector import (
     Connector,
+    FundingHistoryDecl,
     ImportRef,
     LifecycleObligationDecl,
     SupportedChainsSpec,
 )
 from almanak.connectors._lifecycle_declaration_bundle import LifecycleClaimCell, LifecycleDeclarationBundle
 from almanak.connectors._strategy_base.address_table import AddressTableSpec
+from almanak.connectors.aster_perps.markets import FUNDING_MARKETS
 from almanak.core.capability_obligations import (
     EvidenceKind,
     EvidenceRef,
@@ -181,6 +183,8 @@ CONNECTOR = Connector(
     lifecycle_declarations=_lifecycle_declarations(),
     strategy_intents=(IntentType.PERP_OPEN, IntentType.PERP_CLOSE, IntentType.PERP_DEPOSIT, IntentType.PERP_WITHDRAW),
     supported_chains=SupportedChainsSpec(chains=(BSC,)),
+    # Aster's funding API is off-chain and chain-agnostic, hence no chains.
+    funding_history=FundingHistoryDecl(venue="aster_perps", markets=FUNDING_MARKETS),
 )
 
 __all__ = ["CONNECTOR"]

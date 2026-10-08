@@ -219,10 +219,10 @@ def test_perps_read_dispatch_equals_frozen_legacy_tables() -> None:
 # of 2026-06-10, frozen verbatim (VIB-4851 Phase D / D1):
 #   SUPPORTED_PROTOCOLS = ["gmx", "gmx_v2", "hyperliquid"]
 #   chain ctor validation = GMX_STATS_API.keys() = {"arbitrum", "avalanche"}
-FROZEN_FUNDING_SUPPORTED_PROTOCOLS = ("gmx", "gmx_v2", "hyperliquid")
-FROZEN_FUNDING_VENUES = {"gmx_v2": "gmx_v2", "hyperliquid": "hyperliquid"}
+FROZEN_FUNDING_SUPPORTED_PROTOCOLS = ("aster_perps", "gmx", "gmx_v2", "hyperliquid")
+FROZEN_FUNDING_VENUES = {"gmx_v2": "gmx_v2", "hyperliquid": "hyperliquid", "aster_perps": "aster_perps"}
 FROZEN_FUNDING_ALIASES = {"gmx": "gmx_v2"}
-FROZEN_FUNDING_CHAINS = {"gmx_v2": ("arbitrum", "avalanche"), "hyperliquid": ()}
+FROZEN_FUNDING_CHAINS = {"gmx_v2": ("arbitrum", "avalanche"), "hyperliquid": (), "aster_perps": ()}
 
 
 def test_funding_history_dispatch_equals_frozen_legacy_tables() -> None:

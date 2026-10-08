@@ -66,6 +66,7 @@ class TestSupportedMarketsDerivation:
             "ATOM-USD",
             "APT-USD",
         ],
+        "aster_perps": ["BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD"],
     }
 
     def test_derived_content_matches_pinned(self) -> None:

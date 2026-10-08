@@ -13,6 +13,9 @@ _BASE_PATTERN = re.compile(r"^[A-Z0-9]{2,15}$")
 _QUOTES = ("USDT", "USD")
 _CLIENT_ORDER_ID_PATTERN = re.compile(r"^[.A-Z:/a-z0-9_-]{1,36}$")
 
+# Markets served on the gateway funding lanes, in their ``BASE-USD`` key form.
+FUNDING_MARKETS = ("BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD")
+
 
 def to_symbol(market: str) -> str:
     """Map an intent market (``ETH/USD``, ``ETH-USDT``, ``ETHUSDT``) to an Aster symbol."""
@@ -44,4 +47,4 @@ def client_order_id(intent_id: str, *, leg: str) -> str:
     return value
 
 
-__all__ = ["MARGIN_ASSET", "client_order_id", "to_symbol"]
+__all__ = ["FUNDING_MARKETS", "MARGIN_ASSET", "client_order_id", "to_symbol"]
