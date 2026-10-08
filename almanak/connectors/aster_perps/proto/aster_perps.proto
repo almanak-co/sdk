@@ -58,6 +58,7 @@ message AsterOrderResponse {
   string fee_asset = 13;
   string realized_pnl = 14;     // summed over the order's fills; "" when unread
   bool order_not_found = 15;    // GetOrder: the venue has no order under this client id (it never filled)
+  bool already_flat = 16;       // close: the venue held no position for the symbol, so no order was sent
 }
 
 message AsterGetOrderRequest {

@@ -23,6 +23,7 @@ from almanak.connectors.aster_perps.gateway.service import AsterPerpsServiceServ
 from almanak.connectors.aster_perps.proto import aster_perps_pb2
 from almanak.connectors.aster_perps.runner_hooks import AsterPerpsRunnerHookConnector
 from almanak.framework.execution.clob_handler import ClobOrderStatus
+from almanak.framework.execution.offchain_venue import has_offchain_fill, offchain_execution_result
 from almanak.framework.models.reproduction_bundle import ActionBundle
 
 MAIN = Account.create()
@@ -187,6 +188,32 @@ async def test_close_refuses_when_the_held_direction_differs() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_close_with_no_position_at_the_venue_succeeds_as_already_flat_without_an_order() -> None:
+    client = FakeClient(position_amt="0")
+    response = await _servicer(client).PlaceMarketOrder(_close_request(), None)
+    assert response.success and response.already_flat and not response.error
+    assert (response.executed_qty, response.requested_qty, response.cum_quote) == ("0", "0", "0")
+    assert response.client_order_id == "almc" + "a" * 32
+    assert not _placed(client)
+
+
+@pytest.mark.parametrize(
+    "rows", [[{"symbol": "ETHUSDT", "positionAmt": bad}] for bad in ("", "garbage", "NaN")] + [[{"symbol": "ETHUSDT"}]]
+)
+@pytest.mark.asyncio
+async def test_a_close_over_an_unreadable_position_amount_is_never_already_flat(rows: list[dict]) -> None:
+    client = _PositionsClient(rows)
+    response = await _servicer(client).PlaceMarketOrder(_close_request(), None)
+    assert not response.success and not response.already_flat
+    assert not _placed(client)
+    reconcile = aster_perps_pb2.AsterGetOrderRequest(
+        symbol="ETHUSDT", client_order_id="almc" + "a" * 32, wallet_address=MAIN.address, close_position=True
+    )
+    reconciled = await _servicer(client).GetOrder(reconcile, None)
+    assert reconciled.outcome_unknown and not reconciled.already_flat
+
+
+@pytest.mark.asyncio
 async def test_open_against_an_opposite_one_way_position_is_refused() -> None:
     client = FakeClient(position_amt="-0.002")
     response = await _servicer(client).PlaceMarketOrder(_request(is_long=True), None)
@@ -340,7 +367,44 @@ async def test_get_order_aggregates_a_close_and_never_places() -> None:
     missing = aster_perps_pb2.AsterGetOrderRequest(
         symbol="ETHUSDT", client_order_id="almc" + "b" * 32, wallet_address=MAIN.address, close_position=True
     )
+    client.position_amt = "0.003"
     assert (await servicer.GetOrder(missing, None)).order_not_found
+
+
+@pytest.mark.asyncio
+async def test_a_close_reconcile_with_an_unreadable_position_stays_unknown() -> None:
+    client = _PositionsClient(AsterUnknownOutcomeError("positions timed out"))
+    request = aster_perps_pb2.AsterGetOrderRequest(
+        symbol="ETHUSDT", client_order_id="almc" + "c" * 32, wallet_address=MAIN.address, close_position=True
+    )
+    response = await _servicer(client).GetOrder(request, None)
+    assert response.outcome_unknown and not response.success and not response.order_not_found
+
+
+@pytest.mark.asyncio
+async def test_a_close_reconcile_over_offsetting_hedge_legs_is_never_already_flat() -> None:
+    client = _PositionsClient(
+        [{"symbol": "ETHUSDT", "positionAmt": "0.002"}, {"symbol": "ETHUSDT", "positionAmt": "-0.002"}]
+    )
+    request = aster_perps_pb2.AsterGetOrderRequest(
+        symbol="ETHUSDT", client_order_id="almc" + "d" * 32, wallet_address=MAIN.address, close_position=True
+    )
+    response = await _servicer(client).GetOrder(request, None)
+    assert not response.success and not response.already_flat and response.order_not_found
+
+
+@pytest.mark.asyncio
+async def test_a_lost_already_flat_answer_reconciles_to_the_same_success() -> None:
+    client = FakeClient(position_amt="0")
+    servicer = _servicer(client)
+    placed = await servicer.PlaceMarketOrder(_close_request(), None)
+    request = aster_perps_pb2.AsterGetOrderRequest(
+        symbol="ETHUSDT", client_order_id="almc" + "a" * 32, wallet_address=MAIN.address, close_position=True
+    )
+    reconciled = await servicer.GetOrder(request, None)
+    assert placed.already_flat and reconciled.already_flat and reconciled.success
+    assert (reconciled.executed_qty, reconciled.client_order_id) == ("0", "almc" + "a" * 32)
+    assert not _placed(client)
 
 
 @pytest.mark.asyncio
@@ -457,6 +521,21 @@ async def test_handler_publishes_the_venue_fill() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handler_reports_an_already_flat_close_as_a_success_with_no_fill() -> None:
+    bundle = _bundle()
+    bundle.metadata["order_request"].update(close_position=True, notional_usd="")
+    flat = aster_perps_pb2.AsterOrderResponse(
+        success=True, already_flat=True, client_order_id="almo123", executed_qty="0", requested_qty="0", cum_quote="0"
+    )
+    result = await AsterOrderHandler(FakeGatewayClient(flat), wallet_address="").execute(bundle)  # type: ignore[arg-type]
+    assert result.success and result.filled_size == Decimal(0)
+    order = result.venue_data[ASTER_ORDER_KEY]
+    assert order["already_flat"] is True and order["reduce_only"] is True
+    assert result.order_id is None
+    assert not has_offchain_fill(offchain_execution_result(result))
+
+
+@pytest.mark.asyncio
 async def test_handler_marks_a_partial_open_as_partially_filled() -> None:
     handler = AsterOrderHandler(FakeGatewayClient(_fill(status="EXPIRED", executed_qty="0.001")), wallet_address="")  # type: ignore[arg-type]
     result = await handler.execute(_bundle())
@@ -512,6 +591,22 @@ async def test_handler_does_not_conclude_a_failure_for_a_young_submission() -> N
     partial = _fill(success=False, error="position only partly closed", executed_qty="0.001")
     handler = AsterOrderHandler(FakeGatewayClient(order=partial), wallet_address=MAIN.address)  # type: ignore[arg-type]
     assert await handler.reconcile(_bundle().metadata, since=datetime.now(UTC)) is None
+
+
+@pytest.mark.parametrize(("age", "settled"), [(timedelta(0), False), (timedelta(seconds=31), True)])
+@pytest.mark.asyncio
+async def test_handler_holds_an_already_flat_reconcile_until_a_sent_leg_would_be_visible(
+    age: timedelta, settled: bool
+) -> None:
+    flat = aster_perps_pb2.AsterOrderResponse(
+        success=True, already_flat=True, client_order_id="almo123", executed_qty="0", requested_qty="0", cum_quote="0"
+    )
+    handler = AsterOrderHandler(FakeGatewayClient(order=flat), wallet_address=MAIN.address)  # type: ignore[arg-type]
+    result = await handler.reconcile(_bundle().metadata, since=datetime.now(UTC) - age)
+    if settled:
+        assert result is not None and result.success and result.filled_size == Decimal(0)
+    else:
+        assert result is None
 
 
 @pytest.mark.asyncio
@@ -611,6 +706,27 @@ def test_hook_books_exit_and_realized_pnl_on_close() -> None:
     AsterPerpsRunnerHookConnector().enrich_result(result, gateway_client=None, chain="bsc")
     perp = result.extracted_data["perp_data"]
     assert (perp.exit_price, perp.realized_pnl) == (Decimal("2730"), Decimal("0.005"))
+
+
+def test_hook_books_an_already_flat_close_as_a_zero_size_close_with_unmeasured_economics() -> None:
+    result = _result(
+        {
+            "symbol": "ETHUSDT",
+            "reduce_only": True,
+            "already_flat": True,
+            "executed_qty": "0",
+            "avg_price": "",
+            "cum_quote": "0",
+            "fee": "",
+            "fee_asset": "",
+            "realized_pnl": "",
+        }
+    )
+    AsterPerpsRunnerHookConnector().enrich_result(result, gateway_client=None, chain="bsc")
+    perp = result.extracted_data["perp_data"]
+    assert perp.size_delta == Decimal(0)
+    assert perp.exit_price is None and perp.realized_pnl is None
+    assert result.protocol_fees is None
 
 
 def test_hook_leaves_non_usd_fee_unmeasured() -> None:

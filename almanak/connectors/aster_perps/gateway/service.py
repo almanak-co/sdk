@@ -117,6 +117,20 @@ def _leg_client_order_id(base: str, leg: int) -> str:
     return base if leg == 0 else f"{base[:33]}.{leg:02d}"
 
 
+def _already_flat(client_order_id: str) -> aster_perps_pb2.AsterOrderResponse:
+    """A close asks for flat and the venue reads flat (closed elsewhere, liquidated,
+    or an open that never filled): success with no fill, so a caller or teardown
+    can move on instead of failing forever."""
+    return aster_perps_pb2.AsterOrderResponse(
+        success=True,
+        already_flat=True,
+        client_order_id=client_order_id,
+        executed_qty="0",
+        requested_qty="0",
+        cum_quote="0",
+    )
+
+
 def _unknown_order(client_order_id: str, error: str, requested_qty: str = "") -> aster_perps_pb2.AsterOrderResponse:
     return aster_perps_pb2.AsterOrderResponse(
         success=False,
@@ -252,8 +266,23 @@ class AsterPerpsServiceServicer(aster_perps_pb2_grpc.AsterPerpsServiceServicer):
         return await self._submit(client, request, prepared)
 
     async def _held_amount(self, client: AsterProApiClient, symbol: str) -> Decimal:
+        return sum(await self._position_amounts(client, symbol), Decimal(0))
+
+    async def _is_flat(self, client: AsterProApiClient, symbol: str) -> bool:
+        # Every row, not the net: hedge-mode legs that offset are not flat.
+        return all(amount == 0 for amount in await self._position_amounts(client, symbol))
+
+    async def _position_amounts(self, client: AsterProApiClient, symbol: str) -> list[Decimal]:
         positions = [p for p in await client.positions(symbol) if p.get("symbol") == symbol]
-        return sum((_decimal(p.get("positionAmt")) or Decimal(0) for p in positions), Decimal(0))
+        amounts: list[Decimal] = []
+        for position in positions:
+            amount = _decimal(position.get("positionAmt"))
+            # An unreadable amount is not a flat one: a close would report
+            # already_flat over a live position, so it raises instead of counting as zero.
+            if amount is None or not amount.is_finite():
+                raise ValueError(f"Aster {symbol} position amount unreadable: {position.get('positionAmt')!r}")
+            amounts.append(amount)
+        return amounts
 
     async def _prepare_open(
         self, client: AsterProApiClient, request: aster_perps_pb2.AsterPlaceMarketOrderRequest, max_slippage: Decimal
@@ -292,7 +321,7 @@ class AsterPerpsServiceServicer(aster_perps_pb2_grpc.AsterPerpsServiceServicer):
     ) -> _PreparedOrder | aster_perps_pb2.AsterOrderResponse:
         amount = await self._held_amount(client, request.symbol)
         if amount == 0:
-            return aster_perps_pb2.AsterOrderResponse(success=False, error=f"no open {request.symbol} position")
+            return _already_flat(request.client_order_id)
         if (amount > 0) != request.is_long:
             held = "long" if amount > 0 else "short"
             wanted = "long" if request.is_long else "short"
@@ -358,7 +387,7 @@ class AsterPerpsServiceServicer(aster_perps_pb2_grpc.AsterPerpsServiceServicer):
             return None
         try:
             remaining = await self._held_amount(client, request.symbol)
-        except (AsterApiError, AsterUnknownOutcomeError) as exc:
+        except (AsterApiError, AsterUnknownOutcomeError, ValueError) as exc:
             return _unknown_order(base, f"position after close unreadable: {exc}")
         return await self._close_response(client, request.symbol, base, legs, remaining, refusal)
 
@@ -572,6 +601,14 @@ class AsterPerpsServiceServicer(aster_perps_pb2_grpc.AsterPerpsServiceServicer):
             closed = await self._close(client, request, None, place=False)
             if closed is not None:
                 return closed
+            # No leg was ever sent. If the venue reads flat, this is the answer the
+            # close gave when it returned already_flat, so a lost response
+            # reconciles to the same success; a held position means it never ran.
+            try:
+                if await self._is_flat(client, request.symbol):
+                    return _already_flat(request.client_order_id)
+            except (AsterApiError, AsterUnknownOutcomeError, ValueError) as exc:
+                return _unknown_order(request.client_order_id, f"position unreadable: {exc}")
             return aster_perps_pb2.AsterOrderResponse(
                 success=False,
                 order_not_found=True,

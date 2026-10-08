@@ -123,7 +123,10 @@ class AsterOrderHandler:
             result = self._to_result(response, order_request)
         # Any order (or close leg) sent moments ago may still be queued at the
         # venue: a verdict short of success is not final until it has had time.
-        if not result.success and datetime.now(UTC) - since < _NOT_FOUND_PROOF_AGE:
+        # already_flat counts as short of success here: a filled leg the lookup
+        # cannot see yet also leaves the account flat, and its fill must be booked.
+        unproven = not result.success or response.already_flat
+        if unproven and datetime.now(UTC) - since < _NOT_FOUND_PROOF_AGE:
             return None
         return result
 
@@ -212,6 +215,7 @@ class AsterOrderHandler:
             "fee": response.fee,
             "fee_asset": response.fee_asset,
             "realized_pnl": response.realized_pnl,
+            "already_flat": bool(response.already_flat),
         }
         if not response.success:
             logger.warning("Aster order %s not filled: %s", order_request.get("client_order_id"), response.error)
@@ -238,7 +242,7 @@ class AsterOrderHandler:
         )
         return ClobExecutionResult(
             success=True,
-            order_id=str(response.order_id),
+            order_id=None if response.already_flat else str(response.order_id),
             status=ClobOrderStatus.MATCHED if complete else ClobOrderStatus.PARTIALLY_FILLED,
             filled_size=executed,
             avg_fill_price=_decimal(response.avg_price),

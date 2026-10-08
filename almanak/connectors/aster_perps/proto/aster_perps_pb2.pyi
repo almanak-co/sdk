@@ -140,6 +140,7 @@ class AsterOrderResponse(_message.Message):
     FEE_ASSET_FIELD_NUMBER: _builtins.int
     REALIZED_PNL_FIELD_NUMBER: _builtins.int
     ORDER_NOT_FOUND_FIELD_NUMBER: _builtins.int
+    ALREADY_FLAT_FIELD_NUMBER: _builtins.int
     success: _builtins.bool
     error: _builtins.str
     outcome_unknown: _builtins.bool
@@ -161,6 +162,8 @@ class AsterOrderResponse(_message.Message):
     """summed over the order's fills; "" when unread"""
     order_not_found: _builtins.bool
     """GetOrder: the venue has no order under this client id (it never filled)"""
+    already_flat: _builtins.bool
+    """close: the venue held no position for the symbol, so no order was sent"""
     def __init__(
         self,
         *,
@@ -179,8 +182,9 @@ class AsterOrderResponse(_message.Message):
         fee_asset: _builtins.str = ...,
         realized_pnl: _builtins.str = ...,
         order_not_found: _builtins.bool = ...,
+        already_flat: _builtins.bool = ...,
     ) -> None: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["avg_price", b"avg_price", "client_order_id", b"client_order_id", "cum_quote", b"cum_quote", "error", b"error", "executed_qty", b"executed_qty", "fee", b"fee", "fee_asset", b"fee_asset", "order_id", b"order_id", "order_not_found", b"order_not_found", "outcome_unknown", b"outcome_unknown", "realized_pnl", b"realized_pnl", "requested_qty", b"requested_qty", "side", b"side", "status", b"status", "success", b"success"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["already_flat", b"already_flat", "avg_price", b"avg_price", "client_order_id", b"client_order_id", "cum_quote", b"cum_quote", "error", b"error", "executed_qty", b"executed_qty", "fee", b"fee", "fee_asset", b"fee_asset", "order_id", b"order_id", "order_not_found", b"order_not_found", "outcome_unknown", b"outcome_unknown", "realized_pnl", b"realized_pnl", "requested_qty", b"requested_qty", "side", b"side", "status", b"status", "success", b"success"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
 
 Global___AsterOrderResponse: _TypeAlias = AsterOrderResponse  # noqa: Y015
