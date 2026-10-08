@@ -22,6 +22,7 @@ from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from web3.exceptions import TransactionNotFound
 
+from almanak.connectors.aster_perps.addresses import ASTER_PRO, FUTURES_BROKER_ID
 from almanak.connectors.aster_perps.gateway.api_client import (
     WITHDRAW_CHAIN_ID,
     AsterApiError,
@@ -33,6 +34,7 @@ from almanak.connectors.aster_perps.gateway.api_client import (
     quantity_for_notional,
 )
 from almanak.connectors.aster_perps.proto import aster_perps_pb2, aster_perps_pb2_grpc
+from almanak.connectors.aster_perps.vault_events import DEPOSIT_TOPIC, VaultDeposit, decode_deposits
 from almanak.gateway.utils.rpc_provider import get_cached_web3
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,17 @@ _MAX_CLOSE_LEGS = 30
 # Aster's "Order does not exist": the venue holds no order under the client id.
 # GET /order still finds every order with a fill, so this proves nothing traded.
 _NO_SUCH_ORDER = -2013
+# Aster answers every account read with this until the account's first deposit is
+# credited: a measured unopened account, not an unreadable one.
+_ACCOUNT_NOT_OPENED = -5050
+# How far back (about a day of BSC blocks) an unopened account's vault deposits are
+# looked for. Aster credits a deposit within minutes, so a deposit still uncredited
+# after a day is a venue incident this read cannot value: after a gateway restart in
+# that state the account reads empty. The widest eth_getLogs range sent at once, and
+# how many finalized blocks every scan re-reads in case a node had not indexed them.
+_UNOPENED_DEPOSIT_LOOKBACK_BLOCKS = 115_200
+_LOG_RANGE_BLOCKS = 5_000
+_DEPOSIT_RESCAN_BLOCKS = 64
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -99,6 +112,18 @@ def _order_response(order: dict[str, Any], *, requested_qty: str = "") -> aster_
         cum_quote=str(order.get("cumQuote", "")),
         requested_qty=requested,
     )
+
+
+def _pending_deposit(deposit: VaultDeposit) -> aster_perps_pb2.AsterPendingTransfer:
+    """An uncredited vault deposit as an in-flight transfer; an unknown currency is left unvalued."""
+    from almanak.framework.data.tokens.resolver import get_token_resolver
+
+    try:
+        token = get_token_resolver().resolve(deposit.currency, "bsc", skip_gateway=True)
+    except Exception:  # noqa: BLE001 — an unresolvable currency stays unvalued, which leaves the account unmeasured
+        return aster_perps_pb2.AsterPendingTransfer(type="DEPOSIT", asset=deposit.currency, amount="")
+    amount = Decimal(deposit.amount) / Decimal(10) ** token.decimals
+    return aster_perps_pb2.AsterPendingTransfer(type="DEPOSIT", asset=token.symbol, amount=str(amount))
 
 
 @dataclass(frozen=True)
@@ -169,6 +194,12 @@ class AsterPerpsServiceServicer(aster_perps_pb2_grpc.AsterPerpsServiceServicer):
         # fee): reconciliation matches it exactly even when the caller never
         # received the response, and a re-send is refused unless it provably failed.
         self._accepted_requests: dict[str, tuple[str, str, str]] = {}
+        # While Aster reports the account unopened: the next block to scan for vault
+        # deposits, and the deposits found so far, keyed by (tx hash, log index).
+        self._deposit_scan_from: int | None = None
+        self._unopened_deposits: dict[tuple[str, int], VaultDeposit] = {}
+        # Once seen open, an account cannot become unopened: a later -5050 is an error.
+        self._account_opened = False
         self._unavailable_reason = ""
         safe_mode = getattr(settings, "safe_mode", None) in ("direct", "zodiac")
         private_key = getattr(settings, "private_key", None)
@@ -636,7 +667,12 @@ class AsterPerpsServiceServicer(aster_perps_pb2_grpc.AsterPerpsServiceServicer):
             return aster_perps_pb2.AsterPositionsResponse(success=False, error=error)
         try:
             rows = await client.positions(request.symbol or None)
-        except (AsterApiError, AsterUnknownOutcomeError) as exc:
+        except AsterApiError as exc:
+            if exc.code == _ACCOUNT_NOT_OPENED and not self._account_opened:
+                # No deposit has ever been credited, so no position can exist.
+                return aster_perps_pb2.AsterPositionsResponse(success=True)
+            return aster_perps_pb2.AsterPositionsResponse(success=False, error=str(exc))
+        except AsterUnknownOutcomeError as exc:
             return aster_perps_pb2.AsterPositionsResponse(success=False, error=str(exc))
         return aster_perps_pb2.AsterPositionsResponse(
             success=True,
@@ -656,6 +692,58 @@ class AsterPerpsServiceServicer(aster_perps_pb2_grpc.AsterPerpsServiceServicer):
                 if _decimal(row.get("positionAmt")) not in (None, Decimal(0))
             ],
         )
+
+    async def _uncredited_deposits(self, wallet: str) -> list[aster_perps_pb2.AsterPendingTransfer]:
+        """Futures-account vault deposits from ``wallet`` while Aster reports the account unopened.
+
+        The first credited deposit opens the account, so every deposit found here
+        is in flight: it has left the wallet and Aster has not credited it yet.
+        Aster's transfer history is unreadable until then, so the vault's
+        on-chain ``Deposit`` events are the only record. Only finalized blocks are
+        cached; the unfinalized tail is re-read on every call, so a reorg cannot
+        leave a deposit counted that no longer exists. An unreadable chain raises:
+        the account is then unmeasured, never valued as empty.
+        """
+        vault = ASTER_PRO["bsc"]["vault"]
+        web3 = get_cached_web3("bsc")
+        account_topic = "0x" + wallet.lower().removeprefix("0x").rjust(64, "0")
+        try:
+            head = int(await asyncio.to_thread(lambda: web3.eth.block_number))
+            finalized = min(head, int((await asyncio.to_thread(web3.eth.get_block, "finalized"))["number"]))
+            start = self._deposit_scan_from
+            if start is None:
+                start = max(0, head - _UNOPENED_DEPOSIT_LOOKBACK_BLOCKS)
+            logs: list[Any] = []
+            for low in range(start, head + 1, _LOG_RANGE_BLOCKS):
+                logs.extend(
+                    await asyncio.to_thread(
+                        web3.eth.get_logs,
+                        {
+                            "address": vault,
+                            "fromBlock": low,
+                            "toBlock": min(low + _LOG_RANGE_BLOCKS - 1, head),
+                            "topics": [DEPOSIT_TOPIC, account_topic],
+                        },
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001 — an unread deposit must never value the account as empty
+            raise AsterApiError(f"Aster account not opened; vault deposits unreadable: {exc}") from exc
+        unfinalized: dict[tuple[str, int], VaultDeposit] = {}
+        for log in logs:
+            for deposit in decode_deposits({"logs": [log]}, vault=vault):
+                tx_hash = log["transactionHash"]
+                tx_key = tx_hash.hex() if isinstance(tx_hash, bytes | bytearray) else str(tx_hash)
+                key = (tx_key.lower(), int(log["logIndex"]))
+                if int(log["blockNumber"]) <= finalized:
+                    self._unopened_deposits[key] = deposit
+                else:
+                    unfinalized[key] = deposit
+        self._deposit_scan_from = max(start, finalized + 1 - _DEPOSIT_RESCAN_BLOCKS)
+        return [
+            _pending_deposit(deposit)
+            for deposit in {**self._unopened_deposits, **unfinalized}.values()
+            if deposit.account.lower() == wallet.lower() and deposit.broker == FUTURES_BROKER_ID
+        ]
 
     async def _pending_transfers(self, client: AsterProApiClient) -> list[aster_perps_pb2.AsterPendingTransfer]:
         """Transfers in flight between the wallet and the account, rebuilt from venue history.
@@ -892,6 +980,20 @@ class AsterPerpsServiceServicer(aster_perps_pb2_grpc.AsterPerpsServiceServicer):
             return aster_perps_pb2.AsterBalancesResponse(success=False, error=error)
         try:
             rows = await client.balances()
+        except AsterApiError as exc:
+            if exc.code != _ACCOUNT_NOT_OPENED or self._account_opened:
+                return aster_perps_pb2.AsterBalancesResponse(success=False, error=str(exc))
+            try:
+                pending = await self._uncredited_deposits(client.user_address)
+            except AsterApiError as scan_exc:
+                return aster_perps_pb2.AsterBalancesResponse(success=False, error=str(scan_exc))
+            return aster_perps_pb2.AsterBalancesResponse(success=True, pending_transfers=pending)
+        except AsterUnknownOutcomeError as exc:
+            return aster_perps_pb2.AsterBalancesResponse(success=False, error=str(exc))
+        self._account_opened = True
+        self._deposit_scan_from = None
+        self._unopened_deposits.clear()
+        try:
             pending = await self._pending_transfers(client)
         except (AsterApiError, AsterUnknownOutcomeError) as exc:
             return aster_perps_pb2.AsterBalancesResponse(success=False, error=str(exc))

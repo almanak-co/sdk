@@ -1443,3 +1443,217 @@ def test_hook_excludes_flat_positions_from_observed_leverage(monkeypatch, is_lon
     result = _result({"symbol": "ETHUSDT", "reduce_only": False, "is_long": is_long, "leverage_requested": 5})
     AsterPerpsRunnerHookConnector().enrich_result(result, gateway_client=object(), chain="bsc")
     assert result.extracted_data["perp_data"].venue_leverage == (None if flat_only else Decimal(3))
+
+
+_USDT_BSC = "0x55d398326f99059fF775485246999027B3197955"
+
+
+class _UnopenedClient(FakeClient):
+    """An Aster account that has never had a deposit credited (Aster code -5050)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.opened = False
+
+    async def balances(self) -> list[dict]:
+        if not self.opened:
+            raise AsterApiError("GET /fapi/v3/balance: This function can only be used after deposit", code=-5050)
+        return [{"asset": "USDT", "balance": "3", "availableBalance": "3", "crossUnPnl": "0"}]
+
+    async def positions(self, symbol: str | None = None) -> list[dict]:
+        if not self.opened:
+            raise AsterApiError("GET /fapi/v3/positionRisk: This function can only be used after deposit", code=-5050)
+        return []
+
+    async def transfer_history(self) -> list[dict]:
+        if not self.opened:
+            raise AsterApiError("This function can only be used after deposit", code=-5050)
+        return []
+
+
+def _deposit_log(account: str, *, amount_wei: int, broker: int = 1, block: int = 199_000, tx: str = "0xd1") -> dict:
+    from eth_abi import encode as abi_encode
+
+    from almanak.connectors.aster_perps.addresses import ASTER_PRO
+    from almanak.connectors.aster_perps.vault_events import DEPOSIT_TOPIC
+
+    return {
+        "address": ASTER_PRO["bsc"]["vault"],
+        "topics": [
+            DEPOSIT_TOPIC,
+            "0x" + account.lower()[2:].rjust(64, "0"),
+            "0x" + _USDT_BSC.lower()[2:].rjust(64, "0"),
+        ],
+        "data": "0x" + abi_encode(["bool", "uint256", "uint256"], [False, amount_wei, broker]).hex(),
+        "transactionHash": tx,
+        "logIndex": 0,
+        "blockNumber": block,
+    }
+
+
+class _ChainLogs:
+    """A BSC node: head block and the vault's Deposit logs, recording every getLogs range."""
+
+    def __init__(self, logs: list[dict], *, head: int = 200_000, fail: bool = False, lag: int = 0) -> None:
+        self.logs = logs
+        self.head = head
+        self.lag = lag
+        self.fail = fail
+        self.ranges: list[tuple[int, int]] = []
+        chain = self
+
+        class _Eth:
+            @property
+            def block_number(self) -> int:
+                return chain.head
+
+            def get_logs(self, params: dict) -> list[dict]:
+                return chain._get_logs(params)
+
+            def get_block(self, tag: str) -> dict:
+                assert tag == "finalized"
+                return {"number": chain.head - chain.lag}
+
+        self.eth = _Eth()
+
+    def _get_logs(self, params: dict) -> list[dict]:
+        if self.fail:
+            raise ConnectionError("rpc down")
+        self.ranges.append((params["fromBlock"], params["toBlock"]))
+        topics = params["topics"]
+        return [
+            log
+            for log in self.logs
+            if params["fromBlock"] <= log["blockNumber"] <= params["toBlock"] and log["topics"][:2] == topics
+        ]
+
+
+def _unopened(monkeypatch: pytest.MonkeyPatch, chain: _ChainLogs) -> tuple[AsterPerpsServiceServicer, _UnopenedClient]:
+    from almanak.connectors.aster_perps.gateway import service
+
+    monkeypatch.setattr(service, "get_cached_web3", lambda _chain: chain)
+    client = _UnopenedClient()
+    return _servicer(client), client
+
+
+async def _get_balances(servicer: AsterPerpsServiceServicer) -> Any:
+    return await servicer.GetBalances(aster_perps_pb2.AsterGetBalancesRequest(wallet_address=MAIN.address), None)
+
+
+@pytest.mark.asyncio
+async def test_an_unopened_account_with_no_deposit_is_measured_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    servicer, _ = _unopened(monkeypatch, _ChainLogs([]))
+    response = await _get_balances(servicer)
+    assert response.success, response.error
+    assert list(response.balances) == [] and list(response.pending_transfers) == []
+
+
+@pytest.mark.asyncio
+async def test_a_first_deposit_aster_has_not_credited_is_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    servicer, _ = _unopened(monkeypatch, _ChainLogs([_deposit_log(MAIN.address, amount_wei=3 * 10**18)]))
+    response = await _get_balances(servicer)
+    assert response.success, response.error
+    [pending] = response.pending_transfers
+    assert (pending.type, pending.asset, Decimal(pending.amount)) == ("DEPOSIT", "USDT", Decimal(3))
+
+
+@pytest.mark.asyncio
+async def test_an_unopened_account_on_an_unreadable_chain_is_unmeasured(monkeypatch: pytest.MonkeyPatch) -> None:
+    servicer, _ = _unopened(monkeypatch, _ChainLogs([], fail=True))
+    response = await _get_balances(servicer)
+    assert not response.success and "unreadable" in response.error
+
+
+@pytest.mark.asyncio
+async def test_a_spot_or_foreign_deposit_does_not_count_as_futures_equity(monkeypatch: pytest.MonkeyPatch) -> None:
+    logs = [
+        _deposit_log(MAIN.address, amount_wei=10**18, broker=1000, tx="0xs1"),
+        _deposit_log("0x" + "ab" * 20, amount_wei=10**18, tx="0xf1"),
+    ]
+    servicer, _ = _unopened(monkeypatch, _ChainLogs(logs))
+    response = await _get_balances(servicer)
+    assert response.success and list(response.pending_transfers) == []
+
+
+@pytest.mark.asyncio
+async def test_the_deposit_scan_resumes_from_the_last_block_and_stops_once_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chain = _ChainLogs([_deposit_log(MAIN.address, amount_wei=3 * 10**18, block=199_000)])
+    servicer, client = _unopened(monkeypatch, chain)
+    await _get_balances(servicer)
+    first = list(chain.ranges)
+    assert first[0][0] == 200_000 - 115_200 and first[-1][1] == 200_000
+    assert all(high - low < 5_000 for low, high in first)
+
+    chain.head = 200_010
+    chain.ranges.clear()
+    [pending] = (await _get_balances(servicer)).pending_transfers
+    assert chain.ranges == [(200_001 - 64, 200_010)] and Decimal(pending.amount) == Decimal(3)
+
+    client.opened = True
+    response = await _get_balances(servicer)
+    assert response.success and [b.balance for b in response.balances] == ["3"]
+    assert servicer._deposit_scan_from is None and servicer._unopened_deposits == {}
+
+
+@pytest.mark.asyncio
+async def test_a_deposit_reorged_out_of_the_unfinalized_tail_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    deposit = _deposit_log(MAIN.address, amount_wei=3 * 10**18, block=199_998)
+    chain = _ChainLogs([deposit], lag=5)
+    servicer, _ = _unopened(monkeypatch, chain)
+    [pending] = (await _get_balances(servicer)).pending_transfers
+    assert Decimal(pending.amount) == Decimal(3) and servicer._unopened_deposits == {}
+    assert servicer._deposit_scan_from == 200_000 - 5 + 1 - 64
+
+    chain.logs = []  # the block holding the deposit was reorganized away
+    response = await _get_balances(servicer)
+    assert response.success and list(response.pending_transfers) == []
+
+
+@pytest.mark.asyncio
+async def test_a_deposit_a_lagging_node_missed_is_found_on_the_rescan(monkeypatch: pytest.MonkeyPatch) -> None:
+    chain = _ChainLogs([])
+    servicer, _ = _unopened(monkeypatch, chain)
+    assert list((await _get_balances(servicer)).pending_transfers) == []
+    # The node had not indexed this finalized block on the first scan.
+    chain.logs = [_deposit_log(MAIN.address, amount_wei=3 * 10**18, block=199_990)]
+    chain.head = 200_001
+    [pending] = (await _get_balances(servicer)).pending_transfers
+    assert Decimal(pending.amount) == Decimal(3)
+
+
+@pytest.mark.asyncio
+async def test_an_account_seen_open_never_reads_unopened_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    servicer, client = _unopened(monkeypatch, _ChainLogs([]))
+    client.opened = True
+    assert (await _get_balances(servicer)).success
+    client.opened = False
+    assert not (await _get_balances(servicer)).success
+    positions = await servicer.GetPositions(aster_perps_pb2.AsterGetPositionsRequest(wallet_address=MAIN.address), None)
+    assert not positions.success
+
+
+@pytest.mark.asyncio
+async def test_an_unopened_account_holds_no_position(monkeypatch: pytest.MonkeyPatch) -> None:
+    servicer, _ = _unopened(monkeypatch, _ChainLogs([]))
+    response = await servicer.GetPositions(aster_perps_pb2.AsterGetPositionsRequest(wallet_address=MAIN.address), None)
+    assert response.success and list(response.positions) == []
+
+
+@pytest.mark.asyncio
+async def test_any_other_account_error_stays_unmeasured(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Banned(_UnopenedClient):
+        async def balances(self) -> list[dict]:
+            raise AsterApiError("Too many requests", code=-1003)
+
+        async def positions(self, symbol: str | None = None) -> list[dict]:
+            raise AsterApiError("Too many requests", code=-1003)
+
+    from almanak.connectors.aster_perps.gateway import service
+
+    monkeypatch.setattr(service, "get_cached_web3", lambda _chain: _ChainLogs([]))
+    servicer = _servicer(_Banned())
+    assert not (await _get_balances(servicer)).success
+    positions = await servicer.GetPositions(aster_perps_pb2.AsterGetPositionsRequest(wallet_address=MAIN.address), None)
+    assert not positions.success
