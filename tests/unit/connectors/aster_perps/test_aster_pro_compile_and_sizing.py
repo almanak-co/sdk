@@ -220,3 +220,70 @@ async def test_a_symbol_without_a_tick_size_is_unknown_not_fatal_for_every_marke
     assert (await client.symbol_rules("ETHUSDT")).tick_size == Decimal("0.01")
     with pytest.raises(AsterApiError, match="Unknown Aster symbol"):
         await client.symbol_rules("BADUSDT")
+
+
+@pytest.mark.parametrize(
+    ("target", "price", "quantity", "notional"),
+    [
+        ("6", "2490", "0.003", "8.71"),  # 0.002 would be $4.98, under the $5 minimum
+        ("6", "2000", "0.003", "7.00"),  # the target itself is a valid order
+        ("6", "1000", "0.006", "6.50"),
+        ("5", "5000", "0.002", "12.50"),  # 0.001 is exactly $5, under the 2% clearance
+    ],
+)
+def test_venue_order_size_keeps_the_target_unless_the_minimum_needs_more(
+    target: str, price: str, quantity: str, notional: str
+) -> None:
+    from decimal import Decimal
+
+    from almanak.connectors.aster_perps.markets import venue_order_size
+
+    q, n = venue_order_size(Decimal(target), Decimal(price), max_notional_usd=Decimal(100))
+    assert (q, n) == (Decimal(quantity), Decimal(notional))
+    # What the venue does with the notional: round down to the step at its own mark.
+    assert (n / Decimal(price) / Decimal("0.001")).to_integral_value(rounding="ROUND_DOWN") * Decimal("0.001") == q
+
+
+def test_venue_order_size_caps_the_headroom_at_what_the_margin_carries() -> None:
+    from decimal import Decimal
+
+    from almanak.connectors.aster_perps.markets import venue_order_size
+
+    # $6 budget at $2,600: 0.002 ETH ($5.20) is affordable; the padded $6.50 is capped to $6.
+    assert venue_order_size(Decimal(6), Decimal(2600), max_notional_usd=Decimal(6)) == (
+        Decimal("0.002"),
+        Decimal("6"),
+    )
+
+
+def test_venue_order_size_refuses_an_order_the_margin_cannot_carry() -> None:
+    from decimal import Decimal
+
+    import pytest
+
+    from almanak.connectors.aster_perps.markets import venue_order_size
+
+    with pytest.raises(ValueError, match="exceeds what the margin carries"):
+        venue_order_size(Decimal(6), Decimal(2490), max_notional_usd=Decimal(6))
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "0", "-1"])
+def test_venue_order_size_refuses_a_non_finite_or_non_positive_price(bad: str) -> None:
+    from decimal import Decimal
+
+    from almanak.connectors.aster_perps.markets import venue_order_size
+
+    with pytest.raises(ValueError, match="positive finite"):
+        venue_order_size(Decimal(6), Decimal(bad), max_notional_usd=Decimal(100))
+
+
+def test_venue_order_size_reaches_the_minimum_in_one_step_on_a_tiny_price() -> None:
+    from decimal import Decimal
+
+    from almanak.connectors.aster_perps.markets import venue_order_size
+
+    # 5.10 / (0.0000001 * 1) = 51,000,000 steps: computed, never iterated.
+    q, _ = venue_order_size(
+        Decimal(1), Decimal("0.0000001"), max_notional_usd=Decimal(100), step=Decimal(1)
+    )
+    assert q == Decimal(51_000_000)

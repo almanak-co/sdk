@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 
 # Aster Pro USDT-margined perps settle in USDT; it is the only margin asset the
 # connector accepts.
@@ -15,6 +16,53 @@ _CLIENT_ORDER_ID_PATTERN = re.compile(r"^[.A-Z:/a-z0-9_-]{1,36}$")
 
 # Markets served on the gateway funding lanes, in their ``BASE-USD`` key form.
 FUNDING_MARKETS = ("BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD")
+
+
+# Aster ETHUSDT order rules: quantity step and minimum order notional (USD). The venue
+# rounds an order's quantity DOWN to the step and refuses it below the minimum.
+ETH_QTY_STEP = Decimal("0.001")
+MIN_ORDER_NOTIONAL_USD = Decimal("5")
+# Clearance over the minimum, so a small move between the strategy's price read
+# and the venue's mark at submission does not push the order under it.
+_MIN_NOTIONAL_CLEARANCE = Decimal("1.02")
+# Share of deposit x leverage an order may use, leaving room for the taker fee and
+# an adverse move at open before the venue's initial-margin check binds.
+MARGIN_USE_CAP = Decimal("0.9")
+
+
+def venue_order_size(
+    target_usd: Decimal,
+    price: Decimal,
+    *,
+    max_notional_usd: Decimal,
+    step: Decimal = ETH_QTY_STEP,
+    min_notional_usd: Decimal = MIN_ORDER_NOTIONAL_USD,
+) -> tuple[Decimal, Decimal]:
+    """The order quantity for ``target_usd`` and the USD notional to send for it.
+
+    The quantity is the target rounded down to the step (never above what was
+    asked) unless that falls under the venue minimum, in which case it steps up
+    only as far as the minimum requires. The notional sent is ``(quantity + half
+    a step) * price``, capped at ``max_notional_usd`` (what the margin can carry),
+    so the venue's own round-down lands on that quantity unless its mark moves
+    by more than the headroom. Raises ``ValueError`` when the margin cannot carry
+    the quantity at all.
+    """
+    if not all(v.is_finite() and v > 0 for v in (target_usd, price, step)):
+        raise ValueError(
+            f"order sizing needs positive finite inputs, got target={target_usd} price={price} step={step}"
+        )
+    floor_steps = (target_usd / price / step).to_integral_value(rounding=ROUND_DOWN)
+    min_steps = (min_notional_usd * _MIN_NOTIONAL_CLEARANCE / price / step).to_integral_value(rounding=ROUND_CEILING)
+    quantity = max(floor_steps, min_steps) * step
+    cost = (quantity * price).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+    if cost > max_notional_usd:
+        raise ValueError(
+            f"the smallest valid order ({quantity} at ~{price}, ${cost}) exceeds what the margin carries "
+            f"(${max_notional_usd})"
+        )
+    notional = min(((quantity + step / 2) * price).quantize(Decimal("0.01"), rounding=ROUND_DOWN), max_notional_usd)
+    return quantity, max(notional, cost)
 
 
 def to_symbol(market: str) -> str:
@@ -47,4 +95,13 @@ def client_order_id(intent_id: str, *, leg: str) -> str:
     return value
 
 
-__all__ = ["FUNDING_MARKETS", "MARGIN_ASSET", "client_order_id", "to_symbol"]
+__all__ = [
+    "ETH_QTY_STEP",
+    "FUNDING_MARKETS",
+    "MARGIN_ASSET",
+    "MARGIN_USE_CAP",
+    "MIN_ORDER_NOTIONAL_USD",
+    "client_order_id",
+    "to_symbol",
+    "venue_order_size",
+]

@@ -194,8 +194,9 @@ class TestDepositSettleOpen:
         open_intent = strategy.decide(_market("2000"))
         assert _type(open_intent) == "PERP_OPEN"
         assert open_intent.market == "ETH/USD" and open_intent.collateral_token == USDT
-        assert open_intent.size_usd == Decimal("6") and open_intent.leverage == Decimal("3")
-        assert open_intent.collateral_amount == Decimal("2") and open_intent.is_long is True
+        # 0.003 ETH at $2,000, sent with half a step of headroom so the venue's round-down keeps it.
+        assert open_intent.size_usd == Decimal("7.00") and open_intent.leverage == Decimal("3")
+        assert open_intent.collateral_amount == Decimal("2.34") and open_intent.is_long is True
         assert open_intent.max_slippage == Decimal("0.01") and open_intent.protocol == "aster_perps"
         assert strategy.state["phase"] == "settle"
 
@@ -485,6 +486,37 @@ class TestOpenPositions:
 
     def test_tracks_only_the_margin_token(self, module):
         assert _make(module)._get_tracked_tokens() == ["0x55d398326f99059fF775485246999027B3197955"]
+
+
+class TestVenueOrderSize:
+    def test_a_target_that_rounds_under_the_minimum_steps_up_to_a_valid_order(self, module):
+        strategy = _make(module)
+        strategy.state.update(phase="flat")
+        intent = strategy.decide(_market("2490"))
+        # $6 / $2,490 rounds down to 0.002 ETH ($4.98 < $5): the order steps up to 0.003 ETH ($7.47),
+        # sent with its headroom capped at the $8.10 usable margin (0.9 of deposit 3 x leverage 3).
+        assert _type(intent) == "PERP_OPEN" and intent.size_usd == Decimal("8.10")
+
+    def test_an_affordable_order_is_not_refused_for_its_headroom(self, module):
+        strategy = _make(module, deposit_usd="2", leverage="3", size_usd="6")
+        strategy.state.update(phase="flat")
+        intent = strategy.decide(_market("2600"))
+        # 0.002 ETH ($5.20) fits the $5.40 usable margin; the headroom is capped at it.
+        assert _type(intent) == "PERP_OPEN" and intent.size_usd == Decimal("5.40")
+
+    def test_a_non_eth_market_must_set_its_quantity_step(self, module):
+        with pytest.raises(ValueError, match="qty_step"):
+            _make(module, market="SOL/USD")
+
+    def test_a_non_eth_market_cannot_be_priced_with_eth(self, module):
+        with pytest.raises(ValueError, match="base_token_address"):
+            _make(module, market="SOL/USD", qty_step="0.01")
+
+    def test_an_order_the_deposit_cannot_margin_holds(self, module):
+        strategy = _make(module, deposit_usd="2", leverage="3", size_usd="6")
+        strategy.state.update(phase="flat")
+        assert _type(strategy.decide(_market("2490"))) == "HOLD"
+        assert strategy.state["open_sent_at"] is None
 
 
 class TestReviewFixes:
