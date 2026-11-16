@@ -1,0 +1,227 @@
+{
+  "$defs": {
+    "Eta": {
+      "additionalProperties": false,
+      "properties": {
+        "remaining_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Remaining Seconds"
+        },
+        "estimated_finish_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Finish At"
+        },
+        "basis": {
+          "default": "calibrating",
+          "enum": [
+            "calibrating",
+            "previous_runs",
+            "observed",
+            "mixed",
+            "complete",
+            "unavailable"
+          ],
+          "title": "Basis",
+          "type": "string"
+        }
+      },
+      "title": "Eta",
+      "type": "object"
+    },
+    "PhaseProgress": {
+      "additionalProperties": false,
+      "properties": {
+        "phase_id": {
+          "title": "Phase Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "unit": {
+          "title": "Unit",
+          "type": "string"
+        },
+        "completed_units": {
+          "minimum": 0,
+          "title": "Completed Units",
+          "type": "number"
+        },
+        "total_units": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Total Units"
+        },
+        "total_is_estimate": {
+          "title": "Total Is Estimate",
+          "type": "boolean"
+        },
+        "finished": {
+          "title": "Finished",
+          "type": "boolean"
+        },
+        "elapsed_seconds": {
+          "minimum": 0,
+          "title": "Elapsed Seconds",
+          "type": "number"
+        },
+        "eta": {
+          "$ref": "#/$defs/Eta"
+        }
+      },
+      "required": [
+        "phase_id",
+        "label",
+        "unit",
+        "completed_units",
+        "total_units",
+        "total_is_estimate",
+        "finished",
+        "elapsed_seconds",
+        "eta"
+      ],
+      "title": "PhaseProgress",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "kind": {
+      "const": "backtest_progress",
+      "default": "backtest_progress",
+      "title": "Kind",
+      "type": "string"
+    },
+    "job_id": {
+      "title": "Job Id",
+      "type": "string"
+    },
+    "attempt_id": {
+      "title": "Attempt Id",
+      "type": "string"
+    },
+    "sequence": {
+      "minimum": 0,
+      "title": "Sequence",
+      "type": "integer"
+    },
+    "status": {
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "interrupted"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    },
+    "stale_after_seconds": {
+      "default": 15.0,
+      "minimum": 0,
+      "title": "Stale After Seconds",
+      "type": "number"
+    },
+    "elapsed_seconds": {
+      "minimum": 0,
+      "title": "Elapsed Seconds",
+      "type": "number"
+    },
+    "phase": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Phase"
+    },
+    "phases": {
+      "items": {
+        "$ref": "#/$defs/PhaseProgress"
+      },
+      "title": "Phases",
+      "type": "array"
+    },
+    "eta": {
+      "$ref": "#/$defs/Eta"
+    },
+    "timing_key": {
+      "title": "Timing Key",
+      "type": "string"
+    },
+    "observer_errors": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Observer Errors",
+      "type": "integer"
+    },
+    "decision_evaluations": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Decision Evaluations"
+    }
+  },
+  "required": [
+    "job_id",
+    "attempt_id",
+    "sequence",
+    "status",
+    "updated_at",
+    "elapsed_seconds",
+    "phase",
+    "phases",
+    "eta",
+    "timing_key"
+  ],
+  "title": "ProgressSnapshot",
+  "type": "object",
+  "$id": "urn:almanak:backtest-progress:v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

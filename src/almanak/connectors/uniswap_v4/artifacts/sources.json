@@ -1,0 +1,16 @@
+{
+  "deployments": "https://developers.uniswap.org/docs/protocols/v4/deployments",
+  "core_commit": "46c6834698c48bc4a463a86d8420f4eb1d7f3b75",
+  "periphery_commit": "dce236d4e2057422d0791d9a973a58765eb46f65",
+  "abi_evidence": "Canonical action encodings are checked against the deployed contracts by tests/fork/test_uniswap_permissions.py; source commits are protocol evidence, not claims of bytecode build equivalence.",
+  "tick_math": "https://github.com/Uniswap/v4-core/blob/46c6834698c48bc4a463a86d8420f4eb1d7f3b75/src/libraries/TickMath.sol",
+  "tick_math_license": "UNISWAP-MIT-LICENSE.txt",
+  "swap_semantics": {
+    "Pool": "https://github.com/Uniswap/v4-core/blob/46c6834698c48bc4a463a86d8420f4eb1d7f3b75/src/libraries/Pool.sol",
+    "SwapMath": "https://github.com/Uniswap/v4-core/blob/46c6834698c48bc4a463a86d8420f4eb1d7f3b75/src/libraries/SwapMath.sol",
+    "SqrtPriceMath": "https://github.com/Uniswap/v4-core/blob/46c6834698c48bc4a463a86d8420f4eb1d7f3b75/src/libraries/SqrtPriceMath.sol",
+    "TickBitmap": "https://github.com/Uniswap/v4-core/blob/46c6834698c48bc4a463a86d8420f4eb1d7f3b75/src/libraries/TickBitmap.sol",
+    "ProtocolFeeLibrary": "https://github.com/Uniswap/v4-core/blob/46c6834698c48bc4a463a86d8420f4eb1d7f3b75/src/libraries/ProtocolFeeLibrary.sol"
+  },
+  "swap_math_license": "UNISWAP-MIT-LICENSE.txt"
+}

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Almanak position inputs",
+  "description": "Each allocation is one connector's economic choices against a named market. Adding a connector adds a file under positions/ and one entry here; debts stay Aave V4 positions.",
+  "anyOf": [
+    {
+      "$ref": "positions/aave_v4.schema.json"
+    },
+    {
+      "$ref": "positions/uniswap_v3.schema.json"
+    },
+    {
+      "$ref": "positions/aave_v3.schema.json"
+    },
+    {
+      "$ref": "positions/sparklend.schema.json"
+    },
+    {
+      "$ref": "positions/compound_v3.schema.json"
+    },
+    {
+      "$ref": "positions/morpho_blue.schema.json"
+    },
+    {
+      "$ref": "positions/uniswap_v4.schema.json"
+    },
+    {
+      "$ref": "positions/pancakeswap_v3.schema.json"
+    },
+    {
+      "$ref": "positions/aerodrome_slipstream.schema.json"
+    },
+    {
+      "$ref": "positions/aerodrome.schema.json"
+    },
+    {
+      "$ref": "positions/curve.schema.json"
+    },
+    {
+      "$ref": "positions/gmx_v2.schema.json"
+    },
+    {
+      "$ref": "positions/hyperliquid.schema.json"
+    }
+  ]
+}

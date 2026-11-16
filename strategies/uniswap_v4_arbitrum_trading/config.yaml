@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/uniswap_v4_arbitrum_trading.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    trading:
+      market: trading_market
+      account: trading
+      capital:
+        asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+        quantity: '100'
+      hold_seconds: 43200s
+      slippage_bps: 100
+      deadline_seconds: 300s
+      minimum_native_balance: '0.001'
+      kind: trading
+  gas:
+    # Example Arbitrum amounts; size them from the live gas price.
+    # Entry takes 1 transaction and exit 4 (almanak check --production):
+    # exit_reserve = 4 fees, total_budget = exit_reserve + 1 entry + 20 later fees.
+    gas_payer:
+      accounts:
+      - trading
+      chain: eip155:42161
+      max_transaction_fee:
+        base_units: 160000000000000
+      total_budget:
+        base_units: 4000000000000000
+      exit_reserve:
+        base_units: 640000000000000
+markets:
+  trading_market:
+    connector: uniswap_v4
+    chain: eip155:42161
+    currency0: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+    currency1: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+    fee: 500
+    tick_spacing: 10
+    hooks: '0x0000000000000000000000000000000000000000'
+accounts:
+  trading:
+    chain: eip155:42161

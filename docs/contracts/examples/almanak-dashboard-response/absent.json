@@ -1,0 +1,711 @@
+{
+  "diagnostic": "",
+  "document": null,
+  "protocol_version": 1,
+  "snapshot": {
+    "captured_at": 1790812800,
+    "chains": [
+      {
+        "chain_id": "eip155:31337",
+        "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+      }
+    ],
+    "config_hash": "4964e0f457a19f4185ce75ab405da67f646b28239225f4bf469bb1262eccc07c",
+    "deployment_id": "e3a45e4c57dd4de9a6da556b28579342",
+    "fork_origin": {
+      "chain": {
+        "chain_id": "eip155:1",
+        "environment": "mainnet"
+      },
+      "hash": "0xebd2f4a6612e094a8db8d1ab770970f7060bdaf3a18a49e4274f8935d5348ea0",
+      "number": 25908472,
+      "timestamp": 1788579287
+    },
+    "initialized": true,
+    "latest_observation": 1788579301,
+    "mode": "closed",
+    "notices": [
+      "Retained snapshot, not a live feed. Recorded mode does not establish process health.",
+      "Balances are sampled around transactions; readings at each decision are kept for charts. Fiat PnL is unavailable.",
+      "Strategy explanations and holding times are author-owned; execution and ownership use retained facts."
+    ],
+    "pending_hash": null,
+    "record_hash": "e35c8723c700452fbe7eb815a2739a8b06b7d72d89bafffd130b75bb175fd957",
+    "reserved_attempt": null,
+    "strategy_hash": "308c358d56c809b48cc919b65561146373717104ed48ab64ee1adf5d00915ba4",
+    "undelivered_outcomes": 0,
+    "values": {
+      "effect-04523fbed4ae62276897b6969694a21d5b0b7ec519dbcd692c3dcdace5184952": {
+        "amount": "0",
+        "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "block": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+          },
+          "hash": "0x8014c8bdbca3d4450d456f352f5afff931d3ce285ff817b2c681784d5280b516",
+          "number": 25908474,
+          "timestamp": 1788579288
+        },
+        "decimals": 18,
+        "evidence": "recorded",
+        "id": "effect-04523fbed4ae62276897b6969694a21d5b0b7ec519dbcd692c3dcdace5184952",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Recorded asset effect of this transaction, not a requested amount.",
+        "scope": {
+          "account": "lending_0",
+          "fund": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "payer": null,
+          "target": {
+            "account": "lending_0",
+            "allocation": "main_weth_0",
+            "fund": {
+              "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              }
+            },
+            "reserve": {
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              },
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "kind": "aave_v4",
+              "reserve_id": 0,
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+            }
+          }
+        },
+        "symbol": null,
+        "unit": "base_units"
+      },
+      "effect-15f595b181093447dfa55a6a232b7c1c135c8a1684eb0c6777ace9a196eba62b": {
+        "amount": "10000000000000000",
+        "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "block": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+          },
+          "hash": "0xb2c4f562ae1d748c9d8d84f26dda0abc293ce753f9432f7780dbc3121dd269ec",
+          "number": 25908475,
+          "timestamp": 1788579292
+        },
+        "decimals": 18,
+        "evidence": "recorded",
+        "id": "effect-15f595b181093447dfa55a6a232b7c1c135c8a1684eb0c6777ace9a196eba62b",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Recorded asset effect of this transaction, not a requested amount.",
+        "scope": {
+          "account": "lending_0",
+          "fund": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "payer": null,
+          "target": {
+            "account": "lending_0",
+            "allocation": "main_weth_0",
+            "fund": {
+              "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              }
+            },
+            "reserve": {
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              },
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "kind": "aave_v4",
+              "reserve_id": 0,
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+            }
+          }
+        },
+        "symbol": null,
+        "unit": "base_units"
+      },
+      "effect-814636f824eab1ee86517fcf437d4edd5b65c23900b2dc7789fb65f4bfae127a": {
+        "amount": "10000000051566691",
+        "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "block": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+          },
+          "hash": "0x5d629f754b109469e6058a8b9857d493899a390ef32f7a8bf8fbb927178114cb",
+          "number": 25908476,
+          "timestamp": 1788579301
+        },
+        "decimals": 18,
+        "evidence": "recorded",
+        "id": "effect-814636f824eab1ee86517fcf437d4edd5b65c23900b2dc7789fb65f4bfae127a",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Recorded asset effect of this transaction, not a requested amount.",
+        "scope": {
+          "account": "lending_0",
+          "fund": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "payer": null,
+          "target": {
+            "account": "lending_0",
+            "allocation": "main_weth_0",
+            "fund": {
+              "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              }
+            },
+            "reserve": {
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              },
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "kind": "aave_v4",
+              "reserve_id": 0,
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+            }
+          }
+        },
+        "symbol": null,
+        "unit": "base_units"
+      },
+      "lending_0-gas": {
+        "amount": "308383281348396",
+        "asset": "eip155:31337/slip44:60",
+        "block": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+          },
+          "hash": "0x5d629f754b109469e6058a8b9857d493899a390ef32f7a8bf8fbb927178114cb",
+          "number": 25908476,
+          "timestamp": 1788579301
+        },
+        "decimals": 18,
+        "evidence": "recorded",
+        "id": "lending_0-gas",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Gas paid in retained receipts for this fund's operations.",
+        "scope": {
+          "account": "lending_0",
+          "fund": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "payer": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "target": null
+        },
+        "symbol": "ETH",
+        "unit": "base_units"
+      },
+      "main_weth_0-configured": {
+        "amount": "10000000000000000",
+        "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "block": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+          },
+          "hash": "0x5d629f754b109469e6058a8b9857d493899a390ef32f7a8bf8fbb927178114cb",
+          "number": 25908476,
+          "timestamp": 1788579301
+        },
+        "decimals": 18,
+        "evidence": "configured",
+        "id": "main_weth_0-configured",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Configured starting capital.",
+        "scope": {
+          "account": "lending_0",
+          "fund": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "payer": null,
+          "target": {
+            "account": "lending_0",
+            "allocation": "main_weth_0",
+            "fund": {
+              "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              }
+            },
+            "reserve": {
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              },
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "kind": "aave_v4",
+              "reserve_id": 0,
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+            }
+          }
+        },
+        "symbol": null,
+        "unit": "base_units"
+      },
+      "main_weth_0-delta": {
+        "amount": "51566691",
+        "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "block": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+          },
+          "hash": "0x5d629f754b109469e6058a8b9857d493899a390ef32f7a8bf8fbb927178114cb",
+          "number": 25908476,
+          "timestamp": 1788579301
+        },
+        "decimals": 18,
+        "evidence": "recorded",
+        "id": "main_weth_0-delta",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Token withdrawal less supply after closure; excludes gas. Unavailable until closure and a recorded supply.",
+        "scope": {
+          "account": "lending_0",
+          "fund": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "payer": null,
+          "target": {
+            "account": "lending_0",
+            "allocation": "main_weth_0",
+            "fund": {
+              "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              }
+            },
+            "reserve": {
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              },
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "kind": "aave_v4",
+              "reserve_id": 0,
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+            }
+          }
+        },
+        "symbol": null,
+        "unit": "base_units"
+      },
+      "main_weth_0-observed": {
+        "amount": "0",
+        "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "block": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+          },
+          "hash": "0x5d629f754b109469e6058a8b9857d493899a390ef32f7a8bf8fbb927178114cb",
+          "number": 25908476,
+          "timestamp": 1788579301
+        },
+        "decimals": 18,
+        "evidence": "recorded",
+        "id": "main_weth_0-observed",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Last retained protocol balance; not a live balance.",
+        "scope": {
+          "account": "lending_0",
+          "fund": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "payer": null,
+          "target": {
+            "account": "lending_0",
+            "allocation": "main_weth_0",
+            "fund": {
+              "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              }
+            },
+            "reserve": {
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              },
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "kind": "aave_v4",
+              "reserve_id": 0,
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+            }
+          }
+        },
+        "symbol": null,
+        "unit": "base_units"
+      },
+      "main_weth_0-shares": {
+        "amount": "0",
+        "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "block": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+          },
+          "hash": "0x5d629f754b109469e6058a8b9857d493899a390ef32f7a8bf8fbb927178114cb",
+          "number": 25908476,
+          "timestamp": 1788579301
+        },
+        "decimals": null,
+        "evidence": "recorded",
+        "id": "main_weth_0-shares",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Runtime-owned shares; independent of strategy memory.",
+        "scope": {
+          "account": "lending_0",
+          "fund": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "payer": null,
+          "target": {
+            "account": "lending_0",
+            "allocation": "main_weth_0",
+            "fund": {
+              "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              }
+            },
+            "reserve": {
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              },
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "kind": "aave_v4",
+              "reserve_id": 0,
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+            }
+          }
+        },
+        "symbol": null,
+        "unit": "shares"
+      },
+      "main_weth_0-supplied": {
+        "amount": "10000000000000000",
+        "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "block": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+          },
+          "hash": "0x5d629f754b109469e6058a8b9857d493899a390ef32f7a8bf8fbb927178114cb",
+          "number": 25908476,
+          "timestamp": 1788579301
+        },
+        "decimals": 18,
+        "evidence": "recorded",
+        "id": "main_weth_0-supplied",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Sum of confirmed supply effects.",
+        "scope": {
+          "account": "lending_0",
+          "fund": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "payer": null,
+          "target": {
+            "account": "lending_0",
+            "allocation": "main_weth_0",
+            "fund": {
+              "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              }
+            },
+            "reserve": {
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              },
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "kind": "aave_v4",
+              "reserve_id": 0,
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+            }
+          }
+        },
+        "symbol": null,
+        "unit": "base_units"
+      },
+      "main_weth_0-withdrawn": {
+        "amount": "10000000051566691",
+        "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "block": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+          },
+          "hash": "0x5d629f754b109469e6058a8b9857d493899a390ef32f7a8bf8fbb927178114cb",
+          "number": 25908476,
+          "timestamp": 1788579301
+        },
+        "decimals": 18,
+        "evidence": "recorded",
+        "id": "main_weth_0-withdrawn",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Sum of confirmed withdrawal effects.",
+        "scope": {
+          "account": "lending_0",
+          "fund": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "payer": null,
+          "target": {
+            "account": "lending_0",
+            "allocation": "main_weth_0",
+            "fund": {
+              "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              }
+            },
+            "reserve": {
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+              },
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "kind": "aave_v4",
+              "reserve_id": 0,
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+            }
+          }
+        },
+        "symbol": null,
+        "unit": "base_units"
+      },
+      "position-count": {
+        "amount": "0",
+        "asset": null,
+        "block": null,
+        "decimals": null,
+        "evidence": "recorded",
+        "id": "position-count",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Positions with retained owned shares.",
+        "scope": null,
+        "symbol": null,
+        "unit": "count"
+      },
+      "tx-04523fbed4ae62276897b6969694a21d5b0b7ec519dbcd692c3dcdace5184952": {
+        "amount": "47804841375360",
+        "asset": "eip155:31337/slip44:60",
+        "block": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+          },
+          "hash": "0x8014c8bdbca3d4450d456f352f5afff931d3ce285ff817b2c681784d5280b516",
+          "number": 25908474,
+          "timestamp": 1788579288
+        },
+        "decimals": 18,
+        "evidence": "recorded",
+        "id": "tx-04523fbed4ae62276897b6969694a21d5b0b7ec519dbcd692c3dcdace5184952",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Native gas from the receipt of 0x04523fbed4ae62276897b6969694a21d5b0b7ec519dbcd692c3dcdace5184952.",
+        "scope": {
+          "account": "lending_0",
+          "fund": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "payer": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "target": null
+        },
+        "symbol": "ETH",
+        "unit": "base_units"
+      },
+      "tx-15f595b181093447dfa55a6a232b7c1c135c8a1684eb0c6777ace9a196eba62b": {
+        "amount": "140586373056420",
+        "asset": "eip155:31337/slip44:60",
+        "block": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+          },
+          "hash": "0xb2c4f562ae1d748c9d8d84f26dda0abc293ce753f9432f7780dbc3121dd269ec",
+          "number": 25908475,
+          "timestamp": 1788579292
+        },
+        "decimals": 18,
+        "evidence": "recorded",
+        "id": "tx-15f595b181093447dfa55a6a232b7c1c135c8a1684eb0c6777ace9a196eba62b",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Native gas from the receipt of 0x15f595b181093447dfa55a6a232b7c1c135c8a1684eb0c6777ace9a196eba62b.",
+        "scope": {
+          "account": "lending_0",
+          "fund": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "payer": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "target": null
+        },
+        "symbol": "ETH",
+        "unit": "base_units"
+      },
+      "tx-814636f824eab1ee86517fcf437d4edd5b65c23900b2dc7789fb65f4bfae127a": {
+        "amount": "119992066916616",
+        "asset": "eip155:31337/slip44:60",
+        "block": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+          },
+          "hash": "0x5d629f754b109469e6058a8b9857d493899a390ef32f7a8bf8fbb927178114cb",
+          "number": 25908476,
+          "timestamp": 1788579301
+        },
+        "decimals": 18,
+        "evidence": "recorded",
+        "id": "tx-814636f824eab1ee86517fcf437d4edd5b65c23900b2dc7789fb65f4bfae127a",
+        "inputs": [],
+        "price_source": "",
+        "quote": null,
+        "reason": "Native gas from the receipt of 0x814636f824eab1ee86517fcf437d4edd5b65c23900b2dc7789fb65f4bfae127a.",
+        "scope": {
+          "account": "lending_0",
+          "fund": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "payer": {
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x4601c4547c02aaede88a6ec8f32fb6e946bb680ab811e939966088a3cb36487b"
+            }
+          },
+          "target": null
+        },
+        "symbol": "ETH",
+        "unit": "base_units"
+      }
+    }
+  },
+  "status": "absent"
+}

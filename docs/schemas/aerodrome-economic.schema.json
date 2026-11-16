@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "window": {
+      "$ref": "uniswap-economic.schema.json#/properties/window"
+    },
+    "inventory": {
+      "$ref": "uniswap-economic.schema.json#/properties/inventory"
+    },
+    "mode": {
+      "const": "economic"
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "latency": {
+          "$ref": "strategy.schema.json#/$defs/Duration"
+        },
+        "decision_interval": {
+          "$ref": "strategy.schema.json#/$defs/Duration"
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "swap_model": {
+              "const": "prepared_integer_pool",
+              "title": "Swap Model",
+              "type": "string"
+            },
+            "liquidity_model": {
+              "anyOf": [
+                {
+                  "const": "fixed_external_shares_and_fee_indices",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Liquidity Model"
+            }
+          },
+          "required": [
+            "swap_model",
+            "liquidity_model"
+          ]
+        }
+      },
+      "required": [
+        "latency",
+        "models"
+      ]
+    },
+    "data": {
+      "additionalProperties": false,
+      "properties": {
+        "sample_seconds": {
+          "$ref": "strategy.schema.json#/$defs/Duration"
+        },
+        "max_age_seconds": {
+          "$ref": "strategy.schema.json#/$defs/Duration"
+        },
+        "max_samples": {
+          "exclusiveMinimum": 0,
+          "minimum": 0,
+          "title": "Max Samples",
+          "type": "integer",
+          "description": "Maximum samples per configured pool across the run and cleanup window."
+        },
+        "source": {
+          "const": "aerodrome_archive",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sample_seconds",
+        "max_age_seconds",
+        "max_samples",
+        "source"
+      ],
+      "title": "DataPolicy",
+      "type": "object"
+    },
+    "costs": {
+      "discriminator": {
+        "mapping": {
+          "excluded": "#/$defs/ExcludedCosts",
+          "fixed_native": "#/$defs/Costs"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ExcludedCosts"
+        },
+        {
+          "$ref": "#/$defs/Costs"
+        }
+      ],
+      "title": "Costs"
+    }
+  },
+  "required": [
+    "window",
+    "inventory",
+    "mode",
+    "execution",
+    "data",
+    "costs"
+  ],
+  "$defs": {
+    "ExcludedCosts": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "excluded",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ExcludedCosts",
+      "type": "object"
+    },
+    "Costs": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "fixed_native",
+          "title": "Kind",
+          "type": "string"
+        },
+        "swap": {
+          "minimum": 0,
+          "title": "Swap",
+          "type": "integer"
+        },
+        "mint": {
+          "minimum": 0,
+          "title": "Mint",
+          "type": "integer"
+        },
+        "increase": {
+          "minimum": 0,
+          "title": "Increase",
+          "type": "integer"
+        },
+        "decrease": {
+          "minimum": 0,
+          "title": "Decrease",
+          "type": "integer"
+        },
+        "collect": {
+          "minimum": 0,
+          "title": "Collect",
+          "type": "integer"
+        },
+        "close": {
+          "minimum": 0,
+          "title": "Close",
+          "type": "integer",
+          "description": "Aggregate modeled withdrawal and fee-claim cost in native base units."
+        },
+        "revoke": {
+          "minimum": 0,
+          "title": "Revoke",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "swap",
+        "mint",
+        "increase",
+        "decrease",
+        "collect",
+        "close",
+        "revoke"
+      ],
+      "title": "Costs",
+      "type": "object"
+    }
+  }
+}

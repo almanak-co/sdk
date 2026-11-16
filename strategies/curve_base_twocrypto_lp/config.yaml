@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/curve_base_twocrypto_lp.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    proportional:
+      market: crypto_pool
+      account: proportional
+      funding_asset: eip155:8453/erc20:0xcfa3ef56d303ae4faaba0592388f19d7c3399fb4
+      trading_asset: eip155:8453/erc20:0x4da9a0f397db1397902070f93a4d6ddbc0e0e6e8
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:8453/erc20:0x4da9a0f397db1397902070f93a4d6ddbc0e0e6e8
+        quantity: '0'
+      - asset: eip155:8453/erc20:0xcfa3ef56d303ae4faaba0592388f19d7c3399fb4
+        quantity: '10'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      minimum_native_balance:
+        base_units: 0
+    single_coin:
+      market: crypto_pool
+      account: single_coin
+      funding_asset: eip155:8453/erc20:0xcfa3ef56d303ae4faaba0592388f19d7c3399fb4
+      trading_asset: eip155:8453/erc20:0x4da9a0f397db1397902070f93a4d6ddbc0e0e6e8
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:8453/erc20:0x4da9a0f397db1397902070f93a4d6ddbc0e0e6e8
+        quantity: '0'
+      - asset: eip155:8453/erc20:0xcfa3ef56d303ae4faaba0592388f19d7c3399fb4
+        quantity: '10'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      minimum_native_balance:
+        base_units: 0
+      single_coin_exit: eip155:8453/erc20:0xcfa3ef56d303ae4faaba0592388f19d7c3399fb4
+markets:
+  crypto_pool:
+    connector: curve
+    chain: eip155:8453
+    pool: '0xba0c274085a078d19c46f2d902698a841cbfb289'
+accounts:
+  proportional:
+    chain: eip155:8453
+  single_coin:
+    chain: eip155:8453

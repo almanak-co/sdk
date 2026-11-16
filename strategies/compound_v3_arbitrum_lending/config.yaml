@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/compound_v3_arbitrum_lending.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '200'
+  allocations:
+    earn:
+      market: earn
+      account: lender
+      capital: '1000'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    collateral:
+      market: collateral
+      account: borrower
+      capital: '1'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: borrower
+      borrow: true
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+markets:
+  earn:
+    connector: compound_v3
+    chain: eip155:42161
+    comet: '0x9c4ec768c28520b50860ea7a15bd7213a9ff58bf'
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+  collateral:
+    connector: compound_v3
+    chain: eip155:42161
+    comet: '0x9c4ec768c28520b50860ea7a15bd7213a9ff58bf'
+    asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+  loan:
+    connector: compound_v3
+    chain: eip155:42161
+    comet: '0x9c4ec768c28520b50860ea7a15bd7213a9ff58bf'
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+accounts:
+  lender:
+    chain: eip155:42161
+  borrower:
+    chain: eip155:42161

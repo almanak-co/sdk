@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/pancakeswap_v3_base_lp.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    position:
+      market: pool
+      account: fund
+      range:
+        lower: -198630
+        upper: -197630
+      capital:
+        asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+        quantity: '0.1'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+markets:
+  pool:
+    connector: pancakeswap_v3
+    chain: eip155:8453
+    pool: '0xb775272e537cc670c65dc852908ad47015244eaf'
+accounts:
+  fund:
+    chain: eip155:8453

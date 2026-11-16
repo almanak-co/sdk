@@ -1,0 +1,698 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "const": "historical_path",
+      "title": "Market Model",
+      "type": "string"
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end_policy": {
+          "enum": [
+            "teardown",
+            "mark"
+          ]
+        },
+        "cleanup": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)(s|m|h|d)$"
+            }
+          ]
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "end_policy",
+        "cleanup"
+      ]
+    },
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "funds": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "balances": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "asset": {
+                      "type": "string",
+                      "description": "Full CAIP-19 asset type"
+                    },
+                    "quantity": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9]+(\\.[0-9]+)?$"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "base_units": {
+                              "type": "integer",
+                              "minimum": 0
+                            }
+                          },
+                          "required": [
+                            "base_units"
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "asset",
+                    "quantity"
+                  ]
+                }
+              },
+              "payer": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "balances"
+            ]
+          }
+        },
+        "payers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "chain": {
+                "description": "The payer's chain: CAIP-2 text on the public author root, the harness chain object otherwise",
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$"
+                  },
+                  {
+                    "$ref": "#/$defs/Chain"
+                  }
+                ]
+              },
+              "balances": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "asset": {
+                      "type": "string",
+                      "description": "Full CAIP-19 asset type"
+                    },
+                    "quantity": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9]+(\\.[0-9]+)?$"
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "base_units": {
+                              "type": "integer",
+                              "minimum": 0
+                            }
+                          },
+                          "required": [
+                            "base_units"
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "asset",
+                    "quantity"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "chain",
+              "balances"
+            ]
+          }
+        }
+      },
+      "required": [
+        "funds"
+      ]
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "latency": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)(s|m|h|d)$"
+            }
+          ]
+        },
+        "decision_interval": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)(s|m|h|d)$"
+            }
+          ]
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "swap_model": {
+              "const": "historical_quoter",
+              "title": "Swap Model",
+              "type": "string"
+            },
+            "liquidity_model": {
+              "anyOf": [
+                {
+                  "const": "fixed_historical_fee_growth",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Liquidity Model"
+            },
+            "approval_model": {
+              "const": "at_intent_eligibility",
+              "title": "Approval Model",
+              "type": "string"
+            }
+          },
+          "required": [
+            "swap_model",
+            "approval_model"
+          ]
+        }
+      },
+      "required": [
+        "latency"
+      ]
+    },
+    "costs": {
+      "$ref": "#/$defs/FixedCosts"
+    }
+  },
+  "required": [
+    "mode",
+    "window",
+    "inventory",
+    "execution",
+    "costs"
+  ],
+  "$defs": {
+    "Account": {
+      "additionalProperties": false,
+      "properties": {
+        "chain": {
+          "$ref": "#/$defs/Chain"
+        },
+        "address": {
+          "title": "Address",
+          "type": "string"
+        }
+      },
+      "required": [
+        "chain",
+        "address"
+      ],
+      "title": "Account",
+      "type": "object"
+    },
+    "AlchemyProvider": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "alchemy",
+          "title": "Kind",
+          "type": "string"
+        },
+        "network": {
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "title": "Network",
+          "type": "string"
+        },
+        "api_key_env": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "title": "Api Key Env",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "network",
+        "api_key_env"
+      ],
+      "title": "AlchemyProvider",
+      "type": "object"
+    },
+    "AssetAmount": {
+      "additionalProperties": false,
+      "description": "Nonnegative base-unit amount with explicit asset identity.",
+      "properties": {
+        "asset": {
+          "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$",
+          "title": "Asset",
+          "type": "string"
+        },
+        "amount": {
+          "minimum": 0,
+          "title": "Amount",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "asset",
+        "amount"
+      ],
+      "title": "AssetAmount",
+      "type": "object"
+    },
+    "Chain": {
+      "additionalProperties": false,
+      "properties": {
+        "chain_id": {
+          "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$",
+          "title": "Chain Id",
+          "type": "string"
+        },
+        "environment": {
+          "minLength": 1,
+          "title": "Environment",
+          "type": "string"
+        }
+      },
+      "required": [
+        "chain_id",
+        "environment"
+      ],
+      "title": "Chain",
+      "type": "object"
+    },
+    "CollectionLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "max_in_flight": {
+          "default": 4,
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max In Flight",
+          "type": "integer"
+        },
+        "batch_size": {
+          "default": 32,
+          "maximum": 32,
+          "minimum": 1,
+          "title": "Batch Size",
+          "type": "integer"
+        },
+        "requests_per_second": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requests Per Second"
+        },
+        "max_retries": {
+          "default": 3,
+          "maximum": 8,
+          "minimum": 0,
+          "title": "Max Retries",
+          "type": "integer"
+        }
+      },
+      "title": "CollectionLimits",
+      "type": "object"
+    },
+    "FixedCosts": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "fixed_native",
+          "title": "Kind",
+          "type": "string"
+        },
+        "calibration_sha256": {
+          "pattern": "^0x[0-9a-f]{64}$",
+          "title": "Calibration Sha256",
+          "type": "string"
+        },
+        "per_operation": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "propertyNames": {
+            "enum": [
+              "approve_erc20",
+              "approve_permit2",
+              "revoke_erc20",
+              "revoke_permit2",
+              "swap",
+              "mint",
+              "collect",
+              "burn"
+            ]
+          },
+          "title": "Per Operation",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "calibration_sha256",
+        "per_operation"
+      ],
+      "title": "FixedCosts",
+      "type": "object"
+    },
+    "HistoryBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "chain": {
+          "$ref": "#/$defs/Chain"
+        },
+        "provider": {
+          "discriminator": {
+            "mapping": {
+              "alchemy": "#/$defs/AlchemyProvider",
+              "rpc_url": "#/$defs/UrlProvider"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/AlchemyProvider"
+            },
+            {
+              "$ref": "#/$defs/UrlProvider"
+            }
+          ],
+          "title": "Provider"
+        },
+        "collection": {
+          "$ref": "#/$defs/CollectionLimits",
+          "default": {
+            "max_in_flight": 4,
+            "batch_size": 32,
+            "requests_per_second": null,
+            "max_retries": 3
+          }
+        }
+      },
+      "required": [
+        "chain",
+        "provider"
+      ],
+      "title": "HistoryBinding",
+      "type": "object"
+    },
+    "SafeRoles": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "safe_roles",
+          "title": "Kind",
+          "type": "string"
+        },
+        "fund": {
+          "$ref": "#/$defs/Account"
+        },
+        "operator": {
+          "$ref": "#/$defs/Account"
+        },
+        "roles_module": {
+          "title": "Roles Module",
+          "type": "string"
+        },
+        "role_key": {
+          "pattern": "^0x[0-9a-f]{64}$",
+          "title": "Role Key",
+          "type": "string"
+        },
+        "safe_deployment_block": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Safe Deployment Block"
+        },
+        "roles_deployment_block": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Roles Deployment Block"
+        }
+      },
+      "required": [
+        "kind",
+        "fund",
+        "operator",
+        "roles_module",
+        "role_key"
+      ],
+      "title": "SafeRoles",
+      "type": "object"
+    },
+    "Schedule": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "maximum": 253402300799,
+          "minimum": 0,
+          "title": "Start",
+          "type": "integer"
+        },
+        "end": {
+          "maximum": 253402300799,
+          "minimum": 0,
+          "title": "End",
+          "type": "integer"
+        },
+        "decision_interval_override_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decision Interval Override Seconds"
+        },
+        "latency_seconds": {
+          "minimum": 0,
+          "title": "Latency Seconds",
+          "type": "integer"
+        },
+        "end_policy": {
+          "enum": [
+            "mark_open",
+            "teardown"
+          ],
+          "title": "End Policy",
+          "type": "string"
+        },
+        "cleanup_seconds": {
+          "minimum": 0,
+          "title": "Cleanup Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "latency_seconds",
+        "end_policy",
+        "cleanup_seconds"
+      ],
+      "title": "Schedule",
+      "type": "object"
+    },
+    "SimulationAccount": {
+      "additionalProperties": false,
+      "description": "An adapter identity without signing or installed account authority.",
+      "properties": {
+        "kind": {
+          "const": "simulation",
+          "default": "simulation",
+          "title": "Kind",
+          "type": "string"
+        },
+        "fund": {
+          "$ref": "#/$defs/Account"
+        },
+        "payer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Account"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "fund"
+      ],
+      "title": "SimulationAccount",
+      "type": "object"
+    },
+    "UrlProvider": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "rpc_url",
+          "title": "Kind",
+          "type": "string"
+        },
+        "url_env": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "title": "Url Env",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "url_env"
+      ],
+      "title": "UrlProvider",
+      "type": "object"
+    },
+    "almanak__backtest__config__Fund": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "title": "Name",
+          "type": "string"
+        },
+        "fund": {
+          "$ref": "#/$defs/Account"
+        },
+        "balances": {
+          "items": {
+            "$ref": "#/$defs/AssetAmount"
+          },
+          "title": "Balances",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "fund",
+        "balances"
+      ],
+      "title": "Fund",
+      "type": "object"
+    },
+    "almanak__connectors__uniswap_v4__backtest_config__Fund": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "title": "Name",
+          "type": "string"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SafeRoles"
+            },
+            {
+              "$ref": "#/$defs/SimulationAccount"
+            }
+          ],
+          "title": "Profile"
+        },
+        "balances": {
+          "items": {
+            "$ref": "#/$defs/AssetAmount"
+          },
+          "title": "Balances",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "profile",
+        "balances"
+      ],
+      "title": "Fund",
+      "type": "object"
+    }
+  }
+}

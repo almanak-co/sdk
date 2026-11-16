@@ -1,0 +1,1209 @@
+{
+  "schema_version": 4,
+  "deployment_id": "bd731f9f7baf4a4ba180f0b0c1c81717",
+  "config": {
+    "accounts": {
+      "bindings": [
+        {
+          "name": "lending_0",
+          "profile": {
+            "kind": "eoa",
+            "fund": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+            }
+          }
+        }
+      ]
+    },
+    "allocations": [
+      {
+        "name": "main_weth",
+        "account": "lending_0",
+        "reserve": {
+          "kind": "aave_v4",
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+          },
+          "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+          "reserve_id": 0,
+          "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+          "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        "amount": 10000000000000000,
+        "native_asset": "eip155:31337/slip44:60",
+        "minimum_native_balance": 1000000000000000,
+        "hold_seconds": null
+      }
+    ],
+    "fork_instance": "0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c",
+    "fork_origin": {
+      "chain": {
+        "chain_id": "eip155:1",
+        "environment": "mainnet"
+      },
+      "number": 25908472,
+      "hash": "0xebd2f4a6612e094a8db8d1ab770970f7060bdaf3a18a49e4274f8935d5348ea0",
+      "timestamp": 1788579287
+    }
+  },
+  "strategy": {
+    "filename": "strategy.py",
+    "source": "\"\"\"Supply named WETH positions once, with optional timed withdrawal.\"\"\"\n\nfrom almanak_v3.caip import AssetType\nfrom almanak_v3.lending import Decision, DecisionInput, LendingConfig, Memory, OutcomeInput\n\n\ndef validate_config(config: LendingConfig) -> None:\n    for allocation in config.allocations:\n        chain = allocation.reserve.chain.chain_id\n        weth = AssetType(f\"{chain}/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2\")\n        if allocation.reserve.asset != weth:\n            raise ValueError(f\"{allocation.name}: this strategy requires the WETH reserve\")\n\n\ndef decide(context: DecisionInput) -> Decision:\n    observations = {item.allocation: item for item in context.observations}\n    owned = {item.target.allocation: item.shares for item in context.owned}\n    supplied_at = context.memory.values.get(\"supplied_at\", {})\n    for allocation in context.config.allocations:\n        observed = observations[allocation.name]\n        intent = decide_allocation(context, allocation, observed, owned, supplied_at)\n        if intent is not None:\n            return Decision(memory=context.memory, intent=intent)\n    return Decision(memory=context.memory)\n\n\ndef decide_allocation(context, allocation, observed, owned, supplied_at):\n    name = allocation.name\n    started = supplied_at.get(name)\n    due = (\n        started is not None\n        and allocation.hold_seconds is not None\n        and observed.position.reserve.block.timestamp >= started + allocation.hold_seconds\n    )\n    if context.teardown or due:\n        if owned[name] or observed.allowance:\n            return context.config.withdraw(name)\n        return None\n    if started is None:\n        return context.config.supply(name, allocation.amount)\n    return None\n\n\ndef on_outcome(context: OutcomeInput) -> Memory:\n    result = context.result\n    if not (result.success and result.complete and result.intent.kind == \"supply\"):\n        return context.memory\n    supplied_at = dict(context.memory.values.get(\"supplied_at\", {}))\n    supplied_at[result.intent.target.allocation] = result.block.timestamp\n    return Memory(\n        version=context.memory.version,\n        values={**context.memory.values, \"supplied_at\": supplied_at},\n    )\n"
+  },
+  "mode": "closed",
+  "initialized": true,
+  "memory": {
+    "version": 1,
+    "values": {
+      "supplied_at": {
+        "main_weth": 1788579289
+      }
+    }
+  },
+  "delivered": 3,
+  "decision": null,
+  "owned": [
+    {
+      "target": {
+        "allocation": "main_weth",
+        "account": "lending_0",
+        "fund": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+          },
+          "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+        },
+        "reserve": {
+          "kind": "aave_v4",
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+          },
+          "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+          "reserve_id": 0,
+          "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+          "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        }
+      },
+      "shares": 0
+    }
+  ],
+  "baseline": [
+    {
+      "allocation": "main_weth",
+      "account": "lending_0",
+      "position": {
+        "reserve": {
+          "source": {
+            "kind": "aave_v4",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+            "reserve_id": 0,
+            "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+            "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          },
+          "block": {
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "number": 25908473,
+            "hash": "0x4f43e4d3cb9358051dee4497310b2d0c0fab8b6f32e4d1f3b3a32e106d41cfd3",
+            "timestamp": 1788579287
+          },
+          "asset": {
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "identifier": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "decimals": 18
+          },
+          "hub_asset_id": 0,
+          "collateral_risk_bps": 0,
+          "dynamic_config_key": 0,
+          "paused": false,
+          "frozen": false,
+          "borrowable": true,
+          "receive_shares_enabled": true
+        },
+        "account": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+          },
+          "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+        },
+        "supplied_assets": 0,
+        "supplied_shares": 0,
+        "drawn_debt": 0,
+        "premium_debt": 0,
+        "total_debt": 0
+      },
+      "wallet_balance": 40000000000000000,
+      "allowance": 0,
+      "native_balance": {
+        "asset": "eip155:31337/slip44:60",
+        "amount": 4959952989358028924
+      }
+    }
+  ],
+  "pending": null,
+  "plan": null,
+  "outcomes": [
+    {
+      "decision": {
+        "identity": "e45ab939fc064e7687960ee1a197f5fe",
+        "intent": {
+          "target": {
+            "allocation": "main_weth",
+            "account": "lending_0",
+            "fund": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+            },
+            "reserve": {
+              "kind": "aave_v4",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+              "reserve_id": 0,
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            }
+          },
+          "kind": "supply",
+          "amount": {
+            "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "amount": 10000000000000000
+          }
+        },
+        "observations": [
+          {
+            "allocation": "main_weth",
+            "account": "lending_0",
+            "position": {
+              "reserve": {
+                "source": {
+                  "kind": "aave_v4",
+                  "chain": {
+                    "chain_id": "eip155:31337",
+                    "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+                  },
+                  "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+                  "reserve_id": 0,
+                  "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+                  "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+                },
+                "block": {
+                  "chain": {
+                    "chain_id": "eip155:31337",
+                    "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+                  },
+                  "number": 25908473,
+                  "hash": "0x4f43e4d3cb9358051dee4497310b2d0c0fab8b6f32e4d1f3b3a32e106d41cfd3",
+                  "timestamp": 1788579287
+                },
+                "asset": {
+                  "chain": {
+                    "chain_id": "eip155:31337",
+                    "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+                  },
+                  "identifier": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                  "decimals": 18
+                },
+                "hub_asset_id": 0,
+                "collateral_risk_bps": 0,
+                "dynamic_config_key": 0,
+                "paused": false,
+                "frozen": false,
+                "borrowable": true,
+                "receive_shares_enabled": true
+              },
+              "account": {
+                "chain": {
+                  "chain_id": "eip155:31337",
+                  "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+                },
+                "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+              },
+              "supplied_assets": 0,
+              "supplied_shares": 0,
+              "drawn_debt": 0,
+              "premium_debt": 0,
+              "total_debt": 0
+            },
+            "wallet_balance": 40000000000000000,
+            "allowance": 0,
+            "native_balance": {
+              "asset": "eip155:31337/slip44:60",
+              "amount": 4959952989358028924
+            }
+          }
+        ],
+        "memory": {
+          "version": 1,
+          "values": {}
+        }
+      },
+      "operation": {
+        "target": {
+          "allocation": "main_weth",
+          "account": "lending_0",
+          "fund": {
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+          },
+          "reserve": {
+            "kind": "aave_v4",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+            "reserve_id": 0,
+            "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+            "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          }
+        },
+        "kind": "approve",
+        "amount": {
+          "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "amount": 10000000000000000
+        }
+      },
+      "tx_hash": "0x04523fbed4ae62276897b6969694a21d5b0b7ec519dbcd692c3dcdace5184952",
+      "nonce": 7714,
+      "before": {
+        "allocation": "main_weth",
+        "account": "lending_0",
+        "position": {
+          "reserve": {
+            "source": {
+              "kind": "aave_v4",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+              "reserve_id": 0,
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            },
+            "block": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "number": 25908473,
+              "hash": "0x4f43e4d3cb9358051dee4497310b2d0c0fab8b6f32e4d1f3b3a32e106d41cfd3",
+              "timestamp": 1788579287
+            },
+            "asset": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "identifier": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "decimals": 18
+            },
+            "hub_asset_id": 0,
+            "collateral_risk_bps": 0,
+            "dynamic_config_key": 0,
+            "paused": false,
+            "frozen": false,
+            "borrowable": true,
+            "receive_shares_enabled": true
+          },
+          "account": {
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+          },
+          "supplied_assets": 0,
+          "supplied_shares": 0,
+          "drawn_debt": 0,
+          "premium_debt": 0,
+          "total_debt": 0
+        },
+        "wallet_balance": 40000000000000000,
+        "allowance": 0,
+        "native_balance": {
+          "asset": "eip155:31337/slip44:60",
+          "amount": 4959952989358028924
+        }
+      },
+      "after": {
+        "allocation": "main_weth",
+        "account": "lending_0",
+        "position": {
+          "reserve": {
+            "source": {
+              "kind": "aave_v4",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+              "reserve_id": 0,
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            },
+            "block": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "number": 25908474,
+              "hash": "0x8014c8bdbca3d4450d456f352f5afff931d3ce285ff817b2c681784d5280b516",
+              "timestamp": 1788579288
+            },
+            "asset": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "identifier": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "decimals": 18
+            },
+            "hub_asset_id": 0,
+            "collateral_risk_bps": 0,
+            "dynamic_config_key": 0,
+            "paused": false,
+            "frozen": false,
+            "borrowable": true,
+            "receive_shares_enabled": true
+          },
+          "account": {
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+          },
+          "supplied_assets": 0,
+          "supplied_shares": 0,
+          "drawn_debt": 0,
+          "premium_debt": 0,
+          "total_debt": 0
+        },
+        "wallet_balance": 40000000000000000,
+        "allowance": 10000000000000000,
+        "native_balance": {
+          "asset": "eip155:31337/slip44:60",
+          "amount": 4959905184516653564
+        }
+      },
+      "success": true,
+      "assets": 0,
+      "shares": 0,
+      "gas_paid": {
+        "asset": "eip155:31337/slip44:60",
+        "amount": 47804841375360
+      },
+      "receipt": {
+        "type": "0x0",
+        "status": "0x1",
+        "cumulativeGasUsed": "0xb3d8",
+        "logs": [
+          {
+            "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "topics": [
+              "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+              "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              "0x00000000000000000000000094e7a5dcbe816e498b89ab752661904e2f56c485"
+            ],
+            "data": "0x000000000000000000000000000000000000000000000000002386f26fc10000",
+            "blockHash": "0x8014c8bdbca3d4450d456f352f5afff931d3ce285ff817b2c681784d5280b516",
+            "blockNumber": "0x18b54fa",
+            "blockTimestamp": "0x6a9b8dd8",
+            "transactionHash": "0x04523fbed4ae62276897b6969694a21d5b0b7ec519dbcd692c3dcdace5184952",
+            "transactionIndex": "0x0",
+            "logIndex": "0x0",
+            "removed": false
+          }
+        ],
+        "logsBloom": "0x00000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000002000000080000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000000000000010020000000000000000000000000000000000000000000000000000000000000000000000000000200000000000000000000000002000000000000000000000000010200000000000000000000000000000000000000000000000000000000000",
+        "transactionHash": "0x04523fbed4ae62276897b6969694a21d5b0b7ec519dbcd692c3dcdace5184952",
+        "transactionIndex": "0x0",
+        "blockHash": "0x8014c8bdbca3d4450d456f352f5afff931d3ce285ff817b2c681784d5280b516",
+        "blockNumber": "0x18b54fa",
+        "gasUsed": "0xb3d8",
+        "effectiveGasPrice": "0x3de3b370",
+        "blobGasPrice": "0x44d5c57368cca986e9f",
+        "from": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+        "to": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "contractAddress": null,
+        "blockTimestamp": 1788579288
+      }
+    },
+    {
+      "decision": {
+        "identity": "2c7958505a8c4dc0a735b3e6ee18d87d",
+        "intent": {
+          "target": {
+            "allocation": "main_weth",
+            "account": "lending_0",
+            "fund": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+            },
+            "reserve": {
+              "kind": "aave_v4",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+              "reserve_id": 0,
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            }
+          },
+          "kind": "supply",
+          "amount": {
+            "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "amount": 10000000000000000
+          }
+        },
+        "observations": [
+          {
+            "allocation": "main_weth",
+            "account": "lending_0",
+            "position": {
+              "reserve": {
+                "source": {
+                  "kind": "aave_v4",
+                  "chain": {
+                    "chain_id": "eip155:31337",
+                    "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+                  },
+                  "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+                  "reserve_id": 0,
+                  "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+                  "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+                },
+                "block": {
+                  "chain": {
+                    "chain_id": "eip155:31337",
+                    "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+                  },
+                  "number": 25908474,
+                  "hash": "0x8014c8bdbca3d4450d456f352f5afff931d3ce285ff817b2c681784d5280b516",
+                  "timestamp": 1788579288
+                },
+                "asset": {
+                  "chain": {
+                    "chain_id": "eip155:31337",
+                    "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+                  },
+                  "identifier": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                  "decimals": 18
+                },
+                "hub_asset_id": 0,
+                "collateral_risk_bps": 0,
+                "dynamic_config_key": 0,
+                "paused": false,
+                "frozen": false,
+                "borrowable": true,
+                "receive_shares_enabled": true
+              },
+              "account": {
+                "chain": {
+                  "chain_id": "eip155:31337",
+                  "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+                },
+                "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+              },
+              "supplied_assets": 0,
+              "supplied_shares": 0,
+              "drawn_debt": 0,
+              "premium_debt": 0,
+              "total_debt": 0
+            },
+            "wallet_balance": 40000000000000000,
+            "allowance": 10000000000000000,
+            "native_balance": {
+              "asset": "eip155:31337/slip44:60",
+              "amount": 4959905184516653564
+            }
+          }
+        ],
+        "memory": {
+          "version": 1,
+          "values": {}
+        }
+      },
+      "operation": {
+        "target": {
+          "allocation": "main_weth",
+          "account": "lending_0",
+          "fund": {
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+          },
+          "reserve": {
+            "kind": "aave_v4",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+            "reserve_id": 0,
+            "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+            "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          }
+        },
+        "kind": "supply",
+        "amount": {
+          "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "amount": 10000000000000000
+        }
+      },
+      "tx_hash": "0x15f595b181093447dfa55a6a232b7c1c135c8a1684eb0c6777ace9a196eba62b",
+      "nonce": 7715,
+      "before": {
+        "allocation": "main_weth",
+        "account": "lending_0",
+        "position": {
+          "reserve": {
+            "source": {
+              "kind": "aave_v4",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+              "reserve_id": 0,
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            },
+            "block": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "number": 25908474,
+              "hash": "0x8014c8bdbca3d4450d456f352f5afff931d3ce285ff817b2c681784d5280b516",
+              "timestamp": 1788579288
+            },
+            "asset": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "identifier": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "decimals": 18
+            },
+            "hub_asset_id": 0,
+            "collateral_risk_bps": 0,
+            "dynamic_config_key": 0,
+            "paused": false,
+            "frozen": false,
+            "borrowable": true,
+            "receive_shares_enabled": true
+          },
+          "account": {
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+          },
+          "supplied_assets": 0,
+          "supplied_shares": 0,
+          "drawn_debt": 0,
+          "premium_debt": 0,
+          "total_debt": 0
+        },
+        "wallet_balance": 40000000000000000,
+        "allowance": 10000000000000000,
+        "native_balance": {
+          "asset": "eip155:31337/slip44:60",
+          "amount": 4959905184516653564
+        }
+      },
+      "after": {
+        "allocation": "main_weth",
+        "account": "lending_0",
+        "position": {
+          "reserve": {
+            "source": {
+              "kind": "aave_v4",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+              "reserve_id": 0,
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            },
+            "block": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "number": 25908475,
+              "hash": "0xf552b9609ec2442012882ee679eeab379627f174938a4b0fbd5a37e2646e83f7",
+              "timestamp": 1788579289
+            },
+            "asset": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "identifier": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "decimals": 18
+            },
+            "hub_asset_id": 0,
+            "collateral_risk_bps": 0,
+            "dynamic_config_key": 0,
+            "paused": false,
+            "frozen": false,
+            "borrowable": true,
+            "receive_shares_enabled": true
+          },
+          "account": {
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+          },
+          "supplied_assets": 9999999999999999,
+          "supplied_shares": 9926655412356667,
+          "drawn_debt": 0,
+          "premium_debt": 0,
+          "total_debt": 0
+        },
+        "wallet_balance": 30000000000000000,
+        "allowance": 0,
+        "native_balance": {
+          "asset": "eip155:31337/slip44:60",
+          "amount": 4959764598143597144
+        }
+      },
+      "success": true,
+      "assets": 10000000000000000,
+      "shares": 9926655412356667,
+      "gas_paid": {
+        "asset": "eip155:31337/slip44:60",
+        "amount": 140586373056420
+      },
+      "receipt": {
+        "type": "0x0",
+        "status": "0x1",
+        "cumulativeGasUsed": "0x21357",
+        "logs": [
+          {
+            "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "topics": [
+              "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+              "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              "0x000000000000000000000000cca852bc40e560adc3b1cc58ca5b55638ce826c9"
+            ],
+            "data": "0x000000000000000000000000000000000000000000000000002386f26fc10000",
+            "blockHash": "0xf552b9609ec2442012882ee679eeab379627f174938a4b0fbd5a37e2646e83f7",
+            "blockNumber": "0x18b54fb",
+            "blockTimestamp": "0x6a9b8dd9",
+            "transactionHash": "0x15f595b181093447dfa55a6a232b7c1c135c8a1684eb0c6777ace9a196eba62b",
+            "transactionIndex": "0x0",
+            "logIndex": "0x0",
+            "removed": false
+          },
+          {
+            "address": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+            "topics": [
+              "0xa1facf110ded5028ee267fa3d5986f2aa4dc14230b79ffd27e95760f14883350",
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ],
+            "data": "0x00000000000000000000000000000000000000000343b28b58272222c4566d6a00000000000000000000000000000000000000000013454c5ccce6e5ca086c9b000000000000000000000000000000000000000000000000daadc017a2a44bb2",
+            "blockHash": "0xf552b9609ec2442012882ee679eeab379627f174938a4b0fbd5a37e2646e83f7",
+            "blockNumber": "0x18b54fb",
+            "blockTimestamp": "0x6a9b8dd9",
+            "transactionHash": "0x15f595b181093447dfa55a6a232b7c1c135c8a1684eb0c6777ace9a196eba62b",
+            "transactionIndex": "0x0",
+            "logIndex": "0x1",
+            "removed": false
+          },
+          {
+            "address": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+            "topics": [
+              "0xb233dd05ed21346e144167b35a6213bcf04768dbdffdc8339e8b027b94b9f305",
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x00000000000000000000000094e7a5dcbe816e498b89ab752661904e2f56c485"
+            ],
+            "data": "0x0000000000000000000000000000000000000000000000000023443d91a9463b000000000000000000000000000000000000000000000000002386f26fc10000",
+            "blockHash": "0xf552b9609ec2442012882ee679eeab379627f174938a4b0fbd5a37e2646e83f7",
+            "blockNumber": "0x18b54fb",
+            "blockTimestamp": "0x6a9b8dd9",
+            "transactionHash": "0x15f595b181093447dfa55a6a232b7c1c135c8a1684eb0c6777ace9a196eba62b",
+            "transactionIndex": "0x0",
+            "logIndex": "0x2",
+            "removed": false
+          },
+          {
+            "address": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+            "topics": [
+              "0xd986db228cb1fe8392c5f45ff5f2c639b7db6cbd9ca7d1fe70b2de90c2c8c961",
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+            ],
+            "data": "0x0000000000000000000000000000000000000000000000000023443d91a9463b000000000000000000000000000000000000000000000000002386f26fc10000",
+            "blockHash": "0xf552b9609ec2442012882ee679eeab379627f174938a4b0fbd5a37e2646e83f7",
+            "blockNumber": "0x18b54fb",
+            "blockTimestamp": "0x6a9b8dd9",
+            "transactionHash": "0x15f595b181093447dfa55a6a232b7c1c135c8a1684eb0c6777ace9a196eba62b",
+            "transactionIndex": "0x0",
+            "logIndex": "0x3",
+            "removed": false
+          }
+        ],
+        "logsBloom": "0x0000004000400000000000000000000000000000000000000000000000100000000000000000000000000000000000000200000008000000000000000000400010000000000000000000000a000000000000000000000001000000000000000000080000020000000000000100000800000000000000000000002010000000000000000100000000000000000000000000000000000000000000000000000010000000000000002000000000000000000000000000000000010000000000000000001002000000200000000000000000000000002000000000000000000020000004200000002000000000000008000008040001000000000000000000000000",
+        "transactionHash": "0x15f595b181093447dfa55a6a232b7c1c135c8a1684eb0c6777ace9a196eba62b",
+        "transactionIndex": "0x0",
+        "blockHash": "0xf552b9609ec2442012882ee679eeab379627f174938a4b0fbd5a37e2646e83f7",
+        "blockNumber": "0x18b54fb",
+        "gasUsed": "0x21357",
+        "effectiveGasPrice": "0x3d9ab2fc",
+        "blobGasPrice": "0x2e7bd71db3a66e76ab1",
+        "from": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+        "to": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+        "contractAddress": null,
+        "blockTimestamp": 1788579289
+      }
+    },
+    {
+      "decision": {
+        "identity": "22bc1cc04ee84c6db475a6f4f544f877",
+        "intent": {
+          "target": {
+            "allocation": "main_weth",
+            "account": "lending_0",
+            "fund": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+            },
+            "reserve": {
+              "kind": "aave_v4",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+              "reserve_id": 0,
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            }
+          },
+          "kind": "withdraw",
+          "amount": null
+        },
+        "observations": [
+          {
+            "allocation": "main_weth",
+            "account": "lending_0",
+            "position": {
+              "reserve": {
+                "source": {
+                  "kind": "aave_v4",
+                  "chain": {
+                    "chain_id": "eip155:31337",
+                    "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+                  },
+                  "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+                  "reserve_id": 0,
+                  "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+                  "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+                },
+                "block": {
+                  "chain": {
+                    "chain_id": "eip155:31337",
+                    "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+                  },
+                  "number": 25908475,
+                  "hash": "0xf552b9609ec2442012882ee679eeab379627f174938a4b0fbd5a37e2646e83f7",
+                  "timestamp": 1788579289
+                },
+                "asset": {
+                  "chain": {
+                    "chain_id": "eip155:31337",
+                    "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+                  },
+                  "identifier": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+                  "decimals": 18
+                },
+                "hub_asset_id": 0,
+                "collateral_risk_bps": 0,
+                "dynamic_config_key": 0,
+                "paused": false,
+                "frozen": false,
+                "borrowable": true,
+                "receive_shares_enabled": true
+              },
+              "account": {
+                "chain": {
+                  "chain_id": "eip155:31337",
+                  "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+                },
+                "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+              },
+              "supplied_assets": 9999999999999999,
+              "supplied_shares": 9926655412356667,
+              "drawn_debt": 0,
+              "premium_debt": 0,
+              "total_debt": 0
+            },
+            "wallet_balance": 30000000000000000,
+            "allowance": 0,
+            "native_balance": {
+              "asset": "eip155:31337/slip44:60",
+              "amount": 4959764598143597144
+            }
+          }
+        ],
+        "memory": {
+          "version": 1,
+          "values": {
+            "supplied_at": {
+              "main_weth": 1788579289
+            }
+          }
+        }
+      },
+      "operation": {
+        "target": {
+          "allocation": "main_weth",
+          "account": "lending_0",
+          "fund": {
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+          },
+          "reserve": {
+            "kind": "aave_v4",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+            "reserve_id": 0,
+            "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+            "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          }
+        },
+        "kind": "withdraw",
+        "amount": null
+      },
+      "tx_hash": "0xa63c819f656135e6827880f26c3de25c558002d333eb6610265caf6eeb70c205",
+      "nonce": 7716,
+      "before": {
+        "allocation": "main_weth",
+        "account": "lending_0",
+        "position": {
+          "reserve": {
+            "source": {
+              "kind": "aave_v4",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+              "reserve_id": 0,
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            },
+            "block": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "number": 25908475,
+              "hash": "0xf552b9609ec2442012882ee679eeab379627f174938a4b0fbd5a37e2646e83f7",
+              "timestamp": 1788579289
+            },
+            "asset": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "identifier": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "decimals": 18
+            },
+            "hub_asset_id": 0,
+            "collateral_risk_bps": 0,
+            "dynamic_config_key": 0,
+            "paused": false,
+            "frozen": false,
+            "borrowable": true,
+            "receive_shares_enabled": true
+          },
+          "account": {
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+          },
+          "supplied_assets": 9999999999999999,
+          "supplied_shares": 9926655412356667,
+          "drawn_debt": 0,
+          "premium_debt": 0,
+          "total_debt": 0
+        },
+        "wallet_balance": 30000000000000000,
+        "allowance": 0,
+        "native_balance": {
+          "asset": "eip155:31337/slip44:60",
+          "amount": 4959764598143597144
+        }
+      },
+      "after": {
+        "allocation": "main_weth",
+        "account": "lending_0",
+        "position": {
+          "reserve": {
+            "source": {
+              "kind": "aave_v4",
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+              "reserve_id": 0,
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+            },
+            "block": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "number": 25908476,
+              "hash": "0x09c91c55f86475fb3303205724eb30ad7407eeeb60c3ac82ad660a5c374dad66",
+              "timestamp": 1788579289
+            },
+            "asset": {
+              "chain": {
+                "chain_id": "eip155:31337",
+                "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+              },
+              "identifier": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "decimals": 18
+            },
+            "hub_asset_id": 0,
+            "collateral_risk_bps": 0,
+            "dynamic_config_key": 0,
+            "paused": false,
+            "frozen": false,
+            "borrowable": true,
+            "receive_shares_enabled": true
+          },
+          "account": {
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+          },
+          "supplied_assets": 0,
+          "supplied_shares": 0,
+          "drawn_debt": 0,
+          "premium_debt": 0,
+          "total_debt": 0
+        },
+        "wallet_balance": 39999999999999999,
+        "allowance": 0,
+        "native_balance": {
+          "asset": "eip155:31337/slip44:60",
+          "amount": 4959650072052551498
+        }
+      },
+      "success": true,
+      "assets": 9999999999999999,
+      "shares": 9926655412356667,
+      "gas_paid": {
+        "asset": "eip155:31337/slip44:60",
+        "amount": 114526091045646
+      },
+      "receipt": {
+        "type": "0x0",
+        "status": "0x1",
+        "cumulativeGasUsed": "0x1b29a",
+        "logs": [
+          {
+            "address": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+            "topics": [
+              "0xa1facf110ded5028ee267fa3d5986f2aa4dc14230b79ffd27e95760f14883350",
+              "0x0000000000000000000000000000000000000000000000000000000000000000"
+            ],
+            "data": "0x00000000000000000000000000000000000000000343b28b58272222c4566d6a00000000000000000000000000000000000000000013454cbb6eb12a57cc7bb2000000000000000000000000000000000000000000000000daadc017a2a44bb2",
+            "blockHash": "0x09c91c55f86475fb3303205724eb30ad7407eeeb60c3ac82ad660a5c374dad66",
+            "blockNumber": "0x18b54fc",
+            "blockTimestamp": "0x6a9b8dd9",
+            "transactionHash": "0xa63c819f656135e6827880f26c3de25c558002d333eb6610265caf6eeb70c205",
+            "transactionIndex": "0x0",
+            "logIndex": "0x0",
+            "removed": false
+          },
+          {
+            "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "topics": [
+              "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+              "0x000000000000000000000000cca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+            ],
+            "data": "0x000000000000000000000000000000000000000000000000002386f26fc0ffff",
+            "blockHash": "0x09c91c55f86475fb3303205724eb30ad7407eeeb60c3ac82ad660a5c374dad66",
+            "blockNumber": "0x18b54fc",
+            "blockTimestamp": "0x6a9b8dd9",
+            "transactionHash": "0xa63c819f656135e6827880f26c3de25c558002d333eb6610265caf6eeb70c205",
+            "transactionIndex": "0x0",
+            "logIndex": "0x1",
+            "removed": false
+          },
+          {
+            "address": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+            "topics": [
+              "0x535be2ff85ab4c5d0991e10dc057a4951ea2bac426ffb036eded23036a3942b2",
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x00000000000000000000000094e7a5dcbe816e498b89ab752661904e2f56c485"
+            ],
+            "data": "0x0000000000000000000000000000000000000000000000000023443d91a9463b000000000000000000000000000000000000000000000000002386f26fc0ffff",
+            "blockHash": "0x09c91c55f86475fb3303205724eb30ad7407eeeb60c3ac82ad660a5c374dad66",
+            "blockNumber": "0x18b54fc",
+            "blockTimestamp": "0x6a9b8dd9",
+            "transactionHash": "0xa63c819f656135e6827880f26c3de25c558002d333eb6610265caf6eeb70c205",
+            "transactionIndex": "0x0",
+            "logIndex": "0x2",
+            "removed": false
+          },
+          {
+            "address": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+            "topics": [
+              "0xfe7813e2866053d5c3938554e517b554fce6666a6561bed9eaa7419b29fa9b68",
+              "0x0000000000000000000000000000000000000000000000000000000000000000",
+              "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+              "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+            ],
+            "data": "0x0000000000000000000000000000000000000000000000000023443d91a9463b000000000000000000000000000000000000000000000000002386f26fc0ffff",
+            "blockHash": "0x09c91c55f86475fb3303205724eb30ad7407eeeb60c3ac82ad660a5c374dad66",
+            "blockNumber": "0x18b54fc",
+            "blockTimestamp": "0x6a9b8dd9",
+            "transactionHash": "0xa63c819f656135e6827880f26c3de25c558002d333eb6610265caf6eeb70c205",
+            "transactionIndex": "0x0",
+            "logIndex": "0x3",
+            "removed": false
+          }
+        ],
+        "logsBloom": "0x0000004000400000000000000000000000000000000000000000000000100000000000000000000000000000000000000200000008000000000200000000000000000000000000000000000a000000000000002000000001000000000000000000080000020020000000000100000900000000000000000000002010000000000000000100000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000080000000000001002000000200000000000000000000000002000000000000020000020000000200000002000000000000008000008040000000000000000000000000000",
+        "transactionHash": "0xa63c819f656135e6827880f26c3de25c558002d333eb6610265caf6eeb70c205",
+        "transactionIndex": "0x0",
+        "blockHash": "0x09c91c55f86475fb3303205724eb30ad7407eeeb60c3ac82ad660a5c374dad66",
+        "blockNumber": "0x18b54fc",
+        "gasUsed": "0x1b29a",
+        "effectiveGasPrice": "0x3d5b0023",
+        "blobGasPrice": "0x1f63ddc99ff44822e27",
+        "from": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+        "to": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+        "contractAddress": null,
+        "blockTimestamp": 1788579289
+      }
+    }
+  ],
+  "closure": [
+    {
+      "allocation": "main_weth",
+      "account": "lending_0",
+      "position": {
+        "reserve": {
+          "source": {
+            "kind": "aave_v4",
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+            "reserve_id": 0,
+            "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+            "asset": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+          },
+          "block": {
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "number": 25908476,
+            "hash": "0x09c91c55f86475fb3303205724eb30ad7407eeeb60c3ac82ad660a5c374dad66",
+            "timestamp": 1788579289
+          },
+          "asset": {
+            "chain": {
+              "chain_id": "eip155:31337",
+              "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+            },
+            "identifier": "eip155:31337/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "decimals": 18
+          },
+          "hub_asset_id": 0,
+          "collateral_risk_bps": 0,
+          "dynamic_config_key": 0,
+          "paused": false,
+          "frozen": false,
+          "borrowable": true,
+          "receive_shares_enabled": true
+        },
+        "account": {
+          "chain": {
+            "chain_id": "eip155:31337",
+            "environment": "anvil:0x3d73aa640c556de87995e418ad3cf71a0d08c24a1406727fcc49d1b73984f94c"
+          },
+          "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+        },
+        "supplied_assets": 0,
+        "supplied_shares": 0,
+        "drawn_debt": 0,
+        "premium_debt": 0,
+        "total_debt": 0
+      },
+      "wallet_balance": 39999999999999999,
+      "allowance": 0,
+      "native_balance": {
+        "asset": "eip155:31337/slip44:60",
+        "amount": 4959650072052551498
+      }
+    }
+  ]
+}

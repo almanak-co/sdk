@@ -1,1 +1,0 @@
-fix(connectors): handle a REALM-3 edge case in the adapter

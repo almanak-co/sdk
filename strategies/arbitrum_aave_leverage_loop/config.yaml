@@ -1,0 +1,96 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/arbitrum_aave_leverage_loop.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # Borrow rounds. A round that would end below unwind_health_factor is refused and
+    # the loop holds there; the README's "Which rounds are reachable" has the bound.
+    loops: 2
+    # Share of the current collateral value borrowed each round.
+    borrow_fraction: '0.25'
+    # The unwind starts below this health factor. It must sit well above
+    # minimum_health_factor: the floor also refuses the unwind's own withdrawals,
+    # so the gap between them is how far a price may gap and still unwind.
+    unwind_health_factor: '1.8'
+    # Collateral released per unwind cycle beyond the remaining debt, so the pool
+    # fee, price impact and accrued interest leave no repay shortfall.
+    swap_headroom_bps: 100
+  test_parameters:
+    # Only almanak test run applies these (README, Fork tests): one round still
+    # supplies, borrows, swaps, resupplies and fully unwinds, in fewer decisions.
+    loops: 1
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.05'
+      collateral: true
+      # The gateway floor for every borrow and withdrawal, the unwind's included.
+      # Far below unwind_health_factor, so a price gap through the trigger still
+      # leaves collateral the unwind can withdraw and sell for the repay.
+      minimum_health_factor: '1.15'
+      oracle: '0xb56c2f0b653b2e0b10c9b928c8580ac5df02c7c7'
+      price_source: '0xbd41b1548a5a06544cbcf87c0c54864312842c00'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      collateral: false
+      minimum_health_factor: '1.15'
+      oracle: '0xb56c2f0b653b2e0b10c9b928c8580ac5df02c7c7'
+      price_source: '0xb0c9a7122aab68f75cffd9851e867144dbff113b'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      # A slice size, not prefunding: one swap sells min(owned USDC, capital), and
+      # owned USDC includes borrowed proceeds. Keep it above any single borrow so each
+      # round swaps in one step.
+      capital:
+        asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+        quantity: '1000'
+      entry_swap_bps: 10000
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+  gas:
+    # Example Arbitrum amounts for loops: 2; size them from the live gas price.
+    # exit_reserve = 12 fees, total_budget = exit_reserve + 12 entry fees (README).
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:42161
+      max_transaction_fee:
+        base_units: 150000000000000
+      total_budget:
+        base_units: 3600000000000000
+      exit_reserve:
+        base_units: 1800000000000000
+markets:
+  collateral:
+    connector: aave_v3
+    chain: eip155:42161
+    asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+  loan:
+    connector: aave_v3
+    chain: eip155:42161
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+  pool:
+    connector: uniswap_v3
+    chain: eip155:42161
+    pool: '0xc6962004f452be9203591991d15f6b388e09e8d0'
+accounts:
+  fund:
+    chain: eip155:42161
+inventory:
+- account: fund
+  balance:
+    asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+    quantity: '0.05'
+- account: fund
+  balance:
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+    quantity: '0'

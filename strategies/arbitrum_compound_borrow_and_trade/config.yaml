@@ -1,0 +1,60 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/arbitrum_compound_borrow_and_trade.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '200'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '1'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      capital:
+        asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+        quantity:
+          base_units: 100000000
+      entry_swap_bps: 10000
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+markets:
+  collateral:
+    connector: compound_v3
+    chain: eip155:42161
+    comet: '0x9c4ec768c28520b50860ea7a15bd7213a9ff58bf'
+    asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+  loan:
+    connector: compound_v3
+    chain: eip155:42161
+    comet: '0x9c4ec768c28520b50860ea7a15bd7213a9ff58bf'
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+  pool:
+    connector: uniswap_v3
+    chain: eip155:42161
+    pool: '0xc6962004f452be9203591991d15f6b388e09e8d0'
+accounts:
+  fund:
+    chain: eip155:42161
+inventory:
+- account: fund
+  balance:
+    asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+    quantity: '1'
+- account: fund
+  balance:
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+    quantity: '40'

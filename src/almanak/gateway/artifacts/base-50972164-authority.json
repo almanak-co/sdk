@@ -1,0 +1,27 @@
+{
+  "block": {
+    "chain": {
+      "chain_id": "eip155:8453",
+      "environment": "mainnet"
+    },
+    "hash": "0x310ad4c1ad77e2a58315b1f78df17e01c0ff14fb7eba89868083830baefe2d61",
+    "number": 50972164,
+    "timestamp": 1788733675
+  },
+  "contracts": [
+    {
+      "address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      "code_hash": "0xa6705a10bb756b5dea144591118be77d7af0c3eee3bf2dfe2583dcb0364fefab",
+      "implementation": "0x2ce6311ddae708829bc0784c967b7d77d19fd779",
+      "implementation_hash": "0x11b75a237997ab8328f65b2d5a55c10f0346d0a175741ed42ddf4f2c66b9e873",
+      "implementation_slot": 50801780122331352337026042894847907698553222651959119521779622085092237899971
+    }
+  ],
+  "proof": "Base USDC proxy and implementation match compiled Circle source; slot 9 stores balanceAndBlacklistStates, with the high bit reserved. Fixture writes require amount < 2**255.",
+  "source": "https://github.com/circlefin/stablecoin-evm/tree/fc85788bc7c23cefe3df1a757133048bfddadeaa",
+  "compiler": "0.6.12",
+  "optimizer_runs": 10000000,
+  "evm_version": "istanbul",
+  "proxy_dependency": "OpenZeppelin v3.0.0 Address.sol",
+  "implementation_dependency": "OpenZeppelin v3.4.2"
+}

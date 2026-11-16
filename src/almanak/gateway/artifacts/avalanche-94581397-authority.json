@@ -1,0 +1,105 @@
+{
+  "source": "https://api.avax.network/ext/bc/C/rpc",
+  "block": {
+    "chain": {
+      "chain_id": "eip155:43114",
+      "environment": "mainnet"
+    },
+    "number": 94581397,
+    "hash": "0xabb1529862e4b99fdbd08e9c056edc97b00441407043ba18d45b0d1cb7c6297a",
+    "timestamp": 1788667442
+  },
+  "contracts": [
+    {
+      "address": "0x435272ceff93a1e657e8abfdf0a13e95900a3a56",
+      "code_hash": "0xd160cc610667916056ebd51a2239115c2714d3e6c8a31ba567be6875237230d5",
+      "implementation": "0x56f74d6bc5f51da3ba0d3f715a67cd7d15358ad4",
+      "implementation_hash": "0xdc24a4527e1257b19f12e6fb870dee142970384deb1cca4341b1dea2b1bc1caf",
+      "implementation_slot": 24440054405305269366569402256811496959409073762505157381672968839269610695612
+    },
+    {
+      "address": "0xd07369fae4a5bb13c9ce446b052c7867b1abdf6e",
+      "code_hash": "0x10acc89a5a0ac1f557c96150423c35576749abf7397c6ea368adb6301df25ae5",
+      "implementation": "0xfacde4e3f0368e15f767d9e2db0b67817af52c1c",
+      "implementation_hash": "0xfbcf2a40498e9d4b98580d87cfb9cdb8fbd57db6c381fd53ab140e508979a7a4",
+      "implementation_slot": 24440054405305269366569402256811496959409073762505157381672968839269610695612
+    },
+    {
+      "address": "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7",
+      "code_hash": "0xbe0979d9ff9e744b48d32e81fd67db0d32dfc74120989df9b7b1588e2aff8597",
+      "implementation": null,
+      "implementation_hash": null,
+      "implementation_slot": null
+    },
+    {
+      "address": "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+      "code_hash": "0x7140a935aa3bb55d334d6d325fea277e47674770b10823feefa6f8b2c58af5fc",
+      "implementation": "0x30dfe0469803bce76f8f62ac24b18d33d3d6ffe6",
+      "implementation_hash": "0x4ff47fa5d29bc7c2d76a746ea8b176d9509b49dd16d974a186d94af41ecf6d62",
+      "implementation_slot": 50801780122331352337026042894847907698553222651959119521779622085092237899971
+    },
+    {
+      "address": "0x84b50b131a82da689c0205c00d603c1c92a5f8a4",
+      "code_hash": "0x88caaf18c5f1a35ee6fc2e10bf9e37d8ca16cf15bd5838fb802e994e50904aee",
+      "implementation": null,
+      "implementation_hash": null,
+      "implementation_slot": null
+    },
+    {
+      "address": "0x0a77230d17318075983913bc2145db16c7366156",
+      "code_hash": "0xbd6f524cdc4268b6bd1bb6f77a8821faeea9c52ee9e0afa0b6d948ce82c966c2",
+      "implementation": null,
+      "implementation_hash": null,
+      "implementation_slot": null
+    },
+    {
+      "address": "0xb0d7a8bbdcdb1203850b742bb4d7f57a1f1c8483",
+      "code_hash": "0xa53375355607da0b2cc293aa73c85d266c81afd856adc44298ae692dc01ccf44",
+      "implementation": null,
+      "implementation_hash": null,
+      "implementation_slot": null
+    },
+    {
+      "address": "0x06380c0e0912312b5150364b9dc4542ba0dbbc85",
+      "code_hash": "0x0e5890635bcd695d35faa8275bbdbc24ac7bdae2ce7a16a351399549e107bc60",
+      "implementation": null,
+      "implementation_hash": null,
+      "implementation_slot": null
+    },
+    {
+      "address": "0xc3c9e198c735a4b97e3e683f391ccbdd60b69286",
+      "code_hash": "0xcdd0b0d68cfe8320a26c2e239a229000727f7771849027f847d82252e95f9571",
+      "implementation": null,
+      "implementation_hash": null,
+      "implementation_slot": null
+    },
+    {
+      "address": "0x94b75331ae8d42c1b61065089b7d48fe14aa73b7",
+      "code_hash": "0x28a5b657faca9540a6fa8e1ff4e43938b40548cdfb041d6d209ea4d7cd1f72ea",
+      "implementation": null,
+      "implementation_hash": null,
+      "implementation_slot": null
+    },
+    {
+      "address": "0xb74b1f14d2754acfcbbe1a221023a5cf50ab8acd",
+      "code_hash": "0xabd80e476783c8cf55c44af17dcc96990359b5999a61075fd2402858f92311ff",
+      "implementation": null,
+      "implementation_hash": null,
+      "implementation_slot": null
+    },
+    {
+      "address": "0xbe40675bb704506a3c2ccfb762dcfd1e979845c2",
+      "code_hash": "0xd19dc2c1d48e835934a1078a0fb9fd46a7ed16dc6b4e096064042ba8f88e4ce0",
+      "implementation": null,
+      "implementation_hash": null,
+      "implementation_slot": null
+    },
+    {
+      "address": "0x000000000022d473030f116ddee9f6b43ac78ba3",
+      "code_hash": "0x081beff14e75c5a5c1e60740445f58d54ba0fef228148a11d3e4287dc3551cbb",
+      "implementation": null,
+      "implementation_hash": null,
+      "implementation_slot": null
+    }
+  ]
+}

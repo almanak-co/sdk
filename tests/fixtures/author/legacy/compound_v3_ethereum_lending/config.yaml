@@ -1,0 +1,120 @@
+strategy:
+  connector: compound_v3
+  decision_interval: 5s
+  allocations:
+    earn:
+      market: earn
+      account: lender
+      supply_limit: '1000'
+      borrow_limit: '0'
+      minimum_health_factor: '2'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0'
+    collateral:
+      market: collateral
+      account: borrower
+      supply_limit: '1'
+      borrow_limit: '0'
+      minimum_health_factor: '2'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: borrower
+      supply_limit: '0'
+      borrow_limit: '200'
+      minimum_health_factor: '2'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0'
+assets:
+  eip155:1/slip44:60:
+    decimals: 18
+  eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48:
+    decimals: 6
+  eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2:
+    decimals: 18
+markets:
+  earn:
+    kind: compound_v3
+    market:
+      chain:
+        chain_id: eip155:1
+        environment: mainnet
+      comet: '0xc3d688b66703497daa19211eedff47f25384cdc3'
+      base_asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+      base_price_feed: '0x8fffffd4afb6115b954bd326cbe7b4ba576818f6'
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+    price_feed: '0x8fffffd4afb6115b954bd326cbe7b4ba576818f6'
+  collateral:
+    kind: compound_v3
+    market:
+      chain:
+        chain_id: eip155:1
+        environment: mainnet
+      comet: '0xc3d688b66703497daa19211eedff47f25384cdc3'
+      base_asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+      base_price_feed: '0x8fffffd4afb6115b954bd326cbe7b4ba576818f6'
+    asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+    price_feed: '0xc0053f3fbccd593758258334dfce24c2a9a673ad'
+  loan:
+    kind: compound_v3
+    market:
+      chain:
+        chain_id: eip155:1
+        environment: mainnet
+      comet: '0xc3d688b66703497daa19211eedff47f25384cdc3'
+      base_asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+      base_price_feed: '0x8fffffd4afb6115b954bd326cbe7b4ba576818f6'
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+    price_feed: '0x8fffffd4afb6115b954bd326cbe7b4ba576818f6'
+accounts:
+  lender:
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+  borrower:
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:1
+        environment: mainnet
+      provider:
+        api_key_env: ALCHEMY_API_KEY
+        kind: alchemy
+        network: eth-mainnet
+      block:
+        chain:
+          chain_id: eip155:1
+          environment: mainnet
+        hash: '0x04cfc1ef6404f3b757bf465ae32ef6805add8da8c7a2028bedb738851dd9532d'
+        number: 25925880
+        timestamp: 1788788987
+    funds:
+    - account: lender
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+          quantity: '1000'
+        method: local_storage
+    - account: borrower
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+          quantity: '1'
+        method: wrap_native
+      - balance:
+          asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+          quantity: '20'
+        method: local_storage
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:1/slip44:60
+        quantity: '5'
+      foundry_account_index: 0

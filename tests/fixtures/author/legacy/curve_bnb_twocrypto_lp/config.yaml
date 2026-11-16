@@ -1,0 +1,120 @@
+strategy:
+  connector: curve
+  decision_interval: 5s
+  allocations:
+    proportional:
+      market: crypto_pool
+      account: proportional
+      funding_asset: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+      trading_asset: eip155:56/erc20:0x5519a479da8ce3af7f373c16f14870bbeafda265
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:56/erc20:0x5519a479da8ce3af7f373c16f14870bbeafda265
+        quantity: '0'
+      - asset: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+        quantity: '1'
+      maximums:
+      - asset: eip155:56/erc20:0x5519a479da8ce3af7f373c16f14870bbeafda265
+        quantity: '1000'
+      - asset: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+        quantity: '1000'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      native_asset: eip155:56/slip44:714
+      minimum_native_balance:
+        base_units: 0
+    single_coin:
+      market: crypto_pool
+      account: single_coin
+      funding_asset: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+      trading_asset: eip155:56/erc20:0x5519a479da8ce3af7f373c16f14870bbeafda265
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:56/erc20:0x5519a479da8ce3af7f373c16f14870bbeafda265
+        quantity: '0'
+      - asset: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+        quantity: '1'
+      maximums:
+      - asset: eip155:56/erc20:0x5519a479da8ce3af7f373c16f14870bbeafda265
+        quantity: '1000'
+      - asset: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+        quantity: '1000'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      native_asset: eip155:56/slip44:714
+      minimum_native_balance:
+        base_units: 0
+      single_coin_exit: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+assets:
+  eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7:
+    decimals: 18
+  eip155:56/erc20:0x5519a479da8ce3af7f373c16f14870bbeafda265:
+    decimals: 18
+  eip155:56/erc20:0xb84637ab9be835580821a67823f414ffd0bbf625:
+    decimals: 18
+  eip155:56/slip44:714:
+    decimals: 18
+markets:
+  crypto_pool:
+    pool:
+      kind: curve
+      family: twocrypto_ng
+      chain:
+        chain_id: eip155:56
+        environment: mainnet
+      factory: '0x98ee851a00abee0d95d08cf4ca2bdce32aeaaf7f'
+      pool: '0xb84637ab9be835580821a67823f414ffd0bbf625'
+      coins:
+      - eip155:56/erc20:0x5519a479da8ce3af7f373c16f14870bbeafda265
+      - eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+accounts:
+  proportional:
+    chain:
+      chain_id: eip155:56
+      environment: mainnet
+  single_coin:
+    chain:
+      chain_id: eip155:56
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:56
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: bnb-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      block:
+        chain:
+          chain_id: eip155:56
+          environment: mainnet
+        number: 120628007
+        hash: '0xf008198218320ccaaee388f2a892761d232fd609f6551da421fc1b11fcb748e4'
+        timestamp: 1788844256
+    funds:
+    - account: proportional
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+          quantity: '1'
+        method: local_storage
+    - account: single_coin
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+          quantity: '1'
+        method: local_storage
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:56/slip44:714
+        quantity: '1'
+      foundry_account_index: 662

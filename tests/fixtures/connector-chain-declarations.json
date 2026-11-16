@@ -1,0 +1,3989 @@
+{
+ "head": "e81f3883461a36dc22874248c05d31e741d93215",
+ "scope": "Live trusted declarations, not full rollout acceptance; 2026-09-16 batch 1: Uniswap V4 BNB and GMX Arbitrum promoted under the scoped-promotion amendment; 2026-09-17 batch 2: Uniswap V3 Avalanche and Polygon admitted to verified fork/backtest; 2026-09-23: Uniswap V3 BNB and Robinhood, PancakeSwap V3 BNB and Uniswap V4 Robinhood promoted to production by maintainer acceptance on hosted fork qualification and staging evidence, before their complete per-cell packages (see AGENTS.md); 2026-09-23 second batch: Uniswap V3 Avalanche and Polygon, Uniswap V4 Polygon and Curve Optimism and Base promoted to production by maintainer acceptance on hosted fork qualification and lane evidence, before their complete per-cell packages (see AGENTS.md); 2026-09-24 third batch: Uniswap V3 Ethereum, Arbitrum, Base and Optimism, Uniswap V4 Arbitrum, Base and Optimism, PancakeSwap V3 Ethereum, Arbitrum and Base, Aerodrome Base and Aerodrome Slipstream Base promoted to production by maintainer acceptance on hosted fork qualification and lane evidence, before their complete per-cell packages (see AGENTS.md); 2026-09-24 fourth batch: Morpho Blue Ethereum, Base, Arbitrum, Optimism, Polygon, Robinhood, BNB and Avalanche, Compound V3 Ethereum, Base, Arbitrum and Optimism and SparkLend Ethereum promoted to production by maintainer acceptance on hosted fork qualification, before their complete per-cell packages (see AGENTS.md); 2026-09-24: Aave V3 Arbitrum, Avalanche, Base, BNB, Optimism and Polygon promoted to production under the scoped-promotion amendment on complete per-cell packages; 2026-10-20: Morpho Blue HyperEVM (eip155:999) admitted to fork, backtest and production by maintainer acceptance on its reference lifecycle, rehearsal and prepared backtest evidence, before its complete per-cell package (see AGENTS.md); D7 (maintainer acceptance on merging its declaration): Hyperliquid HyperEVM (eip155:999) admitted to production, Safe/Roles only, on its fork lifecycle, production rehearsal and read-only mainnet checks, with one maintainer-run mainnet lifecycle as its promotion evidence (see AGENTS.md)",
+ "entries": [
+  {
+   "connector": "aave_v3",
+   "chain": "eip155:1",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Pool and reserve-token revision 11 implementations",
+    "ordinary collateral mode and variable-rate debt",
+    "configured Pool, reserve assets and oracle feeds; no default markets"
+   ],
+   "historical": [
+    {
+     "model": "aave-v3-revision11-economic-indices-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount",
+      "collateral"
+     ],
+     "backtest_start_at": "2026-09-06T19:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "collateral": 1,
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "aave_v3",
+   "chain": "eip155:8453",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Pool and reserve-token revision 11 implementations",
+    "ordinary collateral mode and variable-rate debt",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "aave-v3-revision11-economic-indices-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount",
+      "collateral"
+     ],
+     "backtest_start_at": "2026-09-06T22:28:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "collateral": 1,
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "aave_v3",
+   "chain": "eip155:42161",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified revision-11 L2Pool, aToken and variable-debt semantics",
+    "full runtime fingerprints retain documented proxy metadata differences",
+    "ordinary collateral mode and explicit configured oracle sources"
+   ],
+   "historical": [
+    {
+     "model": "aave-v3-revision11-economic-indices-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount",
+      "collateral"
+     ],
+     "backtest_start_at": "2026-09-08T08:17:07Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "collateral": 1,
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "aave_v3",
+   "chain": "eip155:10",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified revision-11 L2Pool and reserve-token implementations",
+    "complete proxy fingerprints and explicitly configured oracle sources"
+   ],
+   "historical": [
+    {
+     "model": "aave-v3-revision11-economic-indices-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount",
+      "collateral"
+     ],
+     "backtest_start_at": "2026-09-08T16:28:11Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "collateral": 1,
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "aave_v3",
+   "chain": "eip155:56",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified revision-11 PoolInstance and reserve-token implementations",
+    "complete proxy fingerprints; reserve proxy metadata difference retained"
+   ],
+   "historical": [
+    {
+     "model": "aave-v3-revision11-economic-indices-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount",
+      "collateral"
+     ],
+     "backtest_start_at": "2026-09-08T18:10:37Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "collateral": 1,
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "aave_v3",
+   "chain": "eip155:137",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified revision-11 PoolInstance and reserve-token implementations",
+    "complete proxy fingerprints and explicitly configured oracle sources"
+   ],
+   "historical": [
+    {
+     "model": "aave-v3-revision11-economic-indices-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount",
+      "collateral"
+     ],
+     "backtest_start_at": "2026-09-08T19:29:13Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "collateral": 1,
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "aave_v3",
+   "chain": "eip155:43114",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified revision-11 PoolInstance and reserve-token implementations",
+    "complete proxy fingerprints and explicitly configured oracle sources"
+   ],
+   "historical": [
+    {
+     "model": "aave-v3-revision11-economic-indices-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount",
+      "collateral"
+     ],
+     "backtest_start_at": "2026-09-09T03:42:27Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "collateral": 1,
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "aave_v4",
+   "chain": "eip155:1",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "borrow",
+    "repay"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified V4 implementation",
+    "local fund/Spoke collateral",
+    "standard ERC-20 assets"
+   ],
+   "historical": [
+    {
+     "model": "aave-v4-supply-historical-shares-v1",
+     "mode": "historical_path",
+     "actions": [
+      "supply",
+      "withdraw"
+     ],
+     "backtest_start_at": "2026-03-30T00:00:00Z",
+     "variants": []
+    },
+    {
+     "model": "aave-v4-economic-rates-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "borrow",
+      "repay",
+      "withdraw_amount",
+      "repay_amount",
+      "collateral",
+      "aave_refresh"
+     ],
+     "backtest_start_at": "2026-03-30T00:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "debt": {
+     "entry": 1,
+     "exit": 3,
+     "per_entry_slice": 0,
+     "per_item": {
+      "collateral": 1
+     },
+     "when_granted": {},
+     "exit_per_item": {
+      "collateral": 1
+     },
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "aave_v4",
+   "chain": "eip155:43114",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "borrow",
+    "repay"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified V4 implementation",
+    "local fund/Spoke collateral",
+    "standard ERC-20 assets"
+   ],
+   "historical": [
+    {
+     "model": "aave-v4-economic-rates-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "borrow",
+      "repay",
+      "withdraw_amount",
+      "repay_amount",
+      "collateral",
+      "aave_refresh"
+     ],
+     "backtest_start_at": "2026-09-05T00:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "debt": {
+     "entry": 1,
+     "exit": 3,
+     "per_entry_slice": 0,
+     "per_item": {
+      "collateral": 1
+     },
+     "when_granted": {},
+     "exit_per_item": {
+      "collateral": 1
+     },
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "aerodrome",
+   "chain": "eip155:8453",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured verified Aerodrome factory, clone, router and fee contracts",
+    "fungible pool shares and separate account-wide fee claims",
+    "one allocation per fund; no unrelated initial shares, fees or pool LP deposit",
+    "stable and volatile pools; no staking or reward authority",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "aerodrome-economic-integer-fixed-indices-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T11:00:00Z",
+     "variants": [
+      "stable",
+      "volatile"
+     ]
+    }
+   ],
+   "variants": [
+    "stable",
+    "volatile"
+   ],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "aerodrome_slipstream",
+   "chain": "eip155:8453",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured compiled Slipstream factory, clone, periphery and fee modules",
+    "one allocation per fund",
+    "unstaked NFTs and undiscounted submitter fee context",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "broader NFT manager grants can affect compatible owned or approved NFTs; gateway operations require the retained strategy-owned NFT",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "slipstream-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T10:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "compound_v3",
+   "chain": "eip155:1",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Comet implementation, extension and immutable asset-list revisions",
+    "signed base principal and non-interest-bearing collateral",
+    "no rewards or manager authority",
+    "scope-only multipurpose ABI grants; economic distinctions remain gateway checks"
+   ],
+   "historical": [
+    {
+     "model": "compound-v3-exogenous-integer-indices-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount"
+     ],
+     "backtest_start_at": "2026-09-07T15:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "compound_v3",
+   "chain": "eip155:8453",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Comet implementation, extension and immutable asset-list revisions",
+    "signed base principal and non-interest-bearing collateral",
+    "no rewards or manager authority",
+    "scope-only multipurpose ABI grants; economic distinctions remain gateway checks",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "compound-v3-exogenous-integer-indices-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount"
+     ],
+     "backtest_start_at": "2026-09-07T15:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "compound_v3",
+   "chain": "eip155:42161",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Comet implementation, extension and immutable asset-list revisions",
+    "signed base principal and non-interest-bearing collateral",
+    "no rewards or manager authority",
+    "scope-only multipurpose ABI grants; economic distinctions remain gateway checks"
+   ],
+   "historical": [
+    {
+     "model": "compound-v3-exogenous-integer-indices-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount"
+     ],
+     "backtest_start_at": "2026-09-07T15:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "compound_v3",
+   "chain": "eip155:10",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Comet implementation, extension and immutable asset-list revisions",
+    "signed base principal and non-interest-bearing collateral",
+    "no rewards or manager authority",
+    "scope-only multipurpose ABI grants; economic distinctions remain gateway checks",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "compound-v3-exogenous-integer-indices-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount"
+     ],
+     "backtest_start_at": "2026-09-07T15:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "curve",
+   "chain": "eip155:1",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified StableSwap NG, TwoCrypto NG or TriCrypto NG revision",
+    "ordered standard non-rebasing coins; no metapool routing",
+    "one allocation per fund",
+    "LP fees embedded in share economics; explicit configured single-coin exit",
+    "economic simulation assumes execution access and fixed external market history",
+    "explicit bounded samples and source age; no missing-input substitution"
+   ],
+   "historical": [
+    {
+     "model": "curve-stableswap-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T20:00:00Z",
+     "variants": [
+      "stableswap_ng"
+     ]
+    },
+    {
+     "model": "curve-ng-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T20:00:00Z",
+     "variants": [
+      "stableswap_ng",
+      "twocrypto_ng",
+      "tricrypto_ng"
+     ]
+    }
+   ],
+   "variants": [
+    "stableswap_ng",
+    "twocrypto_ng",
+    "tricrypto_ng"
+   ],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 3,
+     "exit": 3,
+     "per_entry_slice": 2,
+     "per_item": {
+      "coins": 1
+     },
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "curve",
+   "chain": "eip155:8453",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified StableSwap NG, TwoCrypto NG or TriCrypto NG revision",
+    "ordered standard non-rebasing coins; no metapool routing",
+    "one allocation per fund",
+    "LP fees embedded in share economics; explicit configured single-coin exit",
+    "economic simulation assumes execution access and fixed external market history",
+    "explicit bounded samples and source age; no missing-input substitution",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "curve-stableswap-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T20:00:00Z",
+     "variants": [
+      "stableswap_ng"
+     ]
+    },
+    {
+     "model": "curve-ng-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T20:00:00Z",
+     "variants": [
+      "twocrypto_ng",
+      "tricrypto_ng"
+     ]
+    }
+   ],
+   "variants": [
+    "stableswap_ng",
+    "twocrypto_ng",
+    "tricrypto_ng"
+   ],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 3,
+     "exit": 3,
+     "per_entry_slice": 2,
+     "per_item": {
+      "coins": 1
+     },
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "curve",
+   "chain": "eip155:42161",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified StableSwap NG, TwoCrypto NG or TriCrypto NG revision",
+    "ordered standard non-rebasing coins; no metapool routing",
+    "one allocation per fund",
+    "LP fees embedded in share economics; explicit configured single-coin exit",
+    "economic simulation assumes execution access and fixed external market history",
+    "explicit bounded samples and source age; no missing-input substitution"
+   ],
+   "historical": [
+    {
+     "model": "curve-stableswap-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T20:00:00Z",
+     "variants": [
+      "stableswap_ng"
+     ]
+    },
+    {
+     "model": "curve-ng-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T20:00:00Z",
+     "variants": [
+      "twocrypto_ng",
+      "tricrypto_ng"
+     ]
+    }
+   ],
+   "variants": [
+    "stableswap_ng",
+    "twocrypto_ng",
+    "tricrypto_ng"
+   ],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 3,
+     "exit": 3,
+     "per_entry_slice": 2,
+     "per_item": {
+      "coins": 1
+     },
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "curve",
+   "chain": "eip155:43114",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified StableSwap NG, TwoCrypto NG or TriCrypto NG revision",
+    "ordered standard non-rebasing coins; no metapool routing",
+    "one allocation per fund",
+    "LP fees embedded in share economics; explicit configured single-coin exit",
+    "economic simulation assumes execution access and fixed external market history",
+    "explicit bounded samples and source age; no missing-input substitution"
+   ],
+   "historical": [
+    {
+     "model": "curve-stableswap-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T20:00:00Z",
+     "variants": [
+      "stableswap_ng"
+     ]
+    }
+   ],
+   "variants": [
+    "stableswap_ng"
+   ],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 3,
+     "exit": 3,
+     "per_entry_slice": 2,
+     "per_item": {
+      "coins": 1
+     },
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "curve",
+   "chain": "eip155:56",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified StableSwap NG, TwoCrypto NG or TriCrypto NG revision",
+    "ordered standard non-rebasing coins; no metapool routing",
+    "one allocation per fund",
+    "LP fees embedded in share economics; explicit configured single-coin exit",
+    "economic simulation assumes execution access and fixed external market history",
+    "explicit bounded samples and source age; no missing-input substitution"
+   ],
+   "historical": [
+    {
+     "model": "curve-stableswap-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T20:00:00Z",
+     "variants": [
+      "stableswap_ng"
+     ]
+    },
+    {
+     "model": "curve-ng-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T20:00:00Z",
+     "variants": [
+      "twocrypto_ng"
+     ]
+    }
+   ],
+   "variants": [
+    "stableswap_ng",
+    "twocrypto_ng"
+   ],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 3,
+     "exit": 3,
+     "per_entry_slice": 2,
+     "per_item": {
+      "coins": 1
+     },
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "curve",
+   "chain": "eip155:10",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified StableSwap NG, TwoCrypto NG or TriCrypto NG revision",
+    "ordered standard non-rebasing coins; no metapool routing",
+    "one allocation per fund",
+    "LP fees embedded in share economics; explicit configured single-coin exit",
+    "economic simulation assumes execution access and fixed external market history",
+    "explicit bounded samples and source age; no missing-input substitution",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "curve-stableswap-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T20:00:00Z",
+     "variants": [
+      "stableswap_ng"
+     ]
+    },
+    {
+     "model": "curve-ng-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T20:00:00Z",
+     "variants": [
+      "twocrypto_ng",
+      "tricrypto_ng_2024"
+     ]
+    }
+   ],
+   "variants": [
+    "stableswap_ng",
+    "twocrypto_ng",
+    "tricrypto_ng_2024"
+   ],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 3,
+     "exit": 3,
+     "per_entry_slice": 2,
+     "per_item": {
+      "coins": 1
+     },
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "curve",
+   "chain": "eip155:137",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified StableSwap NG, TwoCrypto NG or TriCrypto NG revision",
+    "ordered standard non-rebasing coins; no metapool routing",
+    "one allocation per fund",
+    "LP fees embedded in share economics; explicit configured single-coin exit",
+    "economic simulation assumes execution access and fixed external market history",
+    "explicit bounded samples and source age; no missing-input substitution"
+   ],
+   "historical": [
+    {
+     "model": "curve-stableswap-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T20:00:00Z",
+     "variants": [
+      "stableswap_ng"
+     ]
+    },
+    {
+     "model": "curve-ng-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T20:00:00Z",
+     "variants": [
+      "twocrypto_ng",
+      "tricrypto_ng_2024"
+     ]
+    }
+   ],
+   "variants": [
+    "stableswap_ng",
+    "twocrypto_ng",
+    "tricrypto_ng_2024"
+   ],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 3,
+     "exit": 3,
+     "per_entry_slice": 2,
+     "per_item": {
+      "coins": 1
+     },
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "curve",
+   "chain": "eip155:4663",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified StableSwap NG, TwoCrypto NG or TriCrypto NG revision",
+    "ordered standard non-rebasing coins; no metapool routing",
+    "one allocation per fund",
+    "LP fees embedded in share economics; explicit configured single-coin exit",
+    "economic simulation assumes execution access and fixed external market history",
+    "explicit bounded samples and source age; no missing-input substitution"
+   ],
+   "historical": [
+    {
+     "model": "curve-stableswap-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-08T05:28:00Z",
+     "variants": [
+      "stableswap_ng"
+     ]
+    },
+    {
+     "model": "curve-ng-fixed-external-unit-balances-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "exit_exchange",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-08T05:28:00Z",
+     "variants": [
+      "twocrypto_ng",
+      "tricrypto_ng_2024"
+     ]
+    }
+   ],
+   "variants": [
+    "stableswap_ng",
+    "twocrypto_ng",
+    "tricrypto_ng_2024"
+   ],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 3,
+     "exit": 3,
+     "per_entry_slice": 2,
+     "per_item": {
+      "coins": 1
+     },
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "gmx_v2",
+   "chain": "eip155:42161",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "increase_position",
+    "decrease_position",
+    "close_position",
+    "revoke_position",
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "close_liquidity",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "Verified market and compiled deployment closure; wrapped-native collateral.",
+    "Solvent liquidation reconciles as an external effect; native insolvency is not advertised (16 September 2026 disposition).",
+    "Dedicated Safe with accepted broad cancellation grants and retained-key checks.",
+    "one allocation per fund"
+   ],
+   "historical": [
+    {
+     "model": "gmx-v2-published-opportunity-integer-gm-v1",
+     "mode": "economic",
+     "actions": [
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "close_liquidity",
+      "revoke_exchange"
+     ],
+     "backtest_start_at": "2026-09-08T00:36:52Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "position": {
+     "entry": 2,
+     "exit": 3,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "swap": {
+     "entry": 3,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 1,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {
+      "input_assets": 1
+     },
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "gmx_v2",
+   "chain": "eip155:43114",
+   "modes": [
+    "fork"
+   ],
+   "actions": [
+    "increase_position",
+    "decrease_position",
+    "close_position",
+    "revoke_position",
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "close_liquidity",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "Candidate identified-fork request lifecycle; not promoted SDK support.",
+    "Verified market and compiled deployment closure; wrapped-native collateral.",
+    "Position and swap candidate implementation; GM liquidity candidate implementation; offline models unproven.",
+    "Dedicated Safe with accepted broad cancellation grants and retained-key checks.",
+    "one allocation per fund"
+   ],
+   "historical": [],
+   "variants": [],
+   "gas_lifecycle": {
+    "position": {
+     "entry": 2,
+     "exit": 3,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "swap": {
+     "entry": 3,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 1,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {
+      "input_assets": 1
+     },
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "hyperliquid",
+   "chain": "eip155:999",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "deposit",
+    "set_leverage",
+    "increase_position",
+    "close_position",
+    "withdraw"
+   ],
+   "account_profiles": [
+    "safe_roles"
+   ],
+   "restrictions": [
+    "Production (D7): T1 (an agent cannot move value out of the account) and the open half of T4 (an unknownOid after expiry is final) are production assumptions; an Ioc order whose answer is lost and which shows nothing past its expiry halts with its evidence.",
+    "Production: the provider must serve HyperEVM's head exactly; Alchemy runs reads pinned near its head at head + 1, which the gateway refuses (blueprint 29).",
+    "Backtests: HyperCore /info trade candles and hourly funding (D4); the venue serves only its latest 5000 candles of an interval.",
+    "Cross margin on first-dex perps at the configured leverage; Ioc entries and reduce-only Ioc exits. Backtests refuse positions above the first margin tier or 100,000 USDC of notional.",
+    "Backtests model book, mark and oracle prices from trade candles.",
+    "A dedicated Safe whose HyperCore account the strategy owns; the agent can trade every market of it (D2), and the gateway alone enforces the configured market and sizes.",
+    "The Safe owners fund the HyperCore HYPE that pays each withdrawal's system transaction; a withdrawal it cannot pay for stops before anything is sent.",
+    "one allocation per fund"
+   ],
+   "historical": [
+    {
+     "model": "hypercore-trade-candle-perpetual-v1",
+     "mode": "economic",
+     "actions": [
+      "deposit",
+      "set_leverage",
+      "increase_position",
+      "close_position",
+      "withdraw"
+     ],
+     "backtest_start_at": "2023-06-08T01:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "perp": {
+     "entry": 5,
+     "exit": 2,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "morpho_blue",
+   "chain": "eip155:1",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Morpho Blue core, adaptive IRM and explicit non-vault oracle revision",
+    "separate supply shares, borrow shares and non-interest-bearing collateral",
+    "no rewards, callbacks, bundlers or delegated managers",
+    "scope-only supply and borrow grants with no amount bound; health and ownership remain gateway checks"
+   ],
+   "historical": [
+    {
+     "model": "morpho-blue-archive-anchored-market-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount"
+     ],
+     "backtest_start_at": "2026-09-07T15:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "morpho_blue",
+   "chain": "eip155:8453",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Morpho Blue core, adaptive IRM and explicit non-vault oracle revision",
+    "separate supply shares, borrow shares and non-interest-bearing collateral",
+    "no rewards, callbacks, bundlers or delegated managers",
+    "scope-only supply and borrow grants with no amount bound; health and ownership remain gateway checks",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "morpho-blue-archive-anchored-market-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount"
+     ],
+     "backtest_start_at": "2026-09-07T15:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "morpho_blue",
+   "chain": "eip155:42161",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Morpho Blue core, adaptive IRM and explicit non-vault oracle revision",
+    "separate supply shares, borrow shares and non-interest-bearing collateral",
+    "no rewards, callbacks, bundlers or delegated managers",
+    "scope-only supply and borrow grants with no amount bound; health and ownership remain gateway checks"
+   ],
+   "historical": [
+    {
+     "model": "morpho-blue-archive-anchored-market-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount"
+     ],
+     "backtest_start_at": "2026-09-07T15:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "morpho_blue",
+   "chain": "eip155:10",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Morpho Blue core, adaptive IRM and explicit non-vault oracle revision",
+    "separate supply shares, borrow shares and non-interest-bearing collateral",
+    "no rewards, callbacks, bundlers or delegated managers",
+    "scope-only supply and borrow grants with no amount bound; health and ownership remain gateway checks",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "morpho-blue-archive-anchored-market-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount"
+     ],
+     "backtest_start_at": "2026-09-07T15:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "morpho_blue",
+   "chain": "eip155:137",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Morpho Blue core, adaptive IRM and explicit non-vault oracle revision",
+    "separate supply shares, borrow shares and non-interest-bearing collateral",
+    "no rewards, callbacks, bundlers or delegated managers",
+    "scope-only supply and borrow grants with no amount bound; health and ownership remain gateway checks"
+   ],
+   "historical": [
+    {
+     "model": "morpho-blue-archive-anchored-market-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount"
+     ],
+     "backtest_start_at": "2026-09-07T15:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "morpho_blue",
+   "chain": "eip155:4663",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Morpho Blue core, adaptive IRM and explicit non-vault oracle revision",
+    "separate supply shares, borrow shares and non-interest-bearing collateral",
+    "no rewards, callbacks, bundlers or delegated managers",
+    "scope-only supply and borrow grants with no amount bound; health and ownership remain gateway checks"
+   ],
+   "historical": [
+    {
+     "model": "morpho-blue-archive-anchored-market-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount"
+     ],
+     "backtest_start_at": "2026-09-07T15:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "morpho_blue",
+   "chain": "eip155:56",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Morpho Blue core, adaptive IRM and explicit non-vault oracle revision",
+    "separate supply shares, borrow shares and non-interest-bearing collateral",
+    "no rewards, callbacks, bundlers or delegated managers",
+    "scope-only supply and borrow grants with no amount bound; health and ownership remain gateway checks"
+   ],
+   "historical": [
+    {
+     "model": "morpho-blue-archive-anchored-market-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount"
+     ],
+     "backtest_start_at": "2026-09-07T15:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "morpho_blue",
+   "chain": "eip155:43114",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Morpho Blue core, adaptive IRM and explicit ERC-4626 conversion oracle revision",
+    "separate supply shares, borrow shares and non-interest-bearing collateral",
+    "no rewards, callbacks, bundlers or delegated managers",
+    "scope-only supply and borrow grants with no amount bound; health and ownership remain gateway checks"
+   ],
+   "historical": [
+    {
+     "model": "morpho-blue-archive-anchored-market-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount"
+     ],
+     "backtest_start_at": "2026-09-07T15:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "morpho_blue",
+   "chain": "eip155:999",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "verified Morpho Blue core, adaptive IRM and explicit non-vault oracle revision",
+    "separate supply shares, borrow shares and non-interest-bearing collateral",
+    "no rewards, callbacks, bundlers or delegated managers",
+    "scope-only supply and borrow grants with no amount bound; health and ownership remain gateway checks"
+   ],
+   "historical": [
+    {
+     "model": "morpho-blue-archive-anchored-market-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount"
+     ],
+     "backtest_start_at": "2026-10-20T04:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "pancakeswap_v3",
+   "chain": "eip155:56",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured verified Pancake original router, factory, deployer and pool",
+    "one allocation per fund",
+    "absent or compiled verified liquidity-mining callback; unstaked NFTs",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "broader NFT manager grants can affect compatible owned or approved NFTs; gateway operations require the retained strategy-owned NFT"
+   ],
+   "historical": [
+    {
+     "model": "pancakeswap-v3-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T07:30:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "pancakeswap_v3",
+   "chain": "eip155:1",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured verified Pancake original router, factory, deployer and pool",
+    "one allocation per fund",
+    "absent or compiled verified liquidity-mining callback; unstaked NFTs",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "broader NFT manager grants can affect compatible owned or approved NFTs; gateway operations require the retained strategy-owned NFT"
+   ],
+   "historical": [
+    {
+     "model": "pancakeswap-v3-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T09:40:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "pancakeswap_v3",
+   "chain": "eip155:8453",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured verified Pancake original router, factory, deployer and pool",
+    "one allocation per fund",
+    "absent or compiled verified liquidity-mining callback; unstaked NFTs",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "broader NFT manager grants can affect compatible owned or approved NFTs; gateway operations require the retained strategy-owned NFT",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "pancakeswap-v3-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T09:20:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "pancakeswap_v3",
+   "chain": "eip155:42161",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "exit_exchange",
+    "revoke_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured verified Pancake original router, factory, deployer and pool",
+    "one allocation per fund",
+    "absent or compiled verified liquidity-mining callback; unstaked NFTs",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "broader NFT manager grants can affect compatible owned or approved NFTs; gateway operations require the retained strategy-owned NFT"
+   ],
+   "historical": [
+    {
+     "model": "pancakeswap-v3-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-09-07T09:40:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "sparklend",
+   "chain": "eip155:1",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "supply",
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "Ethereum Pool revision 4 and token revision 1",
+    "ordinary collateral mode and variable-rate debt",
+    "isolated and siloed reserves remain unsupported",
+    "configured Pool, assets and oracle feeds; no default markets"
+   ],
+   "historical": [
+    {
+     "model": "sparklend-revision4-economic-indices-v1",
+     "mode": "economic",
+     "actions": [
+      "supply",
+      "withdraw",
+      "withdraw_amount",
+      "borrow",
+      "repay",
+      "repay_amount",
+      "collateral"
+     ],
+     "backtest_start_at": "2026-09-07T05:33:47Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "lending": {
+     "entry": 2,
+     "exit": 1,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {
+      "collateral": 1,
+      "borrow": 1
+     },
+     "exit_per_item": {},
+     "exit_when_granted": {
+      "borrow": 2
+     },
+     "exit_per_unwind_cycle": 3
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v3",
+   "chain": "eip155:1",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "exit_exchange",
+    "revoke_exchange",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured verified factory, pool and periphery revisions",
+    "explicit token pair and fee; exact-input swaps only",
+    "one allocation per fund",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "broader NFT manager grants can affect compatible owned or approved NFTs; gateway operations require the retained strategy-owned NFT"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v3-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "exit_exchange",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity"
+     ],
+     "backtest_start_at": "2026-09-06T23:57:23Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v3",
+   "chain": "eip155:8453",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "exit_exchange",
+    "revoke_exchange",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured verified factory, pool and periphery revisions",
+    "explicit token pair and fee; exact-input swaps only",
+    "one allocation per fund",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "broader NFT manager grants can affect compatible owned or approved NFTs; gateway operations require the retained strategy-owned NFT",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v3-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "exit_exchange",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity"
+     ],
+     "backtest_start_at": "2026-09-06T23:57:29Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v3",
+   "chain": "eip155:42161",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "exit_exchange",
+    "revoke_exchange",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured verified factory, pool and periphery revisions",
+    "explicit token pair and fee; exact-input swaps only",
+    "one allocation per fund",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "broader NFT manager grants can affect compatible owned or approved NFTs; gateway operations require the retained strategy-owned NFT"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v3-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "exit_exchange",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity"
+     ],
+     "backtest_start_at": "2026-09-08T08:17:07Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v3",
+   "chain": "eip155:10",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "exit_exchange",
+    "revoke_exchange",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured verified factory, pool and periphery revisions",
+    "explicit token pair and fee; exact-input swaps only",
+    "one allocation per fund",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "broader NFT manager grants can affect compatible owned or approved NFTs; gateway operations require the retained strategy-owned NFT",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v3-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "exit_exchange",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity"
+     ],
+     "backtest_start_at": "2026-09-08T04:34:47Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v3",
+   "chain": "eip155:137",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "exit_exchange",
+    "revoke_exchange",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured verified factory, pool and periphery revisions",
+    "explicit token pair and fee; exact-input swaps only",
+    "one allocation per fund",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "broader NFT manager grants can affect compatible owned or approved NFTs; gateway operations require the retained strategy-owned NFT"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v3-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "exit_exchange",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity"
+     ],
+     "backtest_start_at": "2026-09-13T17:51:22Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v3",
+   "chain": "eip155:43114",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "exit_exchange",
+    "revoke_exchange",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured verified factory, pool and periphery revisions",
+    "explicit token pair and fee; exact-input swaps only",
+    "one allocation per fund",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "broader NFT manager grants can affect compatible owned or approved NFTs; gateway operations require the retained strategy-owned NFT"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v3-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "exit_exchange",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity"
+     ],
+     "backtest_start_at": "2026-09-09T03:42:27Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v3",
+   "chain": "eip155:56",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "exit_exchange",
+    "revoke_exchange",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured verified factory, pool and periphery revisions",
+    "explicit token pair and fee; exact-input swaps only",
+    "one allocation per fund",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "broader NFT manager grants can affect compatible owned or approved NFTs; gateway operations require the retained strategy-owned NFT"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v3-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "exit_exchange",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity"
+     ],
+     "backtest_start_at": "2026-09-08T18:10:37Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v3",
+   "chain": "eip155:4663",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "exit_exchange",
+    "revoke_exchange",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "configured verified factory, pool and periphery revisions",
+    "explicit token pair and fee; exact-input swaps only",
+    "one allocation per fund",
+    "economic execution assumes access; approval and revocation mechanics excluded",
+    "broader NFT manager grants can affect compatible owned or approved NFTs; gateway operations require the retained strategy-owned NFT"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v3-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "exit_exchange",
+      "open_liquidity",
+      "increase_liquidity",
+      "decrease_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity"
+     ],
+     "backtest_start_at": "2026-09-08T05:28:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 2,
+     "exit": 2,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 5,
+     "exit": 5,
+     "per_entry_slice": 2,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v4",
+   "chain": "eip155:1",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange",
+    "exit_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "hookless pools, or reviewed hook profiles (Pons hooks for trading only)",
+    "two standard ERC-20 currencies, or the native coin held as its wrapped token for trading and liquidity",
+    "native-coin liquidity in one token pair per chain, never beside ERC-20 liquidity on that chain; a native mint measures more gas than an ERC-20 mint, and check warns when max_gas_limit is below the measured native mint, measured on another chain where this one has no measurement",
+    "single pool",
+    "one allocation per fund",
+    "fixed LP range or recentring band (bands backtest in economic mode only)"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v4-exact-quoter-fixed-path-lp-v1",
+     "mode": "historical_path",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "revoke_exchange",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-08-20T00:00:00Z",
+     "variants": []
+    },
+    {
+     "model": "uniswap-v4-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "revoke_exchange",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-08-20T00:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 3,
+     "exit": 4,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 8,
+     "exit": 5,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v4",
+   "chain": "eip155:43114",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange",
+    "exit_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "hookless pools, or reviewed hook profiles (Pons hooks for trading only)",
+    "two standard ERC-20 currencies, or the native coin held as its wrapped token for trading and liquidity",
+    "native-coin liquidity in one token pair per chain, never beside ERC-20 liquidity on that chain; a native mint measures more gas than an ERC-20 mint, and check warns when max_gas_limit is below the measured native mint, measured on another chain where this one has no measurement",
+    "single pool",
+    "one allocation per fund",
+    "fixed LP range or recentring band (bands backtest in economic mode only)"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v4-exact-quoter-fixed-path-lp-v1",
+     "mode": "historical_path",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "revoke_exchange",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-09-05T00:00:00Z",
+     "variants": []
+    },
+    {
+     "model": "uniswap-v4-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "revoke_exchange",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-09-05T00:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 3,
+     "exit": 4,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 8,
+     "exit": 5,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v4",
+   "chain": "eip155:8453",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange",
+    "exit_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "hookless pools, or reviewed hook profiles (Pons hooks for trading only)",
+    "two standard ERC-20 currencies, or the native coin held as its wrapped token for trading and liquidity",
+    "native-coin liquidity in one token pair per chain, never beside ERC-20 liquidity on that chain; a native mint measures more gas than an ERC-20 mint, and check warns when max_gas_limit is below the measured native mint, measured on another chain where this one has no measurement",
+    "single pool",
+    "one allocation per fund",
+    "fixed LP range or recentring band (bands backtest in economic mode only)",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v4-exact-quoter-fixed-path-lp-v1",
+     "mode": "historical_path",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "revoke_exchange",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-08-20T00:00:00Z",
+     "variants": []
+    },
+    {
+     "model": "uniswap-v4-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "revoke_exchange",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-08-20T00:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 3,
+     "exit": 4,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 8,
+     "exit": 5,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v4",
+   "chain": "eip155:42161",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange",
+    "exit_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "hookless pools, or reviewed hook profiles (Pons hooks for trading only)",
+    "two standard ERC-20 currencies, or the native coin held as its wrapped token for trading and liquidity",
+    "native-coin liquidity in one token pair per chain, never beside ERC-20 liquidity on that chain; a native mint measures more gas than an ERC-20 mint, and check warns when max_gas_limit is below the measured native mint, measured on another chain where this one has no measurement",
+    "single pool",
+    "one allocation per fund",
+    "fixed LP range or recentring band (bands backtest in economic mode only)"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v4-exact-quoter-fixed-path-lp-v1",
+     "mode": "historical_path",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "revoke_exchange",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-08-20T00:00:00Z",
+     "variants": []
+    },
+    {
+     "model": "uniswap-v4-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "revoke_exchange",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-08-20T00:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 3,
+     "exit": 4,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 8,
+     "exit": 5,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v4",
+   "chain": "eip155:10",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange",
+    "exit_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "hookless pools, or reviewed hook profiles (Pons hooks for trading only)",
+    "two standard ERC-20 currencies, or the native coin held as its wrapped token for trading and liquidity",
+    "native-coin liquidity in one token pair per chain, never beside ERC-20 liquidity on that chain; a native mint measures more gas than an ERC-20 mint, and check warns when max_gas_limit is below the measured native mint, measured on another chain where this one has no measurement",
+    "single pool",
+    "one allocation per fund",
+    "fixed LP range or recentring band (bands backtest in economic mode only)",
+    "pinned Jovian L1 and operator fee accounting"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v4-exact-quoter-fixed-path-lp-v1",
+     "mode": "historical_path",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "revoke_exchange",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-08-20T00:00:00Z",
+     "variants": []
+    },
+    {
+     "model": "uniswap-v4-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "revoke_exchange",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-08-20T00:00:00Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 3,
+     "exit": 4,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 8,
+     "exit": 5,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v4",
+   "chain": "eip155:56",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange",
+    "exit_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "hookless pools, or reviewed hook profiles (Pons hooks for trading only)",
+    "two standard ERC-20 currencies, or the native coin held as its wrapped token for trading and liquidity",
+    "native-coin liquidity in one token pair per chain, never beside ERC-20 liquidity on that chain; a native mint measures more gas than an ERC-20 mint, and check warns when max_gas_limit is below the measured native mint, measured on another chain where this one has no measurement",
+    "single pool",
+    "one allocation per fund",
+    "fixed LP range or recentring band (bands backtest in economic mode only)"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v4-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "revoke_exchange",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-09-09T09:38:46Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 3,
+     "exit": 4,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 8,
+     "exit": 5,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v4",
+   "chain": "eip155:137",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange",
+    "exit_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "hookless pools, or reviewed hook profiles (Pons hooks for trading only)",
+    "two standard ERC-20 currencies, or the native coin held as its wrapped token for trading and liquidity",
+    "native-coin liquidity in one token pair per chain, never beside ERC-20 liquidity on that chain; a native mint measures more gas than an ERC-20 mint, and check warns when max_gas_limit is below the measured native mint, measured on another chain where this one has no measurement",
+    "single pool",
+    "one allocation per fund",
+    "fixed LP range or recentring band (bands backtest in economic mode only)"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v4-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-09-08T19:29:13Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 3,
+     "exit": 4,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 8,
+     "exit": 5,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "uniswap_v4",
+   "chain": "eip155:4663",
+   "modes": [
+    "fork",
+    "production",
+    "backtest"
+   ],
+   "actions": [
+    "swap_exact_input",
+    "open_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange",
+    "exit_exchange"
+   ],
+   "account_profiles": [
+    "eoa",
+    "safe_roles"
+   ],
+   "restrictions": [
+    "hookless pools, or reviewed hook profiles (Pons hooks for trading only)",
+    "two standard ERC-20 currencies, or the native coin held as its wrapped token for trading and liquidity",
+    "native-coin liquidity in one token pair per chain, never beside ERC-20 liquidity on that chain; a native mint measures more gas than an ERC-20 mint, and check warns when max_gas_limit is below the measured native mint, measured on another chain where this one has no measurement",
+    "single pool",
+    "one allocation per fund",
+    "fixed LP range or recentring band (bands backtest in economic mode only)"
+   ],
+   "historical": [
+    {
+     "model": "uniswap-v4-economic-integer-fixed-growth-v1",
+     "mode": "economic",
+     "actions": [
+      "swap_exact_input",
+      "open_liquidity",
+      "collect_liquidity_fees",
+      "close_liquidity",
+      "exit_exchange"
+     ],
+     "backtest_start_at": "2026-09-18T04:28:08Z",
+     "variants": []
+    }
+   ],
+   "variants": [],
+   "gas_lifecycle": {
+    "trade": {
+     "entry": 3,
+     "exit": 4,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    },
+    "liquidity": {
+     "entry": 8,
+     "exit": 5,
+     "per_entry_slice": 3,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  }
+ ]
+}

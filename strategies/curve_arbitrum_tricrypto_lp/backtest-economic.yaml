@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+mode: economic
+window:
+  start: '2026-09-07T20:00:00+00:00'
+  end: '2026-09-07T20:08:00+00:00'
+  end_policy: teardown
+  cleanup: 60s
+execution:
+  latency: 1s
+  models:
+    swap_model: prepared_integer_pool
+    liquidity_model: fixed_external_unit_balances
+inventory:
+  funds:
+    proportional:
+      balances:
+      - asset: eip155:42161/erc20:0x498bf2b1e120fed3ad3d42ea2165e9b73f99c1e5
+        quantity: '0'
+      - asset: eip155:42161/erc20:0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f
+        quantity: '0'
+      - asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+        quantity: '0.01'
+      - asset: eip155:42161/slip44:60
+        quantity: '0'
+    single_coin:
+      balances:
+      - asset: eip155:42161/erc20:0x498bf2b1e120fed3ad3d42ea2165e9b73f99c1e5
+        quantity: '0'
+      - asset: eip155:42161/erc20:0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f
+        quantity: '0'
+      - asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+        quantity: '0.01'
+      - asset: eip155:42161/slip44:60
+        quantity: '0'
+costs:
+  kind: excluded
+data:
+  source: curve_archive
+  sample_seconds: 60s
+  max_age_seconds: 120s
+  max_samples: 100
+  max_parameter_events: 100
+  max_parameter_log_requests: 10

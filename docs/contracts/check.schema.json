@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "almanak-check",
+  "title": "Almanak check result",
+  "description": "What `almanak check --json` prints: the check document on stdout, or a refusal on stderr. The `funding` and `permissions` blocks are referenced by `$id` (almanak-funding-v1, almanak-permissions-v1), so a validator needs those schemas registered.",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/CheckDocument"
+    },
+    {
+      "$ref": "#/$defs/Refusal"
+    }
+  ],
+  "$defs": {
+    "Digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "Stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "status",
+        "message"
+      ],
+      "properties": {
+        "stage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "not_checked"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "CheckDocument": {
+      "description": "The `almanak check --json` stdout document, printed with exit status 0. Members not named here are SDK diagnostics outside this contract.",
+      "type": "object",
+      "required": [
+        "valid",
+        "ready"
+      ],
+      "properties": {
+        "valid": {
+          "type": "boolean"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Stage"
+          }
+        },
+        "parameters_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "funding": {
+          "$ref": "almanak-funding-v1"
+        },
+        "permissions": {
+          "$ref": "almanak-permissions-v1"
+        }
+      }
+    },
+    "Refusal": {
+      "description": "A refused `almanak check --json`: the one-line JSON error the SDK prints on stderr with exit status 1. `error` names the kind; a refused stage keeps the stages and the funding block resolved before it.",
+      "type": "object",
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string"
+        },
+        "valid": {
+          "const": false
+        },
+        "ready": {
+          "const": false
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Stage"
+          }
+        },
+        "funding": {
+          "$ref": "almanak-funding-v1"
+        }
+      }
+    }
+  }
+}

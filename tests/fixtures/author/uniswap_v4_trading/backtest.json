@@ -1,0 +1,95 @@
+{
+  "schedule": {
+    "start": 1787184000,
+    "end": 1787270400,
+    "latency_seconds": 30,
+    "end_policy": "teardown",
+    "cleanup_seconds": 3600,
+    "decision_interval_override_seconds": 3600
+  },
+  "history": [
+    {
+      "chain": {
+        "chain_id": "eip155:1",
+        "environment": "mainnet"
+      },
+      "provider": {
+        "kind": "alchemy",
+        "network": "eth-mainnet",
+        "api_key_env": "ALCHEMY_API_KEY"
+      }
+    }
+  ],
+  "funds": [
+    {
+      "name": "trading",
+      "profile": {
+        "kind": "safe_roles",
+        "fund": {
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "mainnet"
+          },
+          "address": "0x08032f31fae642c40be5f73d93c51cefd1c7e4aa"
+        },
+        "operator": {
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "mainnet"
+          },
+          "address": "0x586ba39027a74e8d40e6626f89ae97ba7f616644"
+        },
+        "roles_module": "0x1bba23137abe534e04f451d1e67c25ead1a93135",
+        "role_key": "0x2057c1d9296b8c3d5a7080d9da22deffd6e2fbbac7e7fbf937c404f9f3518006",
+        "safe_deployment_block": 25908473,
+        "roles_deployment_block": 25908474
+      },
+      "balances": [
+        {
+          "asset": "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "amount": 100000000
+        },
+        {
+          "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "amount": 0
+        }
+      ]
+    }
+  ],
+  "payers": [
+    {
+      "name": "operator",
+      "fund": {
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        },
+        "address": "0x586ba39027a74e8d40e6626f89ae97ba7f616644"
+      },
+      "balances": [
+        {
+          "asset": "eip155:1/slip44:60",
+          "amount": 1000000000000000000
+        }
+      ]
+    }
+  ],
+  "market_model": "historical_path",
+  "swap_model": "historical_quoter",
+  "liquidity_model": "fixed_historical_fee_growth",
+  "approval_model": "at_intent_eligibility",
+  "costs": {
+    "kind": "fixed_native",
+    "calibration_sha256": "0xdd5a34a46ce80d0ef9d95dd0ad9c95abb227a5d83d36adc5e288d95d9266250f",
+    "per_operation": {
+      "approve_erc20": 127545260270833,
+      "approve_permit2": 261559788138528,
+      "swap": 609948849196177,
+      "revoke_permit2": 237052843856514,
+      "mint": 801259274432246,
+      "collect": 602473152410710,
+      "burn": 638889762417440,
+      "revoke_erc20": 101466003861718
+    }
+  }
+}

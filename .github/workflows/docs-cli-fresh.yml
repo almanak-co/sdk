@@ -1,0 +1,41 @@
+name: CLI docs freshness
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/almanak/cli.py'
+      - 'src/almanak/cli_arguments.py'
+      - 'src/almanak/backtest/progress_cli.py'
+      - 'scripts/docs/generate_cli_reference.py'
+      - 'Makefile'
+      - '.github/workflows/docs-cli-fresh.yml'
+  pull_request:
+    paths:
+      - 'src/almanak/cli.py'
+      - 'src/almanak/cli_arguments.py'
+      - 'src/almanak/backtest/progress_cli.py'
+      - 'scripts/docs/generate_cli_reference.py'
+      - 'Makefile'
+      - '.github/workflows/docs-cli-fresh.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  cli-docs-fresh:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-repo
+      - name: Generate CLI reference
+        run: make docs-cli
+      - name: Verify generated pages
+        run: |
+          test -d docs/cli
+          test -f docs/cli/almanak.md
+          COUNT=$(find docs/cli -maxdepth 1 -name '*.md' | wc -l)
+          echo "Generated $COUNT CLI pages"
+          [ "$COUNT" -ge 8 ] || { echo "::error::expected at least 8 CLI pages, found $COUNT"; exit 1; }

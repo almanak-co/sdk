@@ -1,0 +1,749 @@
+{
+  "status": "initial_native_proofs_with_retained_timeout_attempt",
+  "authority": "identified Anvil fixtures only; no production authorization",
+  "scope": "StableSwap NG standard two-coin Ethereum anchor; EOA and generated Safe/Roles",
+  "cases": [
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5",
+      "status": "passed",
+      "phases": [
+        "generated_permissions_installed_and_verified",
+        "generated_permissions_rejected_forbidden_calls",
+        "submitted_pending_identity_survived_runtime_and_gateway_replacement",
+        "entered_and_held",
+        "runtime_resumed",
+        "gateway_replaced_and_resumed",
+        "closed"
+      ]
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58",
+      "status": "passed",
+      "phases": [
+        "submitted_pending_identity_survived_runtime_and_gateway_replacement",
+        "entered_and_held",
+        "runtime_resumed",
+        "gateway_replaced_and_resumed",
+        "closed"
+      ]
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-bb6aacb7351044dab3e38470745942a4",
+      "status": "failed",
+      "phases": [
+        "submitted_pending_identity_survived_runtime_and_gateway_replacement"
+      ]
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6",
+      "status": "passed",
+      "phases": [
+        "generated_permissions_installed_and_verified",
+        "generated_permissions_rejected_forbidden_calls",
+        "submitted_pending_identity_survived_runtime_and_gateway_replacement",
+        "entered_and_held",
+        "runtime_resumed",
+        "gateway_replaced_and_resumed",
+        "closed"
+      ]
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98",
+      "status": "passed",
+      "phases": [
+        "submitted_pending_identity_survived_runtime_and_gateway_replacement",
+        "entered_and_held",
+        "runtime_resumed",
+        "gateway_replaced_and_resumed",
+        "closed"
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/checkpoint.json.gz",
+      "sha256": "88d39972e45085fc4c01a54a3373722bded9d7ed2192b3fd939a2dc999f6e41e",
+      "uncompressed_sha256": "9e8d4e4d1cbe4234f94b6f178efa55306ce47c6cf546b7dfd8931894236759f3",
+      "bytes": 1971253
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/deployment.json.gz",
+      "sha256": "e686632630e90f5eacd8f6862902593b2a66fc65d9afd6cf7969e61b2f51a9fe",
+      "uncompressed_sha256": "eaa06cfe6917ed78bdc7d32491ac888b53cc10f61dd61954d241794eaea20963",
+      "bytes": 6328
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/fixture-installation.json.gz",
+      "sha256": "1cff36c4070950f2ed6dcf66e5da6dba21015120e159271b15eed92bcdd7ab00",
+      "uncompressed_sha256": "6dd737c211e6c83b117ca7e911ca1a8a827230243c2ab0f2132b892ae4696b99",
+      "bytes": 19633
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/fork-routes.json.gz",
+      "sha256": "0d3a4ffe87494b440c4c607d578a52ab681d6ab86b15793ffa661fbfbf721ac3",
+      "uncompressed_sha256": "d6a9c6a846386beca70ddc64629a5caae59611888a13863e0cdbe74fca1c6f6c",
+      "bytes": 201
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/permission-budget-observations.json.gz",
+      "sha256": "ec65b9694ada867602b776c6b49f971d876a0326a85e92c5d8e84d3fae9d182a",
+      "uncompressed_sha256": "6210b89111fc27b804a3cec24d389355a4b726a17dd700f1e177c54e68c51c3c",
+      "bytes": 7551
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/permission-generation.json.gz",
+      "sha256": "bc7f1e0791ebd561fd3f354d17ecbdc3cac0df1f7a59ee1860402dd910b7b202",
+      "uncompressed_sha256": "13a202eab845ea02d20981ed7f57293db14671a1f81f1fa65b830b54d65eb24f",
+      "bytes": 309
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/permission-installation.json.gz",
+      "sha256": "940426b7987aa74cf0b41685458124b15360b8d127aeb9504d76016dcb3c7294",
+      "uncompressed_sha256": "a222b70265ef44b76f416ab67cf355c321e11a58b5d0f6e900a00904fba65091",
+      "bytes": 130565
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/permission-verification.json.gz",
+      "sha256": "f1068d6cbf9232ff8e4b0f4607b58d13e191c0a5e821c18741a3e59705a7302d",
+      "uncompressed_sha256": "75a3db6d0869046f2cf3ab0d7c334469d8c98dfade408d34a9417ca71fa8d24e",
+      "bytes": 1667
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/permissions/manifest.json.gz",
+      "sha256": "9f2dcc45ec8fc9b0d3690b14b61e36c3b1aa89340164836d1df2ab37f323d57e",
+      "uncompressed_sha256": "88d9c6ca89972bd7b38e78a47c3ae1dddea16d7797ee6d447477194a9b3958ce",
+      "bytes": 127761
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/permissions/permissions.txt.gz",
+      "sha256": "8add2e9a99a917cbcb916bec2161dee40412d43d73a19722c6de1a32d468b2f0",
+      "uncompressed_sha256": "aed2c62a642bd237f303dc2d292eb0714709f3ba68d2b534af4fa861baeae1c9",
+      "bytes": 1771
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/permissions/safe-0.json.gz",
+      "sha256": "3dbfe567ddfe2704620cb34b6ad46c4b29d8c53e5eb6bb51e48767db11622cbb",
+      "uncompressed_sha256": "4bd6bf156dd792d5514b11df460fa1837f4bb8b8fc0631143ec36a2989010383",
+      "bytes": 35625
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/permissions/safe-1.json.gz",
+      "sha256": "73d40f08bde4c04fb1da6c7763b5ebbfb4e3efe760a9cfeedde8f4bcf38bab54",
+      "uncompressed_sha256": "07987e5c7fc38702f29338d86d74ac520e90d1d0c74b8c151dbdad593633f366",
+      "bytes": 40798
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/process-0.log.gz",
+      "sha256": "6ee5f5b341660601726211b25b24b79ec4eba22c1e81be47649e77f5a2e8f47e",
+      "uncompressed_sha256": "3aff7569a19bff4d22cfa98f8d309599f4fc603b7bdc90e5c2fb10ef9bfd9632",
+      "bytes": 3951
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "uncompressed_sha256": "52c12385532743af0abdf21fdd62129daa8a76866b861d2595a1274a83043fdd",
+      "bytes": 19
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/process-2.log.gz",
+      "sha256": "72d1ccfadd82c24159146708594f2a7d0491888a430b3dc9f7506ead0dc38cab",
+      "uncompressed_sha256": "1e55dbdea1121c31728f2654bf534368bf5f1bf3dc460a5108c55c191ed758e9",
+      "bytes": 26985
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/process-3.log.gz",
+      "sha256": "e092a9523b6a6248d6a8708f9d9395f916637c99671724d039afda42a3caffcd",
+      "uncompressed_sha256": "be51d13ae01e37b04e7a3f26ebc25465e2a9d1d8fb516e8ed7ec56c2a76e82f9",
+      "bytes": 137
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/process-4.log.gz",
+      "sha256": "e092a9523b6a6248d6a8708f9d9395f916637c99671724d039afda42a3caffcd",
+      "uncompressed_sha256": "be51d13ae01e37b04e7a3f26ebc25465e2a9d1d8fb516e8ed7ec56c2a76e82f9",
+      "bytes": 137
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/process-5.log.gz",
+      "sha256": "8e4d728e4d0ad7038a55d0c3ede6af6f192e5595a4802782417bac01ecee7ac4",
+      "uncompressed_sha256": "888d4649466132b0a8115a3f1810de26bae6a02c8bd2acefb5dea65e6764f2aa",
+      "bytes": 8376
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/process-6.log.gz",
+      "sha256": "912eb6db249db8f2e4f5bddfc636312fab12312ecf52c3fb5e7e1ec9d53792e2",
+      "uncompressed_sha256": "2b3c5eb7c2817cc404476d8dfba5bff19d3aba69c018551342926415773c5070",
+      "bytes": 70489
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/report.json.gz",
+      "sha256": "40b984ca8709619bc38ffa7999af695e0bd524163a576f3a676dddb5b22502da",
+      "uncompressed_sha256": "208bc67ea535c623f1cf180e3dd0ff13fb7b98b699af985357153e0a6afbe210",
+      "bytes": 70417
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eb8f261caa464d7d890dd3c147cdb6a5/result.json.gz",
+      "sha256": "1e7487969d826fe0121b04dd703dfc8cecac3b2c27816ce81654e006f4a65c3e",
+      "uncompressed_sha256": "250e94c236085ee094847c5eebef95c28d9228bbaa3fa3a37ca5c6d041fbb0f4",
+      "bytes": 49738
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/checkpoint.json.gz",
+      "sha256": "789420941919e0e4069e345568e306f1fe0f3d96689b4f742f5bc88951e930f1",
+      "uncompressed_sha256": "c5fb1e2d866179627601c42d1e03e45f40254603317ab5f5cbb816763b66e92c",
+      "bytes": 1841083
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/deployment.json.gz",
+      "sha256": "43a8cb57ca3410be3f24187c124e50a298b0d75460500ca87207c89eb4ef2f8d",
+      "uncompressed_sha256": "116ddb2e135bbaca6b7e51c2d71ff0570545244a06dd89d33446b3959ac47eac",
+      "bytes": 5234
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/fixture-installation.json.gz",
+      "sha256": "38669cb65aae3753a34c1e114b99f70cf8ffe93c7106e3874e085cb353fb6c6b",
+      "uncompressed_sha256": "d830b8d3441ee640a16a3904a7ad2dda215cb489aa593b6a49ad70209b7ab094",
+      "bytes": 537
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/fork-routes.json.gz",
+      "sha256": "bdc01ed8a16ed9ef9499dbbe0ef51c78c18c1c75d0f9b8cd340a1e1b839328d8",
+      "uncompressed_sha256": "028f56374cb745528b6fd2c24b9e2f7339a99bae422e87c8b83ceca14d280f9d",
+      "bytes": 201
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/process-0.log.gz",
+      "sha256": "bc89887f6d0066a9c369b892db7e40bebb7b2736f98df9febb834fbcab739095",
+      "uncompressed_sha256": "c89cbc02df901e1b17c689a1d8bd86d34a197319bcc39965bacc88663e3b3d14",
+      "bytes": 3643
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "uncompressed_sha256": "52c12385532743af0abdf21fdd62129daa8a76866b861d2595a1274a83043fdd",
+      "bytes": 19
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/process-2.log.gz",
+      "sha256": "45ed306ddb76bfdef590b13f06f30e9b23cb58f6b19e9ab55f39aa7cde6d8a72",
+      "uncompressed_sha256": "4c55f311dc92084c42154deae1ac967a760ecde2a129ef3f67de07d43e544b55",
+      "bytes": 26517
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/process-3.log.gz",
+      "sha256": "cc8ff3d5706748c29b9ca6e16a98021482ccf8d88dda0457fabb4b0c5bf0c6f3",
+      "uncompressed_sha256": "4a12ea9528170c724cfc00f46a45eed83b2601744bef017f4cb96fcb451f2193",
+      "bytes": 137
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/process-4.log.gz",
+      "sha256": "cc8ff3d5706748c29b9ca6e16a98021482ccf8d88dda0457fabb4b0c5bf0c6f3",
+      "uncompressed_sha256": "4a12ea9528170c724cfc00f46a45eed83b2601744bef017f4cb96fcb451f2193",
+      "bytes": 137
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/process-5.log.gz",
+      "sha256": "c57a15691cb90ec4e1e647a2afa002a07809fbe958bd3c81a9628deeac3d0a7c",
+      "uncompressed_sha256": "0e6292b965d2e907b77597c136062233a57e8739d0d05d594ceac3e6389a0a82",
+      "bytes": 7908
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/process-6.log.gz",
+      "sha256": "d9f2e95743a324c4ba500aaf01c8beaa979ae01505441f4e5ce7dfdc14229493",
+      "uncompressed_sha256": "4aec33307d4d8e385861698bb0999b06fde11ccd5df70c637c479d4e3d00ba56",
+      "bytes": 70928
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/report.json.gz",
+      "sha256": "b41edc70187f3e631e95b3b85da55787a289d499fe9b8da8ebd553c6ae598f5b",
+      "uncompressed_sha256": "91de4a6868aaf37dd9206ee3146334566b461b0231881e613c21fa8b6bd13916",
+      "bytes": 70856
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/result.json.gz",
+      "sha256": "cb41d86d088639817d6b4d1f525397c9f4c7b0e6ee0100501c09a06e74f72557",
+      "uncompressed_sha256": "9d4bdb8973132f2229b7472c4281edbaed01c9277a1e163f5f68872d928554cb",
+      "bytes": 586
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-0a20470d1ecf49a58a74b2b37330fd58/transactions.json.gz",
+      "sha256": "71670506f00e5146f92f162f0d079690b9d4fb5fe003bd3ad59df4a33b683cb2",
+      "uncompressed_sha256": "40a289cc9d469777f93519fbfe5704b5db9fb592bbac586efe232fc17659fda3",
+      "bytes": 97749
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-bb6aacb7351044dab3e38470745942a4/checkpoint.json.gz",
+      "sha256": "7fef47064c2a0d5498616fd7323df09df6a99746bea752cdc2e4a8f7f8f4c3cb",
+      "uncompressed_sha256": "764c300b6d1a9fc27c268bed818cf0a2c61e9a1c838bc8657b8f17c269e4dcbc",
+      "bytes": 1515970
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-bb6aacb7351044dab3e38470745942a4/deployment.json.gz",
+      "sha256": "7a99957eab58f091e61dba08f6de2bf20c9c59413abfc55caf2f7fb37bba3f33",
+      "uncompressed_sha256": "86f894a5116c3bba893b1ed2359e34523324daa277115081c09892629a3fcf5e",
+      "bytes": 5234
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-bb6aacb7351044dab3e38470745942a4/fixture-installation.json.gz",
+      "sha256": "38669cb65aae3753a34c1e114b99f70cf8ffe93c7106e3874e085cb353fb6c6b",
+      "uncompressed_sha256": "d830b8d3441ee640a16a3904a7ad2dda215cb489aa593b6a49ad70209b7ab094",
+      "bytes": 537
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-bb6aacb7351044dab3e38470745942a4/fork-routes.json.gz",
+      "sha256": "83ff8f16ff0a347379d004e244ca76338ec2b07766a9f108dfcfeaf02a428be1",
+      "uncompressed_sha256": "3b28094be585773fe1d8e5fa12d2b8fd3388b50a2c5b0d9659cfb4f097562e81",
+      "bytes": 201
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-bb6aacb7351044dab3e38470745942a4/process-0.log.gz",
+      "sha256": "977c02a67e4c7bf4828b09b07de67269c81ff0e35dbaf75d335e9d60611e0f6a",
+      "uncompressed_sha256": "a30a35871b794764e8c21a8ccde3754dde712a1763450e18c2e51b8d16f44e97",
+      "bytes": 3643
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-bb6aacb7351044dab3e38470745942a4/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "uncompressed_sha256": "52c12385532743af0abdf21fdd62129daa8a76866b861d2595a1274a83043fdd",
+      "bytes": 19
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-bb6aacb7351044dab3e38470745942a4/process-2.log.gz",
+      "sha256": "04c03c69fd1cf8ed12850755c5c668284a35d9272d43261d50ce74450a80d1f4",
+      "uncompressed_sha256": "07014e7552936f0ba331a99d7a3196d427254cb3bf2329c953133fc71df22685",
+      "bytes": 24321
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-bb6aacb7351044dab3e38470745942a4/process-3.log.gz",
+      "sha256": "a19b3dc83ef1c4cff7b7f1369240980db420adbc453e052b5cc1a53e48211128",
+      "uncompressed_sha256": "5c0a259f4d1866cccc04b0e4bbf698ab70494f88a83e0a77e61c99267b02357b",
+      "bytes": 72
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-bb6aacb7351044dab3e38470745942a4/report.json.gz",
+      "sha256": "5bdd782793e616c33bbdadb38b888de59c6d28966f7cdcb8854c0325a8eac770",
+      "uncompressed_sha256": "3336ba12327af8d2ea48fb5972725c8db07c4733beaf4dc2bb51cd2a37e4aea2",
+      "bytes": 52262
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-bb6aacb7351044dab3e38470745942a4/result.json.gz",
+      "sha256": "aecf3e6d455075f9c704047c4418c91bb95e273ef98dceb59ea1f1bd290f176c",
+      "uncompressed_sha256": "6dec3a59f5b24aa8f876226b4c454db455ea0f1b7a0341b4e92239d447bbef86",
+      "bytes": 489
+    },
+    {
+      "path": "curve_ethereum_stable_lp-eoa-bb6aacb7351044dab3e38470745942a4/transactions.json.gz",
+      "sha256": "878c5921780fcdb5de57e6f7092e896e2b0bc63398a8db4a6ef2af8f25295bb1",
+      "uncompressed_sha256": "0690aac1f448ff3ff7ab800f86f6152c4dc86f3503baae4c0e8ff11ff92e3e27",
+      "bytes": 78198
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/checkpoint.json.gz",
+      "sha256": "8be1d0e4b5d44301d3ca3f2f2a52dbe4b7fd15391aae0e172b191a813503a18e",
+      "uncompressed_sha256": "b4cce4b517597f1802d7e99aae7181609e2778259fb4a116e388adebce18701b",
+      "bytes": 312481
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/deployment.json.gz",
+      "sha256": "cbb6f301da31d4096223f22deb62684b6bf94752c7642f29449ce480777b8763",
+      "uncompressed_sha256": "18c5e0cd01c8c1dc76062989df9bd64418c9c49b832b22569e6604151c6ba40f",
+      "bytes": 3690
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/fixture-installation.json.gz",
+      "sha256": "a9b4cb212dc349fc9ed25bf2acea2067a41cbeb9eefe4aa11c7ba627e03c7f92",
+      "uncompressed_sha256": "5c06ff69ddce4fbd1fd1c731d2eb8281bfcccde8860df3202c0ea861f3d77d18",
+      "bytes": 9819
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/fork-routes.json.gz",
+      "sha256": "4d8523c7d992e466f3556c18e8c8892281d4ab7a3cf425a358be7e3caea7c48d",
+      "uncompressed_sha256": "491c03a7ce20badf5cfae30a332e169e49cc2476d0b1b9498a2b8fc682142529",
+      "bytes": 201
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/permission-budget-observations.json.gz",
+      "sha256": "cddfdfd7d42e55a1c6016e8f28547ba21941c7337771b06085403403f63dfaa4",
+      "uncompressed_sha256": "c4f7487d8c9bbcb0d56084ca59403a6baf2e6e9b138f468390d5fe009b101965",
+      "bytes": 5562
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/permission-generation.json.gz",
+      "sha256": "2c1c34683330e44237da096f3f7d8dabd52b8c4033cb9e0d0b262f70aba0c983",
+      "uncompressed_sha256": "5cf15278ede49fb4febd76dc179ccab85645dd1eeffc68e148cf645b6a77d7cd",
+      "bytes": 312
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/permission-installation.json.gz",
+      "sha256": "c379c766b703a0e7122004485327a2a36d77451b347f2756d4b045539de8de38",
+      "uncompressed_sha256": "918c4cd48f6797ce660d6b7a69f6318967621f3d361983cbab562d6daf905174",
+      "bytes": 41112
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/permission-verification.json.gz",
+      "sha256": "9ccefa3acd4af7cd1417bfa9160a90fec9e42df23356a3b8da4c646c26f67de6",
+      "uncompressed_sha256": "f80ab7bee37743ec470d569ddb062e13a3de290fa9f0d48b3ac7622f728199b6",
+      "bytes": 1222
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/permissions/manifest.json.gz",
+      "sha256": "6006df9c38c86f9f053820e23e6f04a883f342d95f91e85a63b73faeaab511ae",
+      "uncompressed_sha256": "441ec659a55280b47253a707b539e419f9336c68edf8f2076530bf6d99282216",
+      "bytes": 35297
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/permissions/permissions.txt.gz",
+      "sha256": "8b4dcd82aed05648f201329ed455977de44f99bd0e77b8a68c4a34d25e40fc24",
+      "uncompressed_sha256": "7a8a0d99b6fbd79d1c85303112c47ac59aa8c67d0f549e902824ee1fba2038ff",
+      "bytes": 785
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/permissions/safe-0.json.gz",
+      "sha256": "d2764e0d8f283b7965f74a8578eff83e27b04897f658b6c8137ddb8ad3910870",
+      "uncompressed_sha256": "bf64ea47a53e163c12ff6b054ef9f102e491ec77f8b5f404c44338da78dbee04",
+      "bytes": 19830
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/process-0.log.gz",
+      "sha256": "32eeb4d5990712f8ce9f07bb5b41da0cec08c85dfba71eb5b118eca64d1e25f8",
+      "uncompressed_sha256": "0034113ea07345400b767d8dbe8f8fcbf9287c710f7053a1f0e6215907e8f1eb",
+      "bytes": 3951
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "uncompressed_sha256": "52c12385532743af0abdf21fdd62129daa8a76866b861d2595a1274a83043fdd",
+      "bytes": 19
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/process-2.log.gz",
+      "sha256": "18abfaf8f0908bd7f91dfb5f87eabe50141b2a3bb0bb3b0adbe6d249d0143555",
+      "uncompressed_sha256": "0387571fe81c1cb261ba33ea312527ed1ae365bc426d61cd5ec36dd856282594",
+      "bytes": 4036
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/process-3.log.gz",
+      "sha256": "1b3cb340bb4483e6fa2c02f1aba556990d13a615cc476ca9669a9891a7cec545",
+      "uncompressed_sha256": "d6bde73205a5739a8fb2423a5812fe1c922e56257ec358705a22187879325cb2",
+      "bytes": 137
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/process-4.log.gz",
+      "sha256": "1b3cb340bb4483e6fa2c02f1aba556990d13a615cc476ca9669a9891a7cec545",
+      "uncompressed_sha256": "d6bde73205a5739a8fb2423a5812fe1c922e56257ec358705a22187879325cb2",
+      "bytes": 137
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/process-5.log.gz",
+      "sha256": "c188591692ad44615ad4fde3622241ccbfce76aa9cbb7fbd065126b192253740",
+      "uncompressed_sha256": "1c8482e1e1133eed7578a2819c4b5165fc06a6213bae7ef47eda5d707578459d",
+      "bytes": 5441
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/process-6.log.gz",
+      "sha256": "58c2eb41fa53bfee92c3dc861706aad971590ad7e63f0d594fd603e90baef8b3",
+      "uncompressed_sha256": "ba4ee9ce881e2ffb15db67d26db6c8c7dbb6a3a92fa48cbfa250d241fb3608e7",
+      "bytes": 25028
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/report.json.gz",
+      "sha256": "a3131d691ac6b611bcc8e266e8c4c82ce684383baeb2b089aa2192135fa07e0a",
+      "uncompressed_sha256": "c5bbe72330482acb4582e65a709b95619ba560b8f4471217b686494a471f9675",
+      "bytes": 24956
+    },
+    {
+      "path": "curve_ethereum_stable_trading-59aac7cb3095429f903130fa3db694c6/result.json.gz",
+      "sha256": "6ddaa5e327a205a531b06eda15fa3ac32dcfcb623b50e9e4e433d83acff20374",
+      "uncompressed_sha256": "b9787a67cee64b6b8394b78cbf9c427879d91d2a688b125e86970666655e8702",
+      "bytes": 9903
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/checkpoint.json.gz",
+      "sha256": "a7eb56bf73bc61f9bf6a3a40d4738e3677451e121a6b9c847ee60c5e10c2c76b",
+      "uncompressed_sha256": "cbd5fbed14cd1c227043ee25ad8a01c61dea456a3d8f0b4239ce0129d2c1f9d3",
+      "bytes": 280734
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/deployment.json.gz",
+      "sha256": "51d905e23cbc9724d348936ccdb1fbac19be9e2e188ff0d3514e6785575ae8c5",
+      "uncompressed_sha256": "6f1ed03deeba206ab3a213d987264de4b1f4a0599aeedfb06771f9d1d741319f",
+      "bytes": 3143
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/fixture-installation.json.gz",
+      "sha256": "92800d9eb15cf9bf666664c4572fd38539d652ad9944250503661e2f7ed9a419",
+      "uncompressed_sha256": "a99b859c6f35d12b9e95da4bdb9b6222045573796279e024e5c754592d571f66",
+      "bytes": 270
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/fork-routes.json.gz",
+      "sha256": "ca15d46ae2a8ab7610486375ff79fb77c5e7827a0f1c4c69727389f3b8a736c6",
+      "uncompressed_sha256": "74af3f9a76848d547413e7ba456305274f2cbeaabb4a5e6fe13110eea7549f70",
+      "bytes": 201
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/process-0.log.gz",
+      "sha256": "35aa849f67b7e449088d6d1dc78f340e7bd68fa9adbac959ccd3efbb3da2fd07",
+      "uncompressed_sha256": "9b1c3fd3c8818ed432276b9dd55c75a9efdc9afa5c06ccf1049eecf98e403775",
+      "bytes": 3643
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "uncompressed_sha256": "52c12385532743af0abdf21fdd62129daa8a76866b861d2595a1274a83043fdd",
+      "bytes": 19
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/process-2.log.gz",
+      "sha256": "84664bd7a8bf7823e79082ccfc8dfc180d24ae6981e99ae0de9361ffd7923e46",
+      "uncompressed_sha256": "a9e70a25d5df815ab55b5ecbbb8550287ce2227b70153b2b414e6ea52d059540",
+      "bytes": 3568
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/process-3.log.gz",
+      "sha256": "8adb90d7f55c51fc0d1274a09231d99dbb1e67ea8a0e92f24f8a4d91e274a474",
+      "uncompressed_sha256": "230167f39a62cc2b74282edc25287d73a28ab3e5699bb28aa9f68a091e733b8e",
+      "bytes": 137
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/process-4.log.gz",
+      "sha256": "8adb90d7f55c51fc0d1274a09231d99dbb1e67ea8a0e92f24f8a4d91e274a474",
+      "uncompressed_sha256": "230167f39a62cc2b74282edc25287d73a28ab3e5699bb28aa9f68a091e733b8e",
+      "bytes": 137
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/process-5.log.gz",
+      "sha256": "9d81077fe6bc6e12066a869f16d81e252c41524f406a57420c8ac9f9985135ab",
+      "uncompressed_sha256": "3823e030642ed40d4724e86fdffe8669581114b20359519137e624e0eb18a431",
+      "bytes": 5039
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/process-6.log.gz",
+      "sha256": "282000782a406639f891734a3d7e946d29fbb40c28d37c07af0a6c833eaff33d",
+      "uncompressed_sha256": "1e8ce4acd0d481775ace38dc1955d0fbcde421ede08c19f3898d8c409aaa3794",
+      "bytes": 25028
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/report.json.gz",
+      "sha256": "be9d1138452c308ae1e97b02154912a163486f1556989fdbd1cc9ae2f8c14746",
+      "uncompressed_sha256": "2c5b485aa5ce1c3ec20cc542b79361381e3cb215b1beb1afe50d2dd1231c185b",
+      "bytes": 24956
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/result.json.gz",
+      "sha256": "5eb868eb466b8e4a088453b6ae2f3c2eb891db6da93fd35d035e587a86196314",
+      "uncompressed_sha256": "6cdc15d0d09be77ce1b2905e966d61a42c62216d126a45e679ab19bf2efc901a",
+      "bytes": 591
+    },
+    {
+      "path": "curve_ethereum_stable_trading-eoa-a423f094f6504809acb082e1ab594e98/transactions.json.gz",
+      "sha256": "13cbaf32afd2d8b240ea3a9d891d1597ab50919ecdcfa19ab389b9df4956dc02",
+      "uncompressed_sha256": "f4a7f0cba8addb81ee84b218d8d5922349363b548cec500f1a590e95a5a4de01",
+      "bytes": 16541
+    },
+    {
+      "path": "source-snapshot.json.gz",
+      "sha256": "75bcfb990af4cc40f7c5cdf240d23943e6064f2854d2040f074eb23b905d6bc9",
+      "uncompressed_sha256": "1b56b76992654fa588a85a7f7b72ab5f4f3dfb9c5c7b74d758d9f2941ce97784",
+      "bytes": 160493
+    },
+    {
+      "path": "candidate-overlay.json.gz",
+      "sha256": "aea7dcbbc76919026a850096eef30f9c3edd420bf030c6f80b8c89dfbdd1d059",
+      "uncompressed_sha256": "012a2d8f7f8546fa300ffb43ea0039d6fa2235d316d63f8a638c65c1a86e9de1",
+      "bytes": 341
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/__init__.py.gz",
+      "sha256": "4d64aff7ae6a1ee3f9ee54e602aab98bcfc57adfec905d6766647ce47f6c90a3",
+      "uncompressed_sha256": "5ed42f8fcda58bad5994d5671ab2d28f285882f0b935207b86f8366c1a133584",
+      "bytes": 84
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/abi.py.gz",
+      "sha256": "fda0ee7605b9756c2c84bf898299d9e31b9e3e67b5c6982f7af0b5192937727a",
+      "uncompressed_sha256": "5da453822bfd153eb67340d326fd7be01b2ff784eecacb4d83f1279168a817d3",
+      "bytes": 2785
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/api.py.gz",
+      "sha256": "3fa8f1792e124bdc02ff646f5724660cabbe7077e3f268282fdc96979a221929",
+      "uncompressed_sha256": "32cc5730394b3458c03c5aa6aaac78c72fc72141caf625a389621f6e61c3019e",
+      "bytes": 2138
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/asset_effects.py.gz",
+      "sha256": "fb830fa446be3d161a37d0f4780d1c62bbb39fa8345b9b530408bcec4f42d207",
+      "uncompressed_sha256": "1da144eb406ff1883bfc250e0647cff97ddc54f3055226779b4d47c503701b8f",
+      "bytes": 226
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/authoring.py.gz",
+      "sha256": "845d2e578b435d85d688172da8805c040c08509c36d1ea9a9ec0a5e965864e42",
+      "uncompressed_sha256": "0f754a72ff0fa0fdca2128248f87ab033a2a2e5864141d6db15b336e2034007f",
+      "bytes": 2799
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/authority.py.gz",
+      "sha256": "518c4697973db34e94055c736565d5e145dd371ef13810451920fa04c808035f",
+      "uncompressed_sha256": "41f94b86646d5589957cc45d00722ee310ed6b531ec99df475d78402520404ac",
+      "bytes": 2755
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/connector.py.gz",
+      "sha256": "e403dcc191774c570a70c9de6fc7ab08452b58b550698a753be5bddea7ae0cd9",
+      "uncompressed_sha256": "4f968ef3156286e7bc0b6394a50fb0a700fbb8433e65a849166b781cf9e612cf",
+      "bytes": 2272
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/dashboard.py.gz",
+      "sha256": "bf0b9c4ce0fa25d8002c43ed877804ab81756ef83a8d379471eed5c4e70c3a9c",
+      "uncompressed_sha256": "0198d1f2e576e348d19fa81d2a5c8ca515052309f9a4ba406e7e7072c0139a35",
+      "bytes": 4097
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/deployment.py.gz",
+      "sha256": "0cb87cec8a948ee88f42cf086902a35c9902b3a75bd6e63755e8dab4fd86d5e8",
+      "uncompressed_sha256": "073056c010e5a24fca0fe939ac0d61d4834aa872007910da5ae32d0db7c7d960",
+      "bytes": 4447
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/domain.py.gz",
+      "sha256": "0852b647cf98f7fd28e45104195e01b5972518f28c728d5b3355bfa1133c5a82",
+      "uncompressed_sha256": "d20751ce2d673ed8be98c87e8c03309694863e01b973d1f1d9a66accde47a43a",
+      "bytes": 4646
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/execution.py.gz",
+      "sha256": "faf84197e9360ff71df53dc57647b1270064e45f55b4e6ed0b162f65a60cbc12",
+      "uncompressed_sha256": "519decb4795d005237039d045951c44424d631649f0242cc80a1df00af0cd408",
+      "bytes": 3615
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/fork.py.gz",
+      "sha256": "0e32b8095d04cb577f820d0097bd23dc706ffc84b1186592ddfc40edeb6f372d",
+      "uncompressed_sha256": "fb04676c00d7980c6ae7c8635a9ec5ba285d7f9b815dc1ed22f4e7740aec2081",
+      "bytes": 1090
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/lifecycle.py.gz",
+      "sha256": "5cb2d9cc184c3dae87997339ab212531b511f83fde2bc939e2cc0de04de9b79e",
+      "uncompressed_sha256": "78379d84aa3bc3a9b8813662b570549f46166b74f30a297a97cdf54e48493ca0",
+      "bytes": 3526
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/models.py.gz",
+      "sha256": "12fc88bbe440c6727500ea590c54c03391061cacabcc45746fb704c607a766af",
+      "uncompressed_sha256": "07f0d51214af96c413f88f97fdb898c46c4f403df5064b68ac4151116f10381e",
+      "bytes": 5892
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/observations.py.gz",
+      "sha256": "b23fded757394b28462b07f99233b65794f3cc0686fcbef4435c2a5175fd38fb",
+      "uncompressed_sha256": "93c16abcd1db884b33edf8dff0d5072bef37766751c01c284264bcf505873d19",
+      "bytes": 6943
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/operations.py.gz",
+      "sha256": "f79766b66be756cbc76f136f28328b61a1b20d9c99d20ad086ed00abfca257c3",
+      "uncompressed_sha256": "304ca0c12062bf6a1b8b90bdb81e56acb77712fc68ad298fdd911dc87f4254f7",
+      "bytes": 3366
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/ownership.py.gz",
+      "sha256": "c1f9a84e1f5614576b193d41aefd3db7b8fd7c882494e56d9611f25bcdf33df1",
+      "uncompressed_sha256": "f5a2954e57d6b1234673dac0d529130b0c4c0bde6ab9d8ce6ce2ecdb0ccb36dd",
+      "bytes": 987
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/permissions.py.gz",
+      "sha256": "1882cd4a5d854bf77be736db6d02cea2008b0fb1d22458f96bce7163651c5cc3",
+      "uncompressed_sha256": "26c1b11e4e2e4b3dd54c4c0c2325a482b214d756df2caf7bcc30c3f407b7d0d4",
+      "bytes": 5725
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/planning.py.gz",
+      "sha256": "44c31d008286906ccca40c34e59c438c9a294f2b109f9d121eba47a4ccfa6ac8",
+      "uncompressed_sha256": "c40749bfc8ad27f11565b856a45ac5a2ce5ea081803d8476893ca762973fa03a",
+      "bytes": 6421
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/positions.py.gz",
+      "sha256": "328d3c4c4a52c6873f8bfc012cc679eb05622a5b66c404a9c76fd22f7a0c7023",
+      "uncompressed_sha256": "f5e6cb8a014862bd4f39f288840c3938f273b17ad6e59e4f1e3d64bf71507152",
+      "bytes": 2162
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/reader.py.gz",
+      "sha256": "fff44baa4188d00f355f9935001c2533925f2e9cad8296e74c64d8a2d6fb3a93",
+      "uncompressed_sha256": "fd4ea377255f1b08e9a12bff71b7e5bde444a2132e79b7d8e23a59417060e31f",
+      "bytes": 3562
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/receipts.py.gz",
+      "sha256": "04d2866cb8a7ef6bffacb6efeac1f104c7b44f3839b43234d02432e93db49680",
+      "uncompressed_sha256": "e7e1916d27918e07d9f75019eed95aefc5401aab435efc4aa9a3a9879e557b10",
+      "bytes": 8191
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/reconciliation.py.gz",
+      "sha256": "e81a4f8462f5ac2ddcce6cfab43f14f9dd8e9f927597d8601b1502b4d5d5004d",
+      "uncompressed_sha256": "2d7444413e796c325e2c6e233deeb6c6728c8be074f6b5ace2f21397c9b818ac",
+      "bytes": 4951
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/reporting.py.gz",
+      "sha256": "957931b77874d1853e482508d92e33e938888e36f4f2a5c2b7b7a6eaf76dd143",
+      "uncompressed_sha256": "169b0863db2da89a2bd3084e2eca6509f3512be4bd46d5d52096aa005d79f81a",
+      "bytes": 1613
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/simulation.py.gz",
+      "sha256": "721a7503591dd48d4d44a42abd69e498f9118a2f53efef77b274529bd01036a5",
+      "uncompressed_sha256": "00602202239b7722b0d81c4c7aad7eec009f0f72fb032458c5df2a33d788a8ff",
+      "bytes": 2184
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/stable_math.py.gz",
+      "sha256": "5b56286ec286d0eacb81a6384143c65a4d7d698f1b50e80983db1f360f842ca4",
+      "uncompressed_sha256": "a0ce8dde22b6ae75a76eee444d113eea821e34f3dc0594a94d0892f382ea30a3",
+      "bytes": 9677
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/state.py.gz",
+      "sha256": "a03ff4c7ef5476672b20ad2fa184b5ce996cdb31c852a4463b9e30bbdfd0da33",
+      "uncompressed_sha256": "12dc23926d65033c1f44a5350f63ffdd386171a3cc4f315c4a3ea7b304787b31",
+      "bytes": 7174
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/support.py.gz",
+      "sha256": "d83ee01783d19bb0f89f70cac67e282f7606f257d86272469f4d2fc96701d757",
+      "uncompressed_sha256": "bea5b9bb3070a05a206f437745a9af23808cdbc870149949706e27d1a5c96fcc",
+      "bytes": 1171
+    },
+    {
+      "path": "src/almanak_v3/connectors/curve/validation.py.gz",
+      "sha256": "720827667ef2202745e929a7d41c9b81bf741c64629a6f1649377532e056522d",
+      "uncompressed_sha256": "8592c8ff0910197dca0e69199322b5f0e496bbb7cbdf944f94b3996b6931b83c",
+      "bytes": 7697
+    },
+    {
+      "path": "curve-safe-initial.log.gz",
+      "sha256": "f8e260dce3f4c0e03f1fb4a5a65bd00fe1ef52322371fd9708b8975940c926f2",
+      "uncompressed_sha256": "ab14e0ea115ec10f45b6c2295f13a8a536cbe624ad6a9cedc3a31fc157be5e07",
+      "bytes": 405
+    },
+    {
+      "path": "curve-eoa-initial.log.gz",
+      "sha256": "5ae079bfb450223f44c1a723501bbc58592844ffb55c127865de30e78ae0a365",
+      "uncompressed_sha256": "6caa7d85766633fe6b9b9e823d5dcdab0ee09323951776e0190fcbba78c06881",
+      "bytes": 38000
+    },
+    {
+      "path": "curve-eoa-lp-second.log.gz",
+      "sha256": "c4ca9f0ed9921f1dad4d65bde223d162dd5f58efd1386994bf0e51573f1c6799",
+      "uncompressed_sha256": "8f96cc311c380fb9e264397ceeee6472e18c6ee958ded62503ca3d5f66a261e4",
+      "bytes": 124
+    }
+  ],
+  "harness_overlay": "The initial EOA LP attempt reached its 180-second entry wait limit. The retained passing rerun uses the scenario entry_timeout=360 and the shared harness timeout accessor."
+}

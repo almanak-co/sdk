@@ -1,0 +1,71 @@
+name: Release Candidate
+
+on:
+  push:
+    tags:
+      - '*-rc*'   # e.g. 3.1.0-rc1
+      - 'v*rc*'   # canonical PEP 440 spelling, e.g. v3.0.0rc1
+
+permissions:
+  contents: read
+
+jobs:
+  extract_version:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+      - id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION=$(uv run --locked python -m scripts.ci.release_version "$TAG")
+          echo "Building release candidate: ${VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  lint:
+    uses: ./.github/workflows/template_lint.yml
+
+  typecheck:
+    uses: ./.github/workflows/template_typecheck.yml
+
+  test_pytest:
+    uses: ./.github/workflows/template_pytest.yml
+    with:
+      # No CRAP gate runs on release tags, so the shard coverage has no consumer.
+      coverage: false
+
+  test_linux:
+    uses: ./.github/workflows/template_platform_test.yml
+    with:
+      os: ubuntu-22.04
+
+  test_macos:
+    uses: ./.github/workflows/template_platform_test.yml
+    with:
+      os: macos-15
+      advisory: true
+
+  test_strat:
+    uses: ./.github/workflows/template_strat_test.yml
+
+  docs:
+    uses: ./.github/workflows/template_docs.yml
+
+  # RCs build and verify the distributions and keep them as this run's
+  # `sdk-dist` artifact. They publish nowhere, by design: not to PyPI, not to
+  # TestPyPI, not to any other index. PyPI uploads stay with stable releases
+  # (release_tag.yml).
+  build_dist:
+    uses: ./.github/workflows/template_build_dist.yml
+    needs: [extract_version, lint, typecheck, test_pytest, test_linux, test_macos, test_strat, docs]
+    with:
+      version_override: ${{ needs.extract_version.outputs.version }}
+    secrets:
+      ALMANAK_CODE_TOKEN: ${{ secrets.ALMANAK_CODE_TOKEN }}

@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/uniswap_v3_ethereum_lp.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    position:
+      market: pool
+      account: fund
+      range:
+        lower: 197520
+        upper: 198520
+      capital:
+        asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+        quantity:
+          base_units: 100000000
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+markets:
+  pool:
+    connector: uniswap_v3
+    chain: eip155:1
+    pool: '0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640'
+accounts:
+  fund:
+    chain: eip155:1

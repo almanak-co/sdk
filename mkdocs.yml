@@ -1,6 +1,6 @@
 site_name: Almanak SDK
-site_description: Python SDK for developing and deploying autonomous DeFi agents
-site_url: https://sdk.docs.almanak.co
+site_description: Python SDK for writing, checking, running and backtesting autonomous DeFi strategies
+site_url: https://docs.almanak.co
 repo_url: https://github.com/almanak-co/sdk
 repo_name: almanak-co/sdk
 use_directory_urls: false
@@ -30,6 +30,9 @@ plugins:
   - search
   - autorefs:
       resolve_closest: true
+  # Suffix structure: a translated page is `page.<locale>.md` next to the English
+  # page. Locales other than English are declared but not built until their
+  # first translation lands; flip `build` and add the locale to `extra.alternate`.
   - i18n:
       docs_structure: suffix
       fallback_to_default: true
@@ -41,55 +44,34 @@ plugins:
           build: true
         - locale: zh
           name: 中文
-          build: true
+          build: false
           nav_translations:
             Home: 首页
             Getting Started: 快速入门
-            Environment Variables: 环境变量
-            Agent Skills: AI 代理技能
-            Agentic Trading: 代理交易
-            Solana: Solana
             CLI Reference: CLI 参考
-            Gateway: 网关
             API Reference: API 参考
-            Connectors: 连接器
-            Migrations: 迁移
         - locale: fr
           name: Français
-          build: true
+          build: false
           nav_translations:
             Home: Accueil
             Getting Started: Premiers pas
-            Environment Variables: Variables d'environnement
-            Agent Skills: Compétences d'agent
-            Agentic Trading: Trading agentique
-            Solana: Solana
             CLI Reference: Référence CLI
-            Gateway: Passerelle
             API Reference: Référence API
-            Connectors: Connecteurs
-            Migrations: Migrations
         - locale: es
           name: Español
-          build: true
+          build: false
           nav_translations:
             Home: Inicio
             Getting Started: Primeros pasos
-            Environment Variables: Variables de entorno
-            Agent Skills: Habilidades de agente
-            Agentic Trading: Trading agente
-            Solana: Solana
             CLI Reference: Referencia CLI
-            Gateway: Pasarela
             API Reference: Referencia API
-            Connectors: Conectores
-            Migrations: Migraciones
-  # NOTE: llmstxt plugin moved to mkdocs-llms.yml (incompatible with i18n).
-  # Run `make docs-llms` to generate llms.txt separately.
+  # The llmstxt plugin lives in mkdocs-llms.yml; it cannot run under i18n.
   - mkdocstrings:
       default_handler: python
       handlers:
         python:
+          paths: [src]
           options:
             docstring_style: google
             show_signature_annotations: true
@@ -97,31 +79,18 @@ plugins:
             merge_init_into_class: true
             members_order: source
             show_root_heading: true
-            show_root_full_path: false
             show_source: false
             heading_level: 2
-            filters:
-              - "!^_"
-              - "!^(serialize|deserialize|to_dict|from_dict|intent_type|is_chained_amount)$"
             show_symbol_type_heading: true
             show_symbol_type_toc: true
 
 extra:
   generator: false
-  homepage: https://sdk.docs.almanak.co
+  homepage: /
   alternate:
     - name: English
       link: /
       lang: en
-    - name: 中文
-      link: /zh/
-      lang: zh
-    - name: Français
-      link: /fr/
-      lang: fr
-    - name: Español
-      link: /es/
-      lang: es
 
 extra_css:
   - stylesheets/extra.css
@@ -153,51 +122,40 @@ markdown_extensions:
   - tables
 
 nav:
-  - Home:
-    - index.md
+  - Home: index.md
+  - Learn:
+    - How the SDK Works: how-it-works.md
     - Getting Started: getting-started.md
-    - Environment Variables: environment-variables.md
-    - Agent Skills: agent-skills.md
-    - Agentic Trading:
-      - agentic/index.md
-      - Agent Tools: agentic/agent-tools.md
-      - Adapters: agentic/adapters.md
-    - Solana: solana.md
-    - Hyperliquid: hyperliquid.md
-    - Supported Chains: chains.md
-  - CLI Reference:
-    - cli/almanak.md
-    - cli/almanak-ax.md
-    - cli/almanak-strat.md
-    - cli/strat-run.md
-    - cli/strat-teardown.md
-    - cli/strat-new.md
-    - cli/strat-test.md
-    - cli/almanak-gateway.md
-    - cli/almanak-dashboard.md
-  - Gateway:
-    - gateway/api-reference.md
-    - gateway/troubleshooting.md
-  - API Reference:
-    - api/index.md
-    - api/enums.md
-    - api/strategies.md
-    - api/market.md
-    - api/intents.md
-    - api/compiler.md
-    - api/state.md
-    - api/execution.md
-    - api/data.md
-    - api/tokens.md
-    - api/indicators.md
-    - api/dashboard.md
-    - Connectors:
-      - api/connectors/index.md
-      - api/connectors/base.md
-    - api/services.md
-    - api/alerting.md
-    - api/backtesting.md
-    - api/deployment.md
-    - api/logging.md
-  - Migrations:
-    - migration/vib-4062-marketsnapshot.md
+  - Build:
+    - Strategy Authoring: authoring.md
+    - Dashboards: dashboards.md
+    - Configuration: configuration.md
+    - Backtesting: backtesting.md
+    - Example Strategies: examples.md
+  - Operate:
+    - Operating: operating.md
+  - Reference:
+    - Supported Connectors: support.md
+    - CLI:
+      - cli/almanak.md
+      - Check: cli/almanak-check.md
+      - Run: cli/almanak-run.md
+      - Lifecycle: cli/almanak-lifecycle.md
+      - Report: cli/almanak-report.md
+      - Support: cli/almanak-support.md
+      - Backtest: cli/almanak-backtest.md
+      - Services: cli/almanak-service.md
+      - Permissions: cli/almanak-permissions.md
+      - Wallets: cli/almanak-wallet.md
+      - Read-only Observations: cli/almanak-ax.md
+    - Python API:
+      - Authoring API: api/authoring.md
+      - Strategy State: api/strategy.md
+      - Intents: api/intents.md
+      - Connector Support: api/connectors.md
+      - Configuration: api/configuration.md
+      - Reports: api/reports.md
+      - Schemas: api/schemas.md
+      - Architecture Contracts: api/index.md
+    - Almanak Code Status: code.md
+    - Daily QA: qa.md

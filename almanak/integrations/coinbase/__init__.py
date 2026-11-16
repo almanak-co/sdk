@@ -1,1 +1,0 @@
-"""Coinbase integration metadata."""

@@ -1,0 +1,692 @@
+{
+  "schema_version": 1,
+  "source_lags": {
+    "eip155:1": 7200,
+    "eip155:43114": 7200,
+    "eip155:10": 7200,
+    "eip155:56": 7200,
+    "eip155:137": 7200,
+    "eip155:4663": 7200,
+    "eip155:8453": 7200,
+    "eip155:42161": 7200,
+    "eip155:999": 7200
+  },
+  "native_window_seconds": 600,
+  "native_hold_seconds": 120,
+  "native_collect_seconds": 60,
+  "detailed_aave_interval_seconds": 3600,
+  "native_collection_limits": {
+    "sparklend_ethereum_lending": {
+      "max_accounting_samples": 42,
+      "max_risk_blocks": 101,
+      "max_risk_samples": 202
+    },
+    "uniswap_v3_arbitrum_trading": {
+      "max_samples": 21
+    },
+    "uniswap_v3_arbitrum_lp": {
+      "max_samples": 21
+    },
+    "uniswap_v3_optimism_trading": {
+      "max_samples": 21
+    },
+    "uniswap_v3_optimism_lp": {
+      "max_samples": 21
+    },
+    "pancakeswap_v3_bnb_trading": {
+      "max_samples": 21
+    },
+    "pancakeswap_v3_bnb_lp": {
+      "max_samples": 21
+    },
+    "compound_v3_ethereum_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 101,
+      "max_risk_samples": 101
+    },
+    "compound_v3_base_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 601,
+      "max_risk_samples": 601
+    },
+    "pancakeswap_v3_ethereum_trading": {
+      "max_samples": 21
+    },
+    "pancakeswap_v3_ethereum_lp": {
+      "max_samples": 21
+    },
+    "pancakeswap_v3_base_trading": {
+      "max_samples": 21
+    },
+    "pancakeswap_v3_base_lp": {
+      "max_samples": 21
+    },
+    "pancakeswap_v3_arbitrum_trading": {
+      "max_samples": 21
+    },
+    "pancakeswap_v3_arbitrum_lp": {
+      "max_samples": 21
+    },
+    "morpho_blue_ethereum_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 101,
+      "max_risk_samples": 101
+    },
+    "morpho_blue_base_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 601,
+      "max_risk_samples": 601
+    },
+    "aerodrome_slipstream_base_lp": {
+      "max_samples": 21
+    },
+    "aerodrome_slipstream_base_trading": {
+      "max_samples": 21
+    },
+    "aerodrome_base_stable_lp": {
+      "max_samples": 21
+    },
+    "aerodrome_base_stable_trading": {
+      "max_samples": 21
+    },
+    "aerodrome_base_volatile_lp": {
+      "max_samples": 21
+    },
+    "aerodrome_base_volatile_trading": {
+      "max_samples": 21
+    },
+    "compound_v3_optimism_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 601,
+      "max_risk_samples": 601
+    },
+    "morpho_blue_optimism_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 601,
+      "max_risk_samples": 601
+    },
+    "morpho_blue_polygon_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 801,
+      "max_risk_samples": 801
+    },
+    "morpho_blue_avalanche_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 1201,
+      "max_risk_samples": 1201
+    },
+    "uniswap_v4_arbitrum_lp": {
+      "max_samples": 21
+    },
+    "uniswap_v4_arbitrum_trading": {
+      "max_samples": 21
+    },
+    "uniswap_v4_optimism_lp": {
+      "max_samples": 21
+    },
+    "uniswap_v4_optimism_trading": {
+      "max_samples": 21
+    },
+    "uniswap_v3_avalanche_trading": {
+      "max_samples": 21
+    },
+    "uniswap_v3_avalanche_lp": {
+      "max_samples": 21
+    },
+    "uniswap_v3_bnb_trading": {
+      "max_samples": 21
+    },
+    "uniswap_v3_bnb_lp": {
+      "max_samples": 21
+    },
+    "uniswap_v3_polygon_trading": {
+      "max_samples": 21
+    },
+    "uniswap_v3_polygon_lp": {
+      "max_samples": 21
+    },
+    "uniswap_v3_robinhood_trading": {
+      "max_samples": 21
+    },
+    "uniswap_v3_robinhood_lp": {
+      "max_samples": 21
+    },
+    "uniswap_v4_bnb_trading": {
+      "max_samples": 21
+    },
+    "uniswap_v4_bnb_lp": {
+      "max_samples": 21
+    },
+    "uniswap_v4_polygon_trading": {
+      "max_samples": 21
+    },
+    "uniswap_v4_polygon_lp": {
+      "max_samples": 21
+    },
+    "uniswap_v4_robinhood_trading": {
+      "max_samples": 21
+    },
+    "uniswap_v4_robinhood_lp": {
+      "max_samples": 21
+    },
+    "aave_v3_arbitrum_lending": {
+      "max_accounting_samples": 42,
+      "max_risk_blocks": 4801,
+      "max_risk_samples": 9602
+    },
+    "aave_v3_avalanche_lending": {
+      "max_accounting_samples": 42,
+      "max_risk_blocks": 1201,
+      "max_risk_samples": 2402
+    },
+    "aave_v3_base_lending": {
+      "max_accounting_samples": 42,
+      "max_risk_blocks": 601,
+      "max_risk_samples": 1202
+    },
+    "aave_v3_bnb_lending": {
+      "max_accounting_samples": 42,
+      "max_risk_blocks": 2667,
+      "max_risk_samples": 5334
+    },
+    "aave_v3_ethereum_lending": {
+      "max_accounting_samples": 42,
+      "max_risk_blocks": 101,
+      "max_risk_samples": 202
+    },
+    "aave_v3_optimism_lending": {
+      "max_accounting_samples": 42,
+      "max_risk_blocks": 601,
+      "max_risk_samples": 1202
+    },
+    "aave_v3_polygon_lending": {
+      "max_accounting_samples": 42,
+      "max_risk_blocks": 801,
+      "max_risk_samples": 1602
+    },
+    "compound_v3_arbitrum_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 4801,
+      "max_risk_samples": 4801
+    },
+    "compound_v3_polygon_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 801,
+      "max_risk_samples": 801
+    },
+    "morpho_blue_arbitrum_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 4801,
+      "max_risk_samples": 4801
+    },
+    "morpho_blue_bnb_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 2667,
+      "max_risk_samples": 2667
+    },
+    "morpho_blue_robinhood_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 12001,
+      "max_risk_samples": 12001
+    },
+    "morpho_blue_hyperevm_lending": {
+      "max_accounting_samples": 41,
+      "max_risk_blocks": 1221,
+      "max_risk_samples": 1221
+    }
+  },
+  "native_component_collection_limits": {
+    "base_compound_borrow_and_trade": {
+      "compound_v3": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 601
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "base_morpho_borrow_and_trade": {
+      "morpho_blue": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 601
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "ethereum_morpho_curve_borrow_and_trade": {
+      "morpho_blue": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 101,
+        "max_risk_samples": 101
+      },
+      "curve": {
+        "max_samples": 21
+      }
+    },
+    "base_borrow_and_trade_v4": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 1202
+      },
+      "uniswap_v4": {
+        "max_samples": 21
+      }
+    },
+    "optimism_compound_curve_borrow_and_trade": {
+      "compound_v3": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 601
+      },
+      "curve": {
+        "max_samples": 21
+      }
+    },
+    "optimism_morpho_curve_borrow_and_trade": {
+      "morpho_blue": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 601
+      },
+      "curve": {
+        "max_samples": 21
+      }
+    },
+    "polygon_morpho_curve_borrow_and_trade": {
+      "morpho_blue": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 801,
+        "max_risk_samples": 801
+      },
+      "curve": {
+        "max_samples": 21
+      }
+    },
+    "arbitrum_aave_borrow_and_trade_v4": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 8192,
+        "max_risk_samples": 16384
+      },
+      "uniswap_v4": {
+        "max_samples": 21
+      }
+    },
+    "optimism_aave_borrow_and_trade_v4": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 1202
+      },
+      "uniswap_v4": {
+        "max_samples": 21
+      }
+    },
+    "ethereum_aave_v4_borrow_and_trade": {
+      "aave_v4": {},
+      "uniswap_v4": {
+        "max_samples": 21
+      }
+    },
+    "avalanche_aave_v4_borrow_and_trade": {
+      "aave_v4": {},
+      "uniswap_v4": {
+        "max_samples": 21
+      }
+    },
+    "avalanche_morpho_borrow_and_trade_v4": {
+      "morpho_blue": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 1201,
+        "max_risk_samples": 1201
+      },
+      "uniswap_v4": {
+        "max_samples": 21
+      }
+    },
+    "base_aave_curve_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 1202
+      },
+      "curve": {
+        "max_samples": 21
+      }
+    },
+    "arbitrum_aave_curve_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 8192,
+        "max_risk_samples": 16384
+      },
+      "curve": {
+        "max_samples": 21
+      }
+    },
+    "base_aave_pancake_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 1202
+      },
+      "pancakeswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "ethereum_aave_pancake_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 101,
+        "max_risk_samples": 202
+      },
+      "pancakeswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "arbitrum_aave_pancake_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 8192,
+        "max_risk_samples": 16384
+      },
+      "pancakeswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "base_aave_aerodrome_stable_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 1202
+      },
+      "aerodrome": {
+        "max_samples": 21
+      }
+    },
+    "base_aave_aerodrome_volatile_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 1202
+      },
+      "aerodrome": {
+        "max_samples": 21
+      }
+    },
+    "base_aave_slipstream_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 1202
+      },
+      "aerodrome_slipstream": {
+        "max_samples": 21
+      }
+    },
+    "bnb_aave_pancake_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 8192,
+        "max_risk_samples": 16384
+      },
+      "pancakeswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "base_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 1202
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "ethereum_base_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 84,
+        "max_risk_blocks": 702,
+        "max_risk_samples": 1404
+      },
+      "uniswap_v3": {
+        "max_samples": 42
+      }
+    },
+    "avalanche_aave_borrow_and_trade_v3": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 1201,
+        "max_risk_samples": 2402
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "bnb_aave_borrow_and_trade_v3": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 8192,
+        "max_risk_samples": 16384
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "polygon_aave_borrow_and_trade_v3": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 801,
+        "max_risk_samples": 1602
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "bnb_aave_borrow_and_trade_v4": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 8192,
+        "max_risk_samples": 16384
+      },
+      "uniswap_v4": {
+        "max_samples": 21
+      }
+    },
+    "polygon_aave_borrow_and_trade_v4": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 801,
+        "max_risk_samples": 1602
+      },
+      "uniswap_v4": {
+        "max_samples": 21
+      }
+    },
+    "robinhood_morpho_borrow_and_trade_v3": {
+      "morpho_blue": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 12001,
+        "max_risk_samples": 12001
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "robinhood_morpho_borrow_and_trade_v4": {
+      "morpho_blue": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 12001,
+        "max_risk_samples": 12001
+      },
+      "uniswap_v4": {
+        "max_samples": 21
+      }
+    },
+    "arbitrum_aave_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 4801,
+        "max_risk_samples": 9602
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "arbitrum_compound_borrow_and_trade": {
+      "compound_v3": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 4801,
+        "max_risk_samples": 4801
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "arbitrum_morpho_borrow_and_trade": {
+      "morpho_blue": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 4801,
+        "max_risk_samples": 4801
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "avalanche_aave_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 1201,
+        "max_risk_samples": 2402
+      },
+      "curve": {
+        "max_samples": 21
+      }
+    },
+    "bnb_aave_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 2667,
+        "max_risk_samples": 5334
+      },
+      "curve": {
+        "max_samples": 21
+      }
+    },
+    "bnb_morpho_curve_borrow_and_trade": {
+      "morpho_blue": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 2667,
+        "max_risk_samples": 2667
+      },
+      "curve": {
+        "max_samples": 21
+      }
+    },
+    "ethereum_compound_curve_borrow_and_trade": {
+      "compound_v3": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 101,
+        "max_risk_samples": 101
+      },
+      "curve": {
+        "max_samples": 21
+      }
+    },
+    "ethereum_spark_curve_borrow_and_trade": {
+      "sparklend": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 101,
+        "max_risk_samples": 202
+      },
+      "curve": {
+        "max_samples": 21
+      }
+    },
+    "optimism_aave_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 1202
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "polygon_aave_borrow_and_trade": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 801,
+        "max_risk_samples": 1602
+      },
+      "curve": {
+        "max_samples": 21
+      }
+    },
+    "robinhood_morpho_curve_borrow_and_trade": {
+      "morpho_blue": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 12001,
+        "max_risk_samples": 12001
+      },
+      "curve": {
+        "max_samples": 21
+      }
+    },
+    "arbitrum_aave_leverage_loop": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 4801,
+        "max_risk_samples": 9602
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "base_morpho_leverage_loop": {
+      "morpho_blue": {
+        "max_accounting_samples": 41,
+        "max_risk_blocks": 601,
+        "max_risk_samples": 601
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "arbitrum_aave_borrow_lp": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 4801,
+        "max_risk_samples": 9602
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    },
+    "arbitrum_aave_lending_short": {
+      "aave_v3": {
+        "max_accounting_samples": 42,
+        "max_risk_blocks": 4801,
+        "max_risk_samples": 9602
+      },
+      "uniswap_v3": {
+        "max_samples": 21
+      }
+    }
+  },
+  "native_preparation_timeout_seconds": {
+    "aave_v3_arbitrum_lending": 7200,
+    "aave_v3_avalanche_lending": 7200,
+    "aave_v3_bnb_lending": 7200,
+    "arbitrum_aave_borrow_and_trade_v4": 7200,
+    "arbitrum_aave_curve_borrow_and_trade": 7200,
+    "arbitrum_aave_pancake_borrow_and_trade": 7200,
+    "polygon_aave_borrow_and_trade_v3": 7200,
+    "robinhood_morpho_borrow_and_trade_v4": 7200
+  }
+}

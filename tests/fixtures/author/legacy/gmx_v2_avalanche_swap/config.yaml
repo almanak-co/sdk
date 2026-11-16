@@ -1,0 +1,112 @@
+strategy:
+  connector: gmx_v2
+  decision_interval: 5s
+  allocations:
+    Main:
+      kind: gmx_swap
+      market: wavax_usdc
+      account: fund
+      initial_inventory:
+      - asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '50'
+      - asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '0'
+      maximum_inputs:
+      - asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '50'
+      - asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '10000'
+      maximum_market_token_input:
+        base_units: 0
+      execution_fee:
+        asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '1'
+      entry_amount:
+        asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '1'
+      entry_minimum_output:
+        asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '1'
+      exit_minimum_output:
+        asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '0.1'
+      hold_seconds: 2m
+      deadline_seconds: 5m
+      maximum_event_block_span: 2000
+      native_asset: eip155:43114/slip44:9005
+      minimum_native_balance:
+        base_units: 0
+assets:
+  eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7:
+    decimals: 18
+  eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e:
+    decimals: 6
+  eip155:43114/slip44:9005:
+    decimals: 18
+  eip155:43114/erc20:0x913c1f46b48b3ed35e7dc3cf754d4ae8499f31cf:
+    decimals: 18
+markets:
+  wavax_usdc:
+    market:
+      kind: gmx_v2
+      chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      share_asset: eip155:43114/erc20:0x913c1f46b48b3ed35e7dc3cf754d4ae8499f31cf
+      index_asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+      long_asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+      short_asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+      wrapped_native: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+      contracts:
+        exchange_router: '0xc002db96e682fff6675966f959677285a0c45efa'
+        token_router: '0x820f5ffc5b525cd4d88cd91acf2c28f16530cc68'
+        reader: '0xa34320a507493c71fe35e982e496f7c5d1a7fa02'
+        data_store: '0x2f0b22339414aded7d5f06f9d604c7ff5b2fe3f6'
+        event_emitter: '0xdb17b211c34240b014ab6d61d4a31fa0c0e20c26'
+        oracle: '0x29220fa3b24279279c211701de4a7b035122b911'
+        order_handler: '0xc993ef170859dae0241a3c12b8186e456fa1c1b0'
+        order_vault: '0xd3d60d22d415ad43b7e64b510d86a30f19b1b12c'
+        increase_order_executor: '0x7e99d14db15fe16b58b05beb101bbc69c2203679'
+        decrease_order_executor: '0x8d3fec13225f611ad7f5fa77442625749a29b057'
+        swap_order_executor: '0x7313c9fac0ad3511cf30a1dd603c3255b455fde8'
+        swap_handler: '0xe1ed31707677d961ea8056c23e6153701e7414b9'
+        deposit_handler: '0xe93fa5956199d1e395885ab10bbe45b0bd04f0f2'
+        deposit_vault: '0x90c670825d0c62ede1c5ee9571d6d9a17a722dff'
+        withdrawal_handler: '0xa334b4e3f92a91e927f061494a95d84b7f0d134d'
+        withdrawal_vault: '0xf5f30b10141e1f63fc11ed772931a8294a591996'
+accounts:
+  fund:
+    chain:
+      chain_id: eip155:43114
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: avax-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      block:
+        chain:
+          chain_id: eip155:43114
+          environment: mainnet
+        number: 94733400
+        hash: '0x3c57a273d20b7c0507063f3075a52e6496729bf0ea0fee2f66ebb02be1babb1b'
+        timestamp: 1788827745
+    funds:
+    - account: fund
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+          quantity: '50'
+        method: wrap_native
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:43114/slip44:9005
+        quantity: '1000'
+      foundry_account_index: 941090

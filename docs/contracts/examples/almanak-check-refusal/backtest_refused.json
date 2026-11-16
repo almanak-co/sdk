@@ -1,0 +1,58 @@
+{
+  "code": "invalid_configuration",
+  "error": "invalid_config",
+  "field": "inventory.funds.unknown_fund",
+  "file": "/workspace/repository/strategies/aave/backtest.yaml",
+  "line": 17,
+  "message": "hypothetical fund has no author account",
+  "ready": false,
+  "remedy": "Correct the indicated field and run check again.",
+  "stages": [
+    {
+      "message": "",
+      "stage": "configuration",
+      "status": "passed"
+    },
+    {
+      "message": "hypothetical fund has no author account",
+      "stage": "backtest_configuration",
+      "status": "failed"
+    },
+    {
+      "message": "Stopped after the failed stage.",
+      "stage": "sandbox",
+      "status": "not_checked"
+    },
+    {
+      "message": "Stopped after the failed stage.",
+      "stage": "resolution",
+      "status": "not_checked"
+    },
+    {
+      "message": "Stopped after the failed stage.",
+      "stage": "parameters",
+      "status": "not_checked"
+    },
+    {
+      "message": "Stopped after the failed stage.",
+      "stage": "strategy",
+      "status": "not_checked"
+    },
+    {
+      "message": "Stopped after the failed stage.",
+      "stage": "capabilities",
+      "status": "not_checked"
+    },
+    {
+      "message": "Stopped after the failed stage.",
+      "stage": "data_dependencies",
+      "status": "not_checked"
+    },
+    {
+      "message": "Stopped after the failed stage.",
+      "stage": "online_admission",
+      "status": "not_checked"
+    }
+  ],
+  "valid": false
+}

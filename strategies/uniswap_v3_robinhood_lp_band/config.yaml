@@ -1,0 +1,46 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/uniswap_v3_robinhood_lp_band.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    position:
+      market: pool
+      account: fund
+      band:
+        lower: -200120
+        upper: -196120
+        width_bps: 500
+      capital:
+        asset: eip155:4663/erc20:0x5fc5360d0400a0fd4f2af552add042d716f1d168
+        quantity: '5'
+      entry_swap_bps: 5000
+      hold_seconds: 300s
+      slippage_bps: 100
+      deadline_seconds: 300
+      # 0 only because both pool currencies are ERC-20; a native-coin pool needs gas
+      # headroom here (README).
+      minimum_native_balance:
+        base_units: 0
+  gas:
+    # Example Robinhood Chain amounts; size them from the live gas price.
+    # Entry takes 4 transactions and exit 5 (almanak check --production):
+    # exit_reserve = 5 fees, total_budget = exit_reserve + 4 entry + 20 later fees.
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:4663
+      max_transaction_fee:
+        base_units: 160000000000000
+      total_budget:
+        base_units: 4640000000000000
+      exit_reserve:
+        base_units: 800000000000000
+markets:
+  pool:
+    connector: uniswap_v3
+    chain: eip155:4663
+    pool: '0x69bfaf19c9f377bb306a89aed9f6b07e2c1a8d9a'
+accounts:
+  fund:
+    chain: eip155:4663

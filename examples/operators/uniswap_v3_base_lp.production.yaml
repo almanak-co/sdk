@@ -1,0 +1,42 @@
+# Operator execution context for a production run of strategies/uniswap_v3_base_lp. Provider
+# credentials stay in the selected --env-file. The account binding is a
+# placeholder: a production run requires reviewed bindings and signing files
+# outside strategy-readable paths. The payer ceilings equal the authored
+# strategy.gas policy.
+schema_version: operator-gateway-config-v1
+modes:
+- production
+networks:
+- chain: eip155:8453
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: fund
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:8453
+          environment: mainnet
+        address: '0x1111111111111111111111111111111111111111'
+production:
+  networks:
+  - chain: eip155:8453
+    max_observation_age_seconds: 120
+  payers:
+  - accounts:
+    - fund
+    max_gas_price_wei: 150000000
+    max_gas_limit: 1000000
+    max_transaction_fee:
+      asset: eip155:8453/slip44:60
+      amount: 160000000000000
+    total_budget:
+      asset: eip155:8453/slip44:60
+      amount: 1460000000000000
+    allow_replacement: false
+  signing:
+    key_file: /private/operator/keystores.json
+    password_file: /private/operator/keystore-password

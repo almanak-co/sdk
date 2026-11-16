@@ -1,0 +1,299 @@
+"""Trusted runtime client. No provider credentials, private keys or local fallback."""
+
+import json
+import threading
+import time
+from pathlib import Path
+from uuid import uuid4
+
+import httpx
+
+from almanak.connectors.composition import (
+    checkpoint_from_json,
+    configuration_from_json,
+    connector_for,
+)
+from almanak.gateway.auth import loopback_endpoint, read_token
+from almanak.gateway.ethereum import DataError
+from almanak.models import Model
+from almanak.strategy import StrategyDefinition
+
+# Creation generates and verifies Roles permissions inside one request. On a new workspace
+# or after a lost checkpoint that is a full history walk, which grows with the Safe's age.
+CREATE_TIMEOUT = 600.0
+# Coordinator requests the gateway answers without the fenced lease commit.
+UNFENCED = frozenset({"release", "teardown"})
+# Read-only requests whose overrun fails only the decision that asked, as a hold.
+TIMEOUT_HOLDS = frozenset({"prices"})
+# Requests that only read, so an overrun leaves nothing half done. It stays a gateway
+# failure, which never holds a decision, but is transient: the coordinator holds the whole
+# tick, committing nothing, and asks again, as after a transient provider read.
+READ_ONLY = frozenset({"configuration", "state", "observe", "audit", "receipt", "reconcile"})
+
+
+def _decode(model, value):
+    # Preserve Pydantic strict JSON semantics (JSON arrays represent typed tuples).
+    return model.model_validate_json(json.dumps(value))
+
+
+class GatewayClient:
+    def __init__(self, endpoint: str, token_file: Path):
+        self.endpoint = loopback_endpoint(endpoint)
+        self.token = read_token(token_file)
+        self.http = httpx.Client(timeout=60, trust_env=False)
+        self.coordinator: str | None = None
+        self.deployment_id: str | None = None
+        self.stopped = threading.Event()
+        self.heartbeat: threading.Thread | None = None
+        self.lease_error: Exception | None = None
+        # Start time of the latest lease-fenced request the gateway answered successfully.
+        self.lease_confirmed: float | None = None
+
+    def request(self, method: str, *, timeout: float | None = None, **fields):
+        body = {
+            key: value.model_dump(mode="json") if isinstance(value, Model) else value
+            for key, value in fields.items()
+        }
+        try:
+            response = self.http.post(
+                self.endpoint + "/" + method,
+                headers={"Authorization": "Bearer " + self.token},
+                json=body,
+                timeout=httpx.USE_CLIENT_DEFAULT if timeout is None else timeout,
+            )
+            result = response.json()
+        except httpx.TimeoutException:
+            if method in TIMEOUT_HOLDS:
+                # A read-only request the gateway is still answering: it retains what it
+                # reads, so the next decision finds it. Only this decision holds.
+                raise DataError(
+                    "timeout", f"{method}: gateway answer exceeded its budget"
+                ) from None
+            raise DataError(
+                "gateway_unavailable",
+                "gateway request failed; durable work is retained",
+                transient=method in READ_ONLY,
+            ) from None
+        except (httpx.HTTPError, ValueError):
+            raise DataError(
+                "gateway_unavailable", "gateway request failed; durable work is retained"
+            ) from None
+        if response.status_code == 503:
+            raise DataError(
+                "gateway_unavailable", "gateway temporarily unavailable; durable work is retained"
+            )
+        if response.status_code != 200:
+            refusal = DataError(
+                result.get("error", "gateway_error"),
+                result.get("message", "gateway refused request"),
+                transient=result.get("transient") is True,
+                details=result["details"] if isinstance(result.get("details"), dict) else None,
+            )
+            refusal.reverted = result.get("reverted") is True
+            raise refusal
+        return result["result"]
+
+    def scoped(self, method, **fields):
+        if self.lease_error is not None:
+            raise RuntimeError("gateway coordinator heartbeat failed; resume to recover")
+        started = time.monotonic()
+        result = self.request(
+            method, coordinator=self.coordinator, deployment_id=self.deployment_id, **fields
+        )
+        if method not in UNFENCED:
+            # The gateway extends the lease in the same commit as every fenced request it
+            # completes, so a success proves the lease runs until at least `started` plus
+            # its duration. That keeps the lease counted if a renewal fails transiently.
+            self.lease_confirmed = max(self.lease_confirmed or started, started)
+        return result
+
+    def configuration(self):
+        config = configuration_from_json(json.dumps(self.request("configuration")))
+        self.connector = connector_for(config)
+        return config
+
+    def load(self):
+        state = checkpoint_from_json(json.dumps(self.request("state")))
+        self.connector = connector_for(state.config)
+        if self.deployment_id is not None and self.deployment_id != state.deployment_id:
+            raise ValueError("gateway changed deployment identity")
+        return state
+
+    def create(self, config, strategy: StrategyDefinition | None):
+        # Creation uses server-provisioned configuration; callers cannot provision authority.
+        if config != self.configuration():
+            raise ValueError(
+                "configuration changed; gateway requires its provisioned configuration"
+            )
+
+        # An operator deployment sends no strategy; the gateway's own start decides
+        # whether it accepts that shape.
+        fields = {} if strategy is None else {"strategy": strategy}
+        # A create that outlives this wait still runs to completion in the gateway, and the
+        # journal's exclusive database creation refuses any second create.
+        state = checkpoint_from_json(
+            json.dumps(self.request("create", timeout=CREATE_TIMEOUT, **fields))
+        )
+        if config != state.config:
+            raise ValueError(
+                "configuration changed; gateway requires its provisioned configuration"
+            )
+
+    def generate_permissions(self, config, strategy: StrategyDefinition):
+        if config != self.configuration():
+            raise ValueError("permission configuration differs from the dedicated gateway")
+        self.connector = connector_for(config)
+        return _decode(
+            self.connector.permissions.manifest_type,
+            self.request("permissions-generate", strategy=strategy),
+        )
+
+    def verify_permissions(self, manifest):
+        return self.request("permissions-verify", manifest=manifest)
+
+    def acquire(self):
+        state = self.load()
+        self.deployment_id = state.deployment_id
+        self.coordinator = uuid4().hex
+        admitted_at = time.monotonic()
+        lease = self.scoped("acquire")
+
+        def renew():
+            period = lease["lease_seconds"] / 3
+            deadline = admitted_at + lease["lease_seconds"]
+            delay = period
+
+            def confirmed(deadline):
+                # Read every time: a fenced request can confirm the lease while a renewal waits.
+                if self.lease_confirmed is None:
+                    return deadline
+                return max(deadline, self.lease_confirmed + lease["lease_seconds"])
+
+            while not self.stopped.wait(delay):
+                started = time.monotonic()
+                deadline = confirmed(deadline)
+                if started >= deadline:
+                    self.lease_error = RuntimeError("coordinator lease renewal deadline elapsed")
+                    return
+                try:
+                    self.scoped("renew")
+                    deadline = started + lease["lease_seconds"]
+                    delay = period
+                except Exception as exc:
+                    # Retry only temporary unavailability for this same lease, never admission
+                    # under a new identity or signing/broadcasting an economic operation.
+                    if isinstance(exc, DataError) and exc.kind == "gateway_unavailable":
+                        deadline = confirmed(deadline)
+                        remaining = deadline - time.monotonic()
+                        if remaining > 0:
+                            delay = min(period / 2, remaining)
+                            continue
+                    self.lease_error = exc
+                    return
+
+        self.heartbeat = threading.Thread(target=renew, daemon=True)
+        self.heartbeat.start()
+
+    def close(self):
+        self.stopped.set()
+        if self.heartbeat is not None:
+            self.heartbeat.join(timeout=65)
+        if self.coordinator is not None:
+            try:
+                self.request(
+                    "release", coordinator=self.coordinator, deployment_id=self.deployment_id
+                )
+            except DataError:
+                pass
+        self.http.close()
+
+    def update(self, change, *, chain=None):
+        while True:
+            state = self.load()
+            updated = change(state)
+            if updated == state:
+                return state
+            updated = self.connector.codec.checkpoint.model_validate_json(updated.model_dump_json())
+            try:
+                return _decode(
+                    self.connector.codec.checkpoint,
+                    self.scoped(
+                        "update",
+                        before=state,
+                        after=updated,
+                        **({"chain": chain} if chain is not None else {}),
+                    ),
+                )
+            except DataError as exc:
+                if exc.kind != "conflict":
+                    raise
+
+    def teardown(self):
+        state = self.load()
+        return _decode(
+            self.connector.codec.checkpoint,
+            self.request("teardown", deployment_id=state.deployment_id),
+        )
+
+    def observe(self):
+        return tuple(
+            _decode(self.connector.codec.snapshot, item) for item in self.scoped("observe")
+        )
+
+    def prices(self, bindings, cutoff):
+        from almanak.gateway.strategy_prices import request_budget
+        from almanak.price_series import PriceSeries
+
+        if not bindings:
+            return ()
+        wire = [json.loads(binding.model_dump_json()) for binding in bindings]
+        result = self.scoped(
+            "prices",
+            price_bindings=wire,
+            cutoff=int(cutoff),
+            timeout=request_budget(bindings),
+        )
+        return tuple(_decode(PriceSeries, item) for item in result)
+
+    def audit_history(self, state):
+        self.scoped("audit")
+
+    def prepare(self, state, intent):
+        return _decode(
+            self.connector.codec.plan, self.scoped("plan", intent=intent, attempt_id=uuid4().hex)
+        )
+
+    def sign(self):
+        return _decode(self.connector.codec.pending, self.scoped("sign"))
+
+    def receipt(self, pending):
+        return self.scoped("receipt")
+
+    def broadcast(self, pending):
+        return self.scoped("broadcast")
+
+    def reconcile(self, pending, receipt):
+        return _decode(self.connector.codec.outcome, self.scoped("reconcile"))
+
+    def family(self, pending, action, index):
+        return _decode(
+            self.connector.codec.checkpoint,
+            self.scoped(
+                "family", family_id=pending.family.identity, candidate_index=index, action=action
+            ),
+        )
+
+    def request_reconcile(self):
+        result = self.scoped("request-reconcile")
+        return None if result is None else _decode(self.connector.codec.outcome, result)
+
+    def external_reconcile(self):
+        binding = self.connector.external_effects
+        if binding is None:
+            raise ValueError("connector has no external-effect binding")
+        result = self.scoped("external-reconcile")
+        return None if result is None else _decode(binding.page_type, result)
+
+    def request_cancel_plan(self):
+        result = self.scoped("request-cancel-plan", attempt_id=uuid4().hex)
+        return None if result is None else _decode(self.connector.codec.plan, result)

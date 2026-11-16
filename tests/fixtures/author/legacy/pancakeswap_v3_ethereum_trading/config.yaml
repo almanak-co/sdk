@@ -1,0 +1,85 @@
+# yaml-language-server: $schema=../../docs/schemas/harness.schema.json
+strategy:
+  connector: pancakeswap_v3
+  decision_interval: 5s
+  allocations:
+    position:
+      market: pool
+      account: fund
+      range: null
+      capital:
+        asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+        quantity: '0.1'
+      entry_swap_bps: 10000
+      maximum0:
+        asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+        quantity: '1000'
+      maximum1:
+        asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+        quantity: '2'
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 300
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance:
+        base_units: 0
+assets:
+  eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48:
+    decimals: 6
+  eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2:
+    decimals: 18
+  eip155:1/slip44:60:
+    decimals: 18
+markets:
+  pool:
+    contracts:
+      position_manager: '0x46a15b0b27311cedf172ab29e4f4766fbe7f4364'
+      quoter: '0xb048bbc1ee6b733fffcfb9e9cef7375518e25997'
+      router: '0x1b81d678ffb9c0263b24a97847620c99d213eb14'
+    pool:
+      chain:
+        chain_id: eip155:1
+        environment: mainnet
+      currency0: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+      currency1: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+      factory: '0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865'
+      fee: 500
+      kind: pancakeswap_v3
+      pool: '0x1ac1a8feaaea1900c4166deeed0c11cc10669d36'
+      tick_spacing: 10
+accounts:
+  fund:
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:1
+        environment: mainnet
+      provider:
+        api_key_env: ALCHEMY_API_KEY
+        kind: alchemy
+        network: eth-mainnet
+      block:
+        chain:
+          chain_id: eip155:1
+          environment: mainnet
+        hash: '0x40156074fd4e4536aa44d1a7f51e6a185585ebf1dd5b6dcc4069edc707f5f321'
+        number: 25924729
+        timestamp: 1788775055
+    funds:
+    - account: fund
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+          quantity: '0.1'
+        method: wrap_native
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:1/slip44:60
+        quantity: '1'
+      foundry_account_index: 491

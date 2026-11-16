@@ -1,1 +1,0 @@
-fix(execution): handle 0G native gas symbol in error path

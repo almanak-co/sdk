@@ -1,0 +1,68 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/optimism_aave_borrow_and_trade_v4.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '5'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.01'
+      collateral: true
+      minimum_health_factor: '2'
+      oracle: '0xd81eb3728a631871a7ebbad631b5f424909f0c77'
+      price_source: '0x13e3ee699d1909e989722e753853ae30b17e08c5'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      collateral: false
+      minimum_health_factor: '2'
+      oracle: '0xd81eb3728a631871a7ebbad631b5f424909f0c77'
+      price_source: '0x6379a975ef93ec2be87f56a02ccf8535dfade201'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      capital:
+        asset: eip155:10/erc20:0x0b2c639c533813f4aa9d7837caf62653d097ff85
+        quantity:
+          base_units: 2500000
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+      kind: trading
+markets:
+  collateral:
+    connector: aave_v3
+    chain: eip155:10
+    asset: eip155:10/erc20:0x4200000000000000000000000000000000000006
+  loan:
+    connector: aave_v3
+    chain: eip155:10
+    asset: eip155:10/erc20:0x0b2c639c533813f4aa9d7837caf62653d097ff85
+  pool:
+    connector: uniswap_v4
+    chain: eip155:10
+    currency0: eip155:10/erc20:0x0b2c639c533813f4aa9d7837caf62653d097ff85
+    currency1: eip155:10/erc20:0x4200000000000000000000000000000000000006
+    fee: 500
+    tick_spacing: 10
+    hooks: '0x0000000000000000000000000000000000000000'
+accounts:
+  fund:
+    chain: eip155:10
+inventory:
+- account: fund
+  balance:
+    asset: eip155:10/erc20:0x4200000000000000000000000000000000000006
+    quantity: '0.01'
+- account: fund
+  balance:
+    asset: eip155:10/erc20:0x0b2c639c533813f4aa9d7837caf62653d097ff85
+    quantity: '1'

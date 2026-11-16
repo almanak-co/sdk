@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/uniswap_v4_optimism_trading.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    trading:
+      market: trading_market
+      account: trading
+      capital:
+        asset: eip155:10/erc20:0x0b2c639c533813f4aa9d7837caf62653d097ff85
+        quantity: '10'
+      hold_seconds: 43200s
+      slippage_bps: 100
+      deadline_seconds: 300s
+      minimum_native_balance: '0.001'
+      kind: trading
+markets:
+  trading_market:
+    connector: uniswap_v4
+    chain: eip155:10
+    currency0: eip155:10/erc20:0x0b2c639c533813f4aa9d7837caf62653d097ff85
+    currency1: eip155:10/erc20:0x4200000000000000000000000000000000000006
+    fee: 500
+    tick_spacing: 10
+    hooks: '0x0000000000000000000000000000000000000000'
+accounts:
+  trading:
+    chain: eip155:10

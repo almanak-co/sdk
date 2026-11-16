@@ -1,0 +1,235 @@
+# yaml-language-server: $schema=../../docs/schemas/harness.schema.json
+strategy:
+  connector: aave_v4
+  decision_interval: 5s
+  allocations:
+    ethereum_collateral:
+      market: ethereum_collateral_market
+      account: ethereum_fund
+      amount: '0.01'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0.001'
+      hold_seconds: 43200s
+    avalanche_collateral:
+      market: avalanche_collateral_market
+      account: avalanche_fund
+      amount: '10'
+      native_asset: eip155:43114/slip44:9005
+      minimum_native_balance: '0.001'
+      hold_seconds: 43200s
+  debts:
+    ethereum_debt:
+      market: ethereum_debt_market
+      account: ethereum_fund
+      amount: '5'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0.001'
+      hold_seconds: 43200s
+      minimum_health_factor: '2'
+      collateral:
+      - ethereum_collateral
+      oracle: '0x99b2b6cea9c3d2fd8f4d90f86741c44b212a6127'
+      collateral_price_sources:
+      - '0x5424384b256154046e9667ddfaaa5e550145215e'
+      debt_price_source: '0x3f73f03aa83b2a48ed27e964ed0fdb590332095b'
+    avalanche_debt:
+      market: avalanche_debt_market
+      account: avalanche_fund
+      amount: '5'
+      native_asset: eip155:43114/slip44:9005
+      minimum_native_balance: '0.001'
+      hold_seconds: 43200s
+      minimum_health_factor: '2'
+      collateral:
+      - avalanche_collateral
+      oracle: '0x84b50b131a82da689c0205c00d603c1c92a5f8a4'
+      collateral_price_sources:
+      - '0x0a77230d17318075983913bc2145db16c7366156'
+      debt_price_source: '0xb0d7a8bbdcdb1203850b742bb4d7f57a1f1c8483'
+assets:
+  eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48:
+    decimals: 6
+  eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2:
+    decimals: 18
+  eip155:1/slip44:60:
+    decimals: 18
+  eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7:
+    decimals: 18
+  eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e:
+    decimals: 6
+  eip155:43114/slip44:9005:
+    decimals: 18
+markets:
+  ethereum_collateral_market:
+    kind: aave_v4
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+    spoke: '0x94e7a5dcbe816e498b89ab752661904e2f56c485'
+    reserve_id: 0
+    hub: '0xcca852bc40e560adc3b1cc58ca5b55638ce826c9'
+    asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+  avalanche_collateral_market:
+    kind: aave_v4
+    chain:
+      chain_id: eip155:43114
+      environment: mainnet
+    spoke: '0x435272ceff93a1e657e8abfdf0a13e95900a3a56'
+    reserve_id: 0
+    hub: '0xd07369fae4a5bb13c9ce446b052c7867b1abdf6e'
+    asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+  ethereum_debt_market:
+    kind: aave_v4
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+    spoke: '0x94e7a5dcbe816e498b89ab752661904e2f56c485'
+    reserve_id: 7
+    hub: '0xcca852bc40e560adc3b1cc58ca5b55638ce826c9'
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+  avalanche_debt_market:
+    kind: aave_v4
+    chain:
+      chain_id: eip155:43114
+      environment: mainnet
+    spoke: '0x435272ceff93a1e657e8abfdf0a13e95900a3a56'
+    reserve_id: 2
+    hub: '0xd07369fae4a5bb13c9ce446b052c7867b1abdf6e'
+    asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+accounts:
+  ethereum_fund:
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+  avalanche_fund:
+    chain:
+      chain_id: eip155:43114
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:1
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: eth-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      block:
+        chain:
+          chain_id: eip155:1
+          environment: mainnet
+        number: 25908472
+        hash: '0xebd2f4a6612e094a8db8d1ab770970f7060bdaf3a18a49e4274f8935d5348ea0'
+        timestamp: 1788579287
+    - chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      provider:
+        kind: rpc_url
+        url_env: AVALANCHE_RPC_URL
+      block:
+        chain:
+          chain_id: eip155:43114
+          environment: mainnet
+        number: 94581397
+        hash: '0xabb1529862e4b99fdbd08e9c056edc97b00441407043ba18d45b0d1cb7c6297a'
+        timestamp: 1788667442
+    funds:
+    - account: ethereum_fund
+      operator: ethereum_operator
+      assets:
+      - balance:
+          asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+          quantity: '0.01'
+        method: wrap_native
+      - balance:
+          asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+          quantity: '1'
+        method: local_storage
+    - account: avalanche_fund
+      operator: avalanche_operator
+      assets:
+      - balance:
+          asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+          quantity: '10'
+        method: wrap_native
+      - balance:
+          asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+          quantity: '1'
+        method: local_storage
+    operators:
+    - name: ethereum_operator
+      native_balance:
+        asset: eip155:1/slip44:60
+        quantity: '1'
+      foundry_account_index: 90
+    - name: avalanche_operator
+      native_balance:
+        asset: eip155:43114/slip44:9005
+        quantity: '1'
+      foundry_account_index: 90
+  production:
+    networks:
+    - chain:
+        chain_id: eip155:1
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: eth-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      max_observation_age_seconds: 180
+    - chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      provider:
+        kind: rpc_url
+        url_env: AVALANCHE_RPC_URL
+      max_observation_age_seconds: 180
+    payers:
+      budget_0:
+        accounts:
+        - ethereum_fund
+        asset: eip155:1/slip44:60
+        source: network_rpc_fee_history
+        reward_percentile: 50
+        base_fee_multiplier_bps: 20000
+        max_gas_price_wei: 1000000000000
+        max_gas_limit: 2000000
+        max_transaction_fee:
+          asset: eip155:1/slip44:60
+          quantity:
+            base_units: 200000000000000000
+        total_budget:
+          asset: eip155:1/slip44:60
+          quantity:
+            base_units: 1000000000000000000
+        exit_reserve:
+          asset: eip155:1/slip44:60
+          quantity:
+            base_units: 200000000000000000
+        gas_limit_buffer_bps: 2500
+        base_fee_basis: next_block
+      budget_1:
+        accounts:
+        - avalanche_fund
+        asset: eip155:43114/slip44:9005
+        source: network_rpc_fee_history
+        reward_percentile: 50
+        base_fee_multiplier_bps: 20000
+        max_gas_price_wei: 1000000000000
+        max_gas_limit: 2000000
+        max_transaction_fee:
+          asset: eip155:43114/slip44:9005
+          quantity:
+            base_units: 200000000000000000
+        total_budget:
+          asset: eip155:43114/slip44:9005
+          quantity:
+            base_units: 1000000000000000000
+        exit_reserve:
+          asset: eip155:43114/slip44:9005
+          quantity:
+            base_units: 200000000000000000
+        gas_limit_buffer_bps: 2500
+        base_fee_basis: observed_block

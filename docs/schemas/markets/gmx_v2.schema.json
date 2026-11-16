@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GMX V2 market selection",
+  "description": "The author names the GM market token; the index, long, short and wrapped-native assets and the sixteen deployment roles are read and verified.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "connector",
+    "chain",
+    "market"
+  ],
+  "properties": {
+    "connector": {
+      "const": "gmx_v2"
+    },
+    "chain": {
+      "type": "string",
+      "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$"
+    },
+    "market": {
+      "$ref": "#/$defs/AssetType"
+    },
+    "assertions": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "index": {
+              "$ref": "#/$defs/AssetType"
+            },
+            "long": {
+              "$ref": "#/$defs/AssetType"
+            },
+            "short": {
+              "$ref": "#/$defs/AssetType"
+            },
+            "index_decimals": {
+              "$ref": "#/$defs/Decimals"
+            },
+            "long_decimals": {
+              "$ref": "#/$defs/Decimals"
+            },
+            "short_decimals": {
+              "$ref": "#/$defs/Decimals"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "AssetType": {
+      "type": "string",
+      "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+    },
+    "Decimals": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    }
+  }
+}

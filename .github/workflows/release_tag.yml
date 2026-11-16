@@ -1,0 +1,114 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+# Stable releases only. `gh release create --prerelease` also fires this
+# trigger; the guard prevents duplicate publishes next to release_candidate.yml.
+
+jobs:
+  guard:
+    runs-on: ubuntu-22.04
+    if: ${{ !github.event.release.prerelease }}
+    steps:
+      # A missing token must stop the release before the gates spend an hour
+      # building distributions that cannot be uploaded.
+      - name: Require the PyPI token
+        env:
+          HAS_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN != '' }}
+        run: |
+          [ "$HAS_PYPI_TOKEN" = true ] || { echo "::error::PYPI_API_TOKEN is not configured"; exit 1; }
+          echo "Stable release; proceeding"
+
+  extract_version:
+    needs: [guard]
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG#v}"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::release tag must be vX.Y.Z: $TAG"; exit 1; }
+          # pyproject.toml is the single source of truth; the tag must agree.
+          PROJECT_VERSION=$(uv version --short)
+          if [ "$VERSION" != "$PROJECT_VERSION" ]; then
+            echo "::error::tag version $VERSION does not match pyproject.toml version $PROJECT_VERSION"
+            exit 1
+          fi
+          echo "Publishing release: ${VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  lint:
+    needs: [guard]
+    uses: ./.github/workflows/template_lint.yml
+
+  typecheck:
+    needs: [guard]
+    uses: ./.github/workflows/template_typecheck.yml
+
+  test_pytest:
+    needs: [guard]
+    uses: ./.github/workflows/template_pytest.yml
+    with:
+      # No CRAP gate runs on release tags, so the shard coverage has no consumer.
+      coverage: false
+
+  test_linux:
+    needs: [guard]
+    uses: ./.github/workflows/template_platform_test.yml
+    with:
+      os: ubuntu-22.04
+
+  test_macos:
+    needs: [guard]
+    uses: ./.github/workflows/template_platform_test.yml
+    with:
+      os: macos-15
+      advisory: true
+
+  test_strat:
+    needs: [guard]
+    uses: ./.github/workflows/template_strat_test.yml
+
+  docs:
+    needs: [guard]
+    uses: ./.github/workflows/template_docs.yml
+
+  build_dist:
+    uses: ./.github/workflows/template_build_dist.yml
+    needs: [
+      extract_version,
+      lint,
+      typecheck,
+      test_linux,
+      test_macos,
+      test_strat,
+      test_pytest,
+      docs,
+    ]
+    with:
+      version_override: ${{ needs.extract_version.outputs.version }}
+    secrets:
+      ALMANAK_CODE_TOKEN: ${{ secrets.ALMANAK_CODE_TOKEN }}
+
+  # A PyPI version can never be uploaded twice, so this runs once every gate
+  # passed. It uploads the verified distributions build_dist built (artifact
+  # sdk-dist); nothing is rebuilt.
+  publish_pypi:
+    uses: ./.github/workflows/template_publish_pypi.yml
+    needs: [extract_version, build_dist]
+    with:
+      version: ${{ needs.extract_version.outputs.version }}
+    secrets:
+      PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}

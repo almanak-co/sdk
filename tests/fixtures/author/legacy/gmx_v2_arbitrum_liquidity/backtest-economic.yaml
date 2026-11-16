@@ -1,0 +1,78 @@
+mode: economic
+window:
+  start: '2026-09-08T00:36:52+00:00'
+  end: '2026-09-08T00:40:52+00:00'
+  end_policy: teardown
+  cleanup: 60s
+inventory:
+  funds:
+    fund:
+      payer: operator
+      balances:
+      - asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+        quantity: '0.5'
+      - asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+        quantity: '200'
+      - asset: eip155:42161/erc20:0x70d95587d40a2caf56bd97485ab3eec10bee6336
+        quantity: '0'
+      - asset: eip155:42161/slip44:60
+        quantity: '0'
+  payers:
+    operator:
+      chain:
+        chain_id: eip155:42161
+        environment: mainnet
+      balances:
+      - asset: eip155:42161/slip44:60
+        quantity: '1'
+execution:
+  latency: 1s
+  models:
+    swap_model: prepared_integer_market
+    liquidity_model: fixed_external_gm_valuation
+    position_model: null
+    keeper:
+      model: published_opportunity_fixed_native_payment
+      minimum_latency_seconds: 1
+      payments:
+      - chain: eip155:42161
+        payment:
+          asset: eip155:42161/slip44:60
+          amount: 100000000000000
+data:
+  history:
+  - chain:
+      chain_id: eip155:42161
+      environment: mainnet
+    provider:
+      kind: alchemy
+      network: arb-mainnet
+      api_key_env: ALCHEMY_API_KEY
+    collection:
+      max_in_flight: 4
+      batch_size: 32
+      requests_per_second: null
+      max_retries: 3
+  source: gmx_published_signed_reports
+  publications:
+  - allocation: Main
+    source:
+      handler: '0xa5d2d45228ee2e3a18ab122b2ce84997d008f4eb'
+      oracle: '0x26c02f221e8db5a821e12347c7ea8a6b6e10842f'
+      request_kind: order
+      calldata_suffix:
+        # Measured suffix from the retained Arbitrum packet
+        # evidence/2026-09-09-gmx-prepared/arbitrum-range-settings.json.
+        prefix: '0xdeadbeef00010203'
+        length: 15
+  max_age_seconds: 60s
+  maximum_risk_blocks: 1500
+  maximum_report_age_seconds: 60
+  publication_limits:
+    page_blocks: 500
+    maximum_blocks: 1500
+    maximum_pages: 3
+    maximum_logs: 10000
+    maximum_transactions: 500
+costs:
+  kind: excluded

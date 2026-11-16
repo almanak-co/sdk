@@ -1,0 +1,62 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Explicit production example. The operator context is
+# examples/operators/aave_v4_avalanche_borrowing.production.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What each debt borrows, in its asset's units.
+    borrow_quantity: '5'
+    # The debt unwinds below minimum_health_factor plus this margin.
+    unwind_margin: '0.25'
+  allocations:
+    avalanche_collateral:
+      market: avalanche_collateral_market
+      account: avalanche_fund
+      capital: '10'
+      minimum_native_balance: '0.001'
+      hold_seconds: 43200s
+  debts:
+    avalanche_debt:
+      market: avalanche_debt_market
+      account: avalanche_fund
+      minimum_native_balance: '0.001'
+      hold_seconds: 43200s
+      minimum_health_factor: '2'
+      collateral:
+      - avalanche_collateral
+      oracle: '0x84b50b131a82da689c0205c00d603c1c92a5f8a4'
+      collateral_price_sources:
+      - '0x0a77230d17318075983913bc2145db16c7366156'
+      debt_price_source: '0xb0d7a8bbdcdb1203850b742bb4d7f57a1f1c8483'
+  gas:
+    budget_0:
+      accounts:
+      - avalanche_fund
+      chain: eip155:43114
+      source: network_rpc_fee_history
+      base_fee_basis: observed_block
+      reward_percentile: 50
+      base_fee_multiplier_bps: 20000
+      max_gas_price_wei: 1000000000000
+      max_gas_limit: 2000000
+      gas_limit_buffer_bps: 2500
+      max_transaction_fee:
+        base_units: 200000000000000000
+      total_budget:
+        base_units: 1000000000000000000
+      exit_reserve:
+        base_units: 200000000000000000
+markets:
+  avalanche_collateral_market:
+    connector: aave_v4
+    chain: eip155:43114
+    spoke: '0x435272ceff93a1e657e8abfdf0a13e95900a3a56'
+    reserve_id: 0
+  avalanche_debt_market:
+    connector: aave_v4
+    chain: eip155:43114
+    spoke: '0x435272ceff93a1e657e8abfdf0a13e95900a3a56'
+    reserve_id: 2
+accounts:
+  avalanche_fund:
+    chain: eip155:43114

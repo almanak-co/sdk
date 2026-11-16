@@ -1,0 +1,67 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/ethereum_aave_v4_borrow_and_trade.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What each debt borrows, in its asset's units.
+    borrow_quantity: '5'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.01'
+      minimum_native_balance: '0.001'
+    trade:
+      market: pool
+      account: fund
+      capital:
+        asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+        quantity: '2.5'
+      slippage_bps: 100
+      deadline_seconds: 300s
+      minimum_native_balance: '0.001'
+      kind: trading
+  debts:
+    loan:
+      market: loan
+      account: fund
+      minimum_native_balance: '0.001'
+      minimum_health_factor: '2'
+      collateral:
+      - collateral
+      oracle: '0x99b2b6cea9c3d2fd8f4d90f86741c44b212a6127'
+      collateral_price_sources:
+      - '0x5424384b256154046e9667ddfaaa5e550145215e'
+      debt_price_source: '0x3f73f03aa83b2a48ed27e964ed0fdb590332095b'
+markets:
+  collateral:
+    connector: aave_v4
+    chain: eip155:1
+    spoke: '0x94e7a5dcbe816e498b89ab752661904e2f56c485'
+    reserve_id: 0
+  loan:
+    connector: aave_v4
+    chain: eip155:1
+    spoke: '0x94e7a5dcbe816e498b89ab752661904e2f56c485'
+    reserve_id: 7
+  pool:
+    connector: uniswap_v4
+    chain: eip155:1
+    currency0: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+    currency1: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+    fee: 500
+    tick_spacing: 10
+    hooks: '0x0000000000000000000000000000000000000000'
+accounts:
+  fund:
+    chain: eip155:1
+inventory:
+- account: fund
+  balance:
+    asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+    quantity: '0.01'
+- account: fund
+  balance:
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+    quantity: '1'

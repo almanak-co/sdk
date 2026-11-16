@@ -1,0 +1,94 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/aave_v4_weth_supply.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What each debt borrows, in its asset's units.
+    borrow_quantity: '5'
+    # The debt unwinds below minimum_health_factor plus this margin.
+    unwind_margin: '0.25'
+  allocations:
+    main_weth:
+      market: main_weth_market
+      account: lending_0
+      capital: '0.01'
+      minimum_native_balance: '0.001'
+      hold_seconds: 300s
+    bluechip_weth:
+      market: bluechip_weth_market
+      account: lending_0
+      capital: '0.01'
+      minimum_native_balance: '0.001'
+    main_weth_1:
+      market: main_weth_market
+      account: lending_1
+      capital: '0.01'
+      minimum_native_balance: '0.001'
+      hold_seconds: 300s
+    bluechip_weth_1:
+      market: bluechip_weth_market
+      account: lending_1
+      capital: '0.01'
+      minimum_native_balance: '0.001'
+  debts:
+    main_usdc:
+      market: main_usdc_market
+      account: lending_0
+      minimum_native_balance: '0.001'
+      hold_seconds: 300s
+      minimum_health_factor: '2'
+      collateral:
+      - main_weth
+      oracle: '0x99b2b6cea9c3d2fd8f4d90f86741c44b212a6127'
+      collateral_price_sources:
+      - '0x5424384b256154046e9667ddfaaa5e550145215e'
+      debt_price_source: '0x3f73f03aa83b2a48ed27e964ed0fdb590332095b'
+    main_usdc_1:
+      market: main_usdc_market
+      account: lending_1
+      minimum_native_balance: '0.001'
+      hold_seconds: 300s
+      minimum_health_factor: '2'
+      collateral:
+      - main_weth_1
+      oracle: '0x99b2b6cea9c3d2fd8f4d90f86741c44b212a6127'
+      collateral_price_sources:
+      - '0x5424384b256154046e9667ddfaaa5e550145215e'
+      debt_price_source: '0x3f73f03aa83b2a48ed27e964ed0fdb590332095b'
+  gas:
+    # Example Ethereum amounts; size them from the live gas price.
+    # Entry takes 6 transactions and exit 12 (almanak check --production):
+    # exit_reserve = 12 fees, total_budget = exit_reserve + 6 entry + 20 later fees.
+    gas_payer:
+      accounts:
+      - lending_0
+      - lending_1
+      chain: eip155:1
+      max_transaction_fee:
+        base_units: 4100000000000000
+      total_budget:
+        base_units: 155800000000000000
+      exit_reserve:
+        base_units: 49200000000000000
+markets:
+  main_weth_market:
+    connector: aave_v4
+    chain: eip155:1
+    spoke: '0x94e7a5dcbe816e498b89ab752661904e2f56c485'
+    reserve_id: 0
+  bluechip_weth_market:
+    connector: aave_v4
+    chain: eip155:1
+    spoke: '0x973a023a77420ba610f06b3858ad991df6d85a08'
+    reserve_id: 0
+  main_usdc_market:
+    connector: aave_v4
+    chain: eip155:1
+    spoke: '0x94e7a5dcbe816e498b89ab752661904e2f56c485'
+    reserve_id: 7
+accounts:
+  lending_0:
+    chain: eip155:1
+  lending_1:
+    chain: eip155:1

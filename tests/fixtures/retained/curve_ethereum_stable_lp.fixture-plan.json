@@ -1,0 +1,101 @@
+{
+  "schema_version": "anvil-fixture-plan-v1",
+  "authority": "unprovisioned",
+  "context_digest": "3250eac95aae6dfdd1420ea60db87eea843066f4b0d357a9f263796295cbe8fe",
+  "operator_digest": "86a4094bd926580a6172f2929fb72f742201472bb9ea15096dda48b5f50ae957",
+  "fixture_digest": "1a390bb0086dd404b2eed58179a555b469f3dc09f6ea3f46ac37f95251584118",
+  "anchors": {
+    "context_digest": "3250eac95aae6dfdd1420ea60db87eea843066f4b0d357a9f263796295cbe8fe",
+    "checkpoints": [
+      {
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        },
+        "reference": "0x783313acbaec87be0f17b177869bda557bb634e4c810d17a072c55521937e6ad",
+        "timestamp": 1788809927,
+        "height": 25927618
+      }
+    ]
+  },
+  "forks": [
+    {
+      "chain": {
+        "chain_id": "eip155:1",
+        "environment": "mainnet"
+      },
+      "provider": {
+        "kind": "alchemy",
+        "network": "eth-mainnet",
+        "api_key_env": "ALCHEMY_API_KEY"
+      },
+      "block": {
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        },
+        "number": 25927618,
+        "hash": "0x783313acbaec87be0f17b177869bda557bb634e4c810d17a072c55521937e6ad",
+        "timestamp": 1788809927
+      }
+    }
+  ],
+  "funds": [
+    {
+      "account": "proportional",
+      "operator": "operator",
+      "assets": [
+        {
+          "balance": {
+            "asset": "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "amount": 100000000
+          },
+          "method": "local_storage"
+        }
+      ]
+    },
+    {
+      "account": "single_coin",
+      "operator": "operator",
+      "assets": [
+        {
+          "balance": {
+            "asset": "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "amount": 100000000
+          },
+          "method": "local_storage"
+        }
+      ]
+    }
+  ],
+  "operators": [
+    {
+      "name": "operator",
+      "native_balance": {
+        "asset": "eip155:1/slip44:60",
+        "amount": 1000000000000000000
+      },
+      "foundry_account_index": 0
+    }
+  ],
+  "keys": [
+    {
+      "chain": "eip155:1",
+      "role": "operator",
+      "name": "operator",
+      "foundry_account_index": 0
+    },
+    {
+      "chain": "eip155:1",
+      "role": "owner",
+      "name": "proportional",
+      "foundry_account_index": 1000000000
+    },
+    {
+      "chain": "eip155:1",
+      "role": "owner",
+      "name": "single_coin",
+      "foundry_account_index": 1000000001
+    }
+  ]
+}

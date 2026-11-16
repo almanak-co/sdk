@@ -1,0 +1,932 @@
+{
+ "base": "16de62e074e26a808173fdfc9128c4e4a1dc0236",
+ "pairs": [
+  [
+   "    if needs_emergency_exit(context):\n        return context.decision(intent=close(context), memory=memory.updated(exiting=True))\n    if None in (context.observation(\"collateral\"), context.observation(\"loan\")):\n        return context.decision()\n    if memory.phase < 4 or context.teardown:\n        return context.decision(intent=action(context))\n    return context.decision()\n\n",
+   "    if needs_emergency_exit(context):\n        intent = close(context)\n        return context.decision(\n            intent=intent, memory=memory.updated(exiting=True), reason=unwind_reason(memory, intent)\n        )\n    if None in (context.observation(\"collateral\"), context.observation(\"loan\")):\n        return context.decision(reason=\"Waiting for lending position data\")\n    if memory.phase < 4 or context.teardown:\n        intent = action(context)\n        return context.decision(intent=intent, reason=unwind_reason(memory, intent))\n    return context.decision(reason=\"Supplied and borrowed; holding until the strategy stops\")\n\n\ndef unwind_reason(memory, intent):\n    if intent is None:\n        return \"Nothing left to unwind\"\n    return \"Unwinding after a failed step or an outside event\" if memory.exiting else None\n\n"
+  ],
+  [
+   "\ndef stalled(owed) -> str:\n    \"\"\"Why the unwind holds with debt open (empty when it does not), so it is never silent.\"\"\"\n",
+   "\ndef stalled(loan, owed) -> str:\n    \"\"\"Why the unwind holds with debt open (empty when it does not), so it is never silent.\"\"\"\n"
+  ],
+  [
+   "        return \"\"\n    return (\n        f\"The unwind holds with {owed} loan base units of debt the fund cannot repay: send \"\n        \"the loan asset to the fund until it holds the debt and the next decision repays it \"\n        \"in full.\"\n    )\n",
+   "        return \"\"\n    amount = Decimal(owed).scaleb(-loan.position.reserve.asset.decimals).normalize()\n    return (\n        f\"Unwind stuck: {amount:f} of the borrowed asset is still owed and the fund can't \"\n        \"repay it. Send that much to the fund to finish repaying.\"\n    )\n"
+  ],
+  [
+   "    if None in (context.observation(\"collateral\"), context.observation(\"loan\")):\n        return context.decision()\n    if context.teardown or memory.unwinding:\n        intent = close(context)\n        owed = context.observation(\"loan\").position.debt_assets if intent is None else 0\n        return context.decision(\n            intent, memory=memory.updated(unwinding=True, shortfall=stalled(owed))\n        )\n    return context.decision(manage(context))\n\n",
+   "    if None in (context.observation(\"collateral\"), context.observation(\"loan\")):\n        return context.decision(reason=\"Waiting for lending position data\")\n    if context.teardown or memory.unwinding:\n        intent = close(context)\n        loan = context.observation(\"loan\")\n        owed = loan.position.debt_assets if intent is None else 0\n        shortfall = stalled(loan, owed)\n        if intent is None:\n            reason = shortfall or \"Repaid and withdrawn; nothing left to do\"\n        elif memory.unwinding:\n            reason = \"Unwinding after a failed step or an outside event\"\n        else:\n            reason = None\n        return context.decision(\n            intent, memory=memory.updated(unwinding=True, shortfall=shortfall), reason=reason\n        )\n    intent = manage(context)\n    return context.decision(intent, reason=health_reason(context, intent))\n\n\ndef health_reason(context, intent):\n    \"\"\"Where the health factor sits against the borrow and repay levels.\"\"\"\n    collateral, loan = context.observation(\"collateral\"), context.observation(\"loan\")\n    if not collateral.position.supplied_assets and not loan.position.debt_assets:\n        return None  # the opening supply explains itself\n    risk = loan.position.risk\n    if risk is None or loan.position.reserve.oracle is None:\n        return \"Waiting for health factor data\"\n    params = context.config.parameters\n    health = Decimal(risk.health_factor_wad) / WAD\n    borrow, repay = f\"{params.borrow_health_factor:g}\", f\"{params.repay_health_factor:g}\"\n    target = f\"{params.target_health_factor:g}\"\n    if risk.health_factor_wad > wad(params.borrow_health_factor):\n        if not loan.position.debt_assets:\n            return f\"No debt yet; borrowing to health {target}\" if intent else \"No debt to manage\"\n        if intent:\n            return f\"Health {health:.2f}, above {borrow}; borrowing more to bring it to {target}\"\n        return f\"Health {health:.2f}, above {borrow}, but the extra borrow rounds to zero\"\n    if risk.health_factor_wad < wad(params.repay_health_factor):\n        if intent:\n            return f\"Health fell to {health:.2f}, below {repay}; repaying to {target}\"\n        return f\"Health {health:.2f}, below {repay}, but there is nothing to repay\"\n    return f\"Health {health:.2f}, inside the {repay} to {borrow} band\"\n\n"
+  ],
+  [
+   "    if None in (context.observation(\"collateral\"), context.observation(\"loan\")):\n        return context.decision()\n    if context.teardown:\n        return context.decision(intent=close(context))\n    if not current.supplied:\n",
+   "    if None in (context.observation(\"collateral\"), context.observation(\"loan\")):\n        return context.decision(reason=\"Waiting for lending position data\")\n    if context.teardown:\n        intent = close(context)\n        return context.decision(\n            intent=intent, reason=None if intent else \"Repaid and withdrawn; nothing left to do\"\n        )\n    if not current.supplied:\n"
+  ],
+  [
+   "    if ratio is None:\n        return context.decision()  # a short, stale or undefined window decides nothing\n    if not current.borrowed and ratio > knobs.borrow_above:\n        return context.decision(\n            intent=context.actions.borrow(\"loan\", borrow_amount(context.config))\n        )\n    if current.borrowed and ratio < knobs.repay_below:\n        return context.decision(intent=context.actions.repay(\"loan\"))\n    return context.decision()\n\n",
+   "    if ratio is None:\n        # A short, stale or undefined window decides nothing.\n        return context.decision(reason=\"Waiting for a complete WETH price history\")\n    trend = trend_text(ratio, knobs.period)\n    above, below = f\"{(knobs.borrow_above - 1) * 100:.3g}%\", f\"{(1 - knobs.repay_below) * 100:.3g}%\"\n    if not current.borrowed and ratio > knobs.borrow_above:\n        return context.decision(\n            intent=context.actions.borrow(\"loan\", borrow_amount(context.config)),\n            reason=f\"{trend}; borrowing above {above}\",\n        )\n    if current.borrowed and ratio < knobs.repay_below:\n        return context.decision(\n            intent=context.actions.repay(\"loan\"), reason=f\"{trend}; repaying below {below}\"\n        )\n    if current.borrowed:\n        return context.decision(reason=f\"{trend}; keeping the loan until {below} below\")\n    return context.decision(reason=f\"{trend}; borrowing starts {above} above\")\n\n\ndef trend_text(ratio, period):\n    side = \"above\" if ratio >= 1 else \"below\"\n    return f\"WETH {abs(ratio - 1) * 100:.1f}% {side} its {period}-hour average\"\n\n"
+  ],
+  [
+   "\nfrom typing import cast\n",
+   "\nfrom decimal import Decimal\nfrom typing import cast\n"
+  ],
+  [
+   "            return scoped_decision(\n                context, memory=context.memory, intent=context.actions.repay(debt.name)\n            )\n",
+   "            return scoped_decision(\n                context,\n                memory=context.memory,\n                intent=context.actions.repay(debt.name),\n                reason=repay_reason(context, debt, observed),\n            )\n"
+  ],
+  [
+   "            )\n    return scoped_decision(context, memory=context.memory)\n\n",
+   "            )\n    return scoped_decision(\n        context, memory=context.memory, reason=hold_reason(context, observations, owned)\n    )\n\n"
+  ],
+  [
+   "    return debt.minimum_health_factor + int(config.parameters.unwind_margin.scaleb(18))\n\n",
+   "    return debt.minimum_health_factor + int(config.parameters.unwind_margin.scaleb(18))\n\n\ndef health_text(context, debt, observed):\n    \"\"\"The debt's health factor against its unwind level, or None without debt.\"\"\"\n    if observed.health_factor is None or not observed.position.total_debt:\n        return None\n    health = Decimal(observed.health_factor).scaleb(-18)\n    trigger = Decimal(unwind_trigger(context.config, debt)).scaleb(-18)\n    side = \"below\" if observed.health_factor < unwind_trigger(context.config, debt) else \"above\"\n    return f\"Health {health:.2f}, {side} the {trigger:.2f} unwind level\"\n\n\ndef hold_reason(context, observations, owned):\n    if state(context).supplied_at and not any(owned.values()):\n        return \"Withdrawn; nothing left to do\"\n    for debt in context.config.debts:\n        if debt.name in observations:\n            health = health_text(context, debt, observations[debt.name])\n            if health is not None:\n                return f\"{health}; holding\"\n    return \"Supplied; holding until the hold time ends or the strategy stops\"\n\n\ndef repay_reason(context, debt, observed):\n    \"\"\"Only a health-triggered repay says why; teardown and hold-time repays are routine.\"\"\"\n    if context.teardown:\n        return None\n    health = health_text(context, debt, observed)\n    if health is None or observed.health_factor >= unwind_trigger(context.config, debt):\n        return None\n    return f\"{health}; repaying\"\n\n"
+  ],
+  [
+   "        ):\n            return context.decision(intent=context.actions.repay(debt.name))\n    for allocation in context.config.allocations:\n",
+   "        ):\n            return context.decision(\n                intent=context.actions.repay(debt.name),\n                reason=repay_reason(context, debt, observed),\n            )\n    for allocation in context.config.allocations:\n"
+  ],
+  [
+   "            )\n    return context.decision()\n\n",
+   "            )\n    return context.decision(reason=hold_reason(context, observations, owned))\n\n"
+  ],
+  [
+   "def decide(context: DecisionInput) -> Decision:\n    for item in context.observations:\n",
+   "def decide(context: DecisionInput) -> Decision:\n    holds = []\n    for item in context.observations:\n"
+  ],
+  [
+   "            return context.decision(intent=intent)\n    return context.decision()\n\n",
+   "            return context.decision(intent=intent)\n        holds.append(hold_reason(context, allocation, observed))\n    return context.decision(reason=\"; \".join(dict.fromkeys(holds)) or None)\n\n"
+  ],
+  [
+   "\ndef on_outcome(context: OutcomeInput) -> Memory:\n",
+   "\ndef hold_reason(context, allocation, observed):\n    started = state(context).minted_at.get(allocation.name)\n    if exit_due(context, allocation, observed, started) or observed.owned.position is None:\n        return \"Liquidity closed; nothing left to do\"\n    if allocation.hold_seconds is None:\n        return \"Liquidity in place; holding until the strategy stops\"\n    return \"Liquidity in place; closing when the hold time ends\"\n\n\ndef on_outcome(context: OutcomeInput) -> Memory:\n"
+  ],
+  [
+   "def decide_allocation(context, allocation, observed):\n    started = state(context).bought_at.get(allocation.name)\n    due = (\n        started is not None\n",
+   "def decide_allocation(context, allocation, observed):\n    if context.teardown or sell_due(context, allocation, observed):\n        return context.actions.exit(allocation.name)\n    if not observed.owned.entry_complete:\n        return context.actions.swap(allocation.name)\n    return None\n\n\ndef sell_due(context, allocation, observed):\n    started = state(context).bought_at.get(allocation.name)\n    return (\n        started is not None\n"
+  ],
+  [
+   "    )\n    if context.teardown or due:\n        return context.actions.exit(allocation.name)\n    if not observed.owned.entry_complete:\n        return context.actions.swap(allocation.name)\n    return None\n\n",
+   "    )\n\n\ndef hold_reason(context, allocation, observed):\n    if context.teardown or sell_due(context, allocation, observed):\n        return \"Sold; nothing left to do\"\n    if allocation.hold_seconds is None:\n        return \"Bought; holding until the strategy stops\"\n    return \"Bought; selling when the hold time ends\"\n\n"
+  ],
+  [
+   "        allocation = context.config.allocation(observed.allocation)\n        intent = decide_allocation(context, allocation, observed)\n        if intent is not None:\n            return context.decision(intent=intent)\n    return context.decision()\n\n",
+   "        allocation = context.config.allocation(observed.allocation)\n        intent, reason = decide_allocation(context, allocation, observed)\n        if intent is not None:\n            return context.decision(intent=intent, reason=reason)\n        holds.append(reason)\n    return context.decision(reason=\"; \".join(dict.fromkeys(holds)) or None)\n\n"
+  ],
+  [
+   "def decide_allocation(context, allocation, observed):\n    started = state(context).started_at.get(allocation.name)\n    if exit_due(context, allocation, observed, started):\n        return exit_allocation(context, allocation, observed)\n    position = observed.owned.position\n",
+   "def decide_allocation(context, allocation, observed):\n    \"\"\"The allocation's intent, or None, with why it holds or recentres.\"\"\"\n    started = state(context).started_at.get(allocation.name)\n    if exit_due(context, allocation, observed, started):\n        intent = exit_allocation(context, allocation, observed)\n        return intent, None if intent is not None else \"Liquidity closed; nothing left to do\"\n    position = observed.owned.position\n"
+  ],
+  [
+   "        if position.range.lower <= observed.pool.tick < position.range.upper:\n            return None\n        return context.actions.close_liquidity(allocation.name)\n    return enter_liquidity(context, allocation, observed)\n\n",
+   "        if position.range.lower <= observed.pool.tick < position.range.upper:\n            return None, \"Price inside the range, nothing to rebalance\"\n        return context.actions.close_liquidity(allocation.name), \"Price left the range, recentring\"\n    intent = enter_liquidity(context, allocation, observed)\n    waiting = \"Price is past the band; waiting for it to return\"\n    return intent, None if intent is not None else waiting\n\n"
+  ],
+  [
+   "    if any(context.observation(name) is None for name in (\"collateral\", \"loan\", \"trade\")):\n        return context.decision()\n    if context.teardown or memory.exiting:\n        return context.decision(close(context), memory=memory.updated(exiting=True))\n    return context.decision(entry(context))\n\n",
+   "    if any(context.observation(name) is None for name in (\"collateral\", \"loan\", \"trade\")):\n        return context.decision(reason=\"Waiting for the lending and trade positions to be read\")\n    if context.teardown or memory.exiting:\n        intent = close(context)\n        return context.decision(\n            intent, memory=memory.updated(exiting=True), reason=closing(context, intent)\n        )\n    intent = entry(context)\n    held = \"Borrowed and traded; holding until the strategy stops\"\n    return context.decision(intent, reason=None if intent is not None else held)\n\n\ndef closing(context, intent):\n    if intent is None:\n        return \"Everything is closed; nothing left to do\"\n    if not context.teardown:\n        return \"Unwinding after a failed step or a lending event\"\n    return None\n\n"
+  ],
+  [
+   "\ndef stalled(context, owed) -> str:\n    \"\"\"Why the unwind holds with debt open (empty when it does not), so it is never silent.\"\"\"\n",
+   "\ndef stalled(context, loan, owed) -> str:\n    \"\"\"Why the unwind holds with debt open (empty when it does not), so it is never silent.\"\"\"\n"
+  ],
+  [
+   "    cover = context.config.parameters.cover_shortfall\n    advice = \"\" if cover else \", or deploy with cover_shortfall: true to cover it from collateral\"\n    return (\n        f\"The unwind holds with {owed} loan base units of debt the fund cannot repay: send \"\n        \"the loan asset to the fund until it holds the debt and the next decision repays it \"\n        f\"in full{advice}.\"\n    )\n",
+   "    cover = context.config.parameters.cover_shortfall\n    advice = \"\" if cover else \", or set cover_shortfall: true to repay it from collateral\"\n    amount = Decimal(owed).scaleb(-loan.position.reserve.asset.decimals).normalize()\n    return (\n        f\"Unwind stuck: {amount:f} of the borrowed asset is still owed and the fund can't \"\n        f\"repay it. Send that much to the fund to finish repaying{advice}.\"\n    )\n"
+  ],
+  [
+   "    if values is None:\n        return context.decision()\n    collateral, loan, liquidity = values\n",
+   "    if values is None:\n        return context.decision(reason=\"Waiting for the lending and liquidity positions to be read\")\n    collateral, loan, liquidity = values\n"
+  ],
+  [
+   "        owed = loan.position.debt_assets if intent is None else 0\n        shortfall = stalled(context, owed)\n        return context.decision(intent, memory=memory.updated(unwinding=True, shortfall=shortfall))\n    return context.decision(enter(context, collateral, loan, liquidity))\n\n",
+   "        owed = loan.position.debt_assets if intent is None else 0\n        shortfall = stalled(context, loan, owed)\n        reason = shortfall or unwinding(context, memory, intent, loan)\n        memory = memory.updated(unwinding=True, shortfall=shortfall)\n        return context.decision(intent, memory=memory, reason=reason)\n    intent = enter(context, collateral, loan, liquidity)\n    reason = None if intent is not None else holding(context, loan, liquidity)\n    return context.decision(intent, reason=reason)\n\n\ndef level(context) -> str:\n    return format(context.config.parameters.unwind_health_factor.normalize(), \"f\")\n\n\ndef health_text(loan) -> str:\n    if not loan.position.debt_assets:\n        return \"No debt\"\n    return f\"Health {loan.position.risk.health_factor_wad / WAD:.2f}\"\n\n\ndef unwinding(context, memory, intent, loan):\n    if intent is None:\n        return \"Everything is closed; nothing left to do\"\n    if context.teardown or memory.unwinding:\n        return None\n    return f\"{health_text(loan)} fell below the {level(context)} unwind level, unwinding\"\n\n\ndef holding(context, loan, liquidity):\n    if liquidity.owned.position is not None:\n        return f\"Liquidity open. {health_text(loan)}, above the {level(context)} unwind level\"\n    if not loan.position.debt_assets:\n        return f\"Not borrowing: the loan would take health near the {level(context)} unwind level\"\n    return \"Waiting for a swap quote to balance the borrowed cash for liquidity\"\n\n"
+  ],
+  [
+   "    if values is None:\n        return context.decision()\n    collateral, loan, trade = values\n",
+   "    if values is None:\n        return context.decision(reason=\"Waiting for the lending and trade positions to be read\")\n    collateral, loan, trade = values\n"
+  ],
+  [
+   "        intent = unwind(context, collateral, loan, trade)\n        return context.decision(intent, memory=memory.updated(unwinding=True))\n    intent = enter(context, loan, trade)\n",
+   "        intent = unwind(context, collateral, loan, trade)\n        reason = unwinding(context, memory, intent, loan, breached)\n        return context.decision(intent, memory=memory.updated(unwinding=True), reason=reason)\n    intent = enter(context, loan, trade)\n"
+  ],
+  [
+   "        return context.decision(intent, memory=memory.updated(entry_price=price))\n    return context.decision(intent)\n\n",
+   "        return context.decision(intent, memory=memory.updated(entry_price=price))\n    reason = None if intent is not None else holding(context, loan, memory)\n    return context.decision(intent, reason=reason)\n\n\ndef level(context) -> str:\n    return format(context.config.parameters.unwind_health_factor.normalize(), \"f\")\n\n\ndef price_move(loan, memory) -> float:\n    \"\"\"The borrowed asset's price change since the sale, in percent.\"\"\"\n    return (loan.position.reserve.oracle.price / memory.entry_price - 1) * 100\n\n\ndef unwinding(context, memory, intent, loan, breached):\n    if intent is None:\n        if loan.position.debt_assets:\n            return \"Debt still open and nothing left to repay it with; send the borrowed asset\"\n        return \"Everything is closed; nothing left to do\"\n    if context.teardown or memory.unwinding:\n        return None\n    if breached:\n        health = loan.position.risk.health_factor_wad / WAD\n        return f\"Health {health:.2f} fell below the {level(context)} unwind level, buying back\"\n    move = price_move(loan, memory)\n    if move > 0:\n        return f\"Stop: price {move:.1f}% above the sale price, buying back\"\n    return f\"Target: price {-move:.1f}% below the sale price, buying back\"\n\n\ndef holding(context, loan, memory):\n    if not loan.position.debt_assets:\n        return f\"Not borrowing: the loan would take health near the {level(context)} unwind level\"\n    if memory.entry_price is None:\n        return \"Waiting for a swap quote to sell the borrowed asset\"\n    params = context.config.parameters\n    move = price_move(loan, memory)\n    return (\n        f\"Short open, price {move:+.1f}% since the sale; stop at \"\n        f\"+{params.stop_loss_bps / 100:g}%, target at -{params.take_profit_bps / 100:g}%\"\n    )\n\n"
+  ],
+  [
+   "    params = context.config.parameters\n    threshold = Decimal(loan.position.risk.liquidation_threshold_bps) / BPS\n    reason = (\n        f\"Round {memory.rounds + 1} of {params.loops} refused: borrowing borrow_fraction \"\n        f\"{params.borrow_fraction} would end at health factor {ratio(projected)}, below \"\n        f\"unwind_health_factor {ratio(params.unwind_trigger)} (liquidation threshold \"\n        f\"{threshold}). The loop holds at {memory.rounds} rounds; lower borrow_fraction or loops.\"\n    )\n",
+   "    params = context.config.parameters\n    level = format(ratio(params.unwind_trigger).normalize(), \"f\")\n    reason = (\n        f\"Stopped after {memory.rounds} of {params.loops} rounds: another borrow would bring \"\n        f\"health to {ratio(projected)}, below the {level} unwind level. Lower the borrow \"\n        \"fraction or the number of rounds.\"\n    )\n"
+  ],
+  [
+   "\ndef stalled(context, owed, health) -> str:\n    \"\"\"Why the unwind holds with debt open (empty when it does not), so it is never silent.\"\"\"\n",
+   "\ndef stalled(context, loan, owed, health) -> str:\n    \"\"\"Why the unwind holds with debt open (empty when it does not), so it is never silent.\"\"\"\n"
+  ],
+  [
+   "        return \"\"\n    return (\n        f\"The unwind holds with {owed} loan base units of debt: health factor \"\n        f\"{ratio(health)} leaves no collateral to withdraw above minimum_health_factor \"\n        f\"{ratio(floor(context.config))}, and the fund owns no loan asset. Send the loan asset \"\n        \"to the fund until it holds the debt and the next decision repays it in full.\"\n    )\n",
+   "        return \"\"\n    amount = Decimal(owed).scaleb(-loan.position.reserve.asset.decimals).normalize()\n    return (\n        f\"Unwind stuck: {amount:f} of the borrowed asset is still owed and health \"\n        f\"{ratio(health)} frees no collateral. Send that much to the fund to finish repaying.\"\n    )\n"
+  ],
+  [
+   "        owed = loan.position.debt_assets if intent is None else 0\n        shortfall = stalled(context, owed, health)\n        return context.decision(intent, memory=memory.updated(unwinding=True, shortfall=shortfall))\n    intent, memory = enter(context, loan, trade, memory)\n    return context.decision(intent, memory=memory)\n\n",
+   "        owed = loan.position.debt_assets if intent is None else 0\n        shortfall = stalled(context, loan, owed, health)\n        reason = shortfall or unwinding(context, memory, intent, health)\n        memory = memory.updated(unwinding=True, shortfall=shortfall)\n        return context.decision(intent, memory=memory, reason=reason)\n    intent, memory = enter(context, loan, trade, memory)\n    debt = health if loan.position.debt_assets else None\n    reason = None if intent is not None else holding(context, memory, debt)\n    return context.decision(intent, memory=memory, reason=reason)\n\n\ndef unwinding(context, memory, intent, health):\n    if intent is None:\n        return \"Everything is closed; nothing left to do\"\n    if context.teardown or memory.unwinding:\n        return None\n    level = format(ratio(context.config.parameters.unwind_trigger).normalize(), \"f\")\n    return f\"Health {ratio(health)} fell below the {level} unwind level, unwinding\"\n\n\ndef holding(context, memory, health):\n    if memory.capped_reason:\n        return memory.capped_reason\n    level = format(ratio(context.config.parameters.unwind_trigger).normalize(), \"f\")\n    if memory.rounds < context.config.parameters.loops:\n        return \"Waiting for a swap quote to turn the borrowed cash into collateral\"\n    status = \"No debt\" if health is None else f\"Health {ratio(health)}\"\n    return f\"All loop rounds done. {status}, above the {level} unwind level\"\n\n"
+  ],
+  [
+   "    params = context.config.parameters\n    threshold = (Decimal(loan.account.market.source.lltv) / WAD).normalize()\n    reason = (\n        f\"Round {memory.rounds + 1} of {params.loops} refused: borrowing borrow_fraction \"\n        f\"{params.borrow_fraction} would end at health factor {ratio(projected)}, below \"\n        f\"unwind_health_factor {ratio(params.unwind_trigger)} (LLTV {threshold}). \"\n        f\"The loop holds at {memory.rounds} rounds; lower borrow_fraction or loops.\"\n    )\n",
+   "    params = context.config.parameters\n    level = format(ratio(params.unwind_trigger).normalize(), \"f\")\n    reason = (\n        f\"Stopped after {memory.rounds} of {params.loops} rounds: another borrow would bring \"\n        f\"health to {ratio(projected)}, below the {level} unwind level. Lower the borrow \"\n        \"fraction or the number of rounds.\"\n    )\n"
+  ],
+  [
+   "    return (\n        f\"The unwind holds with {owed} loan base units of debt: health factor \"\n        f\"{ratio(health)} leaves no collateral to withdraw above minimum_health_factor \"\n        f\"{ratio(floor(context.config))}, and the fund owns no loan asset. Send the loan asset \"\n        \"to the fund until it holds the debt and the next decision repays it in full.\"\n    )\n",
+   "    return (\n        f\"Unwind stuck: debt is still owed and health {ratio(health)} frees no collateral. \"\n        \"Send the borrowed asset to the fund to finish repaying.\"\n    )\n"
+  ],
+  [
+   "        shortfall = stalled(context, debt(loan) if intent is None else 0, health)\n        return context.decision(intent, memory=memory.updated(unwinding=True, shortfall=shortfall))\n    intent, memory = enter(context, loan, trade, memory)\n    return context.decision(intent, memory=memory)\n\n",
+   "        shortfall = stalled(context, debt(loan) if intent is None else 0, health)\n        reason = shortfall or unwinding(context, memory, intent, health)\n        memory = memory.updated(unwinding=True, shortfall=shortfall)\n        return context.decision(intent, memory=memory, reason=reason)\n    intent, memory = enter(context, loan, trade, memory)\n    reason = None if intent is not None else holding(context, memory, health)\n    return context.decision(intent, memory=memory, reason=reason)\n\n\ndef unwinding(context, memory, intent, health):\n    if intent is None:\n        return \"Everything is closed; nothing left to do\"\n    if context.teardown or memory.unwinding:\n        return None\n    level = format(ratio(context.config.parameters.unwind_trigger).normalize(), \"f\")\n    return f\"Health {ratio(health)} fell below the {level} unwind level, unwinding\"\n\n\ndef holding(context, memory, health):\n    if memory.capped_reason:\n        return memory.capped_reason\n    level = format(ratio(context.config.parameters.unwind_trigger).normalize(), \"f\")\n    if memory.rounds < context.config.parameters.loops:\n        return \"Waiting for a swap quote to turn the borrowed cash into collateral\"\n    status = \"No debt\" if health is None else f\"Health {ratio(health)}\"\n    return f\"All loop rounds done. {status}, above the {level} unwind level\"\n\n"
+  ],
+  [
+   "    if memory.exiting or (context.teardown and memory.phase < 3):\n        return context.decision(intent=close(context), memory=memory.updated(exiting=True))\n    if any(context.observation(name) is None for name in (\"earn\", \"collateral\", \"loan\")):\n        if context.teardown:\n            return context.decision(intent=close(context), memory=memory.updated(exiting=True))\n        return context.decision()\n    if memory.phase < 3 or context.teardown:\n        return context.decision(intent=action(context))\n    return context.decision()\n\n",
+   "    if memory.exiting or (context.teardown and memory.phase < 3):\n        intent = close(context)\n        return context.decision(\n            intent=intent, memory=memory.updated(exiting=True), reason=unwind_reason(memory, intent)\n        )\n    if any(context.observation(name) is None for name in (\"earn\", \"collateral\", \"loan\")):\n        if context.teardown:\n            intent = close(context)\n            return context.decision(\n                intent=intent,\n                memory=memory.updated(exiting=True),\n                reason=unwind_reason(memory, intent),\n            )\n        return context.decision(reason=\"Waiting for lending position data\")\n    if memory.phase < 3 or context.teardown:\n        intent = action(context)\n        return context.decision(intent=intent, reason=unwind_reason(memory, intent))\n    return context.decision(\n        reason=\"Earning, supplied and borrowed; holding until the strategy stops\"\n    )\n\n\ndef unwind_reason(memory, intent):\n    if intent is None:\n        return \"Nothing left to unwind\"\n    return \"Unwinding after a failed step or an outside event\" if memory.exiting else None\n\n"
+  ],
+  [
+   "\ndef on_outcome(context: OutcomeInput) -> Memory:\n",
+   "\ndef hold_reason(context, allocation, observed):\n    if exit_due(context, allocation, observed):\n        return \"Position closed; nothing left to do\"\n    if state(context).completed.get(allocation.name, 0) < 5:\n        return \"Waiting for the next block before the next step\"\n    if allocation.hold_seconds is None:\n        return \"All position steps done; holding until the strategy stops\"\n    return \"All position steps done; closing when the hold time ends\"\n\n\ndef on_outcome(context: OutcomeInput) -> Memory:\n"
+  ],
+  [
+   "\ndef on_outcome(context: OutcomeInput) -> Memory:\n",
+   "\ndef hold_reason(context, allocation, observed):\n    if context.teardown or allocation.name in state(context).failed:\n        return \"Liquidity closed; nothing left to do\"\n    return \"Liquidity in place; holding until the strategy stops\"\n\n\ndef on_outcome(context: OutcomeInput) -> Memory:\n"
+  ],
+  [
+   "    return None\n\n",
+   "    return None\n\n\ndef hold_reason(context, allocation, observed):\n    opened = state(context).opened_at.get(allocation.name)\n    if exit_due(context, allocation, observed, opened):\n        return \"Position closed; nothing left to do\"\n    if allocation.hold_seconds is None:\n        return \"Position open; holding until the strategy stops\"\n    return \"Position open; closing when the hold time ends\"\n\n"
+  ],
+  [
+   "\ndef on_outcome(context: OutcomeInput) -> Memory:\n",
+   "\ndef hold_reason(context, allocation, observed):\n    if exit_due(context, allocation, observed):\n        return \"Position closed; nothing left to do\"\n    if allocation.hold_seconds is None:\n        return \"All position steps done; holding until the strategy stops\"\n    return \"All position steps done; closing when the hold time ends\"\n\n\ndef on_outcome(context: OutcomeInput) -> Memory:\n"
+  ],
+  [
+   "\ndef stopped(context, position) -> bool:\n    \"\"\"Whether the latest close has moved past the stop or the take-profit.\"\"\"\n    series = context.price(WETH)\n    if not series.complete or not position.index_amount.amount:\n        return False  # a stale window decides nothing\n    close = Decimal(str(series.values[-1]))\n    move = (close / entry_price(context.config, position) - 1) * BPS\n    if context.config.allocation(\"position\").side == \"short\":\n        move = -move\n    params = context.config.parameters\n    return move <= -params.stop_loss_bps or move >= params.take_profit_bps\n\n",
+   "\ndef price_change(context, position) -> Decimal | None:\n    \"\"\"The latest close's change from the entry price, in BPS, or None on a stale window.\"\"\"\n    series = context.price(WETH)\n    if not series.complete or not position.index_amount.amount:\n        return None\n    close = Decimal(str(series.values[-1]))\n    return (close / entry_price(context.config, position) - 1) * BPS\n\n\ndef stopped(context, position) -> str | None:\n    \"\"\"Why the latest close ends the position (past the stop or the take-profit), or None.\"\"\"\n    change = price_change(context, position)\n    if change is None:\n        return None  # a stale window decides nothing\n    side = -1 if context.config.allocation(\"position\").side == \"short\" else 1\n    params = context.config.parameters\n    if side * change <= -params.stop_loss_bps:\n        return f\"Stop: price {change / 100:+.1f}% from entry, closing\"\n    if side * change >= params.take_profit_bps:\n        return f\"Target: price {change / 100:+.1f}% from entry, closing\"\n    return None\n\n\ndef holding(context, position) -> str:\n    change = price_change(context, position)\n    if change is None:\n        return \"Position open; waiting for a fresh WETH price\"\n    side = -1 if context.config.allocation(\"position\").side == \"short\" else 1\n    params = context.config.parameters\n    stop, target = -side * params.stop_loss_bps / 100, side * params.take_profit_bps / 100\n    return f\"Price {change / 100:+.1f}% from entry; stop at {stop:+g}%, target at {target:+g}%\"\n\n"
+  ],
+  [
+   "        if memory.opened:\n            return context.decision()\n        allocation = context.config.allocation(\"position\")\n",
+   "        if memory.opened:\n            return context.decision(reason=\"Position closed; nothing left to do\")\n        allocation = context.config.allocation(\"position\")\n"
+  ],
+  [
+   "        )\n    if stopped(context, position):\n        unwinding = memory.updated(unwinding=True)\n        return context.decision(intent=context.actions.exit(\"position\"), memory=unwinding)\n    return context.decision()\n\n",
+   "        )\n    reason = stopped(context, position)\n    if reason is not None:\n        unwinding = memory.updated(unwinding=True)\n        intent = context.actions.exit(\"position\")\n        return context.decision(intent=intent, memory=unwinding, reason=reason)\n    return context.decision(reason=holding(context, position))\n\n"
+  ],
+  [
+   "def allocation_intent(context, allocation, observed):\n    memory = state(context)\n",
+   "def allocation_intent(context, allocation, observed):\n    if exit_due(context, allocation, observed):\n        return context.actions.exit(allocation.name)\n    if state(context).held_at.get(allocation.name) is None:\n        return context.actions.swap(\n            allocation.name,\n            amount=allocation.entry_amount,\n            minimum_output=allocation.entry_minimum_output,\n        )\n    return None\n\n\ndef exit_due(context, allocation, observed):\n    memory = state(context)\n"
+  ],
+  [
+   "    )\n    if context.teardown or allocation.name in memory.failed or elapsed:\n        return context.actions.exit(allocation.name)\n    if held_at is None:\n        return context.actions.swap(\n            allocation.name,\n            amount=allocation.entry_amount,\n            minimum_output=allocation.entry_minimum_output,\n        )\n    return None\n\n",
+   "    )\n    return context.teardown or allocation.name in memory.failed or elapsed\n\n\ndef hold_reason(context, allocation, observed):\n    if exit_due(context, allocation, observed):\n        return \"Swapped back; nothing left to do\"\n    if allocation.hold_seconds is None:\n        return \"Swapped; holding until the strategy stops\"\n    return \"Swapped; swapping back when the hold time ends\"\n\n"
+  ],
+  [
+   "def decide_allocation(context, allocation, observed):\n    started = state(context).bought_at.get(allocation.name)\n",
+   "def decide_allocation(context, allocation, observed):\n    if context.teardown or sell_due(context, allocation, observed):\n        return context.actions.exit(allocation.name)\n    if not observed.owned.entry_complete:\n        return context.actions.swap(allocation.name)\n    return None\n\n\ndef sell_due(context, allocation, observed):\n    started = state(context).bought_at.get(allocation.name)\n"
+  ],
+  [
+   "    slack = context.config.decision_trigger.seconds // 2\n    due = (\n        started is not None\n",
+   "    slack = context.config.decision_trigger.seconds // 2\n    return (\n        started is not None\n"
+  ],
+  [
+   "        if intent is not None or context.teardown:\n            return context.decision(intent=intent, memory=current.updated(selling=True))\n        # The exit has completed: the cycle is closed and the next entry signal buys.\n",
+   "        if intent is not None or context.teardown:\n            reason = \"Hold time is up, selling\" if expired and not current.selling else None\n            return context.decision(\n                intent=intent, memory=current.updated(selling=True), reason=reason\n            )\n        # The exit has completed: the cycle is closed and the next entry signal buys.\n"
+  ],
+  [
+   "    if current.buying and not holding:\n        return context.decision(intent=context.actions.swap(\"position\"))  # retry the signal\n    series = context.price(WETH)\n    if not series.complete:\n        return context.decision()  # a short or stale window decides nothing\n    knobs = context.config.parameters\n",
+   "    if current.buying and not holding:\n        intent = context.actions.swap(\"position\")  # retry the signal\n        return context.decision(intent=intent, reason=\"Retrying the buy\")\n    series = context.price(WETH)\n    if not series.complete:\n        # a short or stale window decides nothing\n        return context.decision(reason=\"Waiting for a full WETH price history\")\n    knobs = context.config.parameters\n"
+  ],
+  [
+   "    if levels is None:\n        return context.decision()  # an undefined indicator decides nothing\n    close, midline, atr = levels\n    if holding:\n        if close < highest_close_since(series, current.bought_at) - knobs.stop_atr * atr:\n            return exit_cycle(context, current)\n        return context.decision()\n    if current.bought_at is None and close > midline and atr < knobs.max_atr * close:\n        buying = current.updated(buying=True)\n        return context.decision(intent=context.actions.swap(\"position\"), memory=buying)\n    return context.decision()\n\n\ndef exit_cycle(context, current):\n    selling = current.updated(selling=True)\n    return context.decision(intent=context.actions.exit(\"position\"), memory=selling)\n\n",
+   "    if levels is None:\n        # an undefined indicator decides nothing\n        return context.decision(reason=\"Indicators not available yet\")\n    close, midline, atr = levels\n    if holding:\n        stop = highest_close_since(series, current.bought_at) - knobs.stop_atr * atr\n        if close < stop:\n            return exit_cycle(\n                context, current, f\"Price {close:,.2f} fell below the {stop:,.2f} stop, selling\"\n            )\n        return context.decision(reason=f\"Price {close:,.2f}; trailing stop at {stop:,.2f}\")\n    if current.bought_at is None and close > midline and atr < knobs.max_atr * close:\n        buying = current.updated(buying=True)\n        reason = f\"Price {close:,.2f} broke above {midline:,.2f} in a calm market, buying\"\n        return context.decision(\n            intent=context.actions.swap(\"position\"), memory=buying, reason=reason\n        )\n    if current.bought_at is not None:\n        return context.decision()\n    if close <= midline:\n        return context.decision(reason=f\"Price {close:,.2f}; buying above {midline:,.2f}\")\n    swing = f\"{atr / close:.1%} of price, above {knobs.max_atr:.1%}\"\n    return context.decision(reason=f\"Price swings too wide ({swing}); waiting to buy\")\n\n\ndef exit_cycle(context, current, reason):\n    selling = current.updated(selling=True)\n    return context.decision(intent=context.actions.exit(\"position\"), memory=selling, reason=reason)\n\n"
+  ],
+  [
+   "            selling = current.updated(selling=True)\n            return context.decision(intent=intent, memory=selling)\n        # The exit has completed: the cycle is closed and the next oversold cross buys.\n",
+   "            selling = current.updated(selling=True)\n            reason = \"Hold time is up, selling\" if expired and not current.selling else None\n            return context.decision(intent=intent, memory=selling, reason=reason)\n        # The exit has completed: the cycle is closed and the next oversold cross buys.\n"
+  ],
+  [
+   "    if not math.isfinite(rsi):\n        return context.decision()  # an undefined indicator decides nothing\n    previous = current.last_rsi\n",
+   "    if not math.isfinite(rsi):\n        # an undefined indicator decides nothing\n        return context.decision(reason=\"RSI not available yet\")\n    previous = current.last_rsi\n"
+  ],
+  [
+   "        buying = memory.updated(buying=True)\n        return context.decision(intent=context.actions.swap(\"position\"), memory=buying)\n    if previous is not None and holding and previous <= knobs.overbought < rsi:\n        selling = memory.updated(selling=True)\n        return context.decision(intent=context.actions.exit(\"position\"), memory=selling)\n    return context.decision(memory=memory)\n\n",
+   "        buying = memory.updated(buying=True)\n        reason = f\"RSI {rsi:.1f} crossed below {knobs.oversold:g}, buying\"\n        return context.decision(\n            intent=context.actions.swap(\"position\"), memory=buying, reason=reason\n        )\n    if previous is not None and holding and previous <= knobs.overbought < rsi:\n        selling = memory.updated(selling=True)\n        reason = f\"RSI {rsi:.1f} crossed above {knobs.overbought:g}, selling\"\n        return context.decision(\n            intent=context.actions.exit(\"position\"), memory=selling, reason=reason\n        )\n    level = f\"selling above {knobs.overbought:g}\" if holding else f\"buying below {knobs.oversold:g}\"\n    return context.decision(memory=memory, reason=f\"RSI {rsi:.0f}; {level}\")\n\n"
+  ],
+  [
+   "        if intent is not None or context.teardown:\n            return context.decision(intent=intent, memory=current.updated(closing=True))\n        # The exit has completed: the cycle is closed and the next ranging reading opens.\n",
+   "        if intent is not None or context.teardown:\n            reason = \"Hold time is up, closing\" if expired and not current.closing else None\n            return context.decision(\n                intent=intent, memory=current.updated(closing=True), reason=reason\n            )\n        # The exit has completed: the cycle is closed and the next ranging reading opens.\n"
+  ],
+  [
+   "            return context.decision(intent=enter(context, current, observed), memory=entering)\n        return context.decision()\n    if observed.owned.position is not None:\n",
+   "            return context.decision(intent=enter(context, current, observed), memory=entering)\n        return context.decision(reason=waiting_to_open(rsi, low, high))\n    if observed.owned.position is not None:\n"
+  ],
+  [
+   "        low, high = knobs.trending\n        if rsi is not None and not low <= rsi <= high:\n            closing = current.updated(closing=True)\n            return context.decision(intent=closing_intent(context, observed), memory=closing)\n    return context.decision()\n\n",
+   "        low, high = knobs.trending\n        if rsi is None:\n            return context.decision(reason=\"Liquidity open; waiting for a full WETH price history\")\n        if not low <= rsi <= high:\n            closing = current.updated(closing=True)\n            reason = f\"RSI {rsi:.1f} left {low:g} to {high:g}, closing\"\n            intent = closing_intent(context, observed)\n            return context.decision(intent=intent, memory=closing, reason=reason)\n        return context.decision(reason=f\"RSI {rsi:.0f}; closing if it leaves {low:g} to {high:g}\")\n    return context.decision()\n\n\ndef waiting_to_open(rsi, low, high):\n    if rsi is None:\n        return \"Waiting for a full WETH price history\"\n    if low <= rsi <= high:\n        return \"Price is past the band; waiting for it to return\"\n    return f\"RSI {rsi:.0f}; opening when it is between {low:g} and {high:g}\"\n\n"
+  ],
+  [
+   "\ndef on_outcome(context: OutcomeInput) -> Memory:\n",
+   "\ndef hold_reason(context, allocation, observed):\n    started = state(context).minted_at.get(allocation.name)\n    if exit_due(context, allocation, observed, started) or observed.owned.position is None:\n        return \"Liquidity closed; nothing left to do\"\n    if (\n        state(context).collected_at.get(allocation.name) is None\n        and allocation.collect_seconds is not None\n    ):\n        return \"Liquidity in place; collecting fees when the collect time comes\"\n    if allocation.hold_seconds is None:\n        return \"Liquidity in place; holding until the strategy stops\"\n    return \"Liquidity in place; closing when the hold time ends\"\n\n\ndef on_outcome(context: OutcomeInput) -> Memory:\n"
+  ]
+ ],
+ "references": {
+  "aave_v3_arbitrum_lending": {
+   "from": "5ebe9d47ce0728867010d55e62e4e54fc6e113bc184ebba0f32a522f5e2f2efc",
+   "pairs": [
+    0
+   ]
+  },
+  "aave_v3_arbitrum_managed_borrow": {
+   "from": "6d4ecf61e366d4da817b5a1657af984106639334e51d1b5609b5039fc1128fcb",
+   "pairs": [
+    1,
+    2,
+    3
+   ]
+  },
+  "aave_v3_base_sma_borrow": {
+   "from": "56ced0728d5202ded9cd4bd342175b00913595fcc06512d345649ace27c9ff1b",
+   "pairs": [
+    4,
+    5
+   ]
+  },
+  "aave_v4_avalanche_borrowing": {
+   "from": "3bcf2a200d0c3ea6b11855529e7550006a7e2f94565b1c7c752265d13e97a51e",
+   "pairs": [
+    6,
+    7,
+    8,
+    9
+   ]
+  },
+  "aave_v4_multichain_borrowing": {
+   "from": "3bcf2a200d0c3ea6b11855529e7550006a7e2f94565b1c7c752265d13e97a51e",
+   "pairs": [
+    6,
+    7,
+    8,
+    9
+   ]
+  },
+  "aave_v4_weth_supply": {
+   "from": "988e7229e24f745970b48e76704d154df38be920b6797b7ef3eb5b6277d56f15",
+   "pairs": [
+    6,
+    10,
+    11,
+    9
+   ]
+  },
+  "aerodrome_base_stable_lp": {
+   "from": "4f14e9a8ceb7536d879b30383f306875a51d5720b516c9f1272a165d9d33ea14",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "aerodrome_base_stable_trading": {
+   "from": "a2efd4c6037b756d37e2cef40df28a52c8882e949bb0db440b04dd3acf08b08a",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  },
+  "aerodrome_base_volatile_lp": {
+   "from": "4f14e9a8ceb7536d879b30383f306875a51d5720b516c9f1272a165d9d33ea14",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "aerodrome_base_volatile_trading": {
+   "from": "a2efd4c6037b756d37e2cef40df28a52c8882e949bb0db440b04dd3acf08b08a",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  },
+  "aerodrome_slipstream_base_lp": {
+   "from": "c8a6615853b05a5b48d581f263b47495830eddf3809c2ca93f5b10f418c0c5a4",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "aerodrome_slipstream_base_lp_band": {
+   "from": "6cd7502928a551c3a0b5d55d9cc560f7eece43353a0a4285cba9ad8d7d533e67",
+   "pairs": [
+    12,
+    17,
+    18,
+    19
+   ]
+  },
+  "aerodrome_slipstream_base_trading": {
+   "from": "4126dd81bebd44a9831293b2102035134ea92cf7e16d7accc3a8463ba48fc0ae",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  },
+  "arbitrum_aave_borrow_and_trade": {
+   "from": "0225672eab1ae26a49bae7136d06e1f9651e887a4db300780c5ee4e81f9c8254",
+   "pairs": [
+    20
+   ]
+  },
+  "arbitrum_aave_borrow_lp": {
+   "from": "c99ffe9f61cec284532193d0cf1aa83570a6a2f7d0a4cacae50f59defbc19b99",
+   "pairs": [
+    21,
+    22,
+    23,
+    24
+   ]
+  },
+  "arbitrum_aave_lending_short": {
+   "from": "be58b64fb419d73f393eb901209b9415add30a1417ba3f23227f68579b68fc28",
+   "pairs": [
+    25,
+    26,
+    27
+   ]
+  },
+  "arbitrum_aave_leverage_loop": {
+   "from": "b8714713b366513683ce355c0714923ca7463705735af0560e38edba451dfa5b",
+   "pairs": [
+    28,
+    29,
+    30,
+    25,
+    31
+   ]
+  },
+  "arbitrum_compound_borrow_and_trade": {
+   "from": "a0c7423fde23f504a13b9f88ef79f79fd9846b17eaeeb22e48703a6634be2c45",
+   "pairs": [
+    20
+   ]
+  },
+  "arbitrum_morpho_borrow_and_trade": {
+   "from": "a0c7423fde23f504a13b9f88ef79f79fd9846b17eaeeb22e48703a6634be2c45",
+   "pairs": [
+    20
+   ]
+  },
+  "avalanche_aave_v4_borrow_and_trade": {
+   "from": "2c2dc69fe9fdc494b3bfa9ba6826efe76dbe42335a8bc6f70859e18f565a138e",
+   "pairs": [
+    20
+   ]
+  },
+  "base_morpho_leverage_loop": {
+   "from": "b72b6377458d3b3e88df6850cc24eba88c1b0707b089d68e3b2a26ca989578d4",
+   "pairs": [
+    32,
+    33,
+    25,
+    34
+   ]
+  },
+  "compound_v3_base_lending": {
+   "from": "6812700ca8556f3e147aa9ba18e24f1e214d35c608ea391c7ca0dc91782ca6ec",
+   "pairs": [
+    35
+   ]
+  },
+  "compound_v3_ethereum_lending": {
+   "from": "6812700ca8556f3e147aa9ba18e24f1e214d35c608ea391c7ca0dc91782ca6ec",
+   "pairs": [
+    35
+   ]
+  },
+  "curve_arbitrum_stable_lp": {
+   "from": "5cac218d133054341d8e0ac4f609f815d2dfde85a465a3705d820b7c34184587",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_arbitrum_tricrypto_lp": {
+   "from": "8538514a7186ef7c8d640700e9e9fbf282fff77bcb1ff78c89ce54d49f6913f9",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_arbitrum_twocrypto_lp": {
+   "from": "dedca2211207b1721eedb579b7628f7c1809ff3dd6a6f42b02e2d57702814404",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_avalanche_stable_lp": {
+   "from": "5cac218d133054341d8e0ac4f609f815d2dfde85a465a3705d820b7c34184587",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_base_stable_lp": {
+   "from": "5cac218d133054341d8e0ac4f609f815d2dfde85a465a3705d820b7c34184587",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_base_tricrypto_lp": {
+   "from": "8538514a7186ef7c8d640700e9e9fbf282fff77bcb1ff78c89ce54d49f6913f9",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_base_twocrypto_lp": {
+   "from": "dedca2211207b1721eedb579b7628f7c1809ff3dd6a6f42b02e2d57702814404",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_bnb_stable_lp": {
+   "from": "5cac218d133054341d8e0ac4f609f815d2dfde85a465a3705d820b7c34184587",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_bnb_twocrypto_lp": {
+   "from": "dedca2211207b1721eedb579b7628f7c1809ff3dd6a6f42b02e2d57702814404",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_ethereum_stable_trading": {
+   "from": "fb121f5f6d8a012b38266df291e307b8e47dd964a0dbc22de7881851e219f95a",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  },
+  "curve_ethereum_tricrypto_lp": {
+   "from": "8538514a7186ef7c8d640700e9e9fbf282fff77bcb1ff78c89ce54d49f6913f9",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_ethereum_twocrypto_lp": {
+   "from": "dedca2211207b1721eedb579b7628f7c1809ff3dd6a6f42b02e2d57702814404",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_optimism_stable_lp": {
+   "from": "5cac218d133054341d8e0ac4f609f815d2dfde85a465a3705d820b7c34184587",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_optimism_tricrypto_lp": {
+   "from": "8538514a7186ef7c8d640700e9e9fbf282fff77bcb1ff78c89ce54d49f6913f9",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_optimism_twocrypto_lp": {
+   "from": "dedca2211207b1721eedb579b7628f7c1809ff3dd6a6f42b02e2d57702814404",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_polygon_stable_lp": {
+   "from": "5cac218d133054341d8e0ac4f609f815d2dfde85a465a3705d820b7c34184587",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_polygon_tricrypto_lp": {
+   "from": "8538514a7186ef7c8d640700e9e9fbf282fff77bcb1ff78c89ce54d49f6913f9",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_polygon_twocrypto_lp": {
+   "from": "dedca2211207b1721eedb579b7628f7c1809ff3dd6a6f42b02e2d57702814404",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_robinhood_tricrypto_lp": {
+   "from": "8538514a7186ef7c8d640700e9e9fbf282fff77bcb1ff78c89ce54d49f6913f9",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "curve_robinhood_twocrypto_lp": {
+   "from": "dedca2211207b1721eedb579b7628f7c1809ff3dd6a6f42b02e2d57702814404",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "gmx_v2_arbitrum_collateral_path": {
+   "from": "a4981a38ab5368ed1dd86baa4daae5c7ef0b5c8ea01c76f0a702ed5ff8214def",
+   "pairs": [
+    12,
+    13,
+    36
+   ]
+  },
+  "gmx_v2_arbitrum_liquidity": {
+   "from": "489def1b71833f2b1b75624235daf7ed16d84ee3ed59427ade431e7fedc8bbfb",
+   "pairs": [
+    12,
+    13,
+    37
+   ]
+  },
+  "gmx_v2_arbitrum_position": {
+   "from": "b9b7fddf61d0687eed8a74f4a221f8ff87d803db08a5ee6e2df201e5832f55ab",
+   "pairs": [
+    12,
+    13,
+    38
+   ]
+  },
+  "gmx_v2_arbitrum_position_path": {
+   "from": "ddf9d3b9b32a9d4542ba8fed618cd12969a16038b77ac441228def0ff7b9c122",
+   "pairs": [
+    12,
+    13,
+    39
+   ]
+  },
+  "gmx_v2_arbitrum_price_stop": {
+   "from": "f0e39caa404253af359480920863a663798545faa7f5f13adafdae6b3fd89660",
+   "pairs": [
+    40,
+    41,
+    42
+   ]
+  },
+  "gmx_v2_arbitrum_swap": {
+   "from": "64bf79e0e26a20df199046b494e815f6036533c94c63e5b3ed1cde940b5688bc",
+   "pairs": [
+    12,
+    13,
+    43,
+    44
+   ]
+  },
+  "gmx_v2_avalanche_collateral_path": {
+   "from": "a4981a38ab5368ed1dd86baa4daae5c7ef0b5c8ea01c76f0a702ed5ff8214def",
+   "pairs": [
+    12,
+    13,
+    36
+   ]
+  },
+  "gmx_v2_avalanche_liquidity": {
+   "from": "489def1b71833f2b1b75624235daf7ed16d84ee3ed59427ade431e7fedc8bbfb",
+   "pairs": [
+    12,
+    13,
+    37
+   ]
+  },
+  "gmx_v2_avalanche_position": {
+   "from": "b9b7fddf61d0687eed8a74f4a221f8ff87d803db08a5ee6e2df201e5832f55ab",
+   "pairs": [
+    12,
+    13,
+    38
+   ]
+  },
+  "gmx_v2_avalanche_position_path": {
+   "from": "ddf9d3b9b32a9d4542ba8fed618cd12969a16038b77ac441228def0ff7b9c122",
+   "pairs": [
+    12,
+    13,
+    39
+   ]
+  },
+  "gmx_v2_avalanche_swap": {
+   "from": "64bf79e0e26a20df199046b494e815f6036533c94c63e5b3ed1cde940b5688bc",
+   "pairs": [
+    12,
+    13,
+    43,
+    44
+   ]
+  },
+  "morpho_blue_base_lending": {
+   "from": "6e20cee2adb38168c49a878a3f3b9e23b08173c9d6700e5204bffb13032cdce4",
+   "pairs": [
+    35
+   ]
+  },
+  "morpho_blue_ethereum_lending": {
+   "from": "6e20cee2adb38168c49a878a3f3b9e23b08173c9d6700e5204bffb13032cdce4",
+   "pairs": [
+    35
+   ]
+  },
+  "optimism_aave_borrow_and_trade": {
+   "from": "0225672eab1ae26a49bae7136d06e1f9651e887a4db300780c5ee4e81f9c8254",
+   "pairs": [
+    20
+   ]
+  },
+  "pancakeswap_v3_arbitrum_trading": {
+   "from": "2f0b5763e4d56458d5fa2d72214d3e7058684de07dba6a0ffae5fb264dfeaf0c",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  },
+  "pancakeswap_v3_base_trading": {
+   "from": "2f0b5763e4d56458d5fa2d72214d3e7058684de07dba6a0ffae5fb264dfeaf0c",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  },
+  "pancakeswap_v3_bnb_lp": {
+   "from": "edac4202465a213c2f76ed61492e8dd99fa884c712113f601de184236d92c51e",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "pancakeswap_v3_bnb_lp_band": {
+   "from": "7da742e834b2458f0f23ad387a9cdfa331a7415783a2e8d787443baa3d0083f0",
+   "pairs": [
+    12,
+    17,
+    18,
+    19
+   ]
+  },
+  "pancakeswap_v3_bnb_trading": {
+   "from": "2f0b5763e4d56458d5fa2d72214d3e7058684de07dba6a0ffae5fb264dfeaf0c",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  },
+  "pancakeswap_v3_ethereum_trading": {
+   "from": "2f0b5763e4d56458d5fa2d72214d3e7058684de07dba6a0ffae5fb264dfeaf0c",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  },
+  "sparklend_ethereum_lending": {
+   "from": "52d8c40066746ebacef15f0148eca3253a21837b616378b271acbbde3bc41da3",
+   "pairs": [
+    0
+   ]
+  },
+  "uniswap_v3_arbitrum_lp": {
+   "from": "d795de1d6d6930f4680a2cae3475b544b1452b8faece63bd5d5f02f622b08fed",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "uniswap_v3_arbitrum_trading": {
+   "from": "dd8c271ff85ef889fa75a93b8c0bfb0d41de34e2dc39fe1c2c6eab014ca02fdc",
+   "pairs": [
+    12,
+    13,
+    45,
+    46,
+    16
+   ]
+  },
+  "uniswap_v3_avalanche_lp": {
+   "from": "d795de1d6d6930f4680a2cae3475b544b1452b8faece63bd5d5f02f622b08fed",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "uniswap_v3_base_atr_breakout": {
+   "from": "b946a69a279ebec5938c7e0a179a9fc049a613bd0c60c7f1e89f76b99d52b1ff",
+   "pairs": [
+    47,
+    48,
+    49
+   ]
+  },
+  "uniswap_v3_base_lp": {
+   "from": "d795de1d6d6930f4680a2cae3475b544b1452b8faece63bd5d5f02f622b08fed",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "uniswap_v3_base_rsi": {
+   "from": "0f2629a8c9392683b243fa0c6300efe700be81963f955cf2e9b8006a4cf6b036",
+   "pairs": [
+    50,
+    48,
+    51,
+    52
+   ]
+  },
+  "uniswap_v3_base_rsi_lp": {
+   "from": "6c61476e84bc621abe7126092b879e0e9b17530c40518a5aefd925be76fa0b84",
+   "pairs": [
+    53,
+    54,
+    55
+   ]
+  },
+  "uniswap_v3_base_trading": {
+   "from": "dd8c271ff85ef889fa75a93b8c0bfb0d41de34e2dc39fe1c2c6eab014ca02fdc",
+   "pairs": [
+    12,
+    13,
+    45,
+    46,
+    16
+   ]
+  },
+  "uniswap_v3_ethereum_lp": {
+   "from": "d795de1d6d6930f4680a2cae3475b544b1452b8faece63bd5d5f02f622b08fed",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "uniswap_v3_optimism_lp": {
+   "from": "d795de1d6d6930f4680a2cae3475b544b1452b8faece63bd5d5f02f622b08fed",
+   "pairs": [
+    12,
+    13,
+    14
+   ]
+  },
+  "uniswap_v3_robinhood_lp_band": {
+   "from": "1c288bc652ec953be663fbc39ea18a3e58a55d98c81fc3588d630408faaf42ea",
+   "pairs": [
+    12,
+    17,
+    18,
+    19
+   ]
+  },
+  "uniswap_v4_arbitrum_lp": {
+   "from": "16603291c1bf79a1d393ed64d6d5a90bae6207e8996af9df0276b61d2de079d3",
+   "pairs": [
+    12,
+    13,
+    56
+   ]
+  },
+  "uniswap_v4_arbitrum_trading": {
+   "from": "c1a70b90ecb4c6be88df2969369b919a0c3af56c697d1f73fead531a6fc4e1cc",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  },
+  "uniswap_v4_base_lp": {
+   "from": "16603291c1bf79a1d393ed64d6d5a90bae6207e8996af9df0276b61d2de079d3",
+   "pairs": [
+    12,
+    13,
+    56
+   ]
+  },
+  "uniswap_v4_base_trading": {
+   "from": "c1a70b90ecb4c6be88df2969369b919a0c3af56c697d1f73fead531a6fc4e1cc",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  },
+  "uniswap_v4_bnb_trading": {
+   "from": "c1a70b90ecb4c6be88df2969369b919a0c3af56c697d1f73fead531a6fc4e1cc",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  },
+  "uniswap_v4_ethereum_native_trading": {
+   "from": "c1a70b90ecb4c6be88df2969369b919a0c3af56c697d1f73fead531a6fc4e1cc",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  },
+  "uniswap_v4_lp": {
+   "from": "16603291c1bf79a1d393ed64d6d5a90bae6207e8996af9df0276b61d2de079d3",
+   "pairs": [
+    12,
+    13,
+    56
+   ]
+  },
+  "uniswap_v4_optimism_lp": {
+   "from": "16603291c1bf79a1d393ed64d6d5a90bae6207e8996af9df0276b61d2de079d3",
+   "pairs": [
+    12,
+    13,
+    56
+   ]
+  },
+  "uniswap_v4_optimism_trading": {
+   "from": "c1a70b90ecb4c6be88df2969369b919a0c3af56c697d1f73fead531a6fc4e1cc",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  },
+  "uniswap_v4_robinhood_lp_band": {
+   "from": "7d55d59aee6a7518c81faa0cc099ea0592fa9a5ea46aa590517345beb656f61b",
+   "pairs": [
+    12,
+    17,
+    18,
+    19
+   ]
+  },
+  "uniswap_v4_trading": {
+   "from": "c1a70b90ecb4c6be88df2969369b919a0c3af56c697d1f73fead531a6fc4e1cc",
+   "pairs": [
+    12,
+    13,
+    15,
+    16
+   ]
+  }
+ }
+}

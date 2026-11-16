@@ -1,0 +1,615 @@
+{
+  "verification_source_sha256": "e5a8329eaf4d7fed9820f659a0f9b6c43f0e66863edf3991ccfd7d309fb0c2b3",
+  "chains": {
+    "eip155:42161": {
+      "0xfd70de6b91282d8017aa4e741e9ae325cab992d8": {
+        "contract": "DataStore",
+        "code_hash": "0x3e7aea6e62b75671681b0d3006b146c7f02681a65fd5cc663909104de9d5088e"
+      },
+      "0x3c3d99fd298f679dbc2cecd132b4ec4d0f5e6e72": {
+        "contract": "RoleStore",
+        "code_hash": "0xf0af56368c1914596287f4512d96245c69435059ef378eae86ea7609e2bc3bf6"
+      },
+      "0x7452c558d45f8afc8c83dae62c3f8a5be19c71f6": {
+        "contract": "Router",
+        "code_hash": "0xc25e44eb982bdc5ffbd44db5438231ea7bc038b2fcc675520974453bf2a00d5f"
+      },
+      "0x1c3fa76e6e1088bce750f23a5bfcffa1efef6a41": {
+        "contract": "ExchangeRouter",
+        "code_hash": "0x69de75d4b551e245c505d0cd22d24ee8ce26acdfad473db53998f11e08a1937d"
+      },
+      "0x470fbc46bcc0f16532691df360a07d8bf5ee0789": {
+        "contract": "Reader",
+        "code_hash": "0x629b4d00b9bf4263f0a02cf94cad24e44584266440b10d8a24b9bffce4d95d0e"
+      },
+      "0x7f01614ca5198ec979b1aad1daf0de7e0a215bdf": {
+        "contract": "Oracle",
+        "code_hash": "0x150d2bb03cfdff8a3fc603a1926e62ed851ed47598424c0be67c4b32ded040ce"
+      },
+      "0x63492b775e30a9e6b4b4761c12605eb9d071d5e9": {
+        "contract": "OrderHandler",
+        "code_hash": "0x6c58d94017edcec97dbfcebd0b755f005cdb40177c982e24aefb27d754e709c3"
+      },
+      "0x33871b8568edc4adf33338cdd8cf52a0ecc84d42": {
+        "contract": "DepositHandler",
+        "code_hash": "0xcef2b4f0b018b6c899a03f5ecc0cf60a30366c3f67deeb8a022671b5062415fd"
+      },
+      "0x11e9e7464f3bc887a7290ec41fcd22f619b177fd": {
+        "contract": "WithdrawalHandler",
+        "code_hash": "0xd48765476069f67493eca88bd3c56fef6675df9f9051486dd8285ce2b0105605"
+      },
+      "0xaf157eb8e2398a8e1fc1da929974652b9ba9bc25": {
+        "contract": "LiquidationHandler",
+        "code_hash": "0x8f4bc92f06bc9edf4857920d288816126c6883d1d511e40d6e20f3e10f07bdbf"
+      },
+      "0xc8ee91a54287db53897056e12d9819156d3822fb": {
+        "contract": "EventEmitter",
+        "code_hash": "0xaf602f20d61d7110f1451e4094cb0e052b752caf04e277130bd63167ee7a8b68"
+      },
+      "0x31ef83a530fde1b38ee9a18093a333d8bbbc40d5": {
+        "contract": "OrderVault",
+        "code_hash": "0x34d8332a92711cb1ce9a31be362ca68f9b4d34963e5c7c10d6134c86d832edb3"
+      },
+      "0xf89e77e8dc11691c9e8757e84aafbcd8a67d7a55": {
+        "contract": "DepositVault",
+        "code_hash": "0x4568c2ac54ac838ce1e2e086810d326332fe4f92e8ef2dd5ed94cb80dead66a9"
+      },
+      "0x0628d46b5d145f183adb6ef1f2c97ed1c4701c55": {
+        "contract": "WithdrawalVault",
+        "code_hash": "0xbf33f546f6495b686f51a5c4739c52e30fda25d1ebe4071bd53460cd4d1a5731"
+      },
+      "0xf5f30b10141e1f63fc11ed772931a8294a591996": {
+        "contract": "MarketFactory",
+        "code_hash": "0x7a1c81371f0bcd0d8f872e7d353f922bfcdf0477044e987401858ba76bb2bae8"
+      },
+      "0x33197331426b7fb1fb91954994f8d89b7705644f": {
+        "contract": "CallbackUtils",
+        "code_hash": "0x37b5a86e49f50befbd91549f6bcc00f0342b5205b41bf6e93cd4427777b3c644"
+      },
+      "0xf43f559774d2cf7882e6e846fcb87bde183a6da7": {
+        "contract": "DepositStoreUtils",
+        "code_hash": "0x796146ace8be9fa58a2998c4fc19bd48bbe6635962844fcc121cf1468fd7ae41"
+      },
+      "0x8bc6c1335f3b6d48ac318e205bb3961c113bc84d": {
+        "contract": "FeeUtils",
+        "code_hash": "0xfd2e436c4339b5b9247d6204c93a7b17dc82146ab7186bab0689f8d82586e607"
+      },
+      "0xd27bbe7937f39cc5cde6d9f041e42174ed509b96": {
+        "contract": "MarketEventUtils",
+        "code_hash": "0x0f18463b8967e26c09940be185077bcb0002618593a0e1d4762cec829742a4b9"
+      },
+      "0xeee61742bc4cf361c60cd65826864560bf2d0bb6": {
+        "contract": "MarketStoreUtils",
+        "code_hash": "0xb9c6bf114bdded7e302b5b77e521e713933c762bb04944a175a0ee2296f6f07c"
+      },
+      "0x5c6905a3002f989e1625910ba1793d40a031f947": {
+        "contract": "OrderStoreUtils",
+        "code_hash": "0x7aa22758446b85417353f8602fcf1b63837e106ee523436b15d550ff53c05d6d"
+      },
+      "0x2e48b7fc6209c544533623f083a1eb75fa007444": {
+        "contract": "ReferralUtils",
+        "code_hash": "0x7cbbab832aca0400b74bb0e44c3e3ea14a5a2e159472240ab240a2b2cd456c06"
+      },
+      "0xfe6bdb87e59484db1494a467cdba7c051fb2a604": {
+        "contract": "ShiftStoreUtils",
+        "code_hash": "0xe21ddc26ed7384371b01325326c79f87b34a1fc65350490cf35a2563becbe5e5"
+      },
+      "0xef222da7472d4152c9620925f3656dff4b917e86": {
+        "contract": "WithdrawalStoreUtils",
+        "code_hash": "0x213ccfaeb4f839fb4db24f18bfa50e4e3c1392afbbf4efeb5fb0bd5efb469526"
+      },
+      "0xd099565957046a2d2cf41b0cc9f95e14a8afd13b": {
+        "contract": "MarketUtils",
+        "code_hash": "0xdc4d2281ce1ec8ee240e48de2acfb72f5eae8ee88017b608b7510035e1bc5117"
+      },
+      "0xb6ab1c07c3071395d8b15899a7af2e51f5316832": {
+        "contract": "PositionStoreUtils",
+        "code_hash": "0xc61cf310c036615b346e06962a98503f29b03f7891d5cc50b862954e626c8499"
+      },
+      "0x4bdcab27bb7e03308fe20ae166103bf7fda71a06": {
+        "contract": "PositionUtils",
+        "code_hash": "0xed0bd35763b25a86404b2b6beb396ecb5f5e3c791b1d4446f53cf5f8530eb900"
+      },
+      "0xee777aac7bdeca17baedcc12a998a3ab9275c88a": {
+        "contract": "ReaderDepositUtils",
+        "code_hash": "0xd2d5236a85239bf0556fe237d3efc7d961ef1a91627a097fea3b25377f64b714"
+      },
+      "0x0744370e183df020b62085de54a764e71c373c74": {
+        "contract": "ReaderPositionUtils",
+        "code_hash": "0xf1d81fcfa96db3dfdb83afee5fc22544f07f050d7803f61dab83668a2ad44ff3"
+      },
+      "0x3b2f06cf6ac91cd507ed94d14bd9fe6ce718361a": {
+        "contract": "ReaderPricingUtils",
+        "code_hash": "0x383a441946afdb5029b158e9739f06d9add0de776f636aface6c6846d6008bf6"
+      },
+      "0x116a8f5b8d2aeec4d84b352fe0226270f0caba65": {
+        "contract": "ReaderUtils",
+        "code_hash": "0xbae03913e85bf6f903984abd954af270fc75d705f82897daf8acab570818169a"
+      },
+      "0x6a2691a4a3c30375b1cc1713766b84e9ba7ba155": {
+        "contract": "ReaderWithdrawalUtils",
+        "code_hash": "0x52088ccd43128b57da540e8a20849e5258e67b17d0b1410d61adcbdf619ebd26"
+      },
+      "0xee2d3339cbce7a42573c96acc1298a79a5c996df": {
+        "contract": "GasUtils",
+        "code_hash": "0x37905b4b7f5a968313b910dbd82130f1e5bd389018fae30db46634ee4fe78b2f"
+      },
+      "0x6dec8861104ed2e8e3e43245e467cfd78645366c": {
+        "contract": "ExecuteOrderUtils",
+        "code_hash": "0x7e1addbdeb622f3a84024df110b191ddef7b9a0e6fb74c20414dc9ed6bc4d836"
+      },
+      "0x4ddaf0f957e2be1cd50462eced592aae98d54ba9": {
+        "contract": "OrderEventUtils",
+        "code_hash": "0xf89918cc08f119eba139d59ba870f2ef2edca8345539343b9918ccae94ac211e"
+      },
+      "0x2b667944d984732703626390c675c08ea3d1f0e5": {
+        "contract": "OrderUtils",
+        "code_hash": "0x42c661fcaad56775dba436bd24bf76fcb58da716b69b4ab4a93e0fcf6fe378b5"
+      },
+      "0x37e1aeb6118b0106810d2ef7662875c414e39ca4": {
+        "contract": "DepositUtils",
+        "code_hash": "0x5560ab426da04c35cbd1c00ff5b524f2efbc5f9be091f7c916623a6361d19eb3"
+      },
+      "0x4fec706c582e4243d4aa2bcd49763201e968c75b": {
+        "contract": "ExecuteDepositUtils",
+        "code_hash": "0x4613c272fdee585f5620b33cc9e6a933ea5b8f1da9092ce960d10bd672f70950"
+      },
+      "0x49239322c0ee720400d6785799e5fc111bac7891": {
+        "contract": "ExecuteWithdrawalUtils",
+        "code_hash": "0x6c1bd73c7c153920da2c541cf6fe151df6a2ada813f362d76ac0c00b8f633693"
+      },
+      "0xbd6ae8bd2fab5682aa11e3d63c72fb86080d6d9a": {
+        "contract": "WithdrawalUtils",
+        "code_hash": "0x0345fd837762501b4c84e47802e5ec1d46d0a4ec1c79cc9d050ee77d5e4d43c7"
+      },
+      "0x863f534a62f05e6a4e1bfc8920b3ad023ad9d7ee": {
+        "contract": "LiquidationUtils",
+        "code_hash": "0x18d714ac2511d7ed22ced67261819288d7f674187a7a5efc4f07303522ae3d46"
+      },
+      "0x498c2f611337eab18be4910702e3225e88206dae": {
+        "contract": "MarketStoreUtils",
+        "code_hash": "0xd390647ad15437d53af3d1b3151ad924c24c430298f1c045046f4d96ca61d6a6"
+      },
+      "0x5872e84e5ea23292b40183be86d25fb428621fc1": {
+        "contract": "DepositEventUtils",
+        "code_hash": "0xf74facba5d5f15522848c437b95df48a0430dd0280273d25e17db3dcf980f257"
+      },
+      "0xd10b10b816030347ff4e6767d340371b40b9f03d": {
+        "contract": "GlvDepositEventUtils",
+        "code_hash": "0x4a93afe301119f41eca87ab038e64b55d785cf1f2264453b946eeba899c8feca"
+      },
+      "0xc231f2dfbab5cc699c73f0c80ffd3243f150c3b6": {
+        "contract": "GlvWithdrawalEventUtils",
+        "code_hash": "0xece947c7b0d183825da3b92b4cf350d5ad4b6e68b48cbd62e65b2e0435ba06d1"
+      },
+      "0xc6716c14bd03dbe59abe08552edfb8d87886fadf": {
+        "contract": "ShiftEventUtils",
+        "code_hash": "0x04eb726f01a7c5ba9992a9b7c54f1158cc984d65c8749fa253b923f898fdbf8d"
+      },
+      "0x6d492f93c5d3dd3c36a462929696251b1a69ea48": {
+        "contract": "WithdrawalEventUtils",
+        "code_hash": "0x9819a462211c8a3ca698247f8f4b67d4cc1a08741ef176797cebd7f241131eab"
+      },
+      "0x592516905fdd3e923f8e8a7c849f83a464849f51": {
+        "contract": "ReferralEventUtils",
+        "code_hash": "0x59b1beab9f3dfab8f8ceed51a06ffa7d77d38625a21c31017f2dc33beaa371a2"
+      },
+      "0x858559d39fe8b2fdfe452f895db36077859130e1": {
+        "contract": "SwapPricingUtils",
+        "code_hash": "0xbbc4060ca24fdeafbf66854bb27d9b0d87ceab3ad4072efe88f4d335fb47cd08"
+      },
+      "0xa19e2e9ca5571be6d1077e41afee3e522b86238e": {
+        "contract": "MultichainUtils",
+        "code_hash": "0x01520e573402e9f75f4fd650bc2dec06d5b01515ddeb94c8bb56bf52f860619d"
+      },
+      "0x30eee947f07b03a3c0c2c29d83725d6a66570820": {
+        "contract": "SwapUtils",
+        "code_hash": "0xa2fadc72ae2f2d7c936561c29c9f541a85d608394e44994a8c99d3da5d235332"
+      },
+      "0xa267133cf86927c2391895067dc3c3b47b9e26ee": {
+        "contract": "BridgeOutFromControllerUtils",
+        "code_hash": "0xe6bfe9f6a969755771850bef11a05d7b5a14792f52ce1fe1952a3676612f4c8e"
+      },
+      "0xc4eccce7e5231d453991f8c13459999b14afff24": {
+        "contract": "IncreaseOrderExecutor",
+        "code_hash": "0x51d7d9a3b8ba912e2b37e56b3f2b2a5ed4623dfc4617608f950fd95b730a400b"
+      },
+      "0xf7b962b085775a96a99e3dd38dfff09d7e270088": {
+        "contract": "DecreaseOrderExecutor",
+        "code_hash": "0xb1a3788ce09dd24760c8de52a6d54b4a4a990d5e37ea440e71e02a86b220edbe"
+      },
+      "0xaffd408f3f95f83e3b6326c7bacbad08edfad6fe": {
+        "contract": "SwapOrderExecutor",
+        "code_hash": "0x83ee5ed16b6c903cb9b32ac48752b9885493d643ef230b59ce282ca24b3e39e4"
+      },
+      "0xd3d705e88cce7e11452b3d900f694bec80ef5742": {
+        "contract": "IncreasePositionUtils",
+        "code_hash": "0xc13d650e039aa3190696815e0407c73514f0d387679d061f0d6972cbee63b74a"
+      },
+      "0x8f550e53dfe96c055d5bdb267c21f268fcaf63b2": {
+        "contract": "DecreasePositionUtils",
+        "code_hash": "0x753c89b10de8a912d42549d3e2d92b9e1710a16457751f3193acc3fe90862aa6"
+      },
+      "0x20d56cf90fd3c8f3beb9bac03afda3241093de36": {
+        "contract": "PositionEventUtils",
+        "code_hash": "0x837f5eb2aa3b17a57bc1bde8a0c35bcc03e790aa56fc0e17b01eb5a372407a18"
+      },
+      "0x41978c5c7665dccf6d88978809f32e4bb78e12ca": {
+        "contract": "DecreasePositionCollateralUtils",
+        "code_hash": "0x7a33f19ec59a44979d7bd04130bc848e585ca0f5a9add5981dfda6d59617fdb0"
+      },
+      "0xf90fec8bf858d3445938fb202d962889c37874ae": {
+        "contract": "DecreasePositionSwapUtils",
+        "code_hash": "0x535e713e49e9421a7cddc047662635976d1df8fc18e98f69b8b45984c370f93e"
+      },
+      "0x32c206d8ea6903c3ca5bded94877c72d92bde82a": {
+        "contract": "SwapHandler",
+        "code_hash": "0x90a2567e43d7efa410ce11eda83be4e3ecb3618b57444daf227740122f6f5a10"
+      }
+    },
+    "eip155:43114": {
+      "0x2f0b22339414aded7d5f06f9d604c7ff5b2fe3f6": {
+        "contract": "DataStore",
+        "code_hash": "0x85edfbb562ee85ba75fee6a9ba8d7c60c0de40785f6af70d21325d7c8a6f1071"
+      },
+      "0xa44f830b6a2b6fa76657a3b92c1fe74fcb7c6afd": {
+        "contract": "RoleStore",
+        "code_hash": "0xf0af56368c1914596287f4512d96245c69435059ef378eae86ea7609e2bc3bf6"
+      },
+      "0x820f5ffc5b525cd4d88cd91acf2c28f16530cc68": {
+        "contract": "Router",
+        "code_hash": "0x42536b4eed79ea3fbf32f93ecef9129a468383585bf0b6286c510eacd42473d8"
+      },
+      "0x8f550e53dfe96c055d5bdb267c21f268fcaf63b2": {
+        "contract": "ExchangeRouter",
+        "code_hash": "0x76b91f5f29c71748c903ef76920f0a06258394893e3eb6de110304c35fcaa1a6"
+      },
+      "0x62cb8740e6986b29dc671b2eb596676f60590a5b": {
+        "contract": "Reader",
+        "code_hash": "0xb78894c8b209b564d468d86b5d3ae527f24fff307b58ce8fadebb59359b525cb"
+      },
+      "0xe1d5a068c5b75e0c7ea1a9fe8ea056f9356c6ffd": {
+        "contract": "Oracle",
+        "code_hash": "0xe5909fabb1e0e2a47ccd8f41d73ffb9908d1105bed9cff279bc8d4f92e2f912a"
+      },
+      "0x823b558b4bc0a2c4974a0d8d7885aa1102d15dec": {
+        "contract": "OrderHandler",
+        "code_hash": "0x0d55d9b6f64662a590465ceb55ce4db19d23ff2888107f7eb0f0b5d3e967fdf6"
+      },
+      "0xcc2645e961514a694bca228686ec664933c70647": {
+        "contract": "DepositHandler",
+        "code_hash": "0x131a97770cc741e993ccf4813d49361817044ffa9ae2aafec17d24a5f00a13d8"
+      },
+      "0x334237f7d75497a22b1443f44ddccf95e72904a0": {
+        "contract": "WithdrawalHandler",
+        "code_hash": "0xa8912dc32b5890f811faa800001801be426803463f104ea941f5d3b65b4cb279"
+      },
+      "0xad7f00b4080bacffaae7f44d67560c818d8e5468": {
+        "contract": "LiquidationHandler",
+        "code_hash": "0xdb8039ca85095bb84a404bc116bf28268a43ab68c85e749e920fc66cd4c23651"
+      },
+      "0xdb17b211c34240b014ab6d61d4a31fa0c0e20c26": {
+        "contract": "EventEmitter",
+        "code_hash": "0xd719fe9064ffbd9dc2eb1cd47b25ad4d40c1e50f9a91f9b56a721173824af01d"
+      },
+      "0xd3d60d22d415ad43b7e64b510d86a30f19b1b12c": {
+        "contract": "OrderVault",
+        "code_hash": "0xba7cf9b242d30e1e95cf88661fa682f3f51ff9bb510bffe52d468d61e5066bea"
+      },
+      "0x90c670825d0c62ede1c5ee9571d6d9a17a722dff": {
+        "contract": "DepositVault",
+        "code_hash": "0x83299498bba5e76a6090680f9672b0bccc3cfce06825655e40ae0ccfde97c73d"
+      },
+      "0xf5f30b10141e1f63fc11ed772931a8294a591996": {
+        "contract": "WithdrawalVault",
+        "code_hash": "0xba3e3900302514a45ad7311de798afa14c167a661608a59ad71c5560cf98b36a"
+      },
+      "0xc57c155faccd93f62546f329d1483e0e5b9c1241": {
+        "contract": "MarketFactory",
+        "code_hash": "0x78bf5828c4a068349ad7c1da7962eb40f81f49dae5129151e2b61b8c4b6febe6"
+      },
+      "0xfeb3a35a89fa31437566c0dd7a299fc01decd991": {
+        "contract": "CallbackUtils",
+        "code_hash": "0x0646f39090d484092e839296cdb00f8b4b54f99d38963c11232cd29463c52361"
+      },
+      "0x484ac353cbca537e9f0543d1cc4323f643974128": {
+        "contract": "DepositStoreUtils",
+        "code_hash": "0x13f1877501cf18392e95e0b2adf9c8eb98a8e86566f2a49a96db9c92c51c16e6"
+      },
+      "0x879bc318f83002abac6d97e423d3816eb3103495": {
+        "contract": "FeeUtils",
+        "code_hash": "0x4076f56f1ecb044b9afba8b660c3a96d1380303c7ea7902e2e097d1e7177896b"
+      },
+      "0x384575078ffab77a8deea21ec38e522d27ecf9bb": {
+        "contract": "MarketEventUtils",
+        "code_hash": "0x37707512403cbaa83280f74ecb8b8eaf4f96937641a7cab619d0f544dbea455d"
+      },
+      "0xacaa2e2a2f4ca2ccd775296791206c5b943478dc": {
+        "contract": "MarketStoreUtils",
+        "code_hash": "0xdaa4a997a62d525913577cb4a8870ea419046e24c78fa93268bbbee5426d69cd"
+      },
+      "0xbc886ae772c932a44385db014e1909bcf1f8e4a4": {
+        "contract": "OrderStoreUtils",
+        "code_hash": "0x412e9c35632c14a1ea11d515bdcbcf3f284e00e1b3b0007263395dbb825c07d3"
+      },
+      "0x41978c5c7665dccf6d88978809f32e4bb78e12ca": {
+        "contract": "ReferralUtils",
+        "code_hash": "0xa9ae5032f552e9683cab9894900c9e7ea0e45b53bcbacbf1a9d3143ea8be16e4"
+      },
+      "0x65c56647799e6f8a57b988f17ca5ff4689ea5244": {
+        "contract": "ShiftStoreUtils",
+        "code_hash": "0xf1fa858c3957b95956a137d168c02894c81f1e9be5813dc4dee428c1719f2a82"
+      },
+      "0x710816e1b4b63c9393159bbe9f7eb5ccc5032684": {
+        "contract": "WithdrawalStoreUtils",
+        "code_hash": "0xaf3d26dd33880b5d88775f6aef27d3be873ae15381113b33de9372f35cf9f633"
+      },
+      "0x206b550725f09019f0192fb57826a8d8589e2345": {
+        "contract": "MarketUtils",
+        "code_hash": "0xde822d791e57fc1394e85120f8d2f877c232268d36199e111afc88a6d6099709"
+      },
+      "0xaf6d1b6420984df6918e45c8731789589c963b34": {
+        "contract": "PositionStoreUtils",
+        "code_hash": "0xc2b2f4b984c7c5f72901e9084bc04ff57c0f2b07467d1f3e603a35c820c8652e"
+      },
+      "0x1a6a133509b3f5016faaa8df7bc1df1dd32c950a": {
+        "contract": "PositionUtils",
+        "code_hash": "0x96511441c3dfc8ea0991a511780117a94b427a3acef6e7a0f553874c6f242dc1"
+      },
+      "0xc6716c14bd03dbe59abe08552edfb8d87886fadf": {
+        "contract": "ReaderDepositUtils",
+        "code_hash": "0xc78fef674e1e23cf7f48bc5c7c5de697c5190b86b1f875bc1ff1ef9731c7c70e"
+      },
+      "0x6dec8861104ed2e8e3e43245e467cfd78645366c": {
+        "contract": "ReaderPositionUtils",
+        "code_hash": "0x2a8332ff22f6c13b7c76a2423fa6cd715eff5e62987fca5e57a97ac7c08249d4"
+      },
+      "0x33197331426b7fb1fb91954994f8d89b7705644f": {
+        "contract": "ReaderPricingUtils",
+        "code_hash": "0xaae50580a396a6f729e482b54070434f5f8e7e515afd4a37c0398b7064d6aabf"
+      },
+      "0x2b667944d984732703626390c675c08ea3d1f0e5": {
+        "contract": "ReaderUtils",
+        "code_hash": "0xbb310005a5b62552832cfd5506fae9dd397ccfcb27aaa3fec863507842ea82ea"
+      },
+      "0x63492b775e30a9e6b4b4761c12605eb9d071d5e9": {
+        "contract": "ReaderWithdrawalUtils",
+        "code_hash": "0x0decfd68c2fc907ee8a7e241707b267e9258746ded563a2b6418d3bcef5d7d9b"
+      },
+      "0xeedc3b6866a017c27236c2928bdb9040a3408a76": {
+        "contract": "GasUtils",
+        "code_hash": "0xa85f9f4cb349903978ae73afc235f67519209a88357c19fb72303f20d0cd6c30"
+      },
+      "0x78458cfd7b5371add2e5be72492620cd4e16c149": {
+        "contract": "ExecuteOrderUtils",
+        "code_hash": "0x4aba260f20adf99ade4fd49c584220e46571bc5f75924c0fb89517b4be420762"
+      },
+      "0x62a7d76300d3edab3d5b74c890b33ebd413fd214": {
+        "contract": "OrderEventUtils",
+        "code_hash": "0x984f79beb1027ab59534c3f06c0d0d3a2df0d96dec155590b67a72090d4c6230"
+      },
+      "0x133ba19c1b679ddb847d05e5b4c9546daf955ae0": {
+        "contract": "OrderUtils",
+        "code_hash": "0x592f41e847c559f4b0e6dd64ee31d8d7548897b07669c4e7edc6cf0ab0e3e04e"
+      },
+      "0x37440f0e7a268fa875fa05ef446c1fa11199defd": {
+        "contract": "DepositUtils",
+        "code_hash": "0x8607487d30f6811a277cb3b33f02a22d8e82e2e725f5d5c5f3a29ad37aeb4626"
+      },
+      "0x59971e8c8387a8f02135279ba89463364d9a24d4": {
+        "contract": "ExecuteDepositUtils",
+        "code_hash": "0xe8146a29fc67cc41818dd40d1cd3c5fb65692a5c80715ce4a827561f408ec730"
+      },
+      "0x55ddac7e5cfdc508237e00aec145b22d09dbfef9": {
+        "contract": "ExecuteWithdrawalUtils",
+        "code_hash": "0xcf4e2377d662dc11034ebf539a0a94e14c5a2f3f825e24a48efe8e1b4758ac53"
+      },
+      "0x935ae6508c1c4a0ba172fec239ba046b626cbee2": {
+        "contract": "WithdrawalUtils",
+        "code_hash": "0x66d995a12493a8c45e7f3b7780a7c300915ff964a950e4bf0427fc37cea44e2b"
+      },
+      "0x3b2b33dd30b1497611304c6423ac5fd9aed1e74b": {
+        "contract": "LiquidationUtils",
+        "code_hash": "0xc2e8b965b5d19fba577b97e10b69208bd9e23dc95fa8d4400752b7fdf5280644"
+      },
+      "0x4239225cb5df0252d6b600e895394ddf12006412": {
+        "contract": "MarketStoreUtils",
+        "code_hash": "0x63b5d758d8cc183cb8e8c0e736826681dedfdbee535cb9e2a03511f95a74dfb7"
+      },
+      "0xd4435dd410f9fb4f12ed583f6e6ba282b0a8b344": {
+        "contract": "DepositEventUtils",
+        "code_hash": "0x0678f3a7a0e76209b46256d2bc4e16129412f2d85a07232f009596319c0bc6e5"
+      },
+      "0xcc1ebeed6384fe39ddc48d22bafd95926e1145e5": {
+        "contract": "GlvDepositEventUtils",
+        "code_hash": "0xb8603ccc0f16b4e8dd4f177a27a400d76b582d798366966fbaf9caee31029948"
+      },
+      "0xc8bba3300810d6889e04e409551ee65a53a950bf": {
+        "contract": "GlvWithdrawalEventUtils",
+        "code_hash": "0xe067371653aea9538d76b945aa7b5e112aa22a27bb7657f9343b0471bb327905"
+      },
+      "0x55d5c8eff1a91b3d12bed13922793133f2739cc2": {
+        "contract": "ShiftEventUtils",
+        "code_hash": "0x0b7ef924cfe64a9de5ecb036b2a7ba0c767bca085c540a9c36fbc755d9798e2c"
+      },
+      "0xef6d25840eb545a1e03e0a79f1f3c1da3051dac0": {
+        "contract": "WithdrawalEventUtils",
+        "code_hash": "0xbd01905a2a64bcd237d0247b54422444464dc4736a0a579b3eb442b029f08621"
+      },
+      "0x825e3bdac3d503cac071c849b386fa352582c1d7": {
+        "contract": "ReferralEventUtils",
+        "code_hash": "0x322bb6917185345a2d5d3409da3b5401541b58a4da7280e3e3b640fc2a0a840d"
+      },
+      "0x1ff76f84871893aae558a9b760137e3057a0c747": {
+        "contract": "SwapPricingUtils",
+        "code_hash": "0xf6a65e31b81999f278901e8b362b3bc20e51361ec551c9e36b68a419783fe133"
+      },
+      "0x379522c6c0fc4cd8b25ae1252578ecce295535d6": {
+        "contract": "MultichainUtils",
+        "code_hash": "0x7089abf1465bce5f7492e72e8fff9b039f2ad7d81a4fee4f962bccefb003a199"
+      },
+      "0x161013247f8ca79baf318d0c8e7115562ec2c9ab": {
+        "contract": "SwapUtils",
+        "code_hash": "0x88d08b08a20ee085d534901b8e8a164104923e7e5fd79127b62e0c246827808c"
+      },
+      "0x40336d25f5c0218efab8c3d43db1b45c81fe419e": {
+        "contract": "BridgeOutFromControllerUtils",
+        "code_hash": "0xf3a211223d1a2e7b3fdf199c200ec831c1188c7f542282a2e65dc62f66b11e54"
+      },
+      "0x63abc52a2750c7cb65d560b52627ec8f6207d9f9": {
+        "contract": "IncreaseOrderExecutor",
+        "code_hash": "0x05d11ce2f191cfd7940fdc36befd2ca29972fdd0b2cfd96dadc04f19e1154f27"
+      },
+      "0x40fe9ea67c9d29e77661837e986ef20a78c5e9ce": {
+        "contract": "DecreaseOrderExecutor",
+        "code_hash": "0x3088ed12b84500efe3556ad05d38005eef40d080961ad38af28c80a338d591c5"
+      },
+      "0x92a542690f8a347e2ee9e51c2da0ea38e1186cdb": {
+        "contract": "SwapOrderExecutor",
+        "code_hash": "0xfd00c421861eb892daa86e2721650ceda5de5c1f21fc7d3808d0fb4c39a40abc"
+      },
+      "0xb7e682690e8d8714b81b48b7aace60f66d57dbad": {
+        "contract": "IncreasePositionUtils",
+        "code_hash": "0xc3e5c1691887e95c4b0d6fe1cbd4d83a61483ef1b324b534302970157279193b"
+      },
+      "0x66735edb217e253934a1593d22e02e0dc6dbc0a4": {
+        "contract": "DecreasePositionUtils",
+        "code_hash": "0xf7744c979b042e336cae86f7695df736207a99cf49822a74bb34a2dc22df4dfc"
+      },
+      "0x3f3c38563bfac63e287706fba149d25e0d011ca0": {
+        "contract": "PositionEventUtils",
+        "code_hash": "0xde649348f57c26ae963c81bc2acc385426979a8e5e3a9fa714c8b1e48d0afafd"
+      },
+      "0x445b3b1ff222e60bbeb8db7afd5796495f8b4686": {
+        "contract": "DecreasePositionCollateralUtils",
+        "code_hash": "0xd01c5bc4907008490c0acb8264e1545c2266aaeb1cf77b89aa72800678d6914f"
+      },
+      "0x8a6e7ede1ea4cbffed9b09d9fa3d0abd32ce1429": {
+        "contract": "DecreasePositionSwapUtils",
+        "code_hash": "0x0dd9edefbd463933c59ae3d6dad679a0d6f13da573ae51a40811d0fcd689e18b"
+      },
+      "0x0dc24af5bbbec90c1defd8f5f72e47c7d298c0ae": {
+        "contract": "SwapHandler",
+        "code_hash": "0x8b1305d7025036404a52b24738af581d1e6c73cbddc432e215943d23f25772f4"
+      }
+    }
+  },
+  "revisions": {
+    "MarketToken": {
+      "runtime_length": 6547,
+      "normalized_code_hash": "0x17314b53375440cc5293cc6a88c06ccf42680e48046c2514e86afeee782bcd31",
+      "immutables": {
+        "roleStore": [
+          {
+            "length": 32,
+            "start": 658
+          },
+          {
+            "length": 32,
+            "start": 1991
+          }
+        ],
+        "dataStore": [
+          {
+            "length": 32,
+            "start": 233
+          },
+          {
+            "length": 32,
+            "start": 723
+          },
+          {
+            "length": 32,
+            "start": 1498
+          },
+          {
+            "length": 32,
+            "start": 1876
+          },
+          {
+            "length": 32,
+            "start": 2192
+          },
+          {
+            "length": 32,
+            "start": 3137
+          }
+        ]
+      },
+      "compiler_input": "ceaee67c68e8683a89d03d7b32cacd17",
+      "compiled_output_sha256": "a6580e0310b6a90d61c7a53ceec5d70447b9c81d4f04b8491e2983a6aed9021a"
+    },
+    "ChainlinkDataStreamProvider": {
+      "runtime_length": 3764,
+      "normalized_code_hash": "0x17dba3ee03397ef970593ccd183d36c1b4c8c846780f4bf3027b28c3d739b47d",
+      "immutables": {
+        "dataStore": [
+          {
+            "length": 32,
+            "start": 261
+          },
+          {
+            "length": 32,
+            "start": 543
+          },
+          {
+            "length": 32,
+            "start": 1558
+          },
+          {
+            "length": 32,
+            "start": 1858
+          },
+          {
+            "length": 32,
+            "start": 2072
+          }
+        ],
+        "oracle": [
+          {
+            "length": 32,
+            "start": 300
+          },
+          {
+            "length": 32,
+            "start": 439
+          }
+        ],
+        "verifier": [
+          {
+            "length": 32,
+            "start": 108
+          },
+          {
+            "length": 32,
+            "start": 742
+          }
+        ]
+      },
+      "compiler_input": "1085fa0bbd9d8812a88d39eedbba618e",
+      "compiled_output_sha256": "aa3d28f15fc4e834f757bb11404265ae6b7f592c271095a344ac3aa95ec2e97d"
+    }
+  },
+  "blocks": {
+    "eip155:42161": {
+      "chain": {
+        "chain_id": "eip155:42161",
+        "environment": "mainnet"
+      },
+      "number": 502851450,
+      "hash": "0xa0de844b58e42c6639f5f08493a8ea51d62d627f9ae3aad4f7cc8ed4608b0664",
+      "timestamp": 1788827746
+    },
+    "eip155:43114": {
+      "chain": {
+        "chain_id": "eip155:43114",
+        "environment": "mainnet"
+      },
+      "number": 94733400,
+      "hash": "0x3c57a273d20b7c0507063f3075a52e6496729bf0ea0fee2f66ebb02be1babb1b",
+      "timestamp": 1788827745
+    }
+  },
+  "executor_verification_sha256": "e7bc6b5ab076f8ff956a07fe62d1c5898418bb4f21c3183ec596eea6f28bd184",
+  "swap_handler_verification_source_sha256": "7d5c1884ddcaa951f90429e49d011b9d2c5bf318c2575a7c0bd69b907e67a46c"
+}

@@ -1,0 +1,51 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/curve_bnb_twocrypto_lp.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    proportional:
+      market: crypto_pool
+      account: proportional
+      funding_asset: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+      trading_asset: eip155:56/erc20:0x5519a479da8ce3af7f373c16f14870bbeafda265
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:56/erc20:0x5519a479da8ce3af7f373c16f14870bbeafda265
+        quantity: '0'
+      - asset: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+        quantity: '1'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      minimum_native_balance:
+        base_units: 0
+    single_coin:
+      market: crypto_pool
+      account: single_coin
+      funding_asset: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+      trading_asset: eip155:56/erc20:0x5519a479da8ce3af7f373c16f14870bbeafda265
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:56/erc20:0x5519a479da8ce3af7f373c16f14870bbeafda265
+        quantity: '0'
+      - asset: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+        quantity: '1'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      minimum_native_balance:
+        base_units: 0
+      single_coin_exit: eip155:56/erc20:0x85375d3e9c4a39350f1140280a8b0de6890a40e7
+markets:
+  crypto_pool:
+    connector: curve
+    chain: eip155:56
+    pool: '0xb84637ab9be835580821a67823f414ffd0bbf625'
+accounts:
+  proportional:
+    chain: eip155:56
+  single_coin:
+    chain: eip155:56

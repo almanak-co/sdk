@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/gmx_v2_avalanche_liquidity.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    Main:
+      kind: gmx_liquidity
+      market: wavax_usdc
+      account: fund
+      initial_inventory:
+      - asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '50'
+      - asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '200'
+      execution_fee:
+        asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '1'
+      deadline_seconds: 5m
+      maximum_event_block_span: 2000
+      minimum_native_balance:
+        base_units: 0
+      funding_asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+      entry_amounts:
+      - asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '1'
+      - asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '100'
+      additional_amounts:
+      - asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '1'
+      - asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '50'
+      minimum_market_tokens:
+        asset: eip155:43114/erc20:0x913c1f46b48b3ed35e7dc3cf754d4ae8499f31cf
+        quantity: '1'
+      partial_withdrawal:
+        asset: eip155:43114/erc20:0x913c1f46b48b3ed35e7dc3cf754d4ae8499f31cf
+        quantity: '1'
+      withdrawal_minimums:
+      - asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity:
+          base_units: 1
+      - asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity:
+          base_units: 1
+markets:
+  wavax_usdc:
+    connector: gmx_v2
+    chain: eip155:43114
+    market: eip155:43114/erc20:0x913c1f46b48b3ed35e7dc3cf754d4ae8499f31cf
+accounts:
+  fund:
+    chain: eip155:43114

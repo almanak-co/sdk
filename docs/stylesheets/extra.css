@@ -176,4 +176,9 @@ body::after {
     justify-content: flex-start;
     gap: 0.5rem 1rem;
   }
+
+  .site-footer__links {
+    flex-wrap: wrap;
+    white-space: normal;
+  }
 }

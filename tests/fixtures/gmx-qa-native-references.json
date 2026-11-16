@@ -1,0 +1,102 @@
+[
+  {
+    "reference": "gmx_v2_arbitrum_position",
+    "profile": "safe_roles",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-08-gmx-avalanche-runtime/arbitrum-shared-driver-regression/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_avalanche_position",
+    "profile": "eoa",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-08-gmx-avalanche-runtime/final-eoa-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_avalanche_position",
+    "profile": "safe_roles",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-08-gmx-avalanche-runtime/final-safe-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_arbitrum_position_path",
+    "profile": "eoa",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-08-gmx-position-paths/arbitrum-long-eoa-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_arbitrum_position_path",
+    "profile": "safe_roles",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-08-gmx-position-paths/arbitrum-long-safe_roles-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_avalanche_position_path",
+    "profile": "eoa",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-08-gmx-position-paths/avalanche-long-eoa-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_avalanche_position_path",
+    "profile": "safe_roles",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-08-gmx-position-paths/avalanche-long-safe_roles-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_arbitrum_position",
+    "profile": "eoa",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-08-gmx-request-fixtures/arbitrum-eoa-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_arbitrum_collateral_path",
+    "profile": "eoa",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-gmx-collateral-paths/arbitrum-long-eoa-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_arbitrum_collateral_path",
+    "profile": "safe_roles",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-gmx-collateral-paths/arbitrum-long-safe_roles-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_avalanche_collateral_path",
+    "profile": "eoa",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-gmx-collateral-paths/avalanche-long-eoa-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_avalanche_collateral_path",
+    "profile": "safe_roles",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-gmx-collateral-paths/avalanche-long-safe_roles-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_arbitrum_swap",
+    "profile": "eoa",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-gmx-exchange/arbitrum-eoa-authority-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_arbitrum_swap",
+    "profile": "safe_roles",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-gmx-exchange/arbitrum-safe-authority-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_avalanche_swap",
+    "profile": "eoa",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-gmx-exchange/avalanche-eoa-authority-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_avalanche_swap",
+    "profile": "safe_roles",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-gmx-exchange/avalanche-safe-authority-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_arbitrum_liquidity",
+    "profile": "eoa",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-gmx-gm/arbitrum-eoa-authority-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_arbitrum_liquidity",
+    "profile": "safe_roles",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-gmx-gm/arbitrum-safe-authority-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_avalanche_liquidity",
+    "profile": "eoa",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-gmx-gm/avalanche-eoa-authority-runtime/checkpoint.json.gz"
+  },
+  {
+    "reference": "gmx_v2_avalanche_liquidity",
+    "profile": "safe_roles",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-gmx-gm/avalanche-safe-authority-runtime/checkpoint.json.gz"
+  }
+]

@@ -1,0 +1,126 @@
+{
+  "code": "check_stage_failed",
+  "error": "invalid_config",
+  "field": "permissions",
+  "file": "/workspace/check/private/operator.json",
+  "funding": {
+    "accounts": [
+      {
+        "account": "treasury",
+        "assets": [
+          {
+            "amount_base_units": "2000000000000000",
+            "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "basis": "configured allocation capital",
+            "decimals": 18,
+            "symbol": null
+          }
+        ],
+        "chain": "eip155:1",
+        "fund": "0x521a5c391acc7cce5158c12997fb50b03e75143d",
+        "payer": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+      }
+    ],
+    "mode": "production",
+    "parameters_digest": "871fe557e9cf38ad58f7eb046e16caaf83755d2db09faa29a06753e6239b661e",
+    "payers": [
+      {
+        "accounts": [
+          "treasury"
+        ],
+        "asset": "eip155:1/slip44:60",
+        "chain": "eip155:1",
+        "decimals": 18,
+        "entry_minimum_base_units": "30000000000000000",
+        "entry_transactions": 4,
+        "gas": {
+          "exit_reserve_base_units": "10000000000000000",
+          "max_transaction_fee_base_units": "5000000000000000",
+          "policy": "treasury_payer",
+          "total_budget_base_units": "30000000000000000"
+        },
+        "minimum_native_balance_base_units": "1000000000000000",
+        "payer": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+      }
+    ],
+    "schema": "almanak-funding-v1"
+  },
+  "gas_defaults": [
+    {
+      "field": "strategy.gas.treasury_payer.base_fee_basis",
+      "value": "next_block"
+    }
+  ],
+  "line": null,
+  "message": "Roles modifier is not enabled on the Safe",
+  "ready": false,
+  "remedy": "Correct the failed stage and run check again.",
+  "stages": [
+    {
+      "message": "",
+      "stage": "configuration",
+      "status": "passed"
+    },
+    {
+      "message": "Matching retained contract reads replayed offline.",
+      "stage": "resolution",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "operator_configuration",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "resolution",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "parameters",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "sandbox",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "strategy",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "capabilities",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "data_dependencies",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "pool_liquidity",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "policy",
+      "status": "passed"
+    },
+    {
+      "message": "Roles modifier is not enabled on the Safe",
+      "stage": "permissions",
+      "status": "failed"
+    },
+    {
+      "message": "Stopped after the failed stage.",
+      "stage": "online_admission",
+      "status": "not_checked"
+    }
+  ],
+  "valid": false
+}

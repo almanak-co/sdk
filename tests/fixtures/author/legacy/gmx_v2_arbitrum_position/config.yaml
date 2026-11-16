@@ -1,0 +1,95 @@
+strategy:
+  connector: gmx_v2
+  decision_interval: 5s
+  allocations:
+    Main:
+      market: weth_usdc
+      account: fund
+      side: long
+      capital:
+        asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+        quantity: '0.5'
+      entry_collateral:
+        asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+        quantity: '0.1'
+      entry_size_usd_e30: 1000000000000000000000000000000000
+      maximum_input:
+        base_units: 500000000000000000
+      maximum_size_delta_usd_e30: 1000000000000000000000000000000000
+      execution_fee:
+        asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+        quantity: '0.02'
+      increase_acceptable_price: 1000000000000000000
+      decrease_acceptable_price: 0
+      maximum_price_per_base_unit: 1000000000000000000
+      hold_seconds: 2m
+      maximum_event_block_span: 2000
+      native_asset: eip155:42161/slip44:60
+      minimum_native_balance:
+        base_units: 0
+assets:
+  eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1:
+    decimals: 18
+  eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831:
+    decimals: 6
+  eip155:42161/slip44:60:
+    decimals: 18
+markets:
+  weth_usdc:
+    market:
+      kind: gmx_v2
+      chain:
+        chain_id: eip155:42161
+        environment: mainnet
+      share_asset: eip155:42161/erc20:0x70d95587d40a2caf56bd97485ab3eec10bee6336
+      index_asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+      long_asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+      short_asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+      wrapped_native: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+      contracts:
+        exchange_router: '0x7de39ff2e232a2203196788d37e234cf8f1b83f1'
+        token_router: '0x7452c558d45f8afc8c83dae62c3f8a5be19c71f6'
+        reader: '0xfa26cbb46e2614609406de08ca1dc7f70a684184'
+        data_store: '0xfd70de6b91282d8017aa4e741e9ae325cab992d8'
+        event_emitter: '0xc8ee91a54287db53897056e12d9819156d3822fb'
+        oracle: '0x26c02f221e8db5a821e12347c7ea8a6b6e10842f'
+        order_handler: '0xa5d2d45228ee2e3a18ab122b2ce84997d008f4eb'
+        order_vault: '0x31ef83a530fde1b38ee9a18093a333d8bbbc40d5'
+        increase_order_executor: '0x8f83a77a8f075466904b7b926dc3c80052a59ff8'
+        decrease_order_executor: '0x05920f5788105ecf4003386904ce9f9dc296dcb7'
+accounts:
+  fund:
+    chain:
+      chain_id: eip155:42161
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:42161
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: arb-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      block:
+        chain:
+          chain_id: eip155:42161
+          environment: mainnet
+        number: 502851450
+        hash: '0xa0de844b58e42c6639f5f08493a8ea51d62d627f9ae3aad4f7cc8ed4608b0664'
+        timestamp: 1788827746
+    funds:
+    - account: fund
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+          quantity: '0.5'
+        method: wrap_native
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:42161/slip44:60
+        quantity: '100'
+      foundry_account_index: 941080

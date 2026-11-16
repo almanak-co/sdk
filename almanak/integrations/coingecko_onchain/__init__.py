@@ -1,1 +1,0 @@
-"""CoinGecko Onchain integration metadata."""

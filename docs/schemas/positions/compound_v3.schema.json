@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Compound V3 market position",
+  "description": "Scoped supply, withdrawal and optional base borrowing in one named Comet market. Capital is a quantity of the named market's asset; the health factor is a protocol ratio. Grants carry no amount bound; repaying the fund's own debt needs no amount.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "market",
+    "account",
+    "minimum_native_balance"
+  ],
+  "properties": {
+    "market": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "account": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "capital": {
+      "description": "Optional amount of the market asset the allocation starts with. The funding statement requires it before the first entry. It is not a limit: how much to supply is the strategy's decision. Defaults to zero.",
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    },
+    "borrow": {
+      "description": "Grant borrowing and repayment of this market asset. Supply and withdrawal are always granted; how much to borrow is the strategy's decision. Only the Comet base asset borrows; a collateral reserve refuses it. Defaults to false.",
+      "type": "boolean"
+    },
+    "minimum_health_factor": {
+      "description": "Minimum projected health factor for an action that adds risk. Required when borrow is true; every allocation sharing that fund and market then states the same value. Omit it on an allocation that cannot borrow in a scope where none borrows (lend- or supply-only): there is no debt for it to bound, and while the fund carries any debt in that market an action the connector risk-checks is refused.",
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    },
+    "minimum_native_balance": {
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "borrow": {
+            "const": true
+          }
+        },
+        "required": [
+          "borrow"
+        ]
+      },
+      "then": {
+        "required": [
+          "minimum_health_factor"
+        ]
+      }
+    }
+  ]
+}

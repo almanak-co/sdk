@@ -1,1 +1,0 @@
-../../almanak/skills/almanak-strategy-builder/SKILL.md

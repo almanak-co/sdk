@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Aave V4 supply position",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "market",
+    "account",
+    "minimum_native_balance"
+  ],
+  "properties": {
+    "market": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "account": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "capital": {
+      "description": "Optional amount of the reserve asset the allocation starts with. The funding statement requires it before the first entry. It is not a limit: how much to supply is the strategy's decision. Defaults to zero.",
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    },
+    "minimum_native_balance": {
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    },
+    "hold_seconds": {
+      "anyOf": [
+        {
+          "$ref": "../strategy.schema.json#/$defs/Duration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional. Read only by strategy code for its own timed exit; connectors never act on it. Omit to hold until teardown."
+    }
+  }
+}

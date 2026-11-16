@@ -1,0 +1,83 @@
+{
+  "bindings": [
+    {
+      "name": "ethereum_lending",
+      "profile": {
+        "kind": "safe_roles",
+        "fund": {
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "example"
+          },
+          "address": "0x1111111111111111111111111111111111111111"
+        },
+        "operator": {
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "example"
+          },
+          "address": "0x3333333333333333333333333333333333333333"
+        },
+        "roles_module": "0x4444444444444444444444444444444444444444",
+        "role_key": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "ethereum_liquidity",
+      "profile": {
+        "kind": "safe_roles",
+        "fund": {
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "example"
+          },
+          "address": "0x2222222222222222222222222222222222222222"
+        },
+        "operator": {
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "example"
+          },
+          "address": "0x3333333333333333333333333333333333333333"
+        },
+        "roles_module": "0x5555555555555555555555555555555555555555",
+        "role_key": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "second_chain_lending",
+      "profile": {
+        "kind": "safe_roles",
+        "fund": {
+          "chain": {
+            "chain_id": "eip155:10",
+            "environment": "example"
+          },
+          "address": "0x1111111111111111111111111111111111111111"
+        },
+        "operator": {
+          "chain": {
+            "chain_id": "eip155:10",
+            "environment": "example"
+          },
+          "address": "0x3333333333333333333333333333333333333333"
+        },
+        "roles_module": "0x4444444444444444444444444444444444444444",
+        "role_key": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "ethereum_eoa",
+      "profile": {
+        "kind": "eoa",
+        "fund": {
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "example"
+          },
+          "address": "0x6666666666666666666666666666666666666666"
+        }
+      }
+    }
+  ]
+}

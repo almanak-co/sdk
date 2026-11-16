@@ -1,0 +1,38 @@
+name: Docs
+
+on:
+  workflow_call:
+    inputs:
+      skip:
+        description: "Skip the docs build (no-op success, used by path-based filtering)."
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  docs:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Skip notice
+        if: ${{ inputs.skip }}
+        run: echo "Skipping docs build; no changes that affect the rendered site."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: ${{ !inputs.skip }}
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-repo
+        if: ${{ !inputs.skip }}
+
+      - name: Build docs
+        if: ${{ !inputs.skip }}
+        run: make docs
+
+      - name: Docs drift checks
+        if: ${{ !inputs.skip }}
+        run: make docs-check
+
+      - name: Verify llms.txt output
+        if: ${{ !inputs.skip }}
+        run: test -f site/llms.txt && test -f site/llms-full.txt

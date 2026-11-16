@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only, including the production gas policy. Providers, account
+# bindings and the fork fixture are operator inputs:
+# examples/operators/uniswap_v3_base_lp.fork.yaml and
+# examples/operators/uniswap_v3_base_lp.production.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    position:
+      market: pool
+      account: fund
+      range:
+        lower: -198530
+        upper: -197530
+      capital:
+        asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+        quantity:
+          base_units: 100000000
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+  gas:
+    # Base (OP Stack) values; gas ceilings are chain-specific, never copy them to another chain.
+    # max_transaction_fee >= max_gas_limit x max_gas_price_wei plus L1 data fee headroom;
+    # exit_reserve >= 5 exit fees; total_budget >= 4 entry fees + exit_reserve.
+    # Above max_gas_price_wei every transaction, exits included, waits for gas to fall;
+    # nothing is lost.
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:8453
+      source: network_rpc_fee_history
+      reward_percentile: 50
+      base_fee_multiplier_bps: 20000
+      max_gas_price_wei: 150000000
+      max_gas_limit: 1000000
+      gas_limit_buffer_bps: 2500
+      max_transaction_fee:
+        base_units: 160000000000000
+      total_budget:
+        base_units: 1460000000000000
+      exit_reserve:
+        base_units: 800000000000000
+markets:
+  pool:
+    connector: uniswap_v3
+    chain: eip155:8453
+    pool: '0xd0b53d9277642d899df5c87a3966a349a798f224'
+accounts:
+  fund:
+    chain: eip155:8453

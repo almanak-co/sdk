@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/avalanche_aave_borrow_and_trade_v3.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '5'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '5'
+      collateral: true
+      minimum_health_factor: '2'
+      oracle: '0xebd36016b3ed09d4693ed4251c67bd858c3c7c9c'
+      price_source: '0x0a77230d17318075983913bc2145db16c7366156'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      collateral: false
+      minimum_health_factor: '2'
+      oracle: '0xebd36016b3ed09d4693ed4251c67bd858c3c7c9c'
+      price_source: '0xb0d7a8bbdcdb1203850b742bb4d7f57a1f1c8483'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      capital:
+        asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '2.5'
+      entry_swap_bps: 10000
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+markets:
+  collateral:
+    connector: aave_v3
+    chain: eip155:43114
+    asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+  loan:
+    connector: aave_v3
+    chain: eip155:43114
+    asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+  pool:
+    connector: uniswap_v3
+    chain: eip155:43114
+    pool: '0xfae3f424a0a47706811521e3ee268f00cfb5c45e'
+accounts:
+  fund:
+    chain: eip155:43114
+inventory:
+- account: fund
+  balance:
+    asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+    quantity: '5'
+- account: fund
+  balance:
+    asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+    quantity: '1'

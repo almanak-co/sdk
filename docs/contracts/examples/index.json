@@ -1,0 +1,113 @@
+{
+  "description": "Example documents of the JSON contracts the SDK emits, generated from the producers named here and checked by the tests named here. `schema.file` is relative to docs/contracts; `schema.ref` selects a definition inside it; schemas refer to each other by `$id`. Members at a `placeholders` JSON pointer vary between runs and carry the fixed value shown there.",
+  "regenerate": "make contract-examples",
+  "contracts": {
+    "almanak-funding-v1": {
+      "schema": { "file": "funding-v1.schema.json" },
+      "producer": "almanak.configuration.funding.funding_block: the funding block of `almanak check --fork|--production --online --json`",
+      "checked_by": "tests/test_contract_examples.py",
+      "examples": {
+        "fork": {
+          "description": "Online fork check: a Safe and an EOA account with separate payers and no gas policy, so `gas` is null and `total_budget_base_units` is absent."
+        },
+        "production": {
+          "description": "Online production check: one Safe account whose payer has a gas policy with a total budget."
+        }
+      }
+    },
+    "almanak-permissions-v1": {
+      "schema": { "file": "permissions-v1.schema.json" },
+      "producer": "almanak.gateway.permissions.statement: the permissions block of `almanak check --production --online --json` for Safe/Roles accounts",
+      "checked_by": "tests/test_contract_examples.py",
+      "examples": {
+        "installed": {
+          "description": "Every Safe already holds the generated authority: nothing pending and every bundle null."
+        },
+        "pending": {
+          "description": "The first Safe owes its owner a Safe Transaction Builder batch; the second is installed."
+        }
+      }
+    },
+    "backtest-progress-v1": {
+      "schema": { "file": "backtest-progress-v1.schema.json" },
+      "producer": "almanak.backtest.progress.ProgressJob: the `--progress-file` snapshot of `almanak backtest run`, driven by a fixed clock",
+      "checked_by": "tests/test_contract_examples.py",
+      "examples": {
+        "calibrating": {
+          "description": "First snapshot of a run without timing history: startup active, every ETA still calibrating with null duration and finish time."
+        },
+        "completed": {
+          "description": "Final snapshot of that run: every phase finished and the ETA complete at zero."
+        },
+        "running": {
+          "description": "A later run of the same timing key: the simulation estimated from its observed rate, finalization from previous runs, so the run ETA is mixed. Its measured phase cannot finish within a one-hour budget."
+        },
+        "failed": {
+          "description": "That run after an exception: status failed and every ETA unavailable."
+        },
+        "interrupted": {
+          "description": "A run stopped by an interrupt during startup: status interrupted and every ETA unavailable."
+        }
+      }
+    },
+    "almanak-check": {
+      "schema": { "file": "check.schema.json", "ref": "#/$defs/CheckDocument" },
+      "producer": "almanak.checks.check: the stdout document of `almanak check --online --json` that exits 0, over the committed Aave V4 resolution archive",
+      "checked_by": "tests/test_contract_examples.py",
+      "placeholders": {
+        "/context_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "/resolution_digest": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "examples": {
+        "fork_online": {
+          "description": "Online fork check with funding and no permissions block."
+        },
+        "production_online_safe": {
+          "description": "Online production check of a Safe account with funding and permissions blocks."
+        }
+      }
+    },
+    "almanak-check-refusal": {
+      "schema": { "file": "check.schema.json", "ref": "#/$defs/Refusal" },
+      "producer": "almanak.cli.error_document: the stderr line of a refused `almanak check --json`, which exits 1",
+      "checked_by": "tests/test_contract_examples.py",
+      "placeholders": { "/file": "/workspace/check/private/operator.json" },
+      "examples": {
+        "permissions_refused": {
+          "description": "Online production check whose permissions stage failed: the stages and the funding block resolved before it survive."
+        },
+        "backtest_refused": {
+          "description": "Offline backtest check refusing an inventory fund without an author account; no funding block, because backtests are not funded.",
+          "placeholders": { "/file": "/workspace/repository/strategies/aave/backtest.yaml" }
+        }
+      }
+    },
+    "almanak-backtest-report": {
+      "schema": { "file": "backtest-report.schema.json" },
+      "producer": "almanak.backtest.cli.create: the stdout document of `almanak backtest run --json`, over the committed Aave V4 historical archive",
+      "checked_by": "tests/test_contract_examples.py",
+      "placeholders": {
+        "/run_id": "00000000000000000000000000000000",
+        "/elapsed_seconds": 3.5,
+        "/end_to_end_seconds": 10.0
+      },
+      "examples": {
+        "historical_path": {
+          "description": "The Aave V4 WETH reference over twelve historical-path steps, valued in asset units only."
+        }
+      }
+    },
+    "almanak-dashboard-response": {
+      "schema": { "command": "almanak support --schema dashboard" },
+      "producer": "almanak.dashboard.evaluate.evaluate: the protocol-1 Response of the reference strategy's dashboard hook, evaluated in the sandbox at a fixed capture time",
+      "checked_by": "tests/test_contract_examples.py",
+      "examples": {
+        "ready": { "description": "The hook returned a dashboard document." },
+        "absent": { "description": "The strategy defines no dashboard hook." },
+        "unavailable": {
+          "description": "The sandbox could not run the hook; the diagnostic names the exception type only."
+        }
+      }
+    }
+  }
+}

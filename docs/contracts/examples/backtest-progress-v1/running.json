@@ -1,0 +1,67 @@
+{
+  "attempt_id": "44444444444444444444444444444444",
+  "decision_evaluations": null,
+  "elapsed_seconds": 602.0,
+  "eta": {
+    "basis": "mixed",
+    "estimated_finish_at": "2026-10-01T01:40:36Z",
+    "remaining_seconds": 5401.0
+  },
+  "job_id": "33333333333333333333333333333333",
+  "kind": "backtest_progress",
+  "observer_errors": 0,
+  "phase": "simulation",
+  "phases": [
+    {
+      "completed_units": 1.0,
+      "elapsed_seconds": 2.0,
+      "eta": {
+        "basis": "complete",
+        "estimated_finish_at": "2026-10-01T00:10:35Z",
+        "remaining_seconds": 0.0
+      },
+      "finished": true,
+      "label": "Validating inputs",
+      "phase_id": "startup",
+      "total_is_estimate": false,
+      "total_units": 1.0,
+      "unit": "phases"
+    },
+    {
+      "completed_units": 120960.0,
+      "elapsed_seconds": 600.0,
+      "eta": {
+        "basis": "observed",
+        "estimated_finish_at": "2026-10-01T01:40:35Z",
+        "remaining_seconds": 5400.0
+      },
+      "finished": false,
+      "label": "Simulating strategy",
+      "phase_id": "simulation",
+      "total_is_estimate": false,
+      "total_units": 1209600.0,
+      "unit": "simulation_seconds"
+    },
+    {
+      "completed_units": 0.0,
+      "elapsed_seconds": 0.0,
+      "eta": {
+        "basis": "previous_runs",
+        "estimated_finish_at": "2026-10-01T00:10:36Z",
+        "remaining_seconds": 1.0
+      },
+      "finished": false,
+      "label": "Finalizing result",
+      "phase_id": "finalization",
+      "total_is_estimate": false,
+      "total_units": 1.0,
+      "unit": "phases"
+    }
+  ],
+  "schema_version": 1,
+  "sequence": 4,
+  "stale_after_seconds": 15.0,
+  "status": "running",
+  "timing_key": "4f0c7c3ad2b2d4a6e1a9c0f8b7e6d5c4b3a2918070605040302010f0e0d0c0b0",
+  "updated_at": "2026-10-01T00:10:35Z"
+}

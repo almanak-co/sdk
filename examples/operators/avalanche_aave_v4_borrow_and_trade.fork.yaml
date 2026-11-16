@@ -1,0 +1,54 @@
+# Operator execution context for a fork run of strategies/avalanche_aave_v4_borrow_and_trade. Provider
+# credentials stay in the selected --env-file. The account bindings are
+# placeholders: fork provisioning generates the actual fixture accounts, and a
+# production run requires reviewed bindings and signing files outside
+# strategy-readable paths.
+schema_version: operator-gateway-config-v1
+modes:
+- fork
+networks:
+- chain: eip155:43114
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: fund
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:43114
+          environment: mainnet
+        address: '0x0000000000000000000000000000000000000001'
+fork:
+  anchors:
+  - chain: eip155:43114
+    height: 94581397
+    reference: '0xabb1529862e4b99fdbd08e9c056edc97b00441407043ba18d45b0d1cb7c6297a'
+  funds:
+  - kind: safe_roles
+    account: fund
+    operator: operator
+    assets:
+    - asset: eip155:43114/erc20:0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab
+      amount: 10000000000000000
+    - asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+      amount: 1000000
+  operators:
+  - name: operator
+    native_balance:
+      asset: eip155:43114/slip44:9005
+      amount: 11000000000000000000
+  gas:
+  - accounts:
+    - fund
+    max_gas_price_wei: 141666666666
+    max_gas_limit: 1200000
+    max_transaction_fee:
+      asset: eip155:43114/slip44:9005
+      amount: 170000000000000000
+    total_budget:
+      asset: eip155:43114/slip44:9005
+      amount: 5440000000000000000
+    allow_replacement: false

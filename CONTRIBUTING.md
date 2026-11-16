@@ -1,139 +1,109 @@
-# Contributing to Almanak SDK
+# Contributing to the Almanak SDK
 
-Thank you for your interest in contributing to the Almanak SDK. This guide covers development setup, coding standards, and the pull request process.
+This guide covers development setup, the checks a change must pass and the pull
+request process. [AGENTS.md](AGENTS.md) holds the project's standing rules; read
+it before changing execution, authority or financial data paths.
 
-## Reporting Issues
+## Reporting issues
 
-- **Bugs**: Open an issue on [GitHub Issues](https://github.com/almanak-co/almanak-sdk/issues) with steps to reproduce, expected vs actual behavior, and your environment (Python version, OS, SDK version).
-- **Feature requests**: Open an issue describing the use case and proposed solution.
-- **Security vulnerabilities**: Do NOT open a public issue. See [SECURITY.md](SECURITY.md) for responsible disclosure.
+- **Bugs**: open an issue at
+  [GitHub Issues](https://github.com/almanak-co/sdk/issues) with steps to
+  reproduce, expected and actual behavior, and your environment (Python
+  version, operating system, SDK version).
+- **Feature requests**: open an issue describing the use case.
+- **Security vulnerabilities**: do not open a public issue. See
+  [SECURITY.md](SECURITY.md).
 
-## Development Setup
+## Development setup
 
-### Prerequisites
+You need:
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) (package manager)
-- [Foundry](https://book.getfoundry.sh/) with Anvil (for on-chain tests)
-- Git
+- Python 3.12 or later
+- [uv](https://docs.astral.sh/uv/)
+- Linux with Bubblewrap and `libseccomp2` for strategy isolation
+  (`sudo apt-get install bubblewrap libseccomp2` on Debian or Ubuntu)
+- [Foundry](https://book.getfoundry.sh/)'s `anvil`, for fork runs only
 
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/almanak-co/almanak-sdk.git
-cd almanak-sdk
-
-# Install dependencies (including dev extras)
+```sh
+git clone https://github.com/almanak-co/sdk.git
+cd sdk
 make install-dev
-
-# Verify setup
-make typecheck
-make test
+uv run --locked pre-commit install
 ```
 
-### Dependency management
+macOS can lint, type-check and build, but the strategy worker refuses to start
+there, so tests that run author code need Linux.
 
-`make install-dev` (= `uv sync --all-extras`) is the canonical dev setup; it
-installs both dependency surfaces:
+## Checks
 
-- `[dependency-groups] dev` in `pyproject.toml` — the test/quality toolchain
-  (pytest, radon, diff-cover, ...). Installed by any `uv sync`; CI's
-  diff-quality job installs only this via `uv sync --group dev`.
-- `[project.optional-dependencies] dev` — the docs/build/typing toolchain
-  (mkdocs, ruff, mypy, twine, ...), published as the `dev` extra.
-
-Each tool lives in exactly one of the two lists — do not add a package to
-both.
-
-### Running Tests
-
-The project uses `pytest` with several Makefile targets:
-
-```bash
-make test              # Run core unit tests
-make test-connectors   # Run protocol connector tests
-make test-intents      # Run intent compilation tests
-make test-coverage     # Run tests with coverage report
-make typecheck         # Run mypy type checking
-make lint-check        # Run ruff linter (check only)
-make lint              # Run ruff linter with auto-fix
+```sh
+make lint-check    # Ruff lint and format check
+make typecheck     # mypy over src, strategies and scripts
+make test-ci       # offline test suite, as hosted CI runs it
+make docs-check    # docs navigation and reference checks
+make hygiene       # no credentials, private names or workstation paths
 ```
 
-For a specific test file:
+`make help` lists every target. Run the narrowest tests that cover your change
+while developing:
 
-```bash
-uv run pytest tests/unit/path/to/test_file.py -v
+```sh
+uv run --locked pytest tests/test_check_warnings.py -n auto
 ```
 
-## Code Style
+Default pytest is offline and needs no provider key. Fork tests need an
+explicit provider env file (copy `.env.example` to `.env`):
 
-- **Formatter/Linter**: [ruff](https://docs.astral.sh/ruff/)
-- **Line length**: 120 characters
-- **Type checking**: [mypy](https://mypy-lang.org/) in strict mode
-- **Docstrings**: Google style, required for public APIs
-- **Imports**: Sorted by ruff (isort-compatible)
-
-Run `make lint` before submitting to auto-fix formatting issues.
-
-## Pull Request Process
-
-1. **Fork** the repository and create a branch from `main`:
-   ```bash
-   git checkout -b feat/my-feature main
-   ```
-
-2. **Keep changes focused** - one logical change per PR. Split large changes into stacked PRs.
-
-3. **Write tests** for new functionality. Maintain or improve existing coverage.
-
-4. **Run the full check suite** before pushing:
-   ```bash
-   make lint-check
-   make typecheck
-   make test
-   ```
-
-5. **Open a PR** against `main` with:
-   - A clear title summarizing the change
-   - Description of what and why (not just how)
-   - Link to any related issues
-
-6. **Address review feedback** by pushing additional commits (do not force-push during review).
-
-## Commit Messages
-
-Use conventional commit prefixes:
-
-| Prefix | Purpose |
-|--------|---------|
-| `feat:` | New feature |
-| `fix:` | Bug fix |
-| `docs:` | Documentation only |
-| `test:` | Adding or updating tests |
-| `refactor:` | Code change that neither fixes a bug nor adds a feature |
-| `chore:` | Build, CI, or tooling changes |
-
-Examples:
-```
-feat: add Balancer V2 connector
-fix: resolve token decimals for bridged USDC on Base
-docs: update backtesting README with sweep examples
-test: add golden tests for perp funding calculation
+```sh
+uv run --locked pytest tests/strategy_fork -n auto -m strategy_fork --fork-env=.env
 ```
 
-## What Makes a Good Contribution
+Some tests read retained evidence that is not in the repository. `make test-ci`
+skips them and reports the count; a skipped test is not a pass. `make test` and
+`make crap` expect that evidence and fail without it, so they are maintainer
+gates.
 
-- **Bug fixes** with a regression test
-- **New protocol connectors** following the existing adapter pattern in `almanak/connectors/`
-- **New demo strategies** in `strategies/demo/` with documentation
-- **Documentation improvements** - typos, missing examples, clarifications
-- **Test coverage** for untested paths
+Every function must keep a CRAP score of 30 or lower, and statement coverage
+of `src/` must stay at or above 87%. Pull request CI checks the functions you
+changed.
 
-## Code of Conduct
+## Code style
 
-All contributors must follow our [Code of Conduct](CODE_OF_CONDUCT.md).
+- Ruff formats and lints; `make lint` applies fixes.
+- mypy must pass.
+- Chains and assets are CAIP-2 and CAIP-19 identifiers, never bare chain IDs,
+  token addresses or symbols.
+- Comments explain non-obvious invariants, units and failure semantics. They
+  do not narrate the code.
+- Plain language, no emojis and no em dashes in code, comments and docs.
+
+## Pull requests
+
+1. Fork the repository and branch from `main`.
+2. Keep each pull request to one logical change, with tests for new behavior
+   and a regression test for a bug fix.
+3. Run the checks above.
+4. Open the pull request against `main`. Say what changes and why, which
+   checks you ran, and link the related issue.
+5. Address review by adding commits. Do not force-push during review.
+
+Pull requests from forks run without provider secrets.
+
+## What makes a good contribution
+
+- Bug fixes with a regression test
+- Documentation fixes and clearer examples
+- Test coverage for untested paths
+- Reference strategies under `strategies/` for supported connectors
+
+A new connector, chain or intent changes what the SDK is trusted to sign.
+Open an issue first so the scope and the evidence it needs can be agreed.
+
+## Code of conduct
+
+All contributors follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE).
+By contributing, you agree that your contributions are licensed under the
+[Apache License 2.0](LICENSE).

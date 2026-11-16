@@ -1,0 +1,171 @@
+{
+ "description": "HyperEVM large block 48964667 with its small parent and grandparent and the next small block, read through Alchemy hyperliquid-mainnet. Keys of fee_history are <oldest block>:<reward percentile or none>, each a one-block eth_feeHistory answer.",
+ "captured_at": "2026-10-20T14:00:55+00:00",
+ "pin": 48964667,
+ "headers": {
+  "48964665": {
+   "number": "0x2eb2439",
+   "hash": "0xe2f8a9e962fb26d3905b6ef49c9d559a854387f651c432a86b7c08a58ed25d95",
+   "parentHash": "0xd1fb138b6461ce1c7ca80acb580d8ecc3b2703943a116504a211bb0691b1b745",
+   "timestamp": "0x6ad6234f",
+   "gasLimit": "0x2dc6c0",
+   "gasUsed": "0x6bda7",
+   "baseFeePerGas": "0x21ac449f5"
+  },
+  "48964666": {
+   "number": "0x2eb243a",
+   "hash": "0xe4d3240a9b70f0d1fec8ef141629a3087af1fb45a270eb5dc0a5b16b1c88179c",
+   "parentHash": "0xe2f8a9e962fb26d3905b6ef49c9d559a854387f651c432a86b7c08a58ed25d95",
+   "timestamp": "0x6ad62350",
+   "gasLimit": "0x2dc6c0",
+   "gasUsed": "0x144242",
+   "baseFeePerGas": "0x1eb41493c"
+  },
+  "48964667": {
+   "number": "0x2eb243b",
+   "hash": "0xee76ba26be26755926e020e6e7f73ae89ceed749bb8b1af2128616279b89bafc",
+   "parentHash": "0xe4d3240a9b70f0d1fec8ef141629a3087af1fb45a270eb5dc0a5b16b1c88179c",
+   "timestamp": "0x6ad62350",
+   "gasLimit": "0x1c9c380",
+   "gasUsed": "0x68ee5c",
+   "baseFeePerGas": "0x5f5e100"
+  },
+  "48964668": {
+   "number": "0x2eb243c",
+   "hash": "0x22691a70d9241753eb66f69ef019e7bfc1ecb0d85433929aca645602465223b0",
+   "parentHash": "0xee76ba26be26755926e020e6e7f73ae89ceed749bb8b1af2128616279b89bafc",
+   "timestamp": "0x6ad62351",
+   "gasLimit": "0x2dc6c0",
+   "gasUsed": "0xd1da1",
+   "baseFeePerGas": "0x1e4335ffe"
+  }
+ },
+ "fee_history": {
+  "48964666:50": {
+   "baseFeePerGas": [
+    "0x1eb41493c",
+    "0x1e4335ffe"
+   ],
+   "gasUsedRatio": [
+    0.44256066666666666
+   ],
+   "baseFeePerBlobGas": [
+    "0x1",
+    "0x1"
+   ],
+   "blobGasUsedRatio": [
+    0.0
+   ],
+   "oldestBlock": "0x2eb243a",
+   "reward": [
+    [
+     "0x139c12b7"
+    ]
+   ]
+  },
+  "48964666:none": {
+   "baseFeePerGas": [
+    "0x1eb41493c",
+    "0x1e4335ffe"
+   ],
+   "gasUsedRatio": [
+    0.44256066666666666
+   ],
+   "baseFeePerBlobGas": [
+    "0x1",
+    "0x1"
+   ],
+   "blobGasUsedRatio": [
+    0.0
+   ],
+   "oldestBlock": "0x2eb243a",
+   "reward": [
+    []
+   ]
+  },
+  "48964667:50": {
+   "baseFeePerGas": [
+    "0x5f5e100",
+    "0x58e962d"
+   ],
+   "gasUsedRatio": [
+    0.22922546666666666
+   ],
+   "baseFeePerBlobGas": [
+    "0x1",
+    "0x1"
+   ],
+   "blobGasUsedRatio": [
+    0.0
+   ],
+   "oldestBlock": "0x2eb243b",
+   "reward": [
+    [
+     "0x0"
+    ]
+   ]
+  },
+  "48964667:none": {
+   "baseFeePerGas": [
+    "0x5f5e100",
+    "0x58e962d"
+   ],
+   "gasUsedRatio": [
+    0.22922546666666666
+   ],
+   "baseFeePerBlobGas": [
+    "0x1",
+    "0x1"
+   ],
+   "blobGasUsedRatio": [
+    0.0
+   ],
+   "oldestBlock": "0x2eb243b",
+   "reward": [
+    []
+   ]
+  },
+  "48964668:50": {
+   "baseFeePerGas": [
+    "0x1e4335ffe",
+    "0x1ca5bcde7"
+   ],
+   "gasUsedRatio": [
+    0.28651766666666667
+   ],
+   "baseFeePerBlobGas": [
+    "0x1",
+    "0x1"
+   ],
+   "blobGasUsedRatio": [
+    0.0
+   ],
+   "oldestBlock": "0x2eb243c",
+   "reward": [
+    [
+     "0x1a2e1e35"
+    ]
+   ]
+  },
+  "48964668:none": {
+   "baseFeePerGas": [
+    "0x1e4335ffe",
+    "0x1ca5bcde7"
+   ],
+   "gasUsedRatio": [
+    0.28651766666666667
+   ],
+   "baseFeePerBlobGas": [
+    "0x1",
+    "0x1"
+   ],
+   "blobGasUsedRatio": [
+    0.0
+   ],
+   "oldestBlock": "0x2eb243c",
+   "reward": [
+    []
+   ]
+  }
+ }
+}

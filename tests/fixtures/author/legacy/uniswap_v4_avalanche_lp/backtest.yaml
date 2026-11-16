@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+mode: historical_path
+window:
+  start: '2026-09-05T00:00:00Z'
+  end: '2026-09-06T00:00:00Z'
+  end_policy: teardown
+  cleanup: 3600s
+inventory:
+  funds:
+    lp:
+      balances:
+      - asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '0'
+      - asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '1'
+      payer: operator
+  payers:
+    operator:
+      chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      balances:
+      - asset: eip155:43114/slip44:9005
+        quantity: '1'
+execution:
+  latency: 30s
+  decision_interval: 3600s
+  models:
+    swap_model: historical_quoter
+    liquidity_model: fixed_historical_fee_growth
+    approval_model: at_intent_eligibility
+data:
+  history:
+  - chain:
+      chain_id: eip155:43114
+      environment: mainnet
+    provider:
+      kind: alchemy
+      network: avax-mainnet
+      api_key_env: ALCHEMY_API_KEY
+costs:
+  kind: fixed_native
+  calibration_sha256: '0xcc00c40d45c14021f7493ce6034821acfe332ea09a56522209034dc79e3744c9'
+  per_operation:
+    approve_erc20: 128383208466480
+    approve_permit2: 261980893245832
+    swap: 615902622440764
+    mint: 873479415259149
+    collect: 620067407620086
+    burn: 627438423370122
+    revoke_permit2: 232240294945440
+    revoke_erc20: 101882536320870

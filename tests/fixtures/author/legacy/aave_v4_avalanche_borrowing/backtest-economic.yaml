@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+mode: economic
+window:
+  start: '2026-09-05T00:00:00Z'
+  end: '2026-09-06T00:00:00Z'
+  end_policy: teardown
+  cleanup: 3600s
+inventory:
+  funds:
+    avalanche_fund:
+      balances:
+      - asset: eip155:43114/slip44:9005
+        quantity: '1'
+      - asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '10'
+      - asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '1'
+execution:
+  latency: 30s
+  decision_interval: 3600s
+data:
+  history:
+  - chain:
+      chain_id: eip155:43114
+      environment: mainnet
+    provider:
+      kind: rpc_url
+      url_env: AVALANCHE_RPC_URL
+    collection:
+      max_in_flight: 4
+      requests_per_second: 20.0
+      batch_size: 32
+  source: aave_v4_archive
+  rate_sample_seconds: 3600s
+  risk_prices: spoke_oracle_events
+costs:
+  kind: excluded

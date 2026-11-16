@@ -1,0 +1,85 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/ethereum_compound_curve_borrow_and_trade.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '200'
+  allocations:
+    earn:
+      market: earn
+      account: lender
+      capital: '1000'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    collateral:
+      market: collateral
+      account: fund
+      capital: '1'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      funding_asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+      trading_asset: eip155:1/erc20:0x4c9edd5852cd905f086c759e8383e09bff1e68b3
+      liquidity_enabled: false
+      capital:
+      - asset: eip155:1/erc20:0x4c9edd5852cd905f086c759e8383e09bff1e68b3
+        quantity: '0'
+      - asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+        quantity: '100'
+      entry_swap_bps: 10000
+      slippage_bps: 100
+      deadline_seconds: 5m
+      minimum_native_balance:
+        base_units: 0
+markets:
+  collateral:
+    connector: compound_v3
+    chain: eip155:1
+    comet: '0xc3d688b66703497daa19211eedff47f25384cdc3'
+    asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+  loan:
+    connector: compound_v3
+    chain: eip155:1
+    comet: '0xc3d688b66703497daa19211eedff47f25384cdc3'
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+  pool:
+    connector: curve
+    chain: eip155:1
+    pool: '0x02950460e2b9529d0e00284a5fa2d7bdf3fa4d72'
+  earn:
+    connector: compound_v3
+    chain: eip155:1
+    comet: '0xc3d688b66703497daa19211eedff47f25384cdc3'
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+accounts:
+  fund:
+    chain: eip155:1
+  lender:
+    chain: eip155:1
+inventory:
+- account: lender
+  balance:
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+    quantity: '1000'
+- account: fund
+  balance:
+    asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+    quantity: '1'
+- account: fund
+  balance:
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+    quantity: '20'
+- account: fund
+  balance:
+    asset: eip155:1/erc20:0x4c9edd5852cd905f086c759e8383e09bff1e68b3
+    quantity: '0'

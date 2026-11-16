@@ -3,3574 +3,1326 @@
 All notable changes to the Almanak SDK will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+Version 3.0.0 is the first release of the rewritten SDK. The 2.x line is closed, and
+its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
-## [2.29.2] - 2026-10-06
-
-### Added
-- **`ax dex-pools` ranks and filters pools.** New `--sort volume|liquidity`
-  (default `volume`, since 24h volume is harder to inflate than reported
-  reserves), `--quote <token>` and a minimum-volume filter, plus pagination.
-  `list_token_pools` gains the same options. (#4061)
-
-### Changed
-- **`almanak strat new` no longer scaffolds `tests/`.** The generated
-  `AGENTS.md` points to the fork lifecycle (`almanak strat test --actions …
-  --teardown`) as the strategy test, and the unused test-file generator is
-  removed. (#4059)
-- **`almanak ax` and `almanak strat permissions` keep library warnings and
-  gateway start-up notes off stderr.** (#4062)
-- **Bundled Almanak Code updated to v1.0.89.** It adds a hosted mode for
-  platform sessions: file tools are confined to the workspace and the SDK,
-  commands run in a Bubblewrap sandbox, and tool output is redacted of the
-  process's secrets. The compiled CLI also no longer auto-loads a project's
-  `.env` or `bunfig.toml`. (#4054, #4055, #4056, #4057, #4060, #4063, #4070)
-
-### Fixed
-- **Robinhood strategies execute and tear down on hosted deployments and
-  mainnet.** (#4051)
-- **The runner retries price-source disagreements without stopping the
-  strategy.** The price guard still applies; waiting iterations hold with a
-  `PRICE_DISAGREEMENT` reason. (#4047)
-- **The policy engine no longer values unpriceable tokens at their token
-  count**, which had blocked risk-reducing sells and weakened spend limits.
-  (#4042)
-- **Wallet balances keyed by token address match symbol-named positions**, so
-  one holding is no longer counted twice in portfolio value. (#4052)
-- **`strat check` rejects teardown swaps without an explicit chain** before
-  deployment instead of failing at teardown time. (#4053)
-
-### Security
-- **Platform runner jobs no longer receive the shared platform callback
-  secret.** Backtest and sweep runners use only the run-scoped
-  `PLATFORM_CALLBACK_TOKEN`. (#4066)
-
-## [2.29.1] - 2026-09-24
-
-### Security
-- **Platform backtest callbacks use a run-scoped token instead of the shared
-  platform secret.** The runner and its progress reporter send
-  `x-almanak-backtest-token` from `PLATFORM_CALLBACK_TOKEN`, which the platform
-  mints per execution; the shared `PLATFORM_CALLBACK_SECRET` is used only when
-  no token is set. (#4049)
-- **Backtest runner jobs published from this release no longer carry the
-  platform secret.** The publish template stops mounting
-  `PLATFORM_SECRET_ACCESS_KEY` into the runner container, which executes user
-  strategy code. Sweep runner jobs keep it until the sweep runner gains the
-  same token support.
-
-### Fixed
-- **GMX v2 orders no longer revert.** GMX retired its v2.2b synthetics
-  contracts; the connector now targets the v2.2c `ExchangeRouter` and
-  `OrderHandler` on Arbitrum and Avalanche. (#4046)
-- **QA mainnet lane binds per-chain gas ceilings and prices a leg before
-  funding it.** (#4043)
-- **Intent-certification coverage gap closed**, fixing the money-lane defects it
-  surfaced. (#4040)
-
-### Changed
-- Almanak Code pinned to v1.0.77. (#4045, #4048)
-- 16 exact SWAP proof cells enrolled (Uniswap V4 on six chains, Trader Joe V2 on
-  two). (#4044)
-
-## [2.29.0] - 2026-09-23
-
-### Added
-- **`MarketSnapshot.market_session("NYSE")`** — strategy-facing regular-session
-  status (`OPEN` / `CLOSED` / `UNKNOWN`) of a named exchange, evaluated from the
-  published calendar at the snapshot timestamp. Accepts any
-  `pandas_market_calendars` name (never a token or ticker symbol), so any
-  US-listed tokenized stock gates on NYSE with no catalog entry. No oracle,
-  gateway, or chain read, so it behaves identically on live chain, Anvil, and
-  backtests. This is the supported way to gate on market hours; do not call
-  `reference_price()` for that.
-- **`almanak ax vault <address>`** — the vault counterpart of `ax lending-market`:
-  on-chain verification, listing status, MetaMorpho v1 market enumeration and
-  Vault V2 adapter listing, with deployability guidance. (#3943)
-- **`almanak ax pool <address>` now returns state and analytics**, not just
-  identity — price, tick, active liquidity, TVL, volume and fee APR for the
-  exact pool, with unmeasured metrics reported explicitly rather than as zero. (#4023)
-- **`dex-pools` / `list_token_pools` now mark which discovered pools are
-  supported execution venues** (`supported` / `unsupported` / `unknown`),
-  declared per connector on the `CONNECTOR` manifest. (#3999)
-- **Uniswap V4: full pool-key and dynamic-fee lifecycle support.** Swaps, LP
-  open/close/collect and teardown now bind to the complete `PoolKey` (custom
-  fee, tick spacing, hook address) instead of assuming fixed fee tiers, with
-  hook admission fail-closed by default. (#3953)
-- **Uniswap V4 on Robinhood Chain** promoted to a supported production
-  lifecycle — exact swaps, and full LP open/close/collect execution and
-  accounting bound to deployed pool/router identities. (#3965, #3969)
-- **BSC equity reference feeds** — `reference_price("GOOGL"/"TSLA", chain="bsc")`
-  now resolve via verified Chainlink consumer proxies. (#3948)
-- **Two reusable bStocks example strategies** — a bounded buy-and-hold
-  allocation and a concentrated LP allocation for GOOGLB/USDT on BSC
-  PancakeSwap V3. (#4012)
-
-### Changed
-- **`reference_price()` docs now carry a usage warning.** Coverage is a curated
-  catalog (XAU, GOOGL, TSLA, GOOGLB on BSC as of 2026-09-10) and the GOOGLB
-  composition cannot pass the hosted smoke ladder on a frozen Anvil fork: the
-  30-second multiplier observation age is measured against a block that never
-  advances (ALM-10047). The worked examples were removed from the market API
-  page so agents stop designing around the feed until it is testable.
-- **Opt-in forced exit for Morpho Vault V2 (`allow_force_deallocate`).** A V2
-  redeem that the vault's idle assets + liquidity market cannot cover fails
-  closed by default. `Intent.vault_redeem(..., allow_force_deallocate=True,
-  max_force_deallocate_penalty_bps=N)` lets the connector first call the
-  vault's `forceDeallocate` on its other markets (sized from
-  `adapter.marketIds` / Morpho Blue `market` + `position` reads — no API) to
-  pull the shortfall into idle assets, then redeem, as one bundle. The
-  curator-set penalty is burned from the redeemer's shares; a plan above the
-  cap, or that cannot cover the shortfall, is refused whole. Teardown reads the
-  same consent from the strategy config's `vault_exit` block
-  (`{"allow_force_deallocate": bool, "max_penalty_bps": int}`), off by default.
-  The `forceDeallocate` selector is added to the vault permission hints so the
-  opt-in is executable from a Safe.
-- **Morpho Vault V2 support in `morpho_vault`.** The connector now detects the
-  vault generation on-chain (`detect_vault_version`: `withdrawQueueLength()`
-  answers only on MetaMorpho v1, `adaptersLength()` only on Vault V2) and
-  round-trips V2 vaults: redeem-all sizes from `balanceOf` (V2 returns 0 from
-  every ERC-4626 `max*` view by design, so the old `maxRedeem` path reported
-  "No shares to redeem" for every funded wallet — ALM-10044), the redeem is
-  simulated from the owner before it is built and fails as `VaultIlliquidError`
-  when idle assets + the liquidity adapter cannot cover it, deposits check the
-  V2 receive-shares gate instead of `maxDeposit`, and `get_vault_info` reads
-  V2 performance/management fees, adapters and the liquidity adapter instead of
-  the v1 `fee()`/`timelock()`/queue selectors that revert on V2. The penalised
-  `forceDeallocate` exit is opt-in only (see the entry above).
-- **`reference_price("GOOGLB")` now composes an address-bound raw-token price**
-  (`multiplier × GOOGL/USD`) instead of only serving the underlying share
-  price. (#3950)
-- **`strat test` deployment-readiness now requires actual execution by
-  default.** A forced lifecycle action that only HOLDs no longer counts as a
-  passed action; `deployment_ready` requires requested actions to execute and
-  requested teardown to prove a position unwind. Strategy-declared
-  `test_action_expectations` are validated before lifecycle setup. This
-  changes the meaning of `all_passed` / `deployment_ready` in `strat test`
-  JSON output — downstream consumers pinned to the old semantics should
-  update before adopting this release. (#3951)
-- Cleaned up the generated API reference (`llms-full.txt`, `docs/api/`):
-  removed duplicate class headings, per-class serialization boilerplate, and
-  unfenced code examples, shrinking the generated reference from ~862k to
-  ~596k tokens. (#4031)
-- Documented risk-baseline persistence across position reopen/restart and
-  clarified decision-time vs. fill-time in backtest callbacks. (#4020)
-
-### Fixed
-- **`strat new --template dynamic_lp` / `multi_step` no longer centre the LP
-  range on the USD oracle.** Both scaffolds read `market.price()` for the
-  range, the drift test and (for Slipstream) the tick band, which is the
-  pattern the builder skill forbids: the oracle is hardcoded to `1.0` for
-  stablecoins and can drift from the pool for any pair, so a range built from
-  it can mint out of range without error. Generated strategies now emit a
-  `_pool_spot()` that reads `pool_price_by_pair()` in the pool string's
-  orientation, derive Slipstream ticks from the pool's own tick, and hold
-  when the pool is unreadable instead of falling back to the oracle.
-  `market.price()` remains the right call for valuation, sizing and signals. (#4035)
-- **A managed Robinhood Anvil fork no longer starts against a state-pruned
-  RPC.** The measured-retention table recorded Robinhood's public endpoint as
-  archive-capable, which left the chain out of the `fork_requires_archive` set
-  and let a fork start and then die minutes later on an uncached read
-  (`metadata is not found`) — surfacing as an unrelated-looking fixture error.
-  Re-measuring shows the endpoint serves head-1024 and fails head-8192, so the
-  fork now refuses at start, naming the endpoint and the measured window.
-  Configure an archive RPC (`ALCHEMY_API_KEY`, or `ROBINHOOD_RPC_URL`) to fork
-  this chain; `ALMANAK_ALLOW_PRUNED_FORK_RPC=1` remains the escape hatch for
-  deliberately short-lived forks. No other chain's gating changes. (#4017)
-- **`market_session()` is now cheap enough for backtests.** The calendar
-  instance is cached per exchange and the four-day session frame per
-  calendar-day, so a call costs ~3 ms instead of ~200 ms (the library expands
-  holiday rules on every fresh instance). A one-year hourly backtest spends
-  ~25 s on session gating instead of ~30 min. Behaviour is unchanged. (#3992)
-- Generated TA strategies now reuse the configured slippage tolerance and
-  routing instead of ignoring it. (#4027)
-- Generated basis-trade strategies now expose configurable `perp_leverage`
-  and derive collateral from spot notional × hedge ratio ÷ leverage, instead
-  of hardcoding 10x leverage and a fixed 10% allocation. (#4024)
-- `almanak ax` commands resolve unregistered token addresses on-chain again;
-  the CLI executor was not wiring its gateway channel into the shared token
-  resolver. (#3959)
-- The bundled strategy-builder skill now documents `market_session()`, not
-  `reference_price()`, as the market-hours gate. (#3997)
-- A plain ERC-20 address resolved through pool lookup no longer reports a
-  `pool_address` that made it look like a pool target. (#3974)
-- Teardown simulation failures now preserve their underlying cause instead of
-  escalating slippage tolerance (0.5% → 2%) on unrelated infrastructure
-  failures. (#4026)
-- Teardown swaps now require an explicit chain before reading or spending
-  inventory, and scope balance/inventory reads to that chain. (#4025)
-- Teardown verification for held Pendle PT positions now checks the PT
-  balance instead of retained underlying, fixing false FAILED reports after a
-  successful PT sale. (#3986)
-- A successful teardown close no longer loses its enriched execution result
-  to the slippage-ladder summary. (#3956)
-- The Lido demo's teardown now requests WETH — what the connector actually
-  delivers — instead of ETH, fixing a spurious reconciliation incident. (#3955)
-- GMX keeper receipt verification on managed Anvil now receives the execution
-  chain explicitly, fixing unavailable normalized collateral amounts. (#4021)
-- DexScreener pricing now requires a pair to clear a 24h trading-volume floor
-  as well as a liquidity floor, preventing a deep but untraded pool from
-  pricing a token off a stale ratio. (#4013)
-- Gateway operational stores (registry, timeline, lifecycle) are now bound to
-  the owning `GatewayServer` instead of shared process-globally, so two
-  gateways in one process no longer cross-write each other's SQLite files. (#4010)
-- Canonical receipt confirmation on PoA chains (BSC, etc.) now routes through
-  one descriptor-driven async client with the correct middleware, fixing
-  landed transactions reported as retryable failures. (#3994)
-- The gateway's bStocks execution timeline now persists through a native sink
-  instead of an RPC call back into its own event loop, fixing durable
-  timeline rows going missing under load. (#3989)
-- Local gateways now bind registry/lifecycle/timeline stores to the locked
-  state DB instead of a shared default, so a second local gateway can no
-  longer reconcile a different deployment's state; a boot-breaking regression
-  this introduced against pre-existing local databases was fixed in the same
-  slice. (#3982, #3988)
-- `GetTransactionStatus` on PoA chains (BSC) now constructs its client with
-  the required PoA middleware, fixing successful transactions reported as
-  `unknown`. (#3980)
-- Snapshots now persist the wallet/request identity behind each balance, so
-  historical inventory revaluation (G6) requires matching observed endpoint
-  scope instead of silently joining same-symbol holdings across different
-  chains, wallets or contracts. (#3983, #3984)
-- Gateway-owned token/balance discovery (Chainlink, DexScreener, Morpho,
-  MultiDEX) now stays on owned async paths instead of sharing the strategy's
-  synchronous gRPC channel, fixing a self-call deadlock on an uncached
-  request. (#3949)
-- Unregistered-token swaps (e.g. Robinhood USDG → HOOD) now preserve exact
-  contract identity through discovery, pricing and compilation instead of
-  collapsing to a symbol that fails compilation. (#3947)
-- A successful native-input Enso swap no longer reports an unobserved input
-  amount as measured zero; missing swap-input evidence is preserved as
-  unmeasured through receipts, ledger and AX responses. (#4009)
-- Per-transaction native/USD gas cost caps are now enforced through to
-  gateway signing (CLI, multichain and teardown construction), instead of
-  stopping at the gateway boundary. (#4005)
-- The runner now preserves the circuit breaker's error budget for a genuinely
-  unresolved execution (no receipt observed) on every lane, not just
-  single-chain. (#4004)
-- An unresolved submission (accepted by the chain but with no observable
-  receipt) no longer trips the circuit breaker, preventing an unwarranted
-  emergency stop while the original transaction may still be minable. (#4000)
-- A confirmed LP_OPEN whose receipt was unavailable now recovers through the
-  same durable path as SWAP after a cold restart. (#3976)
-- Dependent transactions in a multi-tx bundle (e.g. approve → swap) are now
-  gas-estimated against the post-setup fork state instead of the compiler's
-  static limit, fixing underpriced swaps that revert on-chain. (#3946)
-- Hosted backtests no longer silently drop declared address-first token
-  universes or disable the priceability preflight by default. (#3978)
-- Backtest indicators now reserve the history they actually need
-  (period × timeframe) instead of sharing one 200-tick buffer, fixing daily
-  indicators that could never warm up on hourly data. (#3977)
-- Backtests starved of required input on every eligible entry tick now return
-  `NOT_EVALUABLE` instead of a misleadingly successful passive result. (#3975)
-- Historical PnL backtests now validate declared historical-guard
-  capabilities (e.g. tick-level liquidity depth) before simulating, instead
-  of degrading silently mid-run. (#3963)
-- Funding-rate history reads now preserve the requested chain and forward
-  addresses correctly instead of uppercasing them, fixing failed GMX
-  address-based requests. (#4022)
-- `BSC-USD` pool quotes now resolve to the canonical BSC USDT contract
-  instead of failing SDK resolution. (#3993)
-- Pool TVL is now valued using exact per-token contract addresses instead of
-  a display symbol, so dynamically-resolved tokens are no longer silently
-  unpriced. (#3981)
-- Reference-price requests for an uncatalogued instrument now return a
-  distinct "unsupported instrument" reason instead of the same error as a
-  provider outage. (#3973)
-- Curve pool discovery no longer logs spurious "execution reverted"
-  diagnostics for expected MetaRegistry probe misses, on both required and
-  optional registry reads. (#3996, #3998)
-- Uniswap V4 compilation and execution now retain block-bound allowance
-  evidence (owner/spender/observed amount) through gateway-to-ledger
-  transport, including refusals on insufficient live allowance. (#3967)
-- The shipped `uniswap_v4_hooks` demo now emits `hook_data` in the adapter's
-  required `0x`-prefixed wire format, fixing LP open/close/teardown refusing
-  on every chain. (#4014)
-- bStocks execution now retains a pending transaction instead of recording a
-  false failure when receipt observation is incomplete, and recovers
-  eligible single-chain swaps from a fresh canonical receipt after restart. (#3966)
-
-### Security
-- Managed Anvil per-token funding failure diagnostics no longer leak provider
-  URLs or API keys into gateway logs; failures now report the exception
-  class and attempted-stage list instead of the raw exception/traceback. (#3979)
-
-## [2.28.0] - 2026-09-08
-
-### Added
-
-- **Intent-driven exact venue discovery.** Backtests now discover pools and
-  perpetual markets from `Intent.lp_open()` and `Intent.perp_open()` at first
-  use, while configuration keys remain optional prewarm hints. `Intent.sequence`
-  executes dependent actions in order, and rejected perpetual actions remain
-  typed and visible in results. (#3837)
-- **Backtest run-validity verdict.** Every finished PnL backtest now carries
-  `result.run_validity` (`VALID | NOT_EVALUABLE | INVALID | PARTIAL_LIFECYCLE`
-  with typed reasons), computed before institutional compliance. Zero-tick,
-  zero-capital, and ledger-drop runs are `INVALID`, a persistently starved hold
-  is `NOT_EVALUABLE`, and both of those set `result.error` so the hosted
-  outcome is `FAILED` with a diagnostic artifact instead of `COMPLETED` with
-  headline metrics (`PARTIAL_LIFECYCLE` is reserved and keeps `success`). A
-  `VALID` run with no fills is flagged `passive_only`.
-  The platform runner echoes the verdict in `result_summary.run_validity`.
-  (#3843)
-- **Exact-pool OHLCV history.** Exact pool addresses can load authenticated
-  candle history on demand, participate in feasibility estimates, and remain
-  distinct from symbol-adjacent aggregate series. (#3896)
-- **Dynamic pool resolution and replay.** Pools absent from the static registry
-  are resolved from historical state, authenticated and pinned with their
-  token, factory, deployment-block and provenance metadata. Schema-v3 manifests
-  preserve that identity so `--from-result` replays do not rediscover it.
-  (#3942)
-- **Hosted backtest progress.** Platform runs now report separate loading and
-  simulation progress, including batch or tick totals, elapsed time and bounded
-  update cadence, without making reporting failures block the run. (#3935,
-  #3936)
-- **Lending capacity preflight.** New `ax lending-capacity` verifies Morpho Blue
-  market identity, available borrow liquidity and both swap-route legs before
-  deployment, using the exact token addresses verified on-chain. (#3867)
-- **Robinhood Chain Uniswap V4.** The Uniswap V4 connector now supports
-  Robinhood Chain, including chain truth, compilation, receipt parsing and
-  catalogue demos. (#3922)
-- **Multi-generation Aerodrome Slipstream.** Exact and symbolic pools select
-  their factory generation's position manager, router and quoter across LP,
-  swap and permission-discovery lanes. (#3841)
-
-### Changed
-
-- **Explicit backtest timeframes stay strict.** Hosted runs now probe a
-  requested timeframe against native provider cadence even without full
-  preflight, rejecting overly fine series instead of silently substituting
-  them. Result summaries report requested and resolved price cadence alongside
-  the decision interval. (#3885)
-- **Authenticated, quote-first slippage estimates.** Slippage estimation now
-  uses connector-owned executable quotes with route and pool binding, and fails
-  closed when a reference is missing, ambiguous or unsafe. (#3923)
-- **Almanak Code updated to v1.0.65.** Bundled agent releases add backtest
-  progress support and the latest reliability improvements. (#3898, #3935,
-  #3940, #3941)
-- **Public backtesting guidance synchronized.** Exact-pool and perpetual-market
-  behavior is now documented consistently in English, Chinese, French and
-  Spanish, including the exact-pool OHLCV feasibility estimate.
-
-### Fixed
-
-- **Backtest refusals always reach the ledgers.** `perp_market`,
-  `reference_price`, `perp_positions`, `lending_position_balances`,
-  `funding_rate`, `pool_price`, `pool_price_by_pair`, `pool_reserves`,
-  `lending_rate_history` and `funding_rate_history` now record a
-  `decision_input_failures` entry on every refusal path. A pending intent
-  whose fill hits `NoAcceptableDataSourceError` under a tolerant error policy
-  ends as a `missing_data` rejection with an `execution:<data_type>` ledger
-  entry instead of vanishing, and the end-of-run drain with no market state
-  records a `no_market_state` rejection per intent.
-  `DataQualityReport.coverage_ratio` is `None` (serialized `null`) when no
-  price lookup was made; the data-quality gate fails a ticked run that
-  measured nothing and its institutional-mode raise is now an error result
-  rather than an exception escaping `backtest()`. (#3879)
-- **Intent-driven backtest boundaries are fail-closed.** Exact-pool identities
-  are canonicalized and revalidated, exact-address perpetual markets require a
-  current-run connector certificate, terminal sequences share the ordered
-  execution path, and owned providers are restored on every exit. (#3887)
-- **Unavailable reference prices are honest refusals.** `reference_price`
-  under `backtest_no_historical_plane` now records and raises the expected
-  typed data refusal rather than returning an unusable value. (#3851)
-- **Older Uniswap V4 pools resolve by targeted scan.** Pool-key resolution can
-  locate pools created before the historical event-query floor without
-  weakening factory authentication. (#3845)
-- **Unavailable accounting values remain unmeasured.** Missing amounts, fees,
-  basis, TVL and yield are no longer coerced to zero, while authoritative empty
-  transaction lists and measured zeroes retain their distinct meaning.
-  (#3764)
-- **Aave V3 E-mode liquidation prices use the effective threshold.** Health and
-  liquidation calculations apply the active E-mode collateral threshold rather
-  than the reserve's base threshold. (#3886)
-- **Reverted transactions preserve evidence.** Receipt, gas and transaction
-  identity survive revert handling for diagnosis and downstream accounting
-  instead of being discarded. (#3897)
-- **Token cache rows retain canonical addresses.** Symbol-based cache updates
-  no longer overwrite canonical symbol-and-address records. (#3865)
-- **Lending scaffolds enforce market identity.** Protocol-aware strategy
-  scaffolds emit required market IDs, and run/backtest boot rejects present but
-  empty identities while leaving teardown unblocked. (#3864)
-- **Teardown uncertainty is preserved.** Residual-position discovery failures
-  stay visible, and whitespace-only manager aliases can no longer override
-  stronger position-manager identity. (#3863, #3929)
-- **Runtime boundary values are validated consistently.** Malformed connector
-  payloads, persisted teardown plans, timeline cursors and nullable values now
-  produce controlled errors while explicit zero and empty values survive
-  hydration. (#3909)
-- **Robinhood demos launch on managed Anvil.** All three catalogue demos have
-  correct chain-aware funding, configuration and QA coverage. (#3933)
-- **Stargate messaging fees are refreshed live.** Compilation obtains
-  `quoteSend` immediately before funding checks, keeps fee currencies separate,
-  and applies bounded integer headroom instead of relying on stale constants.
-  (#3936)
-
-### Security
-
-- **V3-family LP closes enforce live-state minimums.** Uniswap V3, SushiSwap V3,
-  PancakeSwap V3 and Agni liquidity removal now derive per-token minimums from
-  the position's live pool state and fail closed if protective floors cannot be
-  established. (#3930)
-- **Unknown teardown approval actions are rejected.** Approval parsing now
-  refuses action names outside the supported teardown contract. (#3862)
-- **Tornado updated to 6.5.8.** The dependency includes the latest upstream
-  security and reliability fixes. (#3826)
-
-## [2.27.0] - 2026-09-03
-
-### Added
-
-- **Self-describing pool prices in agent tools.** `get_pool_state` / `ax pool`
-  now also return `price_token1_per_token0`, `price_token0_per_token1`, and a
-  unit-labeled `price_label` so price direction is never re-derived wrongly;
-  plus an ALMANAK ethereum registry entry pointing at the liquid market.
-  (#3813)
-- **On-chain lending market verification from the CLI.** New `ax
-  lending-market --protocol <p> --market-id <id>` command, modeled on `ax
-  perp-market`, wiring the previously unreachable `GetLendingMarket` RPC into
-  the planner and protocol tests. (#3838)
-- **Exact bare-address venues for Aerodrome and TraderJoe V2.**
-  Slipstream/Classic LP open/close and TraderJoe V2 LP accept bare pool
-  addresses authenticated on-chain through the registered factory, and
-  Aerodrome swaps now honor `swap_params={"pool"}` pinning. (#3828)
-
-### Changed
-
-- **Backtests sized for one year at 1h.** Hosted budget raised to 7200s with
-  adaptive page-splitting on slow archive pages, and feasibility
-  recommendations now respect the strategy's declared data cadence. (#3842)
-- **Almanak Code updated to v1.0.61.** Bundled agent bumps v1.0.58 through
-  v1.0.61. (#3815, #3816, #3821, #3823)
-
-### Fixed
-
-- **Lending teardown no longer false-fails.** Closure is judged from
-  price-independent raw on-chain balances first, teardown snapshots are
-  genuinely fresh on the no-runner CLI lane, and cold teardown resolves
-  deployment identity like the runner does. (#3838)
-- **Eight local backtest correctness fixes.** Closed a lending-rate look-ahead
-  leak, perp health no longer fabricates `Infinity`, Polygon native alias
-  folding, Optimism PoA sampling, GMX market-identity refusal, run-chain (not
-  implicit Arbitrum) lookups, and fill-before-tick ordering. (#3829)
-- **DexScreener prices respect pair orientation.** Tokens on a pair's quote
-  side are priced by inversion instead of returning the base token's price,
-  and on-demand gateways resolve token identity for pricing. (#3822)
-
-## [2.26.2] - 2026-08-28
-
-### Added
-
-- **Connector-owned pool discovery and inspection.** Added pair resolution and
-  pool-state reads for Curve, Aerodrome Classic, and Uniswap V4, plus
-  factory/registry-verified address identification through the new
-  `resolve_pool_address` agent tool and `almanak ax pool <address>`. (#3800,
-  #3801, #3802)
-- **Managed test data gateway.** Added a persistent, credential-isolated data
-  gateway sidecar with readiness reporting and `ALMANAK_GATEWAY_NO_SPAWN`, so
-  managed clients fail loudly instead of silently spawning a keyless local
-  gateway. (#3803)
-
-### Changed
-
-- **Almanak Code updated to v1.0.55.** The bundled agent gains mid-turn
-  steering, improved linked-repository root-layout handling, cleaner turn
-  completion and cancellation behavior, and provider-neutral repository
-  wording. (#3798, #3808, #3809, #3811, #3812)
-- **Public guidance synchronized.** Updated agent-tool discovery, gateway
-  configuration, Aerodrome LP slippage guidance, and strategy-time
-  documentation across English, Chinese, French, and Spanish.
-
-### Fixed
-
-- **Leveraged lending NAV is debt-correct.** Lending supply legs remain gross
-  while debt is represented separately and netted exactly once, correcting
-  leveraged NAV, same-reserve lending valuation, and degraded accounting
-  fallbacks. (#3775)
-- **LP teardown reconciles NFT identity correctly.** Manager-qualified and bare
-  V3-family LP NFT identities are bridged only when unambiguous, preventing a
-  successful unwind from being reported as failed. (#3786)
-- **Exact OHLCV windows include the intended first bucket.** Pool-history
-  queries now anchor on the last expected timestamp instead of fetching an
-  extra end bucket and dropping the first requested interval. (#3783)
-- **On-demand gateways serve prices immediately.** `GetPrice` can initialize an
-  unconfigured chain without requiring a balance request first; provisioned
-  chain allowlists remain strict. (#3806)
-- **Curve pair resolution avoids redundant price calls.** Symbol prices are
-  memoized for each resolution sweep, including misses, preventing repeated
-  provider calls and timeouts. (#3807)
-- **Aerodrome Slipstream uses the correct known WETH/USDC pool.** Corrected the
-  connector-owned known-pool identity used during resolution. (#3800)
-- **Direct Uniswap V4 quotes tolerate slow forked nodes.** The direct-RPC
-  Quoter timeout now allows computation-heavy tick traversal to finish while
-  preserving fail-closed behavior.
-
-### Security
-
-- **Aerodrome Classic LP slippage is enforced.** Mint and burn compilation now
-  derives minimum amounts from router quotes, honors `max_slippage`, and fails
-  closed when safe floors cannot be established, eliminating zero-minimum
-  sandwich exposure. (#3796)
-
-## [2.26.1] - 2026-08-20
-
-### Added
-
-- **Exact-pool OHLCV observations.** OHLCV candles bind to the exact venue and
-  pool identity a strategy requests and are authenticated end-to-end through the
-  gateway, instead of resolving a symbol-adjacent series. (#3777)
-- **Exact Uniswap-V3 TWAP observations.** V3 TWAP reads resolve the exact pool and
-  fail closed on provider or transport faults rather than substituting aggregate
-  data. (#3749)
-- **Exact-venue binding for Curve swaps.** Curve swap compilation binds to a
-  verified pool identity and rejects malformed venue identity. (#3768)
-- **Exact-venue binding for Slipstream (Aerodrome CL) LP.** Slipstream LP venues
-  bind to the receipt-derived NPM manager generation, and teardown resolves
-  current and legacy concentrated-liquidity manager authority from
-  connector-owned contract roles. (#3747)
-- **Fail-closed exact data consumer across SDK seams.** A shared consumer
-  reconciles exact binding identity across the market-data and execution seams and
-  fails closed on mismatch. (#3773, #3776)
-- **Compound V3 accepts a Comet address as `market_id`.** compound_v3 gains the
-  exact-venue path Aave and Fluid already have: a catalogue key or a listed Comet
-  address resolves to the canonical key, and `expected_pool` becomes a Compound
-  supply/withdraw assertion. (#3774)
-- **Backtest feasibility preflight.** Infeasible backtest windows are rejected
-  before data materialization with an actionable `WINDOW_TOO_LONG` blocker naming
-  the feasible window and a coarser interval, instead of dying at the job timeout.
-  (#3780)
-- **Structured backtest preflight blockers.** Platform backtest preflight failures
-  arrive as structured `{failure_stage, code, blockers}` result artifacts and
-  callbacks, preserved even across redelivered FAILED callbacks. (#3779)
-
-### Changed
-
-- **`quote_asset` documentation clarifies the reporting numeraire.** Guides,
-  docstrings, and the strategy-builder skill now state that `quote_asset` sets the
-  reporting numeraire for canonical metrics, scope the config override to live
-  runs, and add same-family LP guidance. (#3791)
-- **Almanak Code updated to v1.0.49.** Bundled AlmanakCode agent version bump.
-  (#3790)
-
-### Fixed
-
-- **CoinGecko pool discovery is hardened.** Discovery derives cache case from the
-  chain family, tolerates transient discovery failures, and bounds provider
-  caches. (#3789)
-- **Teardown reconciles completeness by asset identity.** Teardown completeness is
-  measured against exact historical asset identity instead of symbol-derived
-  matches. (#3778)
-
-## [2.26.0] - 2026-08-18
-
-### Added
-
-- **Exact-pool market data and history.** Pool snapshots and historical reads now
-  preserve the exact venue and pool identity requested by strategies. (#3721)
-- **Typed asset identity and token decimals.** `AssetIdentity` carries canonical
-  chain/address identity through market-data paths, with decimals resolved from
-  token metadata instead of symbol assumptions. (#3730, #3743)
-- **Fail-closed venue verification contracts.** Exact venue, pool, and data-plane
-  assertions reject mismatches instead of silently falling back. (#3744, #3745,
-  #3748)
-- **Historical exact-pool backtesting.** Backtests can consume exact-pool history,
-  including Curve APY inputs, without substituting aggregate venue data. (#3760,
-  #3763)
-- **Basis-point-native slippage.** Intent and compiler boundaries preserve exact
-  slippage in basis points. (#3766)
-- **Price provenance.** Price observations retain provider and measurement
-  provenance for downstream validation and accounting. (#3727)
-- **Dynamic GMX market discovery.** GMX markets are verified from the live venue
-  registry rather than a hand-maintained symbol catalogue. (#3756)
-- **Typed package and DTO documentation.** Added PEP 561 metadata and expanded
-  documentation for 21 public data-transfer objects. (#3767)
-
-### Changed
-
-- **Stablecoin depeg checks use exact addresses.** Depeg protection no longer
-  conflates assets that share a display symbol. (#3729)
-- **Slippage and minimum-output handling is canonical.** Compilers consume one
-  normalized slippage/min-out contract across venues. (#3728)
-- **Receipt extraction fails closed.** Missing or contradictory execution evidence
-  remains unmeasured instead of being inferred as success. (#3751)
-- **Token normalization is chain-aware.** Address and native-token normalization
-  now respects the target chain family. (#3752)
-- **ERC-20 metadata reads are cached.** ABI and allowance lookup reuse reduces
-  repeated RPC work without weakening validation. (#3753)
-- **Wrapped/native identity lives on chain descriptors.** Callers use canonical
-  descriptor metadata instead of local symbol heuristics. (#3754)
-- **Almanak Code updated to v1.0.48.** Agent guidance, templates, and strategy
-  generation behavior were synchronized with the SDK contract. (#3719, #3722,
-  #3758, #3767, #3769, #3770)
-
-### Fixed
-
-- **Managed Anvil funding.** Zero native balances, ERC-7201 storage layouts, and
-  `anvil_dealERC20` edge cases now fund or fail explicitly. (#3714, #3720, #3723)
-- **Backtest identity and cadence.** Chain identity, historical series selection,
-  and strategy data cadence now remain consistent through simulation. (#3715,
-  #3717)
-- **LP pool and fee correctness.** Exact pool identity and fee semantics are
-  preserved through LP compilation and accounting. (#3716)
-- **Perp teardown uses the actual market address.** Teardown no longer closes a
-  symbol-derived or stale market. (#3685)
-- **Curve permissions are exact.** Safe permission generation targets the verified
-  Curve pool path. (#3724)
-- **Historical V3 reads support PoA chains and bounded ranges.** Historical pool
-  reads handle proof-of-authority headers and enforce query bounds. (#3757, #3759)
-- **Uniswap V3 ABI selection is strict.** Pool calls no longer proceed with an
-  incompatible ABI shape. (#3746)
-- **Pendle sUSDe resolves the correct market.** The connector selects the intended
-  sUSDe market rather than a symbol-adjacent alternative. (#3750)
-
-## [2.25.1] - 2026-08-13
-
-### Added
-
-- **Aave V3 `expected_pool` intent assertion.** Supply and withdraw intents
-  accept an optional `expected_pool` address that is validated, checksummed, and
-  matched against the canonical registry Pool before approval or calldata
-  construction, failing closed on mismatch. It is never a routing override — the
-  compiler still routes only to the registry address, and the field is rejected
-  for connectors that cannot enforce it. (#3707)
-- **`almanak strat test` lifecycle path coverage.** Test results now classify
-  action evidence (executed / held / unmeasured / failed / not-run) and teardown
-  evidence (proved / nothing-to-unwind / unmeasured / residual / failed / not-run
-  / not-requested) and expose `requested_paths_exercised`, so a HOLD or an empty
-  teardown is no longer presented as lifecycle validation. The safe no-op exit
-  contract is preserved. (#3708)
-
-### Changed
-
-- **Packaged demo strategies use address-first market-data lookups.** Every demo
-  token price, valuation, and indicator read now resolves through explicit
-  chain-specific addresses instead of display symbols; affected demo configs
-  require the new address fields and validate them at strategy construction, the
-  shared perp position probe uses a supplied token address or a connector-declared
-  venue mark, and new-strategy scaffolding gains optional index-token address
-  configuration. This removes the symbol/address key mismatch that produced hollow
-  or immediately-held demo backtests — both GMX demos now complete one-year
-  backtests. (#3711)
-
-### Fixed
-
-- **Chainlink rETH/USD is derived from exact feeds.** Corrected the Ethereum
-  catalogue (`0x536218…` is the 18-decimal rETH/ETH feed, not rETH/USD) and now
-  derives rETH/USD as rETH/ETH × ETH/USD while preserving per-leg provider
-  timestamps, feed provenance, and a provider-correct freshness envelope; it fails
-  closed on invalid or future-dated timestamps and decimal mismatches. (#3712)
-- **Backtesting readiness aligns with address-native execution.** Readiness price
-  checks canonicalize through the run's registered `(chain, address)` map,
-  portfolio cash equivalents no longer require provider price history, and a
-  strategy's configured `data_granularity` is honored as the default indicator
-  timeframe instead of the simulation tick cadence. (#3705)
-- **Teardown reports skipped consolidation swaps honestly.** Executed, skipped,
-  successful, and failed teardown operations are counted independently; a
-  safety-clamped untracked-token swap that submits zero transactions is no longer
-  rendered as a completed consolidation across the runner and CLI. (#3697)
-- **Exact Ethereum USDf funding on managed Anvil.** Added a USDf funding recipe
-  that sources from a verified no-code EOA holder — avoiding sUSDf ERC-4626
-  exchange-rate corruption — and fails loudly instead of falling through to
-  `anvil_deal` or storage probing; paper trading now stops with a clear error when
-  required token funding fails. (#3709)
-- **Managed gateway surfaces actionable startup causes.** `almanak strat test`
-  now returns a typed `422` carrying the real, redacted cause (funding refusal,
-  `anvil_funding` validation, archive-RPC gate) instead of an opaque HTTP 500; the
-  EVM zero address is rejected as an ERC-20 `anvil_funding` key (use the
-  `0xEeee…EEeE` native sentinel), and per-token funding failures blame only the
-  tokens that actually failed. (#3713)
-
-## [2.25.0] - 2026-08-13
-
-### Changed
-
-- **GMX V2 markets are address-first — the curated symbol→address table is
-  gone.** Strategies declare the market-token ADDRESS (`Intent.perp_open(
-  market="0x…")`); the dynamic registry (VIB-6561) verifies it against the
-  venue catalogue and on-chain `Reader.getMarket`, and a new process-wide
-  verified-market catalog (`almanak.connectors.gmx_v2.market_catalog`) serves
-  every read plane — compiler price scaling, position valuation, teardown
-  display, anvil oracle seeding, receipt price scaling and the paper
-  backtester. `GMX_V2_MARKETS`, `GMX_V2_INDEX_TOKEN_DECIMALS`,
-  `index_price_symbol` and `index_token_decimals` are deleted from
-  `almanak.connectors.gmx_v2.addresses` (a hand-curated table could not be
-  kept true — VIB-6155 found five wrong rows — and its absence rows read as
-  "market unsupported": the 2026-08-07 XMR misread). The SDK core aliases
-  (`ETH/USD`, `BTC/USD`, `AVAX/USD` via `GMX_V2` core addresses) remain the
-  only offline label resolution. The runner's price warm resolves
-  address-shaped perp markets through the gateway `GetPerpMarket` RPC, the
-  gateway market registry serves last-known-good verified records through
-  venue-API outages (an address names an immutable tuple), and the paper
-  backtester reads positions with the production `getAccountPositions` range
-  read instead of enumerating a catalogue. **Migration:** add
-  `market_address` to GMX strategy configs (see the `gmx_perp_lifecycle` /
-  `gmx_v2_directional_perp` demos); legacy state rows holding symbol-shaped
-  market references now over-split loudly at teardown (fail-safe) — migrate
-  them with `almanak/framework/cli/repair_position_references.py` before a
-  live teardown.
-
-### Added
-
-- **Per-intent V3 pool pinning — `SwapIntent.swap_params` `fee_tier` / `pool`
-  (ALM feature request from the PancakeSwap atomic-execution planner
-  finding).** On every Uniswap V3 fork (`uniswap_v3`, `sushiswap_v3`,
-  `pancakeswap_v3`, `agni_finance`) a swap can now pin its exact execution
-  pool per intent: `swap_params={"fee_tier": 500}` pins the tier directly,
-  `swap_params={"pool": "0x..."}` resolves the pool on-chain (token0/token1/fee
-  read + pair match + `factory.getPool` cross-check, so an address from a
-  different fork's factory is rejected) and pins its tier. A pinned swap
-  either executes against exactly the requested pool or FAILS compilation —
-  it never silently falls back to auto tier selection. Bundle metadata
-  reports `fee_selection_source="intent_pinned"` and the pinned pool address.
-  Camelot (Algebra) rejects both keys loudly — one dynamic-fee pool per pair,
-  nothing to pin — and cross-chain swaps refuse a pin the aggregator would
-  ignore. The intent compiler also gates the pin keys centrally after protocol
-  normalization: a pin routed to any connector that does not consume it
-  (traderjoe_v2, aggregators, Solana venues, `fee_tier` on Curve) fails
-  compilation instead of routing with the pin silently discarded. Fixed-mode tier selection (config-level and pinned) now also quotes
-  its single tier via QuoterV2 when RPC/gateway is available, so min-out and
-  the price-impact guard see executable pool state instead of the oracle
-  estimate. Demos: `pancakeswap_aave_carry_bsc` pins its entry swap to the
-  0.01% stable tier, `uniswap_rsi` gains an optional `swap_pool` config key
-  (exact-pool pin), `mantle_mnt_accumulator` gains `swap_fee_tier` — all
-  three deliberately leave teardown sweeps unpinned so risk reduction never
-  blocks on one pool's health.
-
-- **GMX venue-native spot prices for synthetic perp indices (ALM-3177).** The
-  gateway price aggregator on Arbitrum/Avalanche now includes a `gmx_ticker`
-  source that serves USD mids straight from GMX's signed oracle ticker feed
-  (`/prices/tickers`) — the same price plane the venue's keeper settles orders
-  against. It answers **only** for symbols that are synthetic on the venue AND
-  carry no deployed identity in the SDK token registry on that chain (DOGE,
-  XMR, ZEC, gold, oil, …), so every market the venue lists is now compilable:
-  `PERP_OPEN` acceptable-price derivation no longer depends on a hand-curated
-  symbol→CoinGecko-slug row existing for each newly listed market (the
-  ALM-3177 failure: XMR listed 2025-06-02, still unpriceable in 2026-08).
-  Registry-deployed tokens (WETH, USDC, ARB — and CRV/DOT/LDO/… whose GMX
-  index rows are synthetic but whose tokens are real) are deliberately out of
-  scope — the address-based sources keep their existing votes. Venue
-  specifics are published through a
-  new `GatewayVenueTickerPriceCapability` on the GMX gateway connector; the
-  `almanak.integrations.gmx` source owns only freshness policy (venue
-  observations older than 60s are served stale, older than 5min are a miss)
-  and Empty≠Zero miss semantics.
-
-- **`almanak info matrix --json` schema v2 — per-intent chain coverage.** Each
-  protocol row now carries `chainsByIntent` (`{INTENT: [chain, …]}`, derived from
-  `Connector.supported_chains_for`) and `intentsKnown`, plus a provenance
-  envelope (`schemaVersion`, `sdkVersion`, `sourceCommit`, `sourceDirty`,
-  `generatedAt`). **v2 is purely additive**: every v1 field keeps its exact value
-  and position — the top-level `chains` and `protocols` keys, and each protocol
-  row's `name`, `category` and `chains` — and no v1 key is removed or reordered,
-  so existing consumers and the rendered docs table are unaffected. (The document
-  as a whole is not byte-identical, because v2 adds keys by design.)
-
-  The rendering `category` collapses a connector's exact verbs into one label:
-  `SUPPLY`/`BORROW`/`REPAY`/`WITHDRAW` all become `lending`, and `yield` covers
-  `STAKE` (lido), `VAULT_DEPOSIT` (morpho_vault) and Pendle's `LP_OPEN`/`SWAP`
-  surface alike. Consumers could therefore ask "is this protocol on this chain?"
-  but never "can it do this operation here?" — so `fluid`, which declares no
-  `BORROW`, read as borrow-capable, and `gmx_v2` read as LP-capable. Contract and
-  invariants: `docs/internal/blueprints/05-connectors.md` §2a. Notably,
-  `intentsKnown: false` marks compiler-only rows no connector descriptor
-  describes, where absence means *unknown*, not unsupported.
-
-- **Venue discovery — `MarketSnapshot.token_pools()`, `almanak ax dex-pools`,
-  and a `list_token_pools` agent tool (VIB-6599).** Strategies and operators can
-  enumerate where a token actually trades and how deep each venue is (24h volume
-  + reserves) through the `PoolAnalyticsService.ListTokenPools` volume field,
-  with an opt-in keyless DexScreener fallback. (#3658)
-
-- **Venue-native OHLCV routing with a configurable source (ALM-3148 /
-  ALM-3152).** Indicators for `(base, venue)` synthetic markets (e.g. a GMX
-  XRP/USD perp) now route candles to the venue's own feed; new per-strategy
-  `ohlcv_source` (`venue_native` / `auto` / provider) and `ohlcv_venue` config
-  keys select the plane. Behavioural note: `market.obv()` now raises
-  `VolumeUnavailableError` instead of substituting `0.0` when volume is
-  unmeasured. (#3635)
-
-- **GMX V2 strategy-authored order cancellation and resting/trigger orders
-  (ALM-3101).** Publishes `PERP_CANCEL_ORDER` (`Intent.perp_cancel_order`) on
-  Arbitrum and Avalanche, and author-facing resting orders via
-  `Intent.perp_open(trigger_price=…, settlement_mode="submission")`. (#3572)
-
-- **`almanak ax perp-market <protocol> <market>` (ALM-3179).** Live
-  perp-market resolution through the gateway `GetPerpMarket` RPC with on-chain
-  tuple verification and a found / not_found / invalid / unverified exit-code
-  contract. (#3641)
-
-- **Backtest per-tick decision telemetry.** Hold reasons now surface in logs,
-  in `result.json` (`decision_summary` / `decision_events`), and in a
-  `decisions.jsonl` sidecar, so a zero-trade backtest is explainable without
-  re-tracing the strategy. (#3591)
-
-- **Backtests observe the simulated perp book via `market.perp_positions()`.**
-  Observation-gated perp strategies (open → observe fill → close) now run under
-  the PnL backtester instead of holding forever; GMX markets resolve
-  address-first in the backtest pricing and close lanes. (#3652)
-
-- **Safe exact-pool reference-price strategies (ALM-3223).** A new
-  gateway-owned exact reference-price RPC (catalogued Chainlink feed, fail-closed
-  on a stale or closed session) and exact pool/fee discriminators threaded
-  through `MarketSnapshot.estimate_slippage()` let pre-trade simulation use the
-  same pool the compiler enforces; `token_address` / `close_swap_params` are
-  preserved through generic full-close teardown for non-standard assets (e.g.
-  tokenized gold). (#3692)
-
-- **Canonical `OHLCVTimeframe` vocabulary (ALM-3084).** A dependency-safe
-  `OHLCVTimeframe` StrEnum is threaded through snapshots, providers, cache,
-  indicators, backtesting, and dashboards; string wire / JSON / SQLite values are
-  preserved. Behavioural note: invalid or non-canonical timeframes now raise a
-  validation error instead of silently falling back. (#3530)
-
-### Deprecated
-
-- **`almanak.framework.utils.retry` is deprecated; removal in 3.0.0.** The module
-  has no callers inside the SDK, but its five exported names — `RetryConfig`,
-  `RetryContext`, `retry_with_backoff`, `calculate_backoff_delay` and
-  `DEFAULT_RETRY_CONFIG` — are importable public surface on the released package,
-  so they are **not** removed now. Importing the module, or resolving one of the
-  names through `almanak.framework.utils`, emits a one-shot `DeprecationWarning`;
-  behaviour is otherwise unchanged. Vendor the helpers if you depend on them.
-  R17 (ALM-3197) owns the unified retry home that replaces them.
-
-  Unaffected despite similar names: `TokenBucketRateLimiter.retry_with_backoff`
-  (`almanak/framework/backtesting/pnl/providers/rate_limiter.py`) and the
-  `RetryConfig` classes in `backtesting/pnl/providers/coingecko.py` and
-  `intents/state_machine.py`. All three are live and untouched.
-
-### Changed
-
-- **Provider integrations now own their metadata and gateway implementations.**
-  Chainlink, CoinGecko, Binance, DexScreener, Pyth, Moralis, OKX, Zerion,
-  TheGraph, and Hypercore are registered through import-light manifests under
-  `almanak/integrations/`; generic gateway services consume their declared
-  capabilities instead of importing concrete providers. Existing Chainlink
-  measured-price provenance remains wire-compatible: direct feeds report
-  `onchain_chainlink`, composed feeds report `onchain_derived`, and the
-  synthetic stablecoin shortcut remains distinguishable as `onchain`.
-
-- **BREAKING (Python API): chain descriptors require typed external IDs.**
-  `ChainDescriptor.external_ids` is now a mandatory `ExternalChainIds` value;
-  the former Chainlink field is removed because feed coverage belongs to the
-  Chainlink integration catalogue. Provider-specific chain maps derive from
-  descriptors, and legacy maps exported from `almanak.core.chainlink` are
-  read-only compatibility views rather than mutable configuration surfaces.
-
-- **Chainlink backtesting is gateway-only.** The legacy
-  `ChainlinkDataProvider(rpc_url=...)` argument remains accepted for source
-  compatibility but is deprecated and ignored; gateway configuration owns
-  transport and archive access. Iteration metadata now distinguishes measured
-  gateway history (`chainlink_historical`) from a preloaded local cache
-  (`chainlink_cache`) and reports real hit counts. Persistent-fork valuation
-  now raises a typed configuration error before session boot until the gateway
-  can prove an oracle reader is explicitly bound to that fork, instead of
-  comparing a live value against itself. The legacy non-resetting flag is
-  refused by the same validation, and the ineffective
-  `oracle_divergence_threshold` config field is removed.
-
-- **Stablecoin peg shortcuts fail closed on measured de-pegs.** Periodic
-  on-chain verification forces the measured Chainlink path, preserves its
-  source/timestamp/confidence, and latches any measured off-peg evidence even
-  when it is stale or low-confidence; only a fresh, high-confidence on-peg
-  observation clears the latch. Verifier signature mismatches fail at wiring
-  time, while runtime source errors remain fail-soft.
-
-- **Connector intent declarations are statically typed.** Connector manifests
-  now declare canonical `IntentType` members from
-  `almanak.core.intent_types` in `strategy_intents`,
-  `SupportedChainsSpec.intent_overrides`, and `StrategyMatrixEntry.intents`.
-  Raw strings and unrelated enum members are rejected during manifest
-  construction. The framework vocabulary re-exports the same enum object, and
-  CLI, docs, JSON, config, and wire boundaries continue to publish canonical
-  uppercase string values.
-
-- **Connector chain declarations are statically typed.** `SupportedChainsSpec`
-  now accepts only the registered `ChainDescriptor` singletons exported from
-  `almanak.core.chains.<canonical_name>` modules. Raw strings and synthetic or
-  unregistered descriptors are rejected, moving misspelled manifest chains to
-  import/type-check time. Connector query APIs continue to return canonical
-  lowercase strings, so config, CLI, JSON, and wire contracts are unchanged.
-
-- **Connector chain support now has one canonical declaration.** Strategy
-  connectors declare an inline `SupportedChainsSpec` with optional per-intent
-  and owned-alias overrides. The former `Connector.strategy_chains` field,
-  lazy per-connector `supported_chains.py` modules, and parallel strategy
-  registry have been removed. CLI matrices, generated docs, runtime protocol
-  validation, demos, permissions, and backtesting now derive from the same
-  descriptor metadata.
-
-- **`uniswap_v3` declares SWAP more widely than the LP lifecycle.** `mantle`,
-  `xlayer` and `zerog` are each a distinct deployment with a full address table
-  and a maintained 4-layer SWAP suite (`tests/intents/{mantle,xlayer,zerog}/`),
-  so they stay published for SWAP. None has an LP suite, so `LP_OPEN` /
-  `LP_CLOSE` / `LP_COLLECT_FEES` are withheld there via
-  `SupportedChainsSpec.intent_overrides` — `almanak info matrix` now renders a
-  12-chain swap row and a 9-chain lp row for the same connector. Publishing LP
-  on all twelve is what `check_intent_coverage --enforce` fails on; the pairs
-  re-enter when an LP suite lands. (`UNISWAP_V3["mantle"]` shares no contract
-  with `AGNI_FINANCE["mantle"]` — different factory, position manager, quoter
-  and router — so Agni's `protocol_overrides` entry pins the alias, it does not
-  mean Uniswap V3 is absent from Mantle.)
-
-- **Aave V3 drops `BORROW` on Mantle (VIB-6111).** An intent-chain exclusion in
-  the connector descriptor narrows the support matrix, capability matrix,
-  backtesting engine, docs generators, and CI scripts in lockstep: the Mantle
-  deployment keeps `SUPPLY` / `WITHDRAW` / `REPAY` but no longer advertises a
-  `BORROW` it cannot compile. (#3476)
-
-### Fixed
-
-- **`aerodrome_slipstream` is no longer published on optimism.** Slipstream —
-  the concentrated-liquidity product — is deployed on Base only; Optimism runs
-  Velodrome V2 Classic pools, and `aerodrome/addresses.py` carries no `cl_*`
-  entries for it (no `cl_factory`, no `cl_nft` NonfungiblePositionManager, no
-  `cl_quoter`). Without a `protocol_overrides` entry the alias inherited the
-  connector's `("base", "optimism")` union and advertised an LP row that cannot
-  compile an `LP_OPEN`. Optimism's concentrated venue is Velodrome Slipstream,
-  which has its own row.
-
-- **Fluid no longer over-advertises lending on ethereum / polygon.** fToken
-  lending shipped on arbitrum + base only (VIB-5030), but that narrowing lived in
-  a hand-written `strategy_matrix_entries` row: it scoped the rendered row while
-  `chains_for_intent(SUPPLY)` — the accessor every consumer is told to ask —
-  still answered all four chains. Harmless while only the table read the matrix;
-  a live over-advertisement the moment per-intent coverage is published. The
-  truth moved to `SupportedChainsSpec.intent_overrides`, and the matrix rows are
-  now derived from it (rendering output unchanged).
-
-- Execution refuses to broadcast a deferred bundle it cannot refresh, instead of
-  submitting stale calldata (#3503, VIB-6228).
-- GMX V2 perp opens/closes derive a real `acceptablePrice` instead of an
-  accept-anything sentinel, restoring slippage protection (#3497, VIB-6219).
-- `max_slippage` is now exclusive at 1, and the `protocol_params` LP slippage
-  bypass fails closed (#3496, VIB-6217 / VIB-6218).
-- Uniswap V4 swaps size gas from the estimate instead of a static floor that ran
-  out of gas mid-swap (#3568, VIB-6413).
-- Uniswap V3 concentrated-liquidity mints apply tolerance as a price band rather
-  than a per-leg haircut (#3579, VIB-6269).
-- A fungible-LP teardown burns only this deployment's own liquidity in a shared
-  pool (#3596, VIB-6162; #3605, VIB-6517).
-- A single physical perp position is enumerated and closed exactly once at
-  teardown (#3574, VIB-6341; #3534, VIB-6287).
-- An unmeasured teardown no longer certifies success (#3531, VIB-6285).
-- Hyperliquid perp positions get a real teardown closure authority instead of
-  being reported stranded (#3553, VIB-6387; #3551, VIB-6316).
-- Copy-trading attributes a copy signal to the leader, not the signer (#3479,
-  VIB-6049).
-- A Safe-authorised withdrawal is classified as `WITHDRAWAL` rather than
-  `UNCLASSIFIED_OUT` (#3471, VIB-6050).
-- Settlement-carried perp fees are folded into the dashboard PnL roll-up and the
-  gateway cost-stack wire (#3610, VIB-6541).
-- The V3 pre-trade slippage estimator reads `fee_tier` as pips instead of
-  misreading it as `fee_bps` (#3667, VIB-6609).
-- Aave's zero-LTV compile guard now actually runs in production (#3477,
-  VIB-6111).
-- The shared token disk cache no longer corrupts the file that every process
-  reads (#3488, VIB-6168).
-
 ### Removed
-
-- **BREAKING (config-level): pairs that were published but never proven no
-  longer pass the runtime chain gate.** Collapsing three disagreeing chain
-  declarations into one canonical `SupportedChainsSpec` drops the pairs only the
-  widest source ever claimed: `uniswap_v3` + `linea`, `pancakeswap_v3` +
-  `linea`, `enso` + `sonic` / `berachain` / `linea`, and `lifi` + `sonic` /
-  `linea`. None had an intent suite. A config pairing one of them now fails at
-  boot with a `ConfigurationError` instead of failing on-chain later. `sonic` and
-  `berachain` consequently leave the `almanak info matrix` chain columns
-  entirely — no connector claims either. Address data is retained, so
-  re-enabling is a manifest entry plus a proof run (the VIB-5916 pattern).
-
-- **Three incubating strategies whose only pair is now unsupported.**
-  `uniswap_v3_swap_linea`, `edge_discovery_berachain` (enso + berachain) and
-  `aave_enso_leverage_sonic` (aave_v3 + sonic, enso + sonic) cannot boot, so
-  they are removed rather than left as configs that fail at the chain gate.
-  `enso_swap` loses its `config-sonic.json` and the `sonic` entry in
-  `supported_chains`; its seven other chain configs are unaffected. aave_v3 has
-  not claimed `sonic` since #3338 — its pool and token addresses stay in
-  `addresses.py` so existing Sonic positions can still be exited.
-
-## [2.24.0] - 2026-07-28
-
-### Added
-
-- **LiFi compiles `BridgeIntent` directly.** The LiFi manifest advertised
-  `BRIDGE`, but `LiFiCompiler` only declared `SWAP` — so
-  `BridgeIntent(preferred_bridge="lifi")` failed with *"LiFiCompiler does not
-  support intent type IntentType.BRIDGE"*, forcing the production bridge flow
-  through a cross-chain `SwapIntent`. `compile_bridge` now routes through
-  LiFi's cross-chain route path, and the receipt parser's native-asset fallback
-  no longer mis-stamps an ERC-20 bundle's approve leg as `source_tx_hash`.
-  (#3397) The native-asset bridge fallback is additionally gated on
-  `LiFiTransferStarted`. (#3388)
-- **Verified lending-market resolution (VIB-5985).** A `market_id` can now only
-  enter a config after on-chain proof — closing the incident class where a
-  strategy ran 3+ days in permanent fail-closed HOLD on an unverifiable
-  `morpho_market_id`. Two new `MarketService` RPCs: `ListLendingMarkets`
-  returns every curated-catalog candidate matching `collateral` / `loan` /
-  `lltv_bps` (token filters address-resolved before matching, since symbols are
-  spoofable; never ranks or auto-picks; zero matches is an explicit empty page
-  the caller must treat as an error), and `GetLendingMarket` reads
-  `idToMarketParams(id)` on-chain, recomputes the id from the returned params
-  and compares, so a record is never returned unverified. Surfaced to
-  strategies as `MarketSnapshot.lending_markets(...)` and
-  `MarketSnapshot.lending_market(...)`. Generic contract, Morpho-first
-  implementation. (#3430) `ax lending-reserves` gains the matching UX:
-  pair-aware `--asset` filtering plus `--collateral` / `--loan` leg pins, and
-  `morpho_blue` markets list with their immutable `market_id` + LLTV. (#3424)
-- **Perp fill accounting from measured settlement (VIB-3872).** GMX V2 keeper
-  settlements are decoded by key rather than positional index and carried as
-  typed `PerpFillData` (#3440); `RunnerPerpSettlementCapability` correlates a
-  settlement back to the submitting order (#3443); a reconciler books the
-  measured economics through a dedicated `perp_settlement_commit` lane (#3446);
-  and the Accountant Test P3/P5 cells plus the dashboard cost stack now consume
-  the `PERP_SETTLEMENT` row as the measured source, with ESTIMATED open/close
-  folds superseded rather than double-counted (#3450). The reconciler reads
-  through `GatewayStateManager`, so it is live in production rather than inert
-  (#3453).
-- **Safe-wallet Zodiac discovery for `PERP_CANCEL_ORDER`** via synthetic
-  discovery on `gmx_v2`'s `cancelOrder`, so cancelling an order under a Safe no
-  longer reverts unauthorized (VIB-5569). (#3437)
-- **Backtests fall back to gateway-backed The Graph.** Registry-driven subgraph
-  discovery from validated deployment metadata, gateway-routed pool / funding /
-  rate-history fallbacks, and a fail-before-network check when The Graph
-  credentials are missing. (#3464) Funding history is shared run-wide and
-  throttled behind a cache with no look-ahead (#3463), and funding measurements
-  carry the venue that actually served them (#3462).
-- **GMX async orders execute on managed Anvil.** A keeper simulator drives the
-  two-phase GMX order flow through to settlement, and the GMX lifecycle tests
-  are settlement-aware. (#3413, #3409)
-- **`ledger_lp_leg_identity_missing_total`** meters how often LP leg identity
-  falls back to label order instead of on-chain amount provenance (VIB-6053).
-  (#3466)
+- Publishing release candidates to a package index. Stable releases go to PyPI only; a
+  release candidate builds and verifies its distributions as a workflow artifact and
+  publishes nothing.
 
 ### Changed
+- A coordinator stopped on `execution_failed` or `accounting`, which a recorded revert or
+  accounting issue makes every resume repeat, is reported with the failure
+  `teardown_required` instead of `execution`. Its next command is `almanak teardown --run`
+  and its diagnostic says teardown is required instead of "explicitly resume". Every other
+  coordinator stop stays `execution`.
+- A supervisor that `almanak teardown` relaunches reports `provisioned` from its first
+  status until the teardown control arrives, instead of the previous supervisor's `failed`
+  or `shutdown` stage, which hosts treat as final. A teardown of a workspace with no
+  execution state is refused before any service starts and never creates a coordinator.
+- The production check's decision-interval warning speaks of a live deployment.
+- A Hyperliquid production run given `--signer-file` is refused with "a remote signer
+  holds no agent keys": the gateway alone generates and holds agent keys.
 
-- **BREAKING: GeckoTerminal naming retired in favour of CoinGecko Onchain.**
-  The upstream egress moved to CoinGecko's Onchain API in #2640; this removes
-  the leftover `geckoterminal` naming across the proto, gateway, framework, and
-  chain registry so one vendor is named one way. No behaviour changes, and the
-  upstream HTTP endpoints and API keys are untouched — the same
-  `api.coingecko.com/api/v3/onchain` hosts, and `COINGECKO_API_KEY` /
-  `ALMANAK_GATEWAY_COINGECKO_API_KEY` are unchanged. The *internal* gRPC method
-  path does change, and is breaking (see below). Renames:
-  - gRPC: `IntegrationService.GeckoTerminalGetOHLCV` →
-    `CoinGeckoOnchainGetOHLCV`, and `GeckoTerminalOHLCV{Request,Response,Candle}`
-    → `CoinGeckoOnchainOHLCV*`. **Gateway and SDK must be upgraded together** —
-    a new SDK against an old gateway image (or the reverse) fails the OHLCV call
-    with `UNIMPLEMENTED`.
-  - Gateway env vars:
-    `ALMANAK_GATEWAY_POOL_HISTORY_FINALITY_CUTOFF_SECONDS_GECKOTERMINAL` →
-    `..._COINGECKO_ONCHAIN`, and
-    `ALMANAK_GATEWAY_POOL_HISTORY_PAGE_CAP_ROWS_GECKOTERMINAL` →
-    `..._COINGECKO_ONCHAIN`. Both are non-default tuning knobs; an operator
-    still setting the old name silently gets the default.
-  - Data-routing provider id: `"geckoterminal"` → `"coingecko_onchain"` in
-    `data_overrides` strategy config and in the `pool_history` / `pool_analytics`
-    response `source` field.
-  - `ChainDescriptor.external_ids` vendor key `"geckoterminal"` →
-    `"coingecko_onchain"` (values unchanged; still distinct from the
-    token-level `"coingecko"` asset-platform key).
-  - Python: `GeckoTerminalOHLCVProvider` → `CoinGeckoOnchainOHLCVProvider`,
-    `GeckoTerminalPoolHistoryProvider` → `CoinGeckoOnchainPoolHistoryProvider`,
-    `GatewayGeckoTerminalOHLCVProvider` → `GatewayCoinGeckoOnchainOHLCVProvider`,
-    `GeckoTerminalGatewayDataProvider` → `CoinGeckoOnchainGatewayDataProvider`;
-    modules `gateway/data/ohlcv/geckoterminal_provider.py` →
-    `coingecko_onchain_provider.py` and
-    `gateway/data/pool_history/geckoterminal.py` → `coingecko_onchain.py`.
-
-  (#3465) The CoinGecko Onchain OHLCV handler additionally validates the
-  `pool_address` shape before egress, skipping the check when the chain family
-  is unknown. (#3467)
-- **Production price-impact BLOCK default lowered to 10%** — it was 30%, nearly
-  inert for real bad fills. 5% was rejected as too tight (it would reject an
-  observed ~9.5% Linea gap). A dead 5% default that no call path read was
-  removed first, so the effective cap is now pinned in one place
-  (`max_price_impact_pct`). (#3448, #3427)
-- **One config-validation engine (VIB-5986).** `almanak strat check` and the
-  runtime boot path validate through the same `CONFIG_MODEL`, so a config that
-  passes `check` cannot fail differently at boot — and an invalid config fails
-  loudly at boot instead of degrading silently. (#3423)
-- **Teardown preview surfaces aligned** between the teardown API and the
-  teardown manager, so both report the same planned closes. (#3406)
-- **Curve exposes proportional close floors**, so a proportional LP close
-  states its own minimum-out floors rather than inheriting a generic one.
-  (#3418)
-
-### Deprecated
-
-- **Symbol-based token resolution.** Token symbols are metadata, not stable
-  asset identity — the same ticker maps to a different contract on every chain
-  and is spoofable. `TokenResolver.resolve(...)`, `MarketSnapshot`, and
-  `Intent` construction now emit a `SymbolTokenResolutionWarning` (a
-  `FutureWarning`) when handed a bare symbol, once per external callsite.
-  Symbols keep working for the remainder of the 2.x line and are **rejected in
-  Almanak SDK 3.0.0** with `SymbolTokenResolutionError`. Use a chain-specific
-  contract address or a CAIP-19 asset identifier instead. New public exports:
-  `SymbolTokenResolutionError`, `SymbolTokenResolutionWarning`,
-  `SYMBOL_TOKEN_REMOVAL_VERSION`. (#3396)
-
-### Fixed
-
-- **Receipt parsers resolve the Safe as the trading wallet (VIB-6043 P0).**
-  Under Safe-wallet execution the parsers read `receipt["from"]` — the EOA that
-  relayed the transaction — instead of the Safe that actually holds the
-  position, so money legs were attributed to the wrong wallet across the shared
-  parser helpers. (#3439; regression sweep recorded in #3442)
-- **LP leg identity is bound to its own amounts at the parser (VIB-6053,
-  VIB-6051, VIB-6045).** Token identity for each LP leg is now carried with the
-  amounts it describes rather than re-paired downstream by label order, which
-  silently swapped token0/token1 economics on pools whose label order differs
-  from on-chain order. (#3451) Related: V3 LP decimals pair by on-chain token
-  order (#3420), `position_events` LP tokens re-pair by on-chain order (#3422),
-  and that realignment is gated on amount-order provenance so it cannot fire on
-  unprovenanced rows (#3425).
-- **A degraded all-zero LP read is no longer booked as a measured $0.**
-  Empty ≠ Zero: an unavailable valuation read stays unmeasured instead of
-  entering the books as a real zero. (#3426) Complementing that, a `$0` open
-  position at HIGH confidence now fails closed rather than persisting
-  (VIB-4970). (#3419)
-- **Perp closes no longer read as a −100% loss (VIB-5952).** A keeper-settled
-  close left the headline PnL reading against a stale open position; closed
-  perp state is now suppressed from the headline. (#3436) GMX closes are
-  enriched from keeper receipts (#3417), and `OrderCreated` is decoded by key
-  for settlement identity with cold-fork transient tolerance in the keeper lane
-  (#3429).
-- **GMX perp demos can fully close (VIB-5950).** `size_usd=None` now means full
-  close, which surfaced and fixed a stale GMX Reader `Position.Props` ABI.
-  (#3434)
-- **Uniswap V4 LP positions are discovered in teardown recovery (VIB-6109).** A
-  V4 position opened before a restart was invisible to teardown discovery and
-  survived teardown open on-chain. (#3460)
-- **Manual teardown consolidation sweeps are clamped (VIB-5938)**, so a sweep
-  cannot exceed the measured residual. (#3373)
-- **`RateMonitor` takes an injected gateway client (VIB-5823, VIB-5824)** rather
-  than constructing its own, and no longer reports a placeholder rate as a
-  measured one. (#3416)
-- **Hosted attribution distinguishes unverified sources (VIB-5917)**, so an
-  unverified hosted attribution is not recorded as verified. (#3371)
-- **Swap quoting.** The fee-tier sweep is bounded so a quote sweep cannot fan
-  out unboundedly, and the SushiSwap V3 quoter is registered on Optimism
-  (VIB-5989) (#3432); SushiSwap V3's codeless Base deployment addresses are
-  corrected (VIB-5991) (#3433); `SlippageEstimator` resolves symbol inputs when
-  determining swap direction (VIB-5933) (#3415).
-- **`aerodrome_slipstream` SWAP appears in the Zodiac manifest (VIB-5990)** —
-  discovery produced no entry, so a Safe-wallet swap on Slipstream reverted
-  unauthorized. (#3435)
-- **Strategy configs pinned to live markets.** Polygon Curve moves off the
-  frozen Aave `am3pool` onto the frxUSD/USDT NG pool (VIB-5551) (#3395, #3398);
-  three incubating Morpho configs pin verified market ids, two of them
-  retargeted, and now raise on an invalid config (#3428); the Compound V3 carry
-  strategy splits its bundled borrow into `SUPPLY` → `BORROW` (#3411, #3414).
-- **OHLCV no longer advertises timeframes `validate_timeframe` rejects.**
-  (#3403)
-- **Alerting.** A non-JSON Telegram response body returns a failure result
-  instead of raising (#3404), and shadowing local `asyncio` imports are removed
-  from `WebhookChannel.send_alert` (#3384).
-
-### Security
-
-- **The gateway rejects caller network-override elevation to Anvil.** A caller
-  could previously override the network to `anvil` on a production gateway; the
-  override path is now forbidden, and the pending-order waiver it interacted
-  with is proof-carrying. (#3421)
-## [2.23.0] - 2026-07-24
+## [3.1.1] - 2026-11-05
 
 ### Added
+- `almanak ax hypercore-markets` and `almanak ax hypercore-account` read Hyperliquid's
+  HyperCore, a venue of HyperEVM, from Hyperliquid's `/info` API: each first-dex
+  perpetual market's asset index, `meta` entry, margin tiers, prices and funding, and an
+  account's role, abstraction mode, perp margin and positions, spot balances, each named
+  by its HyperEVM CAIP-19 asset, open orders and approved agents with their expiries.
+  The API has no as-of query, so these take no `--block` and report when each answer was
+  received. Every answer must match the shape recorded from mainnet, or it is refused as
+  `malformed`, and one for another market, account, order or time range is refused as
+  `source_mismatch`. The read gateway serves the same queries as its `info` operation,
+  capped by `ALMANAK_GATEWAY_HYPERLIQUID_WEIGHT_PER_MINUTE` in the API's request weight;
+  a fill, funding or ledger page reserves the most it can cost until its answer is
+  counted.
+- `almanak markets --out .almanak/markets.json`: what each market in `config.yaml`
+  resolves to at one pinned block, its contracts, tokens and ids with each token's symbol
+  and decimals, for checking before approval. It reads no prices.
+- `ax pool` reports an Aerodrome classic pool's `reserves` beside its price: each
+  currency's stored reserve with `asset`, `amount` in base units, `decimals` and the
+  decimal `quantity`.
+- `context.decision(intent, memory=..., reason=...)`: a strategy can say in its own words
+  why it holds or acts. Only a test run logs it; the runtime never acts on it and the
+  checkpoint never keeps it. Every published reference states its hold and act reasons.
+- Test runs (`almanak test run`) log two more coordinator lines: `run_metadata` once at
+  start (each verified asset's symbol and decimals, each allocation's connector) and
+  `transaction_executed` after each committed transaction (allocation, operation,
+  success, gas paid, the fund's token changes, a decoded revert); `decision_evaluated`
+  carries the strategy's `reason`. Live runs log none of them.
 
-- **Teardown exit-asset policy.** A strategy whose mandate forbids terminal
-  swaps can declare `TeardownAssetPolicy.KEEP_OUTPUTS` via the new
-  `TeardownProfile.preferred_asset_policy`, suppressing the framework's
-  post-close consolidation swap into USDC. Resolution order everywhere:
-  explicit `--asset-policy` flag → strategy preference → framework default;
-  honored by platform Stop, the dashboard close API, and `strat test`. The
-  `strat test --teardown` ladder also gains a residual-position gate: measured
-  open positions above dust after teardown now fail the step instead of
-  passing silently, and `strat new` scaffolds document the policy choice.
-  (#3363)
-- **Backtests serve `pool_history`, `pool_analytics`, and
-  `funding_rate_history`.** The three market-API accessors that worked live
-  but refused in backtests are now served from the run's own data lanes —
-  completed-day pool bars, TVL/volume from the newest completed pool-day, and
-  the ascending hourly funding series — no-look-ahead, Empty ≠ Zero, with
-  deliberate refusals kept where serving would fabricate structure
-  (`liquidity_depth`, `pool_reserves`, `twap`, `best_pool`). (#3368, #3374)
-- **Backtest data-provenance manifest + broker seam.** Every run collects a
-  `RunDataManifest` with per-lane serve / refusal / degrade stamps (ohlcv,
-  price, volume, pool-history, funding), exposed on `BacktestResult` and
-  serialized results. Plus: shared process-wide per-provider rate limiting,
-  lending opens failing closed on chain-scope mismatch, address-style LP
-  pools resolved via the token registry, and a gateway hermeticity guard for
-  the unit suite. (#3365)
+- Dashboard line charts show the reading under the pointer (or a finger on a touch
+  screen): a guide snaps to the nearest reading and a label gives its time, each series'
+  value at the display precision, and any marker there ("Sell"), so a trade reads with its
+  time and price.
 
 ### Changed
-
-- **Hyperliquid perp opens fail closed on non-1x leverage.** CoreWriter has
-  no set-leverage action, so a requested `leverage` was never applied
-  on-venue — positions opened at the account's per-asset default (e.g. 20x
-  cross), surfaced only as a warning. `PERP_OPEN` requesting non-1x leverage
-  is now rejected at compile time unless the strategy explicitly opts in with
-  the new `Intent.perp_open(accept_venue_leverage=True)` (default `False`);
-  the venue-observed leverage is still recorded post-fill. Venues that do set
-  leverage on-venue (GMX V2) ignore the flag. (#3354)
-- Bump almanak-code to v1.0.30 — codegen prompts require platform validation
-  before proposing venues. (#3364)
-- Dependency updates: pydantic-settings 2.14.2 (#2959), pillow 12.3.0
-  (#3352), pyasn1 0.6.4 (#3359), gitpython 3.1.52 (#3360), soupsieve 2.8.4
-  (#3248).
+- Every connector's dashboard tables follow one convention:
+  - Exchange dashboards (Uniswap V3/V4, PancakeSwap V3, Aerodrome, Slipstream, Curve) list
+    token inventory one row per token under Position / Token / Amount, labelled by symbol,
+    instead of "Currency 0/1 inventory" columns. A composed strategy's `fund_inventory`
+    does the same under Token / Amount.
+  - A fund account (or GMX fund address) column appears only when the strategy uses more
+    than one: in `exchange_inventory`, `payer_costs`, `fund_costs`, `lending_positions`,
+    `supply_positions`, `debt_positions` and GMX's `positions`, `gm_shares` and `requests`.
+    Allocation headers read "Position".
+  - Every connector projects a `transactions` dataset: each committed transaction the
+    strategy submitted (newest 200), named in its own terms ("Swap USDC → XDP", "Open LP
+    position", "Supply USDC", "Use WETH as collateral", "Open long ETH"), with "(reverted)"
+    when it failed, its receipt gas with the native symbol and its UTC time. Aave V4's
+    replaces its Action / Result / Transaction / "Block time (Unix)" columns and keeps
+    "Asset effect". Lending `fund_costs` gas carries the native symbol.
+  - Lending, repayment and composed cash amounts carry their token symbol ("0.009 WETH",
+    not "asset units"). GMX tables read in tokens and time: the market by its pair
+    ("WETH/USDC"), GM shares and request fees in tokens ("0.02 WETH"; the separate fee
+    asset column is gone), admission deadlines in UTC and submitter gas in ETH;
+    `requests` loses `asset` and `submitters` loses `asset`.
+  - Dashboards that read rows by removed keys must change: `exchange_inventory`'s
+    `inventory0`/`inventory1`/`asset` and `fund_inventory`'s `asset` are now `token` and
+    `amount`; Aave V4 `transactions` rows lose `operation`, `result` and `hash` for
+    `transaction` and `gas`; a single-account table no longer has `account` (or GMX
+    `fund`).
+- A transaction that approves zero (a teardown revoke, or the reset before re-approving on
+  Uniswap V3, PancakeSwap, Aerodrome, Curve and GMX) is stated as `revoke` in the test
+  run's `transaction_executed` lines and the exported history, so the fork-test view no
+  longer reads it as a new approval.
+- The loop and borrow references word their capped-round and repay-shortfall messages in
+  plain terms, with the owed amount in tokens instead of base units and parameter names.
+- `almanak check`'s `gas_amount_units` ceiling follows the chain: a Polygon gas fee,
+  budget or reserve warns above 10,000 whole POL (a real budget there is many cheap
+  units) instead of 10; every other chain keeps 10 whole native units.
 
 ### Fixed
+- `almanak markets` and `almanak ax` resolve HyperEVM at their default block. `finalized`
+  is HyperEVM's head, and Alchemy runs a read pinned within about 128 to 192 blocks of
+  its head at the next block, so the block-context proof refused every read at
+  `finalized` or `latest` as `provider_context`. On HyperEVM those tags now pin the block
+  256 blocks (about four minutes) behind, through `--env-file` or the read gateway; an
+  explicit `--block` is unchanged, and a read run at any other block is still refused.
+  The runtime's own reads keep pinning the head.
+- Base transactions are accounted again. Base upgraded its L1Block fee contract to 1.8.0 at
+  block 53508490 (2026-11-04 15:32 UTC), and the SDK refused the new implementation as an
+  unverified fee revision, so every Base transaction failed its receipt accounting after it
+  was sent. The new implementation differs from the accepted 1.7.0 in one byte, its
+  version string, so its code hash joins the accepted L1Block revisions.
+- A line chart's value axis prints enough decimals to tell its two ends apart. A token
+  priced under a cent (0.0201 over a 0.0171 stop) read "0.02" at both ends, so a moving
+  price looked flat.
+- A line chart outside a group keeps the same 30 px below it as a table does, instead of
+  touching the block under it.
 
-- **HyperCore perp positions are valued in portfolio snapshots (VIB-5768 /
-  VIB-5576).** Perp discovery now gates on the actual `PerpsReadRegistry`
-  reader set instead of the synthetic permission-discovery set, so
-  hyperliquid (statically-registered CoreWriter permissions) is scanned; a
-  live HyperCore position no longer collapses snapshots to `$0` /
-  "No active position". (#3356)
-- **Perp dashboard truth defects (VIB-5942).** NAV/PnL history now plots
-  wallet NAV (cash included) through the same shared helper as the NAV tile
-  and drawdown series; the G6 reconciliation tile and the reconciliation
-  report are labeled by scope; a snapshot-derived perp story section
-  (direction, market, entry, leverage, notional) ships via the additive
-  `PerpPositionSummary` proto; the cost stack honors Empty ≠ Zero and
-  sub-cent gas. (#3358) The perp story section is also wired into the GMX
-  demo dashboards. (#3369)
-- **Mantle swaps were unsubmittable.** The chain's gas-floor table was ~2000x
-  inflated by a stale historical premise — every real swap exceeded the block
-  gas limit at the compiler floor. Corrected to measured scale. (#3362)
-- **Backtest gas fallbacks retuned to measured reality.** Ethereum 22 → 0.21
-  gwei (~140x overstatement), Avalanche ~470x, BSC 60x, Polygon ~5x
-  understatement; and an unset `gas_fallback_gwei` now falls through to the
-  chain-aware defaults instead of a chain-blind flat 20 gwei. (#3377, #3378,
-  #3379)
-- **Backtest serve gaps and log truthfulness.** Symbol reads resolve through
-  the offline token registry on address-keyed runs; the pool-proxy warn-once
-  fires only after a successful serve; LP fill logs no longer claim
-  "executed" before portfolio acceptance; the hollow-run guard gates on
-  executed fills and distinguishes warm-up from persistent input starvation;
-  the perp open gate consults venue-specific margin floors (e.g. GMX V2 0.5%
-  vs the generic 10% default); the low-health-factor borrow warning reads as
-  the advisory it is. (#3367)
-- **`MarketSnapshot.price` honors `quote` in the seeded fast path.**
-  Backtests no longer return the USD price under a non-USD quote label; quote
-  legs resolve through seeded prices with native↔wrapped 1:1 equivalence.
-  (#3376)
-- **`MarketSnapshot.total_portfolio_usd` counts cash once.** The PnL bridge's
-  per-symbol cash mirrors (USD, USDC/USDT/DAI aliases, address keys) no
-  longer multiply into the wallet total; the live path is byte-identical.
-  (#3381)
-- **Exact-boundary `get_price_at`.** A candle stamped exactly at T is
-  returned instead of the previous interval's close — CoinGecko's
-  aligned-spacing rollout (2026-07-23) made that one-interval lag systematic
-  on every boundary-aligned tick. (#3375)
-- **Three incubating strategies read their `config.json` again.**
-  `silo_v2_lending_lifecycle_avalanche`, `euler_v2_lending_lifecycle_avalanche`,
-  and `aave_velodrome_leverage_optimism` nested parameters under a
-  `"parameters"` key that `get_config()` never reads; configs flattened to
-  the repo convention. (#3355)
-
-## [2.22.0] - 2026-07-21
+## [3.1.0] - 2026-10-28
 
 ### Added
-
-- **Aave V3 on Linea (VIB-5916).** The aave_v3 connector now declares `linea`
-  in `strategy_chains`, backed by the full proof chain: four-layer Zodiac-on
-  intent tests on a Linea fork, an exact-surface Safe permission regression,
-  managed-Anvil lifecycle + separate-signal teardown E2E, and a chain-confirmed
-  ≤5 USDC mainnet round trip (`tests/reports/aave_v3_lending_linea_e2e_*.md`).
-  The Linea chain descriptor gains the canonical Safe v1.4.1 + Zodiac Roles
-  stack (verified live on 59144), enabling Safe-wallet execution on Linea
-  framework-wide (hosted review: VIB-5918). (#3338)
-- **`lifecycle_stop_after="borrowed"`** on the chain-generic
-  `aave_v3_lending` strategy: deterministically HOLD an open, healthy borrow
-  for a separate teardown signal, with boot-time validation, warn-only
-  health-factor telemetry (`stop_after_min_health_factor`, default 1.5), and a
-  documented debt-token interest-buffer requirement for `repay_full` teardown
-  (automatic shortfall top-up tracked in VIB-5919). (#3338)
-- **Robinhood Chain (id 4663).** Chain descriptor for the Arbitrum Orbit L2
-  (ETH gas, Blockscout explorer, Arbitrum `ArbGasInfo` L1-fee oracle) plus the
-  token layer (WETH, USDG, USDe — no canonical USDC/USDT exists on 4663 with
-  real liquidity, so none is registered), managed-Anvil funding profile, and
-  the canonical Safe v1.4.1 + Zodiac Roles v2 stack. (#3234)
-- **Uniswap V3 and Morpho Blue on Robinhood Chain.** Both connectors now
-  advertise `robinhood` in their manifests and appear in
-  `almanak info matrix`: Uniswap V3 for `SWAP` + the LP lifecycle, Morpho Blue
-  for the lending lifecycle. Uniswap V3 on Robinhood is a **non-canonical
-  deployment** — the periphery addresses differ from every other chain and
-  same-named forks exist on the explorer, so each address was verified by
-  cross-checking `factory()`. The `uniswap_rsi`, `uniswap_lp`, and
-  `morpho_looping` demos ship a `config.robinhood.json`. (#3238)
-- **Backtesting engine re-cut (ALM-2943).** Typed money/identity primitives
-  with a single-owner token-identity table and an operational gas tank outside
-  strategy capital; single-owner sizing resolution with `RunContext` + typed
-  rejections; per-intent capability routing; data-lane collapse (dead-code
-  deletion, single-flight fetching, shared funding decoder, lending-rate
-  serve); impermanent-loss tick-plane folded onto the shared
-  concentrated-liquidity kernel; behavior replay lifts perp
-  `collateral="all"`; pool-pinned candles with the tick interval derived from
-  the strategy timeframe, connector-declared APY tables (hardcoded 5%/8%
-  deleted), and cost-exact swap recording. (#3314, #3318, #3319, #3320,
-  #3321, #3322, #3325)
-- **Backtests serve the decision-input surface from engine-owned state.**
-  Lending health, LP position value, pool price, realized vol, slippage
-  estimates, and calculators are answered from simulated state instead of live
-  reads (#3346); the full indicator set, engine-modeled gas, real 24h
-  `price_data`, and hollow-run self-reporting (ALM-2951) (#3303);
-  `market.ohlcv` served from the run price series (ALM-2962) (#3312); and a
-  measured volume/liquidity ladder via gateway pool history (ALM-2940)
-  (#3283).
-- **Capital-flow accounting (VIB-5866 leg B).** Deposits and withdrawals are
-  read from ERC-20 Transfer provenance (#3334),
-  `PortfolioMetrics.deposits_usd` / `withdrawals_usd` are None-capable end to
-  end (#3335), and the capital-flow producer populates them at the metrics
-  hook — an operator wiring $500 into the wallet stops showing up as $500 of
-  profit. (#3337)
-- **Teardown measured-lane taxonomy (VIB-5865).** Which wallet-moving verbs
-  the teardown swap-back clamp can see is now an explicit `WalletDeltaLane`
-  taxonomy — blind primitives fail closed and visible instead of silently
-  skipping the strategy's own closing swap (#3349); the LP family flips to
-  measured event-replay so the clamp sweeps exactly the LP proceeds net of
-  consumed inputs and leaves commingled user funds alone (#3350);
-  transfer/bridge and prediction verbs are pinned UNMEASURED with
-  evidence-backed regression guards so they cannot be silently flipped later
-  (#3351).
-- **Lending post-close chain verification** for `euler_v2` / `silo_v2` /
-  `benqi` (VIB-5795) — per-position-type dispatch where a shares-only read
-  never greens a live debt leg — plus BENQI `withdraw_all` (VIB-5404).
-  (#3336)
-- **Vault-safe teardown (VIB-5667).** Teardown now transitions a Lagoon
-  ERC-7540 vault Open → Closing → Closed so **all** depositors — including
-  deposit-only users who never requested a redemption — can synchronously
-  redeem their capital after the strategy unwinds. (#3226)
-- **Resume-terminal guard + `is_lifecycle_complete` strategy hook
-  (VIB-5887).** Relaunching a strategy whose persisted state is terminal but
-  whose wallet holds fresh capital no longer silently HOLDs the whole run.
-  (#3324)
-- **Strategy-configurable token-consolidation floor (VIB-5844).** Teardown's
-  consolidation dust floor (default $5) can be lowered per strategy so
-  small-capital runs consolidate residuals instead of stranding them. (#3297)
+- Composed lending decisions read owned cash: in `decide`, each Aave V3, Aave V4,
+  SparkLend, Morpho Blue and Compound V3 record in `ctx.owned` reports the fund's owned
+  inventory of its market asset as `inventory`, after the last committed outcome, in
+  live, fork and backtest runs alike. A rotation can withdraw from one market and then
+  supply exactly what the fund now owns, interest included, to another. Checkpoints and
+  single-connector strategies are unchanged (`inventory` stays `None`).
+- Typed `strategy.parameters`: a strategy may subclass `almanak.api.TypedParameters`
+  once (a frozen pydantic model refusing undeclared keys) to declare its knobs with
+  types, constraints and defaults. The SDK validates the authored values, after any
+  `test_parameters` or `--param`, before any hook runs; a refused value is the final
+  `invalid_config` naming `strategy.parameters.<field>`, with that field as the
+  refusal's `field`. Every hook then reads `config.parameters` as the validated
+  instance (`config.parameters.borrow_quantity`), and `--param` and `test_parameters`
+  values keep their YAML form for the model's types to convert; as without a model, a
+  `bool` field takes only `true` or `false` and a number field refuses a boolean or a
+  `_`. The model is a top-level class; one the source can't show (under `if`, built
+  with `type(...)`, or with a plain mixin base) is read from the strategy loaded in
+  the sandbox. With a model,
+  `--param` and `test_parameters` may set any field the model declares, including one
+  config.yaml leaves to its default (fork copy only); a key the model doesn't declare
+  is refused with the model's fields listed. `almanak.api` adds
+  `PositiveDecimal` and `UnitFraction`. A strategy without a model keeps the mapping.
+- Optional `strategy.test_parameters` in config.yaml: fork-test values for declared
+  `strategy.parameters` keys, in the declared type. `almanak test run` applies them by
+  default, `--param` overrides one on top, and `--production-parameters` turns them off;
+  the verdict adds `parameter_sources` (`test_parameters` or `--param`) next to
+  `parameter_overrides`. `almanak check` validates the section. Strategy code never
+  sees it in production or backtests, and it leaves every digest unchanged.
+- Optional `strategy.parameters` in config.yaml: author knobs (scalars or flat lists of
+  scalars, keys `^[a-z][a-z0-9_]*$`) that strategies read as the read-only
+  `config.parameters` in every hook, in forks, production and backtests alike. Checks
+  validate only their shape; strategies validate values in `validate_config`. An omitted
+  section leaves every digest unchanged. `almanak test run --param KEY=VALUE`
+  (repeatable) overrides a declared parameter in the fork workspace's copy only, in its
+  declared type (a string knob keeps the text as written, a float knob takes any finite
+  number, an integer refuses `_` and exponents, `null` only for a `null` knob), and the
+  verdict records it under `parameter_overrides`. Fork fixture deployments built
+  directly from a fork config (`ForkSet.prepare`, as the strategy-fork QA harness does)
+  carry the parameters too.
+- `almanak backtest recent` rewrites an economic backtest file for the most recent
+  window (30 days by default): hourly decisions and sampling, limits and tick coverage
+  sized for the window, and `fixed_native` costs from measured gas at the window's gas
+  price. Connectors that read every block, unvalued runs and operations without a
+  measured gas reference are refused with a reason.
+- HyperEVM (`eip155:999`) is a supported network, with gas paid in HYPE
+  (`eip155:999/slip44:2457`) and WHYPE as its wrapped native token, read through
+  Alchemy's `hyperliquid-mainnet` route. Morpho Blue is its first connector, declared for
+  fork, backtest (from 2026-10-20 04:00 UTC) and production with EOA and Safe/Roles
+  accounts. `ax lending-markets` lists its markets from Morpho's API, and `ax resolve`
+  and `ax dex-pools` name candidates through CoinGecko's `hyperevm` network. The
+  `morpho_blue_hyperevm_lending` reference supplies USDC and borrows it against WHYPE.
+- `UnixTime` (price-series `source_time`, `available_at` and the other Unix-second time fields) gains
+  `timestamp()`, returning the seconds as an int, and `datetime()`, returning the UTC datetime. Code
+  written for a datetime field such as `effective_at` (`int(x.timestamp())`) now also reads a
+  `UnixTime` field instead of raising `AttributeError`.
+- The `almanak test run` verdict reports how teardown went and what it left. Additive;
+  existing fields are unchanged. `teardown_decisions` lists every teardown decision
+  with its result and facts, so a teardown that held with obligations open is visible
+  (`closure: not_closed` with its `refusal`). `teardown_sequence` lists every intent
+  teardown executed, in order with repeats, which `teardown_executed` lists once.
+  `holdings` gives each fund's final balance of every configured asset, read from the
+  fork, so an exit that left the fund in the wrong asset shows in a passing verdict.
+- `almanak.api.InvalidConfig`: a `validate_config` refusal is now a final
+  `invalid_config` with the author's message and line, at `check --online` (code
+  `strategy_config_refused`) and at `test run`/`run` setup, which records the
+  non-retryable failure `invalid_config` instead of a retryable `start`. A plain
+  `raise ValueError(...)` in `validate_config` itself counts too; unpacking,
+  conversion and pydantic ValueErrors stay crashes. Strategy worker crashes now report
+  the traceback from the strategy's first frame, with its source lines.
+- `ax lending-reserve` reports a `risk` block: per collateral asset its `ltv_bps`,
+  `liquidation_threshold_bps` and `liquidation_bonus_bps`, decoded from the Aave V3 and
+  SparkLend configuration word, the Aave V4 reserve's current dynamic config (with the
+  Spoke's liquidation config, and `collateral_risk_bps` labelled as the risk premium it
+  is), Compound V3's collateral factors and Morpho Blue's LLTV and liquidation incentive
+  factor, with the `health_factor` and `borrow_limit` definitions. Optional
+  `--borrow-fraction f` (repeatable) and `--health-floor H` project one collateral's
+  health factor, liquidation_threshold / f, and its largest safe borrow fraction,
+  min(ltv, liquidation_threshold / H). `ax lending-markets` adds the Aave V3 and
+  SparkLend `liquidation_bonus_bps`, Compound V3 `collateral_factors` and the Morpho
+  `liquidation_incentive_factor`. The Aave V4 dynamic and liquidation config reads move
+  from the backtest into the connector reader, unchanged.
+- The `almanak test run` verdict names why a lifecycle held, failed or ran out of time.
+  Additive; `passed` and the exit code are unchanged. A new `status` is `entered`,
+  `not_entered` (passed, but the strategy only held, so only admission and teardown ran)
+  or `failed`. Decision rows carry `observation_errors`, each `*_error` field an
+  observation recorded instead of a measurement (`allocation`, `field`, `message`), such
+  as the `entry_quote_error` of an empty pool. Transaction rows carry `trigger`
+  (`decision` or `teardown`), and `teardown_executed` lists the intent kinds teardown
+  executed. A refusal's structured `details` reach its failure entry: a lending
+  teardown that cannot close (`remaining_obligations`, on Aave, Spark, Compound and
+  Morpho) lists each allocation's remaining supply, debt, collateral and allowance with
+  amounts and asset, in `details.remaining` and in its message. `repayment` reports the
+  runtime's latest debt, available balance and shortfall per borrowing allocation.
+- A teardown that refuses an exposure-increasing intent (it is still dropped, never
+  admitted) now logs `exposure_refused_in_teardown` with the intent kind and
+  allocation. `almanak test run` ends teardown as `teardown_refused` (class
+  `strategy`) after 3 such refusals with no teardown outcome between them, naming the
+  intent and allocation in `details`, instead of waiting out the 900-second teardown.
+- `ax pool` and `ax dex-pools` report a Curve pool's state beside its prices, from the
+  reads the connector already makes: `pool_state` with `balances` and `total_supply`,
+  the `fee` (StableSwap base fee, or TwoCrypto/TriCrypto `mid_fee`, `out_fee`,
+  `fee_gamma`) as Curve's 1e10 integer and in bps, `amplification`, `virtual_price`,
+  and StableSwap's `offpeg_fee_multiplier` or the crypto pools' `gamma`.
+- A Curve pool whose coin balances or LP supply include a zero is reported as unfunded:
+  `ax pool` returns `"status": "unfunded_pool"` with the reason and balances (an empty
+  TwoCrypto or TriCrypto pool was refused with `invalid_config` before), `ax dex-pools`
+  lists it as `refused` with reason `unfunded_pool: …`, and `check --online` for fork and
+  production refuses it in a new `pool_liquidity` stage with code `unfunded_pool`, read at
+  the latest block. The rule is the one `backtest prepare` already applied: Curve
+  execution requires an existing funded pool.
+- `almanak ax lending-reserve` and every verified `ax lending-markets` row report a
+  `rates` block for Aave V3, SparkLend, Compound V3 and Morpho Blue: `supply_apr`,
+  `supply_apy`, `borrow_apr` and `borrow_apy` as decimal ratios per year (0.05 is 5%),
+  their `compounding` convention, `available_liquidity` in the asset's units and the
+  `raw` protocol values. Aave ray rates are per-year APRs compounded per second for
+  APY; Compound V3's per-second curve rates at the Comet's utilization likewise
+  compound per second; Morpho's IRM borrow rate compounds continuously, and so does its
+  supply rate, borrow rate x utilization x (1 - fee). `rates.asset` names the lent asset
+  the rates belong to (the reserve's asset, the Comet's base, Morpho's loan asset) and
+  `rates.selected_asset` what the selected asset itself earns: the market's supply
+  rates when it is lent, zero when it is Compound or Morpho collateral. The conversion uses exact arithmetic over values
+  the reserve reader already observes and adds no contract read; `lending-markets`
+  makes that same reserve read for each verified row on the page. Aave V4 reports
+  `rates` null with `rates_unavailable`, as its reserve observation reads no Hub drawn
+  rate or liquidity. Additive.
+- `almanak check --online` warns `gas_ceiling_oversized` on `max_transaction_fee` when it
+  is more than 20 times the executable fee: `max_gas_limit` x the policy's highest bid over
+  the last 100 blocks (`eth_feeHistory` at its `reward_percentile` and
+  `base_fee_multiplier_bps`, floored by `eth_gasPrice` on BNB), plus on Base and Optimism
+  the SDK's L1 data and operator fee bound for a transaction of `max_gas_limit` gas. The
+  payer's entry minimum is entry transactions x `max_transaction_fee` + `exit_reserve`, so
+  fees sized for 10 to 1000 gwei on chains quoting 0.001 to 0.2 gwei put funding
+  requirements 20 to 1000x above the real cost. The message states the factor, the bid
+  and the L1 part, and suggests `max_transaction_fee` = 5 x the executable fee rounded up
+  to two significant digits, with `exit_reserve` = exit transactions x that fee. A node
+  that refuses the 100-block window falls back to the single-block quote, which the
+  message says. Advisory only, and never reported with `gas_price` or `gas_fee_quote`. The
+  `uniswap_v3_optimism_lp` reference gas policy is resized to October 2026 quotes.
+- `almanak test run` decision rows state what the runtime knew when it evaluated each
+  decision: whether the strategy ran (`evaluated`, false with `price_error` when an
+  unavailable price series held it first), the `observed` allocations, each declared
+  `price_series`' completeness (`complete`, `points` of `window`, `gaps`, `age_seconds`)
+  and the chains not ready (`availability`). Only a test run's coordinator logs them, as
+  one `decision_evaluated` line per decision after the decision is recorded; production
+  deployments never do. Additive; a hold's reason is not inferred.
+- The generated support page lists each connector's strategy actions: the methods
+  bound to `ctx.actions` with their signatures and what each does (for example what
+  `exit` closes, converts and revokes), read from the connector bindings and their
+  docstrings, under one "<connector> actions" heading per connector.
+- Uniswap V4 liquidity allocations, fixed-range and banded, on pools holding the chain's
+  native coin, on every chain with a reviewed native route. The fund deposits and
+  receives the wrapped native (WETH, WPOL, WBNB, WAVAX) and never sends native value: the
+  reviewed PositionManager unwraps the deposit, returns what the mint did not use, and
+  wraps the native proceeds of collect and close within the same call. A strategy cannot
+  combine native and ERC-20 Uniswap V4 liquidity on one chain, and holds native liquidity
+  in one token pair per chain (fee tiers of that pair may differ): a larger grant exceeds
+  the Roles 2.1 condition limit and is refused when permissions are generated. A native
+  mint needs about 1.1M gas, above the 1.2M default limit once its 25% buffer is added, so
+  `check` warns a native liquidity strategy to raise `max_gas_limit`; native-pool gas
+  references are kept apart (`variant: native`) and bound no trading or ERC-20 strategy.
+- `almanak support --json` reports each connector's `gas_lifecycle`: per allocation kind,
+  the transactions one entry and one exit submit, the counts the `funding` block and
+  `almanak check` use. A lending allocation granted `borrow` exits in 3 (approve,
+  repay, revoke; `exit_when_granted`), an Aave V4 debt in 3 plus 1 per collateral it
+  disables (`exit_per_item`), as the rig's fork teardowns submit; `check`'s
+  `gas_exit_reserve` counts them instead of 1, so a reserve sized for 1 per debt now
+  warns. `exit_per_unwind_cycle` (3 on Aave V3, SparkLend, Compound V3 and Morpho Blue)
+  is what one partial deleverage cycle submits on the lending connector; a leverage loop
+  unwound in C cycles exits in the summed exits + 1 + (C - 1) x (that + the swap's
+  exit). `check` cannot see C and counts none. A V3-style pool liquidity exit (Uniswap
+  V3, PancakeSwap V3, Aerodrome Slipstream) is 5: close, approve, swap and a revoke for
+  each position-manager allowance the mint left, which rounding can leave on both
+  currencies. A GMX position exits in 3: approve the order fee, create the close order,
+  claim accrued funding; the keeper's execution is not the payer's.
 
 ### Changed
-
-- **Aave V3 support claims are now derived, not asserted.** `FLASH_LOAN` was
-  removed from aave_v3 `strategy_intents` (the flash-loan *provider* stays
-  registered for the compile lane — decoupling is regression-tested), the
-  hand-typed support-matrix override was deleted so `almanak info matrix`
-  derives the aave_v3 row from the tested manifest, and the unproven `sonic`
-  claim was dropped from the strategy metadata. (#3338)
-- **0G local development is documented** — dRPC archive-RPC env vars in
-  `.env.example` and `docs/environment-variables.md`. (#3332)
-
-### Removed
-
-- **BREAKING (config-level): aave_v3 on `plasma` no longer passes the runtime
-  chain gate.** The chain was never proven (incomplete token catalogue, no
-  intent tests) and is no longer advertised; a config pairing `aave_v3` with
-  `plasma` now fails at boot with a `ConfigurationError` instead of failing
-  on-chain later. Pool address data is retained in `addresses.py`; re-enabling
-  requires a manifest + proof run (see the VIB-5916 pattern). (#3338)
+- Every published reference states a `strategy.gas` policy in its `config.yaml`, so a
+  copy deploys in production without first writing one: the 38 that had none get
+  example amounts from October 2026 mainnet fees, with `max_transaction_fee` sized as
+  `almanak check --online` suggests at the default 1.2M gas limit (2.3M on GMX V2),
+  `exit_reserve` covering the exit transactions `almanak check --production` counts
+  and `total_budget` adding the entry transactions plus 20 later ones. Their fork
+  operator examples carry matching gas ceilings, or `author_gas: unenforced` on Base.
+- A single-evaluation strategy worker imports the request's connector before its
+  author budget starts, under the 30s startup bound, so the 20s wall and CPU budgets
+  cover only strategy code; limits and syscall filters still apply before strategy
+  source loads. Connectors import their historical and economic backtest bindings only
+  when a backtest selects one, so a live or fork decision no longer imports backtest,
+  gateway-service or signing modules: a cold composed Aave V3 + Uniswap V3 decision
+  uses 2.5 instead of 4.7 CPU-seconds and 257 instead of 365 MiB.
+- Reference strategies and the authoring templates declare their `strategy.parameters`
+  as a `StrategyParams(TypedParameters)` model instead of module constants or
+  hand-written parsers: `borrow_quantity` on the lending references; period, window
+  and levels on the TA references; Aave V4's `unwind_margin`. Rules between knobs sit
+  in the model; rules that read the rest of the configuration stay in
+  `validate_config`. Behaviour at the shipped values is unchanged; each converted
+  reference's configuration digest changes.
+- The loan allocation of `aave_v3_arbitrum_lending`, `aave_v3_base_sma_borrow`,
+  `compound_v3_{base,ethereum}_lending`, `morpho_blue_{base,ethereum}_lending`,
+  `sparklend_ethereum_lending` and the managed-borrow template accepts an optional
+  `capital`, a loan-asset reserve for the full repay's interest, which these refused
+  before. The other `aave_v3_*_lending` references still refuse it. The managed-borrow
+  template ships `capital: '1'` there.
+- `almanak.api` exports `MAX_WINDOW` and `parameter_base_units`, which converts a
+  quantity knob to base units and refuses one finer than the asset's decimals, naming
+  the field. The lending references refuse such a `borrow_quantity` in
+  `validate_config` instead of truncating it to 0. Rules between knobs on the TA
+  references name the field they refuse, and the GMX price-stop template refuses
+  acceptable prices that don't suit its `side`.
+- `almanak support --references` lists the six authoring templates (Aave V3 and Morpho
+  Blue leverage loops, Aave V3 borrow-then-LP, lending short and health-factor-managed
+  borrow, GMX V2 price stop) as published references. The loop templates declare
+  `loops: 1` in `strategy.test_parameters`.
+- The gateway and `almanak test run` decode the execution checkpoint less often, since
+  it grows with every outcome (about 1 MB after 18 transactions). `renew` and `state`
+  decode and check the stored checkpoint only when its stored body differs from the
+  last one accepted, and `state` returns the stored checkpoint unchanged. A lease-fenced
+  request decodes its checkpoint once. The test run's keeper poll decodes only for a
+  connector with a fork keeper, and only when the checkpoint changed. Replies and
+  refusals are unchanged.
+- `almanak test run` classes `interrupt`, `decision_timeout`, the new
+  `teardown_timeout` (teardown not closed within its limit, formerly `stopped`) and
+  `worker_timeout` as `infra` failures, the three wall-time timeouts as `transient`.
+  `worker_timeout` is a preloaded strategy worker that did not answer during setup: it
+  raises a typed timeout, and the supervisor still records the retryable `start`
+  failure, now with `cause: worker_timeout` in its status.
+- A transaction plan the gateway's re-preparation does not reproduce when it is reserved
+  is still refused and still stops the coordinator, but the refusal now names the parts
+  that differ (`snapshot`, or the plan fields such as `gas_price`), never their values.
+  A fork test's teardown no longer advances fork time while a decision awaits its plan,
+  a cause of the mismatch.
+- Three author fields are no longer required where they have no effect. Configurations
+  that set them validate and behave as before.
+  - `collect_seconds` is optional on Uniswap V4 liquidity allocations. Only strategy code
+    reads it, to time its own fee collection; connectors never collect on a schedule.
+    Omitted means no scheduled collection, and closing the position still takes its fees.
+    A trading allocation still refuses it.
+  - `entry_swap_bps` accepts 0 on liquidity allocations (Uniswap V3 and V4, PancakeSwap
+    V3, Aerodrome, Aerodrome Slipstream, Curve): no entry quote is offered, which fits a
+    deposit without an entry swap such as a single-sided Curve deposit. Trading
+    allocations still require at least 1. The concentrated-pool schema descriptions note
+    that a band entering through `rebalance_quote` does not use it, since that quote sizes
+    itself from the centred position.
+  - `minimum_health_factor` is optional on Aave V3, SparkLend, Morpho and Compound V3
+    allocations that cannot borrow, in a fund and Pool, market or Comet where no
+    allocation borrows. It stays required with `borrow: true`, and every allocation in that
+    scope still states the same value. An omitted floor tolerates no debt: while the fund
+    carries any debt in that scope, an action the connector risk-checks is refused.
+- A liquidity `band` on Uniswap V3 and V4, PancakeSwap V3 and Aerodrome Slipstream no
+  longer requires a tick envelope: `band: {width_bps: 500}` recentres around the price
+  for the whole deployment instead of holding out of range once the price leaves a fixed
+  `[lower, upper]`. `lower` and `upper` remain an optional author bound, given together,
+  and a band with them behaves as before. The gateway admits an envelope-less mint only
+  at the aligned range of exactly the band width centred on the retained decision tick.
+  Economic backtests of such a band take the explicit `data.coverage`, which must hold
+  an aligned band width and the first centred position, and stop with an error if a
+  position would leave it.
+- `hold_seconds` is optional on Uniswap V3 and V4, PancakeSwap V3, Aerodrome,
+  Aerodrome Slipstream, Curve and GMX V2 allocations, as it already was on Aave V4.
+  Connectors never act on it; only strategy code reads it for its own timed exit, so
+  omitting it means no scheduled exit and the allocation holds until teardown. Uniswap
+  V4 checks that fee collection precedes the hold only when a hold is set. Files that
+  set it validate and behave as before.
 
 ### Fixed
+- Market resolution waits out a provider's rate limit instead of failing the run it
+  starts. The bootstrap gateway resolves a run's markets with a reader that had no retry
+  budget, so one HTTP 429 during resolution ended a backtest with `eth_getCode: HTTP 429`
+  (seen when many recent-window backtests start at once on one provider key). Its reader
+  now re-sends a transient read within the observation readers' budget: a throttle, an
+  HTTP 5xx, a body that is not JSON, a transport failure or a block the provider serves
+  late. Refusals and malformed answers still fail at once.
+- A provider answer that is not JSON (an overloaded provider's HTML page with HTTP 200)
+  is now a provider failure a later attempt may pass, like an HTTP 5xx, instead of a
+  malformed answer. A reader with a retry budget sends the read again, the backtest
+  gateway re-sends a single read or a swap-log window within its retries, and a live
+  deployment holds the tick instead of stopping. A recent-window Base backtest had
+  failed with "eth_getLogs: response is not JSON". JSON that answers wrongly is still
+  refused at once, and no submission is ever re-sent.
+- `almanak test run` stops on a coordinator that is not progressing instead of waiting
+  out the decision and teardown clocks. A `strategy_worker_timeout` or
+  `transient_read_hold` hold the coordinator has kept for 300 seconds ends the wait as a
+  failure of that kind (class `infra`, transient) with the hold's reason, attempts and
+  elapsed time; a `decision_timeout` or `teardown_timeout` is named by such a hold when
+  the coordinator is still on one. After a lifecycle that settled no decision, teardown
+  waits at most 180 seconds and says so, rather than 900: 600 plus 900 seconds outlast a
+  20-minute lifecycle budget, and a starved run ended as an anonymous `decision_timeout`
+  and then an `interrupt`, with no closure.
+- Backtest history collection rides out provider pushback instead of failing the run.
+  A price pool's resolution reads, sent one at a time beside the archive batches,
+  now pass the provider's gate and wait out a rate limit (HTTP 429), an HTTP 5xx or a
+  transport failure as the batches do; a recent-window run on Base had stopped with
+  `eth_getBlockByNumber: HTTP 429`. A batch answered with HTTP 200 but no JSON (an
+  overloaded provider's HTML page) is sent again within the batch's retries rather
+  than failing with "historical batch response is not JSON".
+- HyperEVM reads are pinned by block number, and the reader proves each pinned block
+  with one probe call (its number, timestamp and parent hash) before reading at it.
+  Alchemy runs reads pinned within about 128 blocks of its head at head + 1, and some
+  dRPC upstreams ignore block-hash pins entirely, so observations could mix blocks: a
+  Morpho deployment stopped with "Morpho observed IRM rate differs from the verified
+  revision math". A provider that runs a pinned read elsewhere is now refused with
+  `provider_context`. Other networks and local forks are unchanged.
+- HyperEVM fee quotes pinned on a 30M-gas large block now read the small-block fee
+  market from the pin's parent. A large block's own fee history predicted its 0.1 gwei
+  market, and a third of such quotes bid below the small block the transaction lands
+  in. Other chains are unchanged.
+- `almanak test run` no longer counts a GMX order its keeper cancelled as an entry.
+  `entered`, `executed` and `after_entry` now require the connector's result to succeed,
+  not only the keeper transaction, so a lifecycle whose only entry was cancelled passes
+  as `not_entered` instead of `entered`, and the idle stop that follows an entry no
+  longer cuts its decisions short. Each `keepers` row of a mined execution whose receipt
+  carries the request's lifecycle event names the `request_status` GMX gave the request and, for a cancellation, its `reason` and
+  `reason_bytes` (for example `OrderNotFulfillableAtAcceptablePrice`).
+- An interrupted `almanak test run` (Ctrl-C or SIGTERM, such as a harness budget)
+  reports what the journal holds at the interrupt. `transactions`, `teardown_executed`,
+  `closed` and `evidence_clean` were left as the last decision wrote them, so a run
+  interrupted during teardown reported no teardown transactions however many had
+  executed. A new `in_flight` lists each decision left unsettled, with its trigger,
+  intent kind, allocation and broadcast transaction.
+- `almanak ax dex-pools` reports Uniswap V4 pools holding the native coin under a
+  wrapped-native filter. The vendor files them under the native coin, so `--token WETH`
+  never listed them and `--quote WETH` dropped them; a wrapped-native `--token` now also
+  reads the vendor's native-coin list, a page of each in turn within the same five-page
+  cap, and a wrapped-native `--quote` keeps a pool whose native leg Uniswap V4 holds as
+  that token. The native coin (`slip44`) is accepted as `--token` or `--quote` and asks
+  for its wrapped token instead of being refused. A verified native pool's `market`
+  names the native coin as its currency, as before. When the vendor has not indexed one
+  of the two lists, the other is still read and `source.limitation` says which pools are
+  unknown. A row the chain did not verify (unverified, refused or unsupported) also
+  reports `unverified_vendor_currencies`, the vendor's claimed currencies with the
+  native coin as `slip44`, so a native pool and its wrapped-token twin are told apart
+  before verification. Other filters and refusals are unchanged.
+- The Uniswap V4 support restriction no longer calls native-coin pools trading-only:
+  on each chain with a reviewed native route it states trading and liquidity, one native
+  token pair per chain, no ERC-20 V4 liquidity beside it, and the `check` gas warning
+  for the larger native mint.
+- An idle multi-chain coordinator no longer ticks every second. Once every chain in a
+  scheduler cycle has nothing to do, it waits like a single-chain coordinator: until the
+  next decision is due, at most 5 seconds, so a teardown is still seen within one cycle.
+- The coordinator rewrites the retained dashboard input only when the displayed record
+  changes, or every 5 minutes to refresh its capture time, instead of on every tick. The
+  record hash leaves out the multi-chain scheduler cursor, so a cursor step no longer
+  re-evaluates the dashboard hook.
+- A Uniswap V4 swap, mint, fee collection or close whose signed attempt outlives its
+  deadline no longer stops the deployment for good, standalone or in a composed
+  deployment. Uniswap V4 did not declare its router and PositionManager deadlines, so
+  once the provider dropped such an attempt every rebroadcast was refused as
+  `stale_plan` and every resume repeated it. It is now released and planned afresh like
+  the V3 pool and Aerodrome attempts: the gateway proves the deadline passed at the
+  canonical head, with no receipt, no provider copy and an unused nonce, and the
+  released attempt stays recorded until an attempt at its nonce is reconciled. A signed
+  Uniswap V4 approval, which has no protocol deadline, is likewise rebroadcast after its
+  intent expires instead of being refused for the intent's window.
+- Composed deployments release an expired signed attempt as its component connector
+  would. They kept the rebroadcast-only rule, so a Uniswap V3, PancakeSwap V3, Aerodrome
+  Slipstream, Aerodrome or Uniswap V4 action held past its deadline stopped a composed
+  coordinator on every resume. Lending and GMX V2 actions declare no deadline and keep
+  the rebroadcast-only rule. Composed checkpoints record released attempts in an
+  optional `released` field, omitted when empty, so existing checkpoints read and
+  serialize unchanged.
+- A signed attempt is released as expired only when its calldata enforces the deadline
+  and the canonical head is strictly past it. Curve pool calls and a Uniswap V3,
+  PancakeSwap V3 or Aerodrome Slipstream fee collection encode no deadline, yet were
+  released once the SDK's prepared deadline passed, and a head exactly at the deadline
+  counted as expired although the periphery still accepts that block and on Arbitrum,
+  Robinhood Chain or BNB a later block can share the head's timestamp. In each case a
+  released copy could still execute and stop the deployment at its nonce with an effect
+  the journal never recorded. Such Curve attempts and V3-pool collections are now
+  rebroadcast past the prepared deadline; it still bounds their preparation and signing.
+  Preparing or signing at a head exactly at the deadline is still refused.
+- A signed attempt whose bytes never left is released when current validation refuses
+  it, whatever its deadline, so a teardown's first send refused by the pre-broadcast
+  simulation no longer stops the deployment for good. Signing on Uniswap V3 and V4,
+  PancakeSwap V3, Aerodrome Slipstream, Aerodrome and Curve marks the attempt never
+  sent (`unsent` on the pending attempt, omitted once cleared), and the gateway
+  durably clears the mark in its own commit before the first send. The runtime then
+  releases a never-sent attempt on `stale_plan`, `simulation_reverted`,
+  `price_movement`, `hook_terms` or `precondition_changed`, retains nothing for it, and
+  the next decision plans afresh at the same nonce. Each such release counts against
+  the re-plan limit, which now resets only once an attempt is sent or reconciled
+  rather than after every signature, so a plan that signs and is refused again stops
+  after `REPLAN_ATTEMPTS`. An operator (`ax`) request whose signed step is released
+  this way fails with the refusal, saying nothing executed and the request should be
+  submitted again, instead of finishing without an outcome. A crash between the
+  commit and the send leaves the attempt maybe sent, as are attempts signed by earlier
+  versions. Signers, remote and plugin signers included, must only sign and never
+  broadcast or keep the bytes for broadcast; the never-sent proof relies on it.
+- A maybe-sent Uniswap V3 or V4, PancakeSwap V3, Aerodrome Slipstream, Aerodrome or
+  Curve attempt whose calldata enforces no deadline (an approval, a Curve call or a
+  V3-pool fee collection) that current validation refuses now stops with
+  `signed_attempt_unsendable`, naming its nonce, submitter and the underlying refusal;
+  a lagging provider head or a transient read keeps its own refusal and is retried.
+  Its bytes may still land once the refusal clears, so the remedy is to restore what
+  validation needs (for example fund the gas payer, or wait for the market) and
+  resume. Cancelling the nonce instead retires the deployment, which then stops at
+  the occupied nonce on every resume until a later release reconciles it, and the
+  cancel needs a higher fee than the signed attempt to replace any copy a provider
+  holds. In a multi-chain deployment the stop is a chain-local fault retried on each
+  pass. Previously it stopped with the underlying refusal. Other connectors are
+  unchanged.
+- Checkpoints written by this version can hold `released` attempts (Uniswap V4 and
+  composed deployments) and never-sent attempts. An earlier SDK refuses such a
+  checkpoint when it reads it and does not act on it, so a rollback fails closed.
+- A gas payer funded at the funding statement's entry minimum could not finish entry:
+  the minimum was one `max_transaction_fee` plus `exit_reserve`, enough for a single
+  exposure-increasing transaction, while every entry transaction pays its fee from the
+  payer and fee admission requires the fee ceiling plus `exit_reserve` before each one
+  that adds exposure. An Aave supply-and-borrow strategy funded at the stated 0.0011 ETH
+  paid for its approval and supply, then was refused at the borrow with `gas_budget`
+  "payer balance cannot cover execution and exit reserve". The minimum is now
+  `max(entry_transactions x max_transaction_fee + exit_reserve, largest
+  minimum_native_balance)`, where each connector states an upper bound on the
+  transactions one entry of each allocation submits through the last that adds
+  exposure (for example Aave V3 approve, supply, enable collateral and borrow where
+  granted; a V3 pool trade approve and swap once per `entry_swap_bps` slice of its
+  capital, and a liquidity allocation the same slices before its approvals and mint;
+  a single-slice Uniswap V4 liquidity entry eight, including the other currency's
+  approvals), summed over the payer's accounts and a composed strategy's components.
+  Slices a composed trade takes from shared or borrowed inventory beyond its `capital`
+  are not counted. `almanak check` warns `gas_entry_slices` when an allocation's
+  `entry_swap_bps` splits capital into more than 10 slices, with the fees they add.
+  The `almanak-funding-v1` payer entry adds an optional `entry_transactions` and
+  production preflight adds `native_entry_transactions`; `entry_minimum_base_units` and
+  `native_entry_minimum_base_units` keep their names and now cover the whole entry, so
+  most stated minimums rise. Fee admission is unchanged.
+- A composed strategy's full repay no longer stays refused with `repayment_funding`
+  after the operator sends the shortfall to the fund. It was checked against the
+  strategy's retained inventory, which only its own execution changes, so a transfer
+  never counted although the refusal said it would resolve it; the repayment coverage
+  on the dashboard kept showing the old balance for the same reason. A full repay and
+  its coverage now read the fund's measured wallet balance, as non-composed lending
+  does, so the retained inventory no longer caps what a full repay consumes. The
+  repay's receipt absorbs the top-up it spent into the inventory before debiting it,
+  so the ledger stays within the wallet, and the checkpoint records the absorbed
+  amount, reported as `repayment_top_ups`, which the gateway verifies like the
+  inventory. Partial repays and every other spending remain bounded by the retained
+  inventory.
+- A node's refusal of a transaction submission read as an unexplained
+  `eth_sendRawTransaction: RPC rejected the requested read (JSON-RPC -32000)`, or as a
+  bare `HTTP 400` when the provider refused it at the HTTP level. It now reads `RPC
+  refused the transaction submission` (`did not accept` for a throttle code) and names
+  the standard transaction-pool refusals (nonce too low or too high, already known,
+  replacement or transaction underpriced, intrinsic gas too low, insufficient funds, max
+  fee below the block base fee, block gas limit, fee cap, full pool, invalid sender or
+  chain id) by a fixed phrase, in go-ethereum wording as geth, reth and anvil report it
+  and in erigon's and Nethermind's own wording. Provider text is still never echoed, and
+  reads keep their message.
+- A second `almanak shutdown` (with or without `--force`) on a workspace that is already
+  shut down now prints the recorded status and exits 0 instead of an httpx traceback; the
+  first shutdown left the stopped supervisor's control URL in `workspace.json`, and the
+  CLI posted to it. Shutdown now withdraws that URL, and a repeated shutdown never sends
+  the control token to a URL an older supervisor left behind. A workspace a teardown has
+  relaunched still receives the shutdown while its supervisor holds the workspace lock;
+  a repeated shutdown waits up to 2 seconds for the supervisor that shut down to release
+  that lock, and a starting supervisor retries the lock for up to 1 second.
+  A later `pause` is refused as `invalid_input` ("workspace is shut down and has no ready
+  supervisor"). `almanak run` ends with the recorded status, exit 0 (130 after Ctrl-C),
+  when another command shuts the workspace down while it follows. A `pause` or `shutdown`
+  whose supervisor cannot be reached or answers with an HTTP error status, and a `resume`
+  or `teardown` control that fails after a successful relaunch, print one
+  `supervisor_unavailable` error document with the `workspace`, the `action` and, for an
+  HTTP error, its `status_code`, and exit 1. A relaunch that fails still reports
+  `runtime`, and refusals the supervisor reports in its answer are unchanged.
+- The Uniswap V4 `entry_swap_bps` description said each entry swaps that share of
+  capital and repeats. That holds for trading; for liquidity the share sizes the entry
+  quote, which swaps only the part the mint pairs with and is offered only while no
+  position is held, while `open_liquidity` mints with all inventory held. With the usual
+  single entry swap, values below 10000 leave about the rest of capital idle (on the V3
+  pools 5000 swaps half and invests about all); banded allocations that recentre through
+  `rebalance_quote` and strategies that swap repeatedly before minting are not limited
+  this way. The schema and configuration docs now say so, and `almanak check` warns
+  `entry_budget_partial` with the idle amount for an unbanded V4 liquidity allocation
+  below 10000. No configuration field or execution behaviour changes; a check that
+  carries the new warning is no longer clean.
+- Aave V3 and SparkLend allocations with `collateral: false` and no `borrow` on a reserve
+  whose LTV is above zero are refused when a new run's parameters are prepared
+  (`almanak check --online`, and fresh production or fork preparation), naming the
+  allocation's `collateral` field and the remedy (set `collateral: true`). On the supported
+  ordinary-mode reserves the Pool enables a first supply into an empty position as
+  collateral automatically, so that allocation could never supply and previously failed
+  only in the fork lifecycle with `collateral_authority`. Resuming or exiting a deployment
+  from retained parameters and backtest parameter construction do not apply this check.
+  It replays the same `first_supply_enables_collateral` predicate that execution, receipts
+  and backtests use; the position schemas now describe `collateral`, and the execution
+  refusal names the remedy too.
+- The Uniswap V4 support declaration no longer says LP ranges are fixed: allocations
+  may use a recentring `band`, which backtests in the economic model only.
+- Reference strategies that decided every 5 seconds now decide every 60 seconds, so a
+  copied reference no longer draws the `decision_interval` warning (minimum 30 seconds);
+  references with longer intervals are unchanged.
+- A market fee quote above a per-transaction ceiling of the gas policy no longer stops
+  a single-chain coordinator, which then stayed stopped after gas fell until someone
+  resumed it. The ceilings are `max_gas_price_wei` (refusal `gas_price`) and
+  `max_transaction_fee` for the quoted maximum fee including OP Stack L1 data and
+  operator fees. That fee refusal is now its own kind, `gas_fee_quote`, where it was
+  `gas_budget`, and a replacement family blocked on it records that kind. Preparation
+  holds instead: it signs nothing, keeps the decision, quotes again with the
+  transient-read back-off (5 seconds doubling to a minute) and proceeds once the quote
+  is within the ceilings. The hold has no time limit, in running and teardown alike,
+  because the ceilings are the author's spending choice and a gas spike can outlast the
+  30-minute transient-read horizon. Market refusals of the retained decision at
+  preparation between held attempts no longer add up to the re-plan limit; a count that
+  includes a refusal at signing is kept, so those still stop after five. When the fixed
+  OP Stack operator fees alone exceed `max_transaction_fee`, no market change can admit
+  the transaction and the refusal stays `gas_budget`, which stops. A ceiling set below
+  the chain's floor gas price still holds without end; status and the log show it. While it holds, status stays
+  `running` with a diagnostic naming the kind and the policy field, and the
+  coordinator log has one `gas_ceiling_hold` line per attempt with the quote, then
+  `gas_ceiling_recovered` once a plan is admitted or `gas_ceiling_dropped` when the
+  decision is dropped. `almanak test run` stops at once on such a hold with its kind
+  and quote, since fork gas need not fall. Gas limit, payer balance, exit reserve and
+  lifetime `total_budget` refusals still stop, as does a ceiling refusal at signing or
+  submission, and an operator request (`ax`) is still refused at once. Multi-chain
+  deployments already retried the chain on each pass with the refusal retained as the
+  chain's fault; they log no hold events and their status has no hold diagnostic.
 
-- **Across bridges from a Safe wallet no longer revert (VIB-5921).** The across
-  connector shipped an empty `permission_hints.py`, so its Zodiac Roles manifest
-  contained **zero** Across targets on every chain and each bridge failed at
-  `execTransactionWithRole` (unauthorized) — silently, because the connector
-  coverage gate only checks the file exists. `BRIDGE` cannot use synthetic
-  discovery (it is not a valid synthetic intent type, and the bridge compiler
-  needs a live Across quote), so the SpokePool permission is now declared via
-  `static_permissions`: `depositV3` with native-value send, scoped to `BRIDGE`,
-  on each of the six chains the connector declares — built from the connector's
-  own address/selector constants so it cannot drift. The hand-typed `depositV3`
-  selector is now validated against the real signature by
-  `tests/unit/permissions/test_across_manifest.py`. (#3344)
-- **The config `network` key is no longer decorative (VIB-5920).** `almanak
-  strat run` and `almanak strat teardown execute` now honour `config.json`'s
-  `"network"` in local mode, restoring the contract the `--network` help text
-  has always promised ("Overrides config.json 'network' field"). Previously a
-  bare `almanak strat run -c config-anvil.json` silently booted **mainnet**
-  against a config written for an Anvil fork — a real-money footgun.
-  Precedence is now single-sourced: `--network` flag > `--anvil-port`
-  inference (managed gateway only) > `config.json` `"network"` > `mainnet`
-  default. An unrecognized value fails loudly instead of falling back to
-  mainnet, and a value that is really a chain name (`"network": "base"`) gets
-  told to use `chain` / `chains` instead. The network is now resolved **once
-  per process** — the runtime config consumes the gateway's answer instead of
-  re-resolving — which also closes a split brain where `--anvil-port` without
-  `--network` left the runtime config on mainnet while the gateway forked
-  Anvil. An implicitly-resolved network (config or `--anvil-port`) is
-  announced before the gateway or any fork starts. **Hosted deployments are
-  unaffected** — the platform owns the network and the config key stays
-  ignored there. (#3341)
-- **A config file can no longer disarm gateway authentication (VIB-5920).**
-  The managed gateway drops auth (`allow_insecure=true`, no token) on Anvil
-  for local-dev convenience; that posture is now tied to an explicit operator
-  signal (`--network anvil` / `--anvil-port`). A config-sourced `anvil` — from
-  a copied or committed `config.json` — boots the gateway **with** a random
-  session token and `allow_insecure=false` instead, on both `strat run` and
-  `strat teardown`. Zero operator cost (the CLI hands the token to its own
-  client), and a gateway holding the real `ALMANAK_PRIVATE_KEY` can no longer
-  be silently unauthenticated. (#3341)
-- **`almanak strat run` flag drift (VIB-5846).** The user-facing wrapper and
-  the framework command are collapsed onto one shared option decorator;
-  `--debug`, `--list`, `--dashboard-mode`, and `--simulate-tx` had silently
-  become unreachable through the real CLI. (#3305)
-- **True V3 concentrated-liquidity impermanent loss (ALM-2948).** The
-  heuristic CL IL estimate is replaced with exact V3 math on the shared CL
-  kernel (token decimals threaded through, 50-digit contexts, wrapper
-  parity), and `lp_valuer` is folded onto the same kernel. (#3306)
-- **N-coin LP accounting** — null 2-token IL for N-coin pools, an N-leg trade
-  tape, and the fungible-LP teardown post-condition (VIB-5896, VIB-5795).
-  (#3329)
-- **Wallet PnL anchor token-universe symmetry (VIB-5866 leg A).** (#3328)
-- **Lifetime PnL is suppressed when capital flows are unmeasured (VIB-5866
-  PR-C2)** — the dashboard no longer fabricates a zero-deposit baseline and
-  books an unmeasured external deposit as profit. (#3348)
-- **`portfolio_valuer` prices borrowed-and-held TOKEN inventory (VIB-5890).**
-  (#3323)
-- **Perp accounting payloads carry the intent-known `is_long` + size and
-  write `position_events` (VIB-5941).** (#3357)
-- **Teardown consolidation swap-back routes through the strategy's own DEX
-  (VIB-5865).** (#3330)
-- **Benqi teardown reconciliation** — TD-08 whole-account price injection
-  (VIB-5911) and TD-15 whole-account-residual attribution (VIB-5936). (#3345)
-- **Phase-aware TD-08 reconciliation severity (VIB-5923)** — a position that
-  closed *during* teardown reports INFO, not ERROR. (#3343)
-- **Curve CryptoSwap gas floors raised** — rebalance-gate liquidity operations
-  no longer run out of gas at the 350K static floor. (#3347)
-- **Backtest correctness sweep** — phantom lending/vault swap fees zeroed,
-  perp `collateral="all"` fill, perp symbol canonicalization, candle cadence
-  jitter tolerance, `PriceQuote` migration (#3333); fee-exact factory pool
-  resolution honours the declared `/FEE` segment (ALM-2949) (#3308);
-  >90-day CoinGecko ranges are chunked to keep hourly granularity and
-  indicators refuse finer-than-data timeframes (ALM-2957) (#3311); funding
-  credits land on the registered funding-identity plane (ALM-2960) (#3310);
-  gas never gates a fill — EOA-paid live, charged unconditionally in sim
-  (ALM-2958) (#3309); data-lane hardening — Balancer poolId/cumulative
-  volume, schema families, symbolic-pool resolution, schema-parity audit
-  (ALM-2939) (#3271).
+## [3.0.1] - 2026-10-27
 
-### Security
-
-- **Scrubbed a sample Alchemy API key and PII from public-synced paths.**
-  (#3307)
-
-## [2.21.0] - 2026-07-04
+## [3.0.0] - 2026-10-15
 
 ### Added
-
-- **Hyperliquid perps connector (HyperEVM CoreWriter).** `PERP_OPEN` /
-  `PERP_CLOSE` / `PERP_WITHDRAW` compiled onto HyperCore via the CoreWriter
-  precompile, with runner-pumped fill reconciliation + reject detection,
-  margin-aware valuation, min-order preflight, a Safe permission descriptor,
-  fill-economics accounting + fixture, and a demo. `PERP_WITHDRAW` moves free
-  USDC margin off the venue via perp→spot `usdClassTransfer` + spot→L1
-  `spotSend` (HyperCore→HyperEVM bridge). (#3148, #3168, #3173, #3175)
-- **HyperEVM chain (id 999).** Chain descriptor + gateway data layer:
-  HyperCore oracle prices, static symbol resolution, and perp dashboard
-  support. (#3134, #3165)
-- **Curve N-coin / metapool production vertical.** Metapool support (native
-  2-coin + underlying routing) (#3031) and 3-coin pools with a Curve 3pool
-  demo (#3030); single-sided closes via `LPCloseIntent.coin_index` →
-  `remove_liquidity_one_coin` with `calc_withdraw_one_coin` min-out (#3092);
-  imbalanced closes via `imbalanced_amounts` → `remove_liquidity_imbalance`
-  with a fail-closed max-burn ceiling (#3103); non-USD LP valuation (metapool
-  base-LP decomposition + crypto-numeraire) (#3105); gateway-backed dynamic
-  pool resolution (#3191) and live refresh-on-read of the pool registry
-  (#3095); oracle/MEV-aware swap min-out guard (#3069) + executed-swap floor
-  anchored to oracle vs atomic sandwich (#3126); LP_CLOSE leg-coin resolution
-  into fee + principal USD (#3109); bespoke `curve_lp` Accountant scorecard
-  profile (tick cells N/A, not FAIL) + tricrypto2 fixture (#3114, #3123).
-- **Teardown verification + recovery wave.** Plan-B emergency `--discover`
-  with a sharp attribution gate (#3067); Plan-A on-chain reconciliation as a
-  loud check (#3062); fail-closed on-chain post-teardown verification (#3066)
-  with authoritative on-chain-verified closure counts (#3059); structured
-  decision-log audit trail (#3077); position_registry cutovers for lending
-  (#3055), GMX perps (#3060), and Pendle LP (#3061) + WARM-read enumeration
-  (#3050); first-class HF-safe `generate_lending_unwind` primitive (#3064) +
-  HF-safe unwind staircase for under-funded borrows (#3042);
-  `PERP_CANCEL_ORDER` intent verb recovering stranded GMX V2 pending-order
-  collateral (#3138) + fail-closed pending-unfilled-order detection (#3130);
-  Pendle on-chain closure verifier (#3104); on-chain vault post-condition +
-  transient-revert deferred retry (#3147); boot-time on-chain strand
-  detection with loud halt (#3098); teardown completeness enforcement +
-  spark_lender unwind (#3071).
-- **Typed LP range spec.** `LPOpenIntent.range_spec` — a discriminated
-  `PriceBand` (portable human prices; the default UX) | `TickBand` (raw
-  protocol ticks; escape hatch) union, with a shared `price_band_to_ticks`
-  seam adopted by uniswap_v3. (#3121, #3122)
-- **Backtesting: address-native rollout + robustness.** Historical data,
-  portfolio, snapshots, and metric attribution keyed by token address
-  (#3085, #3086, #3087, #3090, #3091); preflight support matrix aborts
-  unsupported (strategy, protocol, chain) combos upfront (#3161);
-  unsupported intents are refused instead of silently costed as no-ops
-  (#3155); numeraire-canonical performance expression + per-tick price
-  series (#3162); PnL seeded from token funding (#3131); PnL providers are
-  connector-owned (#3145).
-- **Valuation integrity.** Stablecoin de-peg cross-check wired into spot +
-  lending USD marks (#3118); oracle-vs-pool de-peg cross-check for Curve LP
-  NAV (#3051); held-YT USD valuation via the gateway YT mark (#3028).
-- **CLI.** `almanak strat test` market-condition injection for
-  condition-triggered logic (#3111); `ax` runnable from any cwd via a
-  standalone gateway (#3110); uniform sub-level `--chain`/`-c` + liquidation
-  threshold in `ax lending-reserves` (#3183).
-- **Euler V2 chain expansion** to Base / Arbitrum / Ethereum, with a
-  borrow-path fix (#3057).
-- **Aerodrome routing.** Reachable `swap_params` + per-pair routing with
-  classic fallback (#3119).
-- **New demos.** `benqi_looping` leverage loop (#3011); `metamorpho`
-  yield-floor entry/exit gating (#3014); `traderjoe_lp` rebalance hysteresis
-  (deadband + cooldown) (#3024).
+- First release of the v3 SDK: `strategy.py` plus one configuration file, checked,
+  run in explicit fork or production mode and backtested against explicit models.
+- Aave V4 lending, Uniswap V4 trading and fixed-range liquidity references on
+  Ethereum and Avalanche, plus the rollout connectors declared by `almanak support`.
+- Uniswap V4 trading allocations on pools holding the chain's native coin: ETH on
+  Ethereum, Base, Arbitrum, Optimism and Robinhood, POL on Polygon, BNB on BNB Chain and
+  AVAX on Avalanche, hookless or with a reviewed hook (such as Fables WETH/USDG). The fund
+  holds the wrapped native (WETH, WPOL, WBNB, WAVAX) and never sends native value: the
+  reviewed Universal Router unwraps the input or wraps the native output within the same
+  call, and receipts read each chain's wrap evidence. Capital names the wrapped token.
+  Native/wrapped-native pools, LP on native pools and chains without a reviewed router
+  route are refused, and a strategy cannot combine a native and an ERC-20 Uniswap V4 pool
+  on one chain.
+- `strategy.gas` defaults the fields that tune how execution bids, so a policy needs
+  only `accounts`, `chain`, `max_transaction_fee` and `exit_reserve` (and
+  `total_budget` for a lifetime cap); the amounts never default.
+  `max_gas_price_wei` defaults to `max_transaction_fee` in wei over `max_gas_limit`,
+  the highest price the fee ceiling admits, so omitted ceilings can no longer
+  contradict the fee the author chose. `source`, `reward_percentile` (50),
+  `base_fee_basis` (`observed_block` on Avalanche), `base_fee_multiplier_bps` (20000;
+  12500 on Arbitrum and Robinhood Chain), `max_gas_limit` (1200000) and
+  `gas_limit_buffer_bps` (2500) default as listed in the configuration guide. An
+  Avalanche file that omitted `base_fee_basis` now gets `observed_block`, the only
+  basis its fee history supports, which changes that file's digest.
+  `almanak check` reports every applied default under `gas_defaults`. Existing files
+  that state every field are unchanged, digest included.
+- Strategy price series for technical analysis, read from on-chain pool state. A
+  strategy declares a series in `data_dependencies` with a strategy-purpose
+  `PriceBinding`: one Uniswap V3, PancakeSwap V3, Aerodrome Slipstream, Uniswap V4,
+  Aerodrome classic (volatile or stable) or Curve (StableSwap NG, TwoCrypto NG,
+  TriCrypto NG) pool, a `1m` to `1d` timeframe and a `window`. `PoolPrice` delivers one
+  close per candle, the pool's price at the last block at or before each boundary, so
+  quiet pools leave no gaps: the V3/V4 pool price, the Aerodrome reserves' spot price,
+  the StableSwap invariant's marginal price or a Curve crypto pool's own `last_prices`.
+  `PoolSwapCandles` adds open, high, low and quote-token volume built from the pool's
+  trade logs: Swap events' resulting prices, Aerodrome `Sync` events' spot prices, or
+  Curve `TokenExchange` execution prices of the declared pair, fees included. Prices are
+  the declared asset in the pool's other coin, or in the `quote` coin a Curve pool of
+  more than two coins must name, decimal-adjusted; the connector's pool resolution
+  verifies the pool and that both are its coins. Every decision receives the points
+  available by its cutoff in `ctx.prices` (`ctx.price(asset)`). Every economic backtest
+  connector, composed strategies and `historical_path` for Aave V4 and Uniswap V4 read
+  each series through the operator's archive provider from `window` points before the
+  start, with compact evidence that rebuilds every point; fork and live gateways read it
+  from their chain before each decision, as of the earlier of the decision and block
+  time, reading only boundaries they have not seen, and retain what they served in
+  `strategy-prices.sqlite`. No data service or key is added. A backtest file never
+  authors a strategy series; Aave V4 economic single strategy prices (coin price or
+  Spoke oracle, delivered as `PriceObservation`) are unchanged. A failed read holds that
+  live decision, teardown reads no series, provisioning refuses a series on a chain the
+  deployment cannot read, and the gateway refuses to start on a pool that does not
+  resolve or lacks the asset. The SDK computes no indicator: `almanak[ta]` installs
+  numpy and TA-Lib, and the worker runs numeric libraries single-threaded. Four Base
+  references use it: `uniswap_v3_base_rsi` (RSI crossings), `uniswap_v3_base_rsi_lp`
+  (RSI-gated banded liquidity), `aave_v3_base_sma_borrow` (a loan held only above a
+  moving average) and `uniswap_v3_base_atr_breakout` (full candles: channel entry, ATR
+  trailing stop).
+- `almanak test run --through-exit` keeps deciding after the first entry, up to
+  `--decisions`, so the strategy's own later intents execute on the fork before
+  teardown: an LP mint after its entry swap, collection, recentring and its own
+  exit, stopping early once the entered strategy holds for `--idle` consecutive
+  decisions (default 3). Without it the lifecycle still stops at the first entry. The verdict adds
+  `executed`, the intent kinds that ran, and `after_entry`, those that ran after
+  the entry.
+- `almanak test run` settles GMX orders, deposits and withdrawals on the fork. A
+  fork runs no GMX keeper, so a GMX strategy's first request never executed and
+  the lifecycle stopped at it. The run now replays a real keeper: an execution
+  mined on the origin chain after the request, by the same keeper, with its
+  unchanged signed Chainlink Data Streams reports, submitted to the fork's handler
+  at the reports' time. No price, signature, provider or role is synthesized; a
+  request without an eligible report stops the run with that reason. The verdict
+  lists each settlement under `keepers`. `almanak test config` anchors chains with
+  a GMX market at least three hours behind the head so those reports exist, at a start
+  where the market's keeper publications are dense, and the run lengthens advances
+  when needed so each decision lands shortly before a publication. Report sources
+  are the order, deposit and withdrawal handlers of the reviewed deployment record. The report source
+  the QA suite used moved from `tests/` to `almanak.connectors.gmx_v2`.
+- Uniswap V4 liquidity allocations, fixed-range and banded, on pools with a
+  reviewed Fables or StablePairHook hook. Neither hook can block a withdrawal: their
+  address bits encode no remove-liquidity callback, and a profile that did could not
+  admit LP. LP fees are the hook's override fee as the PoolManager credits it, read
+  from fee growth like any V4 position. A changed hook refuses new mints while
+  collect, burn and teardown run. Pons pools stay trading only, since they pay LPs
+  no fee. Measured Safe/Roles gas references cover hooked mint, collect and burn on
+  Ethereum and Robinhood.
+- `almanak ax resolve` names ERC-20 token candidates for a symbol or address and
+  `almanak ax dex-pools` lists the pools that trade a token. CoinGecko on-chain
+  names the candidates with its liquidity and volume; each checked token is read on
+  chain and each checked pool is resolved by its connector, which refuses pools from
+  unreviewed deployments. Verified pools carry a paste-ready `markets:` entry. Both
+  need `COINGECKO_API_KEY` (pro) in the env file of the caller or the read gateway,
+  which serves them as a `lookup` operation under the existing CoinGecko rate cap.
+  `dex-pools` pages through the vendor's order with `--limit` (default 10) and
+  `--offset`, reporting `matched` and `has_more`; an incomplete vendor list says so in
+  `source.limitation`. `resolve` reports `source.complete` the same way and
+  recommends nothing when the vendor has not indexed a lookup. A Uniswap V4 pool
+  is admitted by the connector's own resolution: a hooked pool is verified only with
+  a reviewed hook profile whose code matches its pin, and reports a `hook` block with
+  the profile, address, pin and current terms; any other hook is refused with the
+  connector's reason. Vendor pools labelled `pons-v2-dex` are tried as Uniswap V4
+  pools. A pool holding the native coin keeps it in its PoolKey and `markets:` entry and is
+  verified with the fund holding its wrapped token, and a native
+  `--token` or `--quote` is refused in favour of the wrapped token. A pool whose
+  resolved currencies do not trade the requested `--token`/`--quote` is refused with
+  `vendor_mismatch`; `--connector` keeps pools matched by their reviewed factory.
+- `almanak ax lending-markets` lists Aave V3, SparkLend, Aave V4, Compound V3 and
+  Morpho Blue markets on a chain from each protocol's own records: the Pool's reserve
+  list, the reserves of the Spokes the Aave V4 Hubs serve and the Comets the
+  chain's Configurator deployed. Morpho Blue markets, one loan asset at a time and
+  most supplied first, come from Morpho's public API where it indexes the chain,
+  only Morpho-listed markets unless `--include-unlisted`, with Morpho's warnings, and from the core's `CreateMarket`
+  events on BSC and Avalanche, which carry no curation: there every supplied market is
+  listed, `source.listed_only` is false and `source.curation` null, and
+  `--include-unlisted` changes nothing. Each reported market is resolved as `lending-reserve` resolves it
+  and is `verified` with its `config` block or `refused` with the reason; Aave V3,
+  SparkLend and Aave V4 rows also carry the reserve's frozen, paused and borrowing
+  flags (and loan-to-value for V3 and SparkLend), and every asset carries its
+  on-chain symbol. A Morpho market whose own loan or collateral asset contradicts
+  the API row is refused with `vendor_mismatch`, and an Aave V4 Spoke whose reserve
+  count cannot be read (anything but the revert a Spoke without reserves answers) is
+  named in `source.unreadable` rather than counted as empty, as are a Hub that cannot
+  be enumerated and a reserve that cannot be read; the rest still list. No key
+  is needed; the read gateway serves the Morpho lookup under its own rate cap
+  (`ALMANAK_GATEWAY_MORPHO_REQUESTS_PER_MINUTE`).
+- `ax pool` takes `--connector aerodrome` and `--connector curve` and reports the
+  connector's resolution of the pool against its reviewed factory or registry, with
+  the pool's prices: an Aerodrome spot `price` from its reserves, Curve StableSwap
+  spot `prices` from the invariant, and Curve crypto `last_spot` (the spot price
+  after the pool's last operation) and `oracle` prices. Every `ax pool` price, the V3-style one included, now names its `kind`.
+  `dex-pools` verifies those pools too and matches a venue label it does not know
+  by the pool's own `factory()`.
+- `ax perp-markets` takes `--chain` and `--query` inline, and `ax pool-price` takes a
+  pool key inline (`--chain`, `--currency0`, `--currency1`, `--fee`,
+  `--tick-spacing`, optional `--base` and `--hooks` for a reviewed hook) on the
+  reviewed deployment.
+- Uniswap V4 admits pools with a reviewed hook for trading allocations: the ten
+  Fables hooks and three PonsV2MemeHook instances on Robinhood and Uniswap's
+  StablePairHook proxies on Ethereum and Arbitrum. The registry is in code, keyed
+  by chain and hook address, and pins each hook's runtime code (and a proxy's
+  implementation), its permission bits and its fee mode; a market sets `fee` to
+  `8388608` (the dynamic-fee flag) for Fables and StablePairHook. Every other hook
+  is still refused. Fork and live quotes come from the V4 Quoter, which runs the
+  hook; economic backtests read the hook's fee view or Pons launch rates at each
+  sample and apply the override fee or output haircut; receipts reconcile the
+  Pons take. A reviewed hook whose code later changes refuses new entries
+  (`hook_changed`) and still lets exits and teardown run with a fresh quote and
+  strict minimum output. An entry on a Pons pool whose terms could not be read is
+  refused (`hook_terms`) and re-planned like a reverted simulation; only a
+  throttled read fails the snapshot. `almanak ax pool-price` reports a hooked pool's profile,
+  pin status and terms.
+- Economic Uniswap V3, PancakeSwap V3 and Aerodrome Slipstream backtests report their
+  result in the funding asset. The report gains an equity curve, the pool price series,
+  total return, maximum drawdown and Sharpe ratio, and a `performance` block: fees
+  earned, swap cost and volume, the remaining price effect, time in market and in range,
+  holding benchmarks and one row per position with its range, deposits, withdrawals and
+  fees. Prices come only from the run's own prepared pool samples. Balances the pools do
+  not price, such as gas, stay in asset units.
+- Market resolution reads each ERC-20 asset's `symbol()` and names the asset with
+  it in `asset_metadata` unless the author declares a symbol. The symbol is display
+  text outside the verified facts.
+- `almanak report --format html` leads a valued run with its result and lists its
+  liquidity positions.
+- `almanak test config` writes a fork operator file from the author configuration:
+  one Alchemy provider per authored chain, placeholder account bindings, the latest
+  block (or `--block`) as anchor, fixture funds sized from an online fork check's
+  `funding` block plus 1%, and `fork.gas` ceilings equal to `strategy.gas`. It
+  replaces an existing `--output` only with `--force`.
+- `almanak test run` runs one supervised fork lifecycle through the workspace
+  `run --fork` creates: admission, up to `--decisions` decisions with fork time
+  advanced by the decision interval (or `--advance`, raised to the next due decision
+  when shorter), teardown and shutdown, releasing the run's fund claims. It prints
+  and retains a JSON verdict, `test-verdict.json`, and exits 0 only when the
+  verdict `passed`: admission passed, teardown closed, `evidence_clean` (no pending
+  or reserved attempt, undelivered outcome, accounting issue, integrity error or
+  chain fault) and no failures.
+- `almanak check` reports advisory `warnings` with a `code`: `gas_limit` when a
+  `max_gas_limit` is below the largest measured Safe/Roles gas of the policy's
+  connectors (shipped as reviewed fork receipts in `gas_references.json`),
+  and `gas_amount_units` when a gas amount exceeds 10 whole native units. Warnings
+  never fail a check.
+- `almanak check` warns about gas policies that cannot work: `gas_fee_ceiling`
+  when `max_transaction_fee` is below `max_gas_limit` x `max_gas_price_wei`,
+  `gas_budget` when `total_budget` cannot pay one fee per entry transaction plus
+  `exit_reserve`, `gas_exit_reserve` when the reserve cannot pay one fee per exit
+  transaction and, online, `gas_price` and `gas_fee_quote` when the price ceiling
+  or fee ceiling is below what the policy quotes now.
+- A fork operator file may set `fork.author_gas: unenforced` on Base and Optimism:
+  the fork runs gasless and the authored gas policy is retained but not enforced.
+  Preparation retains that choice as a `fork_gas_unenforced` record, which admission
+  and the prepared configuration (`unenforced_gas`) require. Without it those forks
+  still refuse authored ceilings.
+- `almanak check` warns with code `decision_interval` when a production or mode-agnostic
+  check finds a `strategy.decision_interval` shorter than 30 seconds: every live
+  decision starts a fresh sandboxed worker, and a shorter interval can starve a
+  deployment of CPU. Fork and backtest checks do not report it.
+- `almanak check --fork|--production --online --json` reports a `funding` block
+  (`almanak-funding-v1`, schema in `docs/contracts/funding-v1.schema.json`): per bound
+  account the CAIP-19 assets and base units it must hold before its first entry, and per
+  gas payer the native entry minimum and gas policy amounts. It holds requirements only,
+  no observations. A refused operator policy or fixture stage keeps it in the failure
+  detail. Backtest checks omit it.
+- `almanak ax pool --chain <CAIP-2> --pool <address>` names the pool inline, as an
+  alternative to a `--config` request file; both forms validate as the same
+  request.
+- The wheel carries a read-only copy of every reference strategy's author files
+  (`strategy.py`, `config.yaml`, backtest YAML files and README) from
+  `strategies/`. `almanak support --references` lists them with their connector
+  and chain markets and installed path, filtered by `--connector` and `--chain`.
+- Gateway request log lines carry `duration_ms`, the time from receipt to the
+  encoded reply, including any wait for the deployment's checkpoint lock.
+- `almanak ax pool --connector uniswap_v3|pancakeswap_v3|aerodrome_slipstream`
+  reads a V3-style pool from a `{chain, pool}` request: the connector's resolver
+  verifies the pool against its reviewed factory, and the result reports the
+  declared support level, resolved identities, pinned state and spot price.
+  `--depth-bps` adds the output available on each side before the price moves
+  by that band, from every initialized tick inside it, fees excluded.
+- `almanak service read-gateway` serves a read-only observation gateway: it holds the
+  provider credentials from `--env-file` in its own process and answers only whitelisted
+  JSON-RPC reads over authenticated loopback HTTP. Every `almanak ax` command takes
+  exactly one transport, `--env-file` or `--gateway-url` with `--gateway-auth-file`, so
+  a session that cannot hold a provider key can still read.
+- `almanak ax perp-markets --connector gmx_v2` resolves a GMX V2 market by GM
+  share address or label (for example `BTC/USD`): it enumerates the venue's own
+  DataStore market list at the pinned block and returns the verified resolved
+  market record, with no hosted-API dependency.
+- Remote signing seam: `--signer-file` on `run`, `check` and `service gateway` binds a
+  signer plugin from the `almanak.signers` entry-point group; every returned envelope
+  is verified against the request and the bound submitter before it is used.
+- `almanak support --schema strategy|backtest` prints the bundled JSON schema set of the
+  installed version.
+- The coordinator retains the projected dashboard input (`dashboard/input.json`) after
+  every cycle for a host to display; `almanak support --schema dashboard` prints the
+  schema of the dashboard response a host renders.
 
 ### Changed
-
-- **Serialized chain values are canonical lowercase names.** `ActionBundle`
-  and `ResolvedToken` / `TokenRef` wire shapes (and their SQLite/disk-cache
-  rows) now write `"ethereum"` where they wrote the UPPERCASE enum value
-  (`"ETHEREUM"`). Read paths resolve case-insensitively **forever**, so
-  records persisted before this change keep deserializing (pinned by
-  dedicated compat tests). The MCP `chains` resource served by the
-  agent-tools adapter now reports lowercase, sorted names.
-
-- **Teardown eligibility is now an authoritative opt-in (VIB-5474 / TD-16,
-  resolves VIB-5370).** The runner gated teardown on
-  `hasattr(strategy, "get_open_positions")` — a presence-sniff that never gated
-  anything (the method is abstract on `IntentStrategy`, so it is always present)
-  while `supports_teardown()` was dead API: an author who returned `False` to
-  protect a strategy that must not be force-closed was torn down anyway. The
-  gate is now the authoritative `IntentStrategy.supports_teardown()` (single
-  source of truth: `runner_models.strategy_supports_teardown`). It defaults to
-  `True` (default-safe — a position-holding strategy is never silently made
-  ineligible; only a literal `supports_teardown() -> False` opts out, so a
-  forgotten `return` cannot strand funds). An explicit `False` is now honoured at
-  the runner teardown trigger (refused loudly once per deployment, request left
-  pending for manual recovery). Teardown eligibility and dashboard position
-  observability stay decoupled: an opted-out strategy's positions keep being
-  reported so the operator can monitor and recover them. Strategies with no
-  positions should extend `StatelessStrategy` rather than returning `False`.
-
-- **Flash loans and prediction markets are withheld pending validation.**
-  Flash-loan intents are disabled and the `balancer_flash_arb` demo is
-  parked; Polymarket + flash loans are no longer listed in
-  `almanak info matrix`. The connectors remain in the codebase and should be
-  treated as experimental until re-listed. (#3132, #3034)
-- **ERC-20 approval sequencing consolidated onto one shared primitive**
-  (VIB-5492) — all connectors route approvals through the same
-  allowance-aware sequencing (including USDT-style reset-to-zero). (#3136)
-
-### Removed
-
-- **BREAKING: the `Chain` enum is removed (`almanak.Chain`,
-  `almanak.core.enums.Chain`) — VIB-4851.** Chain identity is the canonical
-  lowercase chain-name string (`"ethereum"`, `"arbitrum"`, …) resolved through
-  `almanak.core.chains.ChainRegistry` (`resolve` / `try_resolve` / `get` /
-  `names` / `all`; case-insensitive, alias- and CAIP-2-aware). Migration:
-  `Chain.ETHEREUM` → `"ethereum"`; `Chain[s]` / `Chain(s)` →
-  `ChainRegistry.resolve(s)` (raises `ValueError`) or
-  `ChainRegistry.try_resolve(s)` (returns `None`); `chain.value` /
-  `chain.name` → the name itself; `list(Chain)` → `ChainRegistry.names()`.
-  Typed surfaces that carried the enum (`ActionBundle.chain`,
-  `ResolvedToken.chain`, `TokenRef.chain`, backtest provider signatures) now
-  carry the canonical string. No deprecation shim is provided (matches prior
-  enum removals); the lazy `almanak.__getattr__` raises `AttributeError`.
-  Chains are now fully self-registered: adding a chain is creating ONE
-  descriptor file under `almanak/core/chains/<name>.py` — descriptor modules
-  are auto-discovered, there is no enum to extend and no central import list.
-
-- **BREAKING: the legacy `Protocol` enum and the v1 `Action` / `ActionBundle`
-  models are removed from the public API** (`almanak.Protocol`,
-  `almanak.Action`, `almanak.ActionBundle`; supersedes the JOE_LEND cleanup
-  tracked in VIB-3963). Protocol identity is connector-manifest strings:
-  pass lowercase keys such as `protocol="uniswap_v3"` anywhere a protocol is
-  named, and enumerate the live universe via
-  `almanak.connectors._connector.CONNECTOR_REGISTRY` instead of iterating an
-  enum. The enum was stale by construction — it could not name most live
-  connectors (aave_v3, gmx_v2, orca, ...) — and the v1 models had no
-  remaining producer or consumer; the intent pipeline's `ActionBundle`
-  (`almanak.framework.models.reproduction_bundle`) is unaffected. The MCP
-  `almanak://protocols` resource now lists the full set of canonical
-  lowercase connector names instead of the enum's 17 uppercase values, and
-  the `LPCloseIntent` curve-only exit-selector guards (`coin_index` /
-  `imbalanced_amounts`) are driven by the connector-declared
-  `lp_close_exit_selectors` capability rather than a protocol-name check.
-
-### Fixed
-
-- **TD-08 reconciliation no longer false-pages on a healthy teardown
-  (VIB-5923).** `reconcile_known_positions_against_chain` takes a keyword-only
-  `phase` (`"pre"` default / `"post"`). The TD-15 post-teardown caller
-  (`verify_closure_against_chain`) deliberately re-reads the pre-execution KNOWN
-  set AFTER every closing intent fired, where "chain reports CLOSED" is the
-  EXPECTED success signal — yet the shared CHECK still logged a 🛑 ERROR per
-  closed position plus an ERROR summary, on every normal closure. Post-phase
-  divergence now logs INFO ("chain-confirmed CLOSED after teardown"), and the
-  post-phase summary is keyed on residual risk instead of divergence — any
-  position still read OPEN makes it a WARNING ("N/M known positions STILL read
-  OPEN on-chain after teardown") rather than the pre lane's healthy-sounding
-  "chain-confirmed open". Severity and wording only: verdicts, the
-  `ReconciliationReport`, and both `apply_*_to_verification_status` folds are
-  unchanged, and the loud per-position fail-closed "STILL OPEN on-chain" ERROR
-  stays with the TD-15 caller (no double-paging). Pre-phase callers keep ERROR.
-  An unrecognised `phase` never raises — both callers wrap the CHECK in a
-  fail-OPEN `except Exception`, so it logs ERROR and degrades to `"pre"`.
-- **Teardown correctness.** V4 LP_CLOSE post-close verification treats an
-  empty position read as CLOSED (+ `lp_v4` label bridge) (#3193);
-  target-token no-op close + multi-position disambiguation (#3190);
-  `--discover` LP_CLOSE populates the pool so the oracle warms real tokens
-  (#3189); V4-aware registry preflight + orphan-candidate recovery net for
-  atomic-commit failures (#3181); Compound V3 market-key resolution on the
-  Plan-A path flips residuals to FAILED instead of silently UNVERIFIED
-  (#3180); TraderJoe-V2 + V4 post-tx reads pinned to the receipt block
-  (#3179); Plan-A LP reconciliation scoped to NFT protocols so a PASSED
-  ERC-1155 post-condition isn't mislabelled UNVERIFIED (#3178); zero-debt
-  Morpho isolated-collateral withdraw proceeds on empty-price teardown
-  (#3166); Pendle PT teardown is chain-derived with a framework-owned close
-  (#3167), PT/YT prices are warmed so the placeholder-price guard doesn't
-  block it (#3116), and Pendle LP_CLOSE no longer runs out of gas
-  (LP-token resolution + closure verifier) (#3128); YT teardown strand
-  (#3035); NO_ACCOUNTING wallet tokens are no longer stranded at teardown
-  (Lido STAKE) (#3041) with measured-ledger reconcile for all NO_ACCOUNTING
-  acquisitions (#3063); successful lending teardown no longer reports
-  false-FAILED (#3102); Fluid lending positions are token-keyed so two
-  supplies don't collapse (#3076); the runner teardown loop latches after a
-  failed teardown so it can't re-enter (#3137); teardown signals are honored
-  within ~15s via an interruptible inter-iteration wait (#3107); exit
-  amounts resolve live per-position at execution (#3056) over a
-  live-reconciling read path (#3054); the lending guard no longer conflates
-  unmeasured prices with LTV=0 (stranding collateral) (#3070); lending
-  revert selectors are decoded for operator clarity (#3048); standalone
-  teardown execute is wired to the gateway price oracle (#3089); auto-mode
-  is derived (not trusted) + hard stop on placeholder prices (#3068).
-- **Accounting.** N-leg (>2-coin) reconciliation root cause fixed — the
-  snapshot carries the N-coin token universe and an N-complete principal
-  (#3172), proven on a VOLATILE tricrypto round-trip (#3177); Curve LP USD
-  valuation via `virtual_price` (#3033); falsely-excluded Curve USD-stable
-  pools are valued (#3036); Curve crypto-numeraire pools book per-event USD
-  (#3129); ERC4626 vault NAV scaled by asset decimals (#3018);
-  UNAVAILABLE-confidence snapshots skipped in the drawdown fold + dashboard
-  NAV (#3017); V4 LP_CLOSE registry close lands with a typed collision error
-  (#3027); Pendle teardown LP_CLOSE stamps `gas_usd` + `price_inputs_json`
-  (#3025); held Pendle PT marked at the discounted PT→SY price, not the
-  asset rate (#3022); TraderJoe LB LP_OPEN stamps `cost_basis` (#3127);
-  Spark lending repricer stamps unmeasured instead of $0-at-HIGH-confidence
-  (#3096); Morpho Blue fails loud instead of serving silent placeholder
-  prices (#3106); N-coin `all_amounts` sorted numerically across JSON
-  round-trips (#3125).
-- **Curve execution.** Dead am3pool registry address corrected (#3115);
-  on-chain `coins(i)` order validated before positional crypto-LP marks
-  (#3112); receipt parser migrated to tagged ExtractOk/Missing/Error
-  (#3047) with decodes for RemoveLiquidityOne / RemoveLiquidityImbalance
-  (#3093), CryptoSwap AddLiquidity + LP-open min-LP protection (#3073), and
-  3-coin CryptoSwap RemoveLiquidity (#3074); approvals seeded from on-chain
-  allowance with USDT reset-to-zero (#3075); LP/swap gas seeded from live
-  `eth_estimateGas` with conservative static fallback (#3139);
-  `estimate_slippage` falls back to a connector swap quote (#3032);
-  `intent.max_slippage` honored on LP open/close (#3037); demo E2E batch —
-  Curve min_lp, L1 gas floor, lending legs, rate providers (#3079).
-- **Backtesting.** Strategy symbols resolve through the engine's registered
-  token map (#3158); plain-symbol reads bridge onto address-native keys
-  (#3156); strategy-facing funding reads feed PnL snapshots (#3153);
-  gas-asset price resolves through registered token addresses (#3152);
-  address tokens threaded into platform PnL runs (#3083); parameter sweeps
-  survive real strategies end-to-end — lazy report import, provider
-  ownership on close, error rows instead of sweep aborts, no silent mock
-  substitution (#3174); stale demo `token_funding` entries migrated to the
-  TokenFunding schema (#3159).
-- **Market data / routing.** Shape-aware `pool_reserves()` routing for
-  Solidly (Aerodrome/Velodrome) and V2 pools with classification safety
-  (#3185); Aerodrome swaps enforce `max_price_impact` + LP ticks must
-  straddle the current tick (#3108); Aerodrome `get_cl_position` bounded
-  retry on transient RPC errors (#3113).
-- **Misc.** Sub-1% price-impact limits render correctly in error messages
-  (#3040); Pendle swap/redemption amount extraction returns tagged results
-  (#3015); teardown leg visibility consolidated + LB-pair balance handle
-  resolved (#3016); `ax` honours an inline key + V4 lp-close by id (#3049);
-  the backtest test-controller surfaces config schema errors as 400 instead
-  of an opaque 500 (#3100).
-
-## [2.20.0] - 2026-06-24
-
-### Added
-
-- **Pendle PT accounting vertical.** Completes the Principal-Token (PT)
-  accounting surface on top of the 2.19.0 PT/YT price foundation: a PT
-  Accountant gate (cell matrix + CLI + cell-applicability matrix + QA
-  checklist), generic cells G1/G3/G6 reading a typed `PendleAccountingEvent`,
-  open-PT mark-to-market via the gateway PT implied-price, PT disposal booking
-  realized-yield PnL, strict-USD realized yield from a measured base price,
-  held-PT inventory rendered in the dashboard Open Positions, PT/YT price-path
-  telemetry + staleness observability, and a `pendle_basics` demo (Anvil runner
-  + funding). (#2997, #3009, #3010, #3013, #2982, #3001, #3006, #2965, #2995)
-- **CAIP-2 / CAIP-19 identity layer (VIB-5175, Phase 1).** Additive interop
-  codec for chain ids (`eip155:42161`) and asset ids (`eip155:1/erc20:0x…`,
-  `eip155:1/slip44:60`), built on a new typed `TokenRef` chain-scoped token
-  identity. `resolve("eip155:42161") ≡ resolve("arbitrum")`; native `slip44`
-  populated for ETH-chains, Solana, Polygon, Avalanche, BSC, and Berachain
-  (others fail loud rather than guess). No change to internal canonical
-  chain/address forms, persistence, or deployment-id. (#2994, #2967, #3000, #3002)
-- **Pre-submit feasibility preflight seam.** Connector-owned `preflight` hook
-  that turns structurally-doomed intents into clean compile FAILs (routed to
-  HOLD) instead of paying gas on an inevitable revert, with GMX exec-fee,
-  Stargate native-fee, Euler LTV, and Pendle market-expiry adapters. (#2986)
-- **`LP_CLOSE` `amount="all"` chaining.** A first-class WEI-denominated marker
-  lets a strategy emit `IntentSequence([LP_OPEN, LP_CLOSE(amount="all")])` and
-  size the close from the prior open's minted-LP balance. (#2980)
-- **Backtesting: address-keyed strategies.** The PnL engine now supports
-  address-keyed strategies (token resolution + EMA). (#3005)
-
-### Changed
-
-- **Gateway price aggregation is bounded.** New
-  `ALMANAK_GATEWAY_PRICE_AGGREGATOR_TIMEOUT_SECONDS` (default `15.0`) caps the
-  whole concurrent price fan-out; slow sources are recorded as timeouts and the
-  aggregate proceeds with whatever returned. (#2984)
+- The distribution, console script and import module are named `almanak`.
+- Generated Safe permissions carry scope only (blueprint 27): the exact contract,
+  function, asset, pool or market, the Safe as recipient or beneficiary, exact
+  approval spenders, nonzero minimum outputs, deadlines and sentinels. No grant
+  carries a cumulative allowance or an amount bound sized from an author field, and
+  liquidity mint ticks are enforced by the gateway rather than on-chain. The
+  budget-only author fields are removed (`maximum0`/`maximum1`, Curve `maximums`,
+  the GMX maxima, lending `supply_limit`/`borrow_limit`/`entry_amount`, Aave V4
+  `amount`); lending allocations take `capital` and `borrow: true`. An exchange
+  allocation is offered an entry quote whenever it holds funding inventory, one
+  `capital × entry_swap_bps` slice at a time, so a strategy that should enter once
+  checks `entry_complete`. `strategy.gas.total_budget` is optional unless the
+  operator's ceiling states one. Installed permissions change for every Safe.
+- `ax` reads through the read gateway named by `ALMANAK_AX_GATEWAY_URL` and
+  `ALMANAK_AX_GATEWAY_AUTH_FILE` when neither `--env-file` nor `--gateway-url` is
+  given, and `--block` defaults to `finalized`. Transport flags still take precedence.
+- An `ax` or read gateway observation read the provider throttles (HTTP 429, or
+  JSON-RPC 429 or -32005) is re-sent within the bounds batched reads already used:
+  at most six times, after the provider's `Retry-After` or a bounded backoff, each
+  attempt admitted under the gateway's rate cap again, and no wait ending more than
+  30 seconds after the first attempt. Concurrent `ax lending-markets` reads no longer drop an Aave V4
+  Hub or fail a Morpho listing on one throttle. Execution, fork fixture and
+  backtest preparation reads still fail on a throttle.
+- `almanak service read-gateway` refuses to start when a provider rate cap
+  variable is invalid, rather than refusing each read or lookup it would govern as
+  an invalid request.
+- Fork fixtures fund ERC-20s outside the reviewed list instead of refusing them.
+  The wrapped native asset is still funded only by wrapping. Every other ERC-20
+  tries, in order, a reviewed token funder, a transfer from a listed holder, the
+  balance slots and seed recipe ported from SDK 2.x, `anvil_dealERC20`, then,
+  without a seed recipe, probing of common balance slots; a token with a reviewed funder or a listed
+  holder never falls through. Each route must leave the exact balance and pass a
+  reverted transfer check, storage routes are refused when `totalSupply` is below
+  the amount, and a failed route is rolled back before the next. When no route
+  passes the fixture refuses and names each outcome. A token address with no code
+  is refused, and an `anvil_dealERC20` still running after 20 s stops funding and
+  asks for a new fork. `simulated_initial_capital` evidence records the route in
+  `method` with its `slot`, `seed` or `holder` (see `docs/operating.md`); the
+  plan's `local_storage` method now means any ERC-20 route. `almanak check --fork`
+  accepts any ERC-20 fixture asset. BTC.b on Avalanche, USD₮0 on Arbitrum and
+  wstETH on Ethereum were refused before.
+- A V3-family economic report names each pool's continuity proof by its dataset
+  digest, block interval and event count instead of embedding it. On a 14-day
+  Robinhood window the embedded proof was 8.3 MB of a 10.4 MB report, and the HTML
+  report, which also repeated the finished report, was 25 MB.
+- Preparing Uniswap V3, PancakeSwap V3 and Aerodrome Slipstream pool samples no
+  longer pays one provider round trip per read or reads every initialized tick at
+  every sample. Collection resolves the block anchors of the samples ahead one
+  search level at a time, asks for the reads the previous sample repeated in bulk,
+  and reads liquidity log windows in batches. A sample reads only the ticks that
+  can have changed since the one before (new, named by a Mint or Burn, crossed by
+  the price, and the nearest ticks outward until one has unchanged fee growth) and
+  carries the others. The first sample of each range, every 256th carried sample
+  and the last sample read every tick and refuse a difference. Sample payloads are
+  unchanged: on Uniswap V3 (Robinhood, Ethereum, Arbitrum, Base), PancakeSwap V3
+  (BNB) and Slipstream (Base) windows the new collection produced the same payloads
+  as reading every tick. A 14-day window at 5-minute samples on a Robinhood pool
+  (4,033 samples, about 360 ticks each) prepared in 6 minutes 23 seconds with
+  230,801 provider reads. A 1-day window took 32 seconds and 15,657 reads against
+  251 seconds and 120,763 reads before.
+- Every V3 target now retains the pool's Mint and Burn events, trading targets
+  included, so `max_liquidity_log_requests` and `max_liquidity_events` bound trading
+  backtests too. A window that needs more log requests is refused with the number
+  it needs.
+- The historical gateway accepts up to 1,024 reads in one batch and overlaps its
+  provider batches within `collection.max_in_flight`. Each provider batch retries
+  on its own. A provider rate limit is waited out up to eight times apart from
+  `max_retries`, holds every later request and halves the overlap, which recovers
+  one batch at a time. Batches of a provider with an operator rate cap stay
+  sequential.
+- A prepared dataset hashes each retained evidence body once per writer and once
+  more at publication, instead of once for every record that names it, and a
+  collection pass serializes its continuity proof once. Publishing and opening the
+  14-day dataset above took 3 and 10 seconds.
+- The preloaded strategy worker also imports the configuration types the strategy
+  helpers dispatch on, so a forked evaluation no longer imports them itself. In a
+  prepared Uniswap V3 band backtest one decision fell from about 136 ms to about
+  30 ms.
+- The timestamp-to-block search reads its next four levels of headers in one
+  batch when the reader can prefetch, so each search takes about a quarter of the
+  provider round trips. It reads and retains the same headers as before.
+- The dashboard renderer takes every colour and font from CSS custom
+  properties, and `AlmanakDashboard.mount` accepts `{theme}` to set them, so a
+  host page can render the dashboard in its own palette and typefaces with the
+  stylesheet and its CSP hash unchanged. `AlmanakDashboard.themeTokens` lists the
+  accepted names. Without a theme the dashboard keeps its current colours and fonts.
+- The dashboard no longer draws its own `ALMANAK / STRATEGY OBSERVATORY` header
+  bar; the page or report that embeds it provides the frame.
+- `almanak check` runs its strategy, capability and data dependency hooks in one
+  preloaded sandbox worker, each in a fresh forked child as backtests already do,
+  instead of starting a sandboxed interpreter per hook. An online check starts that
+  worker while its read gateway starts. In a 3.0.0rc43 container with a Uniswap V3
+  Robinhood fork check, the median wall time fell from 6.6s to 4.1s with 2 CPUs and from
+  6.9s to 4.7s with 1 CPU. A sandbox that cannot start now fails the `sandbox` stage,
+  with the wrapper's own error, instead of the `strategy` stage. Permission generation
+  for an installed Safe also reads its Safe/Roles wiring once instead of twice.
+- The read-only funding preflight that production admission runs before a
+  production start requires each gas payer to hold the native entry minimum
+  `max(max_transaction_fee + exit_reserve, max minimum_native_balance)` over the
+  payer's accounts, instead of the fee reserve alone. It reports the value as
+  `native_entry_minimum_base_units` beside `native_admission_reserve_base_units`.
+  An allocation threshold above the fee reserve was previously caught only at
+  the first entry.
+- Every connector computes its entry token requirements with
+  `Execution.requirements(config, account)` from parameters alone, and preflight
+  compares them with measured balances. Preflight rows are one per asset (Compound
+  V3 and Morpho Blue previously emitted one per observation and under-counted two
+  allocations on one asset), every row states its `requirement` basis, and a
+  missing balance reports `observed_token_base_units: null` and `funded: false`.
+- Uniswap V3, PancakeSwap V3 and Aerodrome Slipstream pool resolution names the
+  factory a refused pool reports alongside the reviewed deployment factory.
+- Python imports use `almanak`, including the public author API, sandbox workers and
+  bundled schemas.
 
 ### Fixed
-
-- **Backtesting sweep reliability.** `almanak strat backtest` subcommands no
-  longer crash at import on a base install — the `report_generator` re-export
-  is lazy and `jinja2` is declared in the `backtest` extra (VIB-5620). The
-  default async sweep mode no longer dies mid-run with "Connector is closed":
-  the engine only closes providers it owns
-  (`PnLBacktester.close_providers_on_finish`), and the sweep orchestration
-  closes the shared provider once per period (VIB-5621). A failing combo is
-  recorded as an error row instead of aborting the sweep and discarding
-  completed results (VIB-5622). Parallel workers refuse to silently
-  substitute a mock strategy when the real class cannot be re-imported —
-  they reload it from its source file (spawn-start platforms) or fail loudly
-  per-combo (VIB-5624). Sweeps where no combination traded now print a loud
-  warning instead of declaring a meaningless "Best combination" (VIB-5623).
-  (#2977); tick-spacing-aware pool resolution and a SushiSwap V3 reader (#2976);
-  Binance OHLCV + spot-price symbols resolved via a canonical `CEX_SYMBOL_MAP`
-  (#2978); repaired DEX-volume subgraphs (SushiSwap/TraderJoe schemas + dead
-  Uniswap V3 Base/Optimism IDs) (#3003).
-- **Accounting.** Portfolio snapshot now includes the native-token balance so
-  equity reflects gas drain (#2991); pre-existing wallet inventory is
-  boot-seeded as FIFO lots (G6 no longer conflates `None` basis with missing)
-  (#2990); Curve single-sided `LP_OPEN` declares funded legs instead of a
-  zero-leg (#2989); `total_value_usd` is sourced from the snapshot in gRPC
-  reconstruction (#2987); PT partial-disposal proceeds are pro-rated to the
-  matched quantity (#2999); held-PT canonical symbol unified across teardown,
-  valuer, and FIFO inventory (#2964).
-- **Gateway.** PT `maturity_ts` populated from on-chain expiry (#2996); asyncpg
-  statement cache disabled in the boot schema validator to stop a pgbouncer
-  crash loop (#3004).
-- **Execution / runner.** Enriched fields (`bin_ids`, `protocol_fees`,
-  `primitive_money_legs`) now reach the strategy callback as top-level slots
-  (#2985); the runner awaits current-iteration outbox drains before snapshotting
-  to fix a held-PT/swap NAV race (#3012); `position_events.tx_hash` points at
-  the ACTION transaction, not the approval (#2983).
-- **Pendle.** Receipt `extract_*` now returns tagged ExtractOk/Missing/Error (no
-  silent parse-error masking) (#2979); `getOracleState` reverts wrap in a typed
-  `PendleOnChainError` (#2966); `days_to_maturity` decoupled from the M1 path
-  (#2995).
-
-## [2.19.1] - 2026-06-22
-
-### Changed
-
-- **Backtesting is enabled by default** (VIB-5130). The
-  `ALMANAK_ENABLE_BACKTESTING` opt-in flag is removed now that the v1
-  conservation work (VIB-5079) has landed: `almanak strat backtest` and
-  `almanak backtest-service` run without it. Treat PnL-engine output as
-  carrying the documented variance bounds (blueprint 31 §7) and certify on the
-  paper trader before going live; perp support remains beta. Any existing
-  `ALMANAK_ENABLE_BACKTESTING=1` setting becomes a harmless no-op.
-
-## [2.19.0] - 2026-06-22
-
-### Added
-
-- **Pendle PT/YT vertical.** Gateway PT/USD price provider that composes the
-  on-chain PT rate with the underlying price (honest availability semantics),
-  `MarketSnapshot.pt_price` surfaced over a new `GetPtPrice` gateway contract,
-  and PT/LP USD valuation with buy-time cost basis (#2945, #2949, #2950, #2951,
-  #2940).
-- **Fluid connectors.** `fluid_dex_lp` (Fluid SmartLending fungible DEX LP) and
-  `fluid_vault` (NFT-CDP BORROW/REPAY), wired into the synthetic discovery
-  matrix (#2802, #2765, #2806).
-- **Accounting valuation hardening (VIB-52xx).** Typed `MeasuredMoney`
-  (Empty≠Zero enforced by construction) and a typed `PrimitiveMoneyLeg`
-  extraction contract, applied at the ledger-extraction, accounting-payload,
-  and USD-valuation boundaries; the dispatcher now prefers connector-declared
-  money legs over intent fallbacks. Adds a canonical `PortfolioValuer`
-  projection contract, a shared lending Track-C seam (Compound V3 + Morpho
-  Blue), declared money legs for Lido STAKE and TraderJoe V2 LP_CLOSE, and an
-  ambient G6 inventory-revaluation lane (#2904, #2906, #2907, #2908, #2910,
-  #2911, #2913, #2914, #2857, #2830).
-- **Uniswap V4 native-ETH pools.** Native-ETH V4 pool support (guards +
-  gateway-read native-amount stamping) and V4 wired into the synthetic-intents
-  permission matrix (#2795, #2790).
-- **Curve multi-coin LP.** `LP_OPEN` now supports non-leading coins in
-  multi-coin Curve pools (#2840).
-- **Dashboard quant surfaces.** Windowed/time-travel chart APIs with
-  server-side decimation, an incremental lifetime-drawdown fold, a default
-  ~1-day plot display window decoupled from indicator fetch, targeted SQL
-  aggregation for quant tiles, and a baseline `dashboard/ui.py` backfilled
-  across strategies (#2791, #2818, #2739, #2824).
-- **Lending accounting surfaces.** Aave Track-C `health_factor` / APY /
-  `borrow_balance` populated, and the Compound V3 lifecycle now emits a
-  standalone SUPPLY accounting event (#2794, #2803).
-- **Backtesting v1** (epic VIB-5079). The backtesting surface reaches v1: a
-  PnL backtest engine plus parameter sweep/optimize and Anvil-fork paper
-  trading, with value conservation enforced end-to-end. **In scope**: PnL
-  backtest + sweep/optimize + paper trade; strategy types swap/TA, LP, and
-  lending; perp is **beta**. The surface **remains gated behind
-  `ALMANAK_ENABLE_BACKTESTING` (off by default)**. Certified by the
-  network-free Trust Matrix (21 PASS / 0 xfail). Adds configurable
-  numeraire/quote-asset (#2814), dynamic CoinGecko id resolution + price-
-  availability guard (#2817), gas routed through gateway rate history (#2829),
-  PositionReconciler divergence detection in paper trading (#2782), and a
-  platform backtest runner image + versioned Cloud Run jobs via the new
-  `almanak[platform-runner]` extra (#2917, #2919). Known variance bounds
-  (blueprint 31 §7): LP fees ±10-15%, perp funding ±15%, lending APY ±10%,
-  large-trade slippage ±30%, gas ±20%.
-
-### Fixed
-
-- **Backtesting conservation and fidelity** (epic VIB-5079). Eliminated a
-  family of value-(de)minting defects in the PnL engine: SWAP buys that minted
-  value (VIB-5082), LP opens marked 27x-90x cost (VIB-5096), lending WITHDRAW
-  double-counting principal (VIB-5097), BORROW/REPAY mis-accounting (VIB-5098),
-  and a perp adapter reading a nonexistent field (VIB-5093). Insufficient-
-  balance fills now record as failed trades that change equity by exactly zero.
-  Per-trade realized PnL is attributed for swaps (VIB-5083); gas defaults are
-  chain-aware (VIB-5088, ~0.1 gwei on Arbitrum vs a flat 30 gwei); subgraph
-  providers paginate past ~1000 points (VIB-5089); Balancer pools resolve from
-  bare addresses (VIB-5090). Additionally: first tick is priceable via a seeded
-  prior candle (#2941), numeraires priced by contract address (#2932), a 10% LP
-  fee-share floor that minted value removed (#2816), and the engine no longer
-  reports `total_fees_earned_usd=0` on every LP backtest (#2852).
-- **Teardown.** Fail-closed consolidation on failed balance eviction (#2900);
-  manual consolidation consent persists across resume (#2886); absent
-  accounting backend distinguished from empty (#2885); swap-back clamped to
-  tracked quantity (#2873); universal fresh-state guard for lending unwind
-  (#2826); auto-fallback to on-chain LP discovery when strategy state is lost
-  (#2822); reports positions closed rather than intents landed (#2787);
-  fully-drained TraderJoe V2 LP teardown verified by deriving the LBPair
-  (#2887).
-- **Accounting.** Pendle PT accounting vertical with PT-rate/redeem gating
-  (#2940, #2952, #2953, #2957, #2947, #2948, #2946); perp NAV net-equity + GMX
-  decode (#2943); fallback snapshot falls back to positions-only to avoid wallet
-  double-count (#2939); debt-netted dashboard cost basis / PnL / drawdown for
-  leveraged loops (#2862); `strat pnl` prefers live Track-C health factor
-  (#2797); `transaction_ledger` amount_in/out populated for V4 native LP_CLOSE
-  (#2848); native-ETH-leg LP accounting and Empty≠Zero close-principal (#2809,
-  #2810, #2808); open swap-inventory lots classified as deployed capital
-  (#2740).
-- **Uniswap V4 / concentrated liquidity.** ABI struct-offset added to V4 swap
-  params, fixing all-ERC20 V4 swaps on every chain (#2785); `sqrt_price_x96_to_tick`
-  off-by-one corrected (#2786, #2796); unspent native `msg.value` swept on V4 LP
-  mint (#2831); V4 custom-error args decoded and `InsufficientToken` relabeled
-  (#2849); fail-closed swap quote + price-impact guard (#2738).
-- **TraderJoe V2.** LP gas estimates scaled by bin count for open and close
-  (#2869, #2820); token0/token1 threaded into LP_CLOSE valuation (#2894); LP
-  state reset on any successful LP_CLOSE (#2867).
-- **Dashboard.** Lending HF/LTV gauges never fabricate placeholders (#2866);
-  trade tape reflects on-chain landed status (#2870); lifetime
-  drawdown/high-watermark over full history (#2801); TA/LP price charts follow
-  the selected NAV range (#2799); OHLCV backfill covers the earliest signal
-  after redeploy (#2842); chart x-axis normalized to tz-naive UTC; hosted G6
-  inventory revaluation aligned (#2891).
-- **CLI.** Single validated config parse with typo-warnings on unknown keys
-  (#2858); `strat pnl` scopes its default DB to the cwd strategy folder (#2800);
-  `strat run --dashboard` no longer silently swallows the strategy (#2788);
-  status commands honor canonical `ALMANAK_GATEWAY_*` env vars (#2860).
-- **Market data & gateway.** `MarketSnapshot.price()` resolves
-  case-insensitively (#2839); transient `MarketSnapshotError` is catchable
-  (#2841); V3 TWAP observe path and Solana CLMM price underflow hardened (#2874,
-  #2871); Balancer pool IDs auto-resolve from bare addresses (#2768); post-tx
-  state reads pinned to the receipt block (#2828); Aerodrome Slipstream (cl_nft)
-  LP valuation path added (#2821); CBBTC mapped to BTC CEX pairs for OHLCV
-  (#2819).
-- **Intents.** Fail-closed capability errors for Balancer LP intents (#2865) and
-  against bundled collateralized-lending borrow (#2827).
-- **Other.** BENQI fails closed on Compound soft-fail receipts (#2893); runner
-  reconciles cached side-state vs live balance on resume (#2843); hardcoded
-  address metadata derived dynamically (#2872); `ALMANAK_FORK_HEALTH_TIMEOUT`
-  wired to the Anvil readiness probe (#2846); demo trade-counting and
-  private-test/GMX-gate fixes (#2864, #2960).
-
-### Security
-
-- Bump cryptography 46.0.7 → 48.0.1, starlette 1.0.1 → 1.3.1, aiohttp 3.14.0 →
-  3.14.1, and tornado to 6.5.7 (#2836, #2837, #2838, #2835, #2784).
-
-## [2.18.0] - 2026-06-12
-
-### Added
-
-- Add health-factor-aware leverage-loop unwind, plus Morpho health-factor and
-  market-state fixes for safer teardown and monitor-time deleveraging (#2542).
-- Add definition-only `quote_asset` strategy metadata and emit it from scaffold
-  templates and packaged demos (#2659, #2734).
-- Add Fluid DEX swaps on Arbitrum, Base, Ethereum, and Polygon, and Fluid
-  fToken lending SUPPLY/WITHDRAW on Arbitrum and Base (#2682, #2723).
-- Add Uniswap V4 position-registry support, high-confidence gateway-backed LP
-  valuation, and measured LP_CLOSE uncollected-fee accounting (#2681, #2680,
-  #2732).
-- Add deterministic nightly mainnet probe runner with budget gating,
-  stranded-funds detection, and structured Slack-compatible reports (#2748).
-- Add ChainDescriptor/ChainRegistry ownership for default-chain policy, chain
-  families, native price/display metadata, Anvil profiles, contract addresses,
-  L2 fee-oracle metadata, and chain aliasing (#2684, #2685, #2687, #2689,
-  #2690, #2747, #2749).
-- Add static ratchets for framework-to-gateway imports and protocol/chain
-  literal dispatch so new coupling sites fail CI (#2722, #2746).
-- Add money-path on-chain read fallback metrics and provenance reporting
-  contracts (#2728).
-
-### Changed
-
-- **Action required for dashboard/backtest users**: heavy optional
-  dependencies moved out of the default install into extras. `streamlit` and
-  `plotly` now live in `almanak[dashboard]`; `matplotlib`, `plotly`, and
-  `optuna` in `almanak[backtest]`; `pyright` in `almanak[code]`;
-  `grpcio-tools` moved to the dev dependency-group. A default
-  `pip install almanak` is ~111 MB of wheels lighter. `almanak dashboard`,
-  `almanak strat backtest dashboard|optimize|sweep`, and backtest chart
-  export now fail fast with a message naming the extra when it is missing.
-  Install `pip install 'almanak[dashboard,backtest]'` to keep the previous
-  behavior. Hosted dashboard base images and the backtest service install
-  their extras explicitly (#2703).
-- Route gateway Onchain DEX pool analytics, pool history, and DEX-native OHLCV
-  through CoinGecko Onchain API instead of GeckoTerminal. CoinGecko Onchain
-  pool endpoints now require `COINGECKO_API_KEY` locally or
-  `ALMANAK_GATEWAY_COINGECKO_API_KEY` in gateway environments (#2640).
-- Backtesting funding-rate providers (`backtesting/pnl/providers/funding_rates.py`
-  and `backtesting/pnl/providers/perp/`) are now thin clients of the gateway's
-  `RateHistoryService` instead of opening their own HTTP sessions against GMX /
-  Hyperliquid endpoints (VIB-4851 Phase D). Funding history is now real measured
-  data: the old GMX series path extrapolated the *current* rate backwards over
-  the whole range, and the old point-query Hyperliquid path returned current
-  funding for any historical timestamp. Protocol identifiers, aliases, and chain
-  support derive from connector-manifest `FundingHistoryDecl` declarations.
-  Removed framework-internal names: `funding_rates.GMX_MARKETS`,
-  `funding_rates.HYPERLIQUID_MARKETS`, `funding_rates.SUPPORTED_PROTOCOLS` (use
-  `funding_rates.supported_protocols()`), `funding_rates.DEFAULT_FUNDING_RATES`
-  (use `DEFAULT_FUNDING_RATE`), `gmx_funding.GMX_API_URLS`,
-  `gmx_funding.GMX_API_FALLBACK_URLS`, `gmx_funding.GMX_MARKET_TOKENS`,
-  `gmx_funding.SUPPORTED_CHAINS` (use `GMXFundingProvider.supported_chains`),
-  `gmx_funding.GMXMarketInfo`, and `hyperliquid_funding.HYPERLIQUID_API_URL`
-  (#2671).
-- Backtesting fee models moved into their owning connectors
-  (`almanak.connectors.<protocol>.fee_model`) and are declared on each
-  connector manifest via `FeeModelDecl` (VIB-4851 Phase D). The
-  `fee_models` package re-exports every model class lazily and the
-  `FeeModelRegistry` lookup behavior is byte-identical (all legacy keys and
-  aliases resolve; `register_fee_model` overlays still work), so existing
-  imports keep working. Importing `fee_models` no longer imports the protocol
-  modules eagerly (#2672).
-- Multi-DEX volume routing and liquidity-depth family dispatch are
-  declaration-driven via each DEX connector's `DexVolumeDecl` (VIB-4851
-  Phase D). Removed framework-internal names:
-  `multi_dex_volume.PROTOCOL_PROVIDER_MAP` / `STRING_PROTOCOL_MAP` /
-  `PROTOCOL_CHAIN_SUPPORT` (use
-  `almanak.connectors._strategy_base.dex_volume_registry.DexVolumeRegistry`),
-  `liquidity_depth.V3_PROTOCOLS` / `V2_PROTOCOLS` /
-  `LIQUIDITY_BOOK_PROTOCOLS` / `WEIGHTED_POOL_PROTOCOLS` /
-  `STABLESWAP_PROTOCOLS` / `PROTOCOL_DATA_SOURCE` / `SUPPORTED_CHAINS` /
-  `DATA_SOURCE_<DEX>` constants (provenance derives as
-  `"<protocol>_subgraph"`). The legacy `Protocol` enum is no longer imported
-  at runtime by any backtesting module (duck-typed `.value` acceptance is
-  preserved). New `GatewayDexVolumeProvider` serves any declared DEX without
-  a per-DEX wrapper class; the existing per-DEX wrapper classes are
-  unchanged (#2672).
-- The backtest service's fee-model exporter derives its per-protocol standard
-  fields (fee tiers, default fee, slippage-model id, supported intents/chains,
-  gas estimates) from each connector's `fee_model.BACKTEST_EXPORT_METADATA`
-  module attribute instead of a central table (VIB-4851 Phase D). HTTP
-  responses are byte-identical (golden-fixture pinned) (#2673).
-- Lending rate-lane facts derive from connector manifests
-  (`LendingReadDecl.rate_history_chains` + `backtest_default_*_apy`).
-  Deliberate widening: `LendingAPYProvider` now accepts `morpho_blue` (its
-  gateway rate lane has existed since W7; the client-side gate was the only
-  exclusion). Removed framework-internal names: `rates.monitor.Protocol`
-  (StrEnum), `lending_apy.SUPPORTED_PROTOCOLS` (use
-  `lending_apy.supported_protocols()`), `lending_apy.AAVE_V3_MARKETS` /
-  `COMPOUND_V3_MARKETS` / `AAVE_V3_SUBGRAPHS` / `COMPOUND_V3_SUBGRAPHS`
-  (unused legacy tables), `lending_apy.DEFAULT_SUPPLY_APYS` /
-  `DEFAULT_BORROW_APYS` (use `GENERIC_DEFAULT_*_APY` + the manifest decls).
-  `rates.monitor.SUPPORTED_PROTOCOLS` / `PROTOCOL_CHAINS` remain importable
-  from the module, lazily derived, but are no longer re-exported eagerly by
-  `almanak.framework.data.rates`; `PROTOCOL_CHAINS` values are now sorted
-  (#2673).
-- TWAP reference pools (`UNISWAP_V3_POOLS`, `TOKEN_TO_POOL`, per-chain
-  `*_POOLS`) moved to `almanak.connectors.uniswap_v3.backtest_pools`,
-  declared via `DexVolumeDecl.twap_reference_pools`; the legacy
-  `providers.twap` names remain importable, lazily derived, but left
-  `twap.__all__` (#2673).
-- `backtesting/paper/position_queries.py` resolves Uniswap V3 / GMX V2 /
-  Aave V3 contract addresses through the strategy-side `AddressRegistry`
-  (W1 seam) instead of local per-chain dicts — the duplicated copies were a
-  drift hazard; an equivalence test pins the registry-derived values to the
-  removed tables. Removed names: `UNISWAP_V3_POSITION_MANAGER`,
-  `GMX_V2_READER`, `GMX_V2_DATA_STORE`, `AAVE_V3_POOL_DATA_PROVIDER`
-  (market/token metadata tables are unchanged) (#2691).
-- Move connector registration, read dispatch, compiler dispatch, Solana program
-  specs, address tables, protocol aliases, capability metadata, strategy
-  support, and money-path flags into connector manifests (#2635, #2636, #2639,
-  #2641, #2643, #2644, #2645, #2646, #2653, #2654, #2655, #2663, #2664,
-  #2666, #2668).
-- Gate the backtesting CLI behind `ALMANAK_ENABLE_BACKTESTING` so experimental
-  surfaces remain opt-in (#2742).
-- Update scaffold templates and packaged demos so TA strategies fire on signal
-  transitions and LP strategies rebalance inventory through swap-to-ratio flows
-  (#2626, #2726).
-
-### Removed
-
-- **BREAKING**: pruned the imperative `register()` surface superseded by the
-  connector-manifest model (VIB-4851). No known users; no migration needed.
-  - `register_health_factor_provider` and its `_HF_FACTORIES` hook were
-    removed from `almanak.framework.data.position_health`. There were no
-    registrants anywhere; `get_health_factor()` behaviour for the built-in
-    protocols (Aave V3, Morpho Blue, Compound V3 and manifest-declared
-    lending reads) is unchanged.
-  - `register_teardown_post_condition` is no longer re-exported from
-    `almanak.framework.teardown` / `almanak.framework.teardown.post_conditions`
-    and is now framework-internal. Connectors publish teardown post-conditions
-    declaratively via `CONNECTOR.teardown_post_condition` (an `ImportRef` on
-    the connector manifest); the lookup helpers
-    (`get_teardown_post_condition`, `has_teardown_post_condition`,
-    `ClosureCheckResult`, `TeardownPostCondition`) remain public.
-  - `PlanExecutor` no longer accepts the deprecated `clob_handler`
-    constructor parameter. Pass a populated `handler_registry`
-    (`ExecutionHandlerRegistry`) instead; handlers are built from connector
-    manifests via `PredictionExecuteRegistry.build_handler(...)` (#2712).
-
-### Fixed
-
-- Fix accounting persistence, Uniswap V4 LP_OPEN identity, Uniswap V4 LP
-  valuation, LP payload units, swap token canonicalization, FIFO restart
-  rehydration, teardown token consolidation, and stale LP accountant fixtures
-  (#2660, #2661, #2676, #2678, #2680, #2700, #2709, #2729).
-- Fix block-anchored reconciliation balance reads to remove false-positive
-  reconciliation incidents (#2705).
-- Fix dashboard PnL signs, stale LP session state, latest-snapshot reads,
-  marker clipping, quant input sharing, and ledger USD-unit display (#2648,
-  #2674, #2677, #2679, #2731).
-- Fix live-mode state/accounting persistence failure handling and mode-aware
-  copy-trading, vault, prediction, and sibling write paths (#2694, #2702,
-  #2704).
-- Fix V3-family receipt parser decimal metadata, Uniswap V3 pool address
-  hashing, Uniswap V4 `StateView.getSlot0` selector usage, and non-Position
-  Manager V4 warning spam (#2695, #2708, #2715, #2716, #2717).
-- Fix PnL backtester arbitrage token-flow direction and perp collateral/cash
-  conservation (#2743, #2750).
-- Fix chain-aware market balance dispatch and native-gas accounting in
-  multichain flows (#2658, #2652).
-- Fix JoeLend raw-unit receipt enricher hooks and Aave carry strategy pool data
-  provider resolution through the AddressRegistry (#2699, #2692).
-
-### Security
-
-- Harden gateway authentication with constant-time token comparison and
-  failed-attempt throttling (#2693).
-- Route incubating Ethena time-warp RPC through the gateway and add a static
-  strategy egress guard (#2696).
-- Remove placeholder Hyperliquid signer behavior that used fake keccak and fake
-  ECDSA paths (#2720).
-
-## [2.17.0] - 2026-06-05
-
-### BREAKING — Removed retired Radiant V2 lending connector
-
-The Radiant V2 connector retired on-chain. All Radiant V2 surfaces are removed:
-the `almanak.framework.connectors.radiant_v2` package, its receipt parser and
-registry entries, its incubating strategies, the now-dead Aave-V2-fork machinery
-(`AAVE_V2_FORKS`, `AAVE_V2_DEPOSIT_SELECTOR`), and the `Protocol.RADIANT_V2`
-enum member.
-
-Strategies that imported any of the above hard-fail with `ImportError` /
-`AttributeError`. Move lending positions to Aave V3, Compound V3, Morpho Blue,
-Silo V2, Euler V2, Benqi, or Spark — all of which now share a single generic
-lending account-state read path (see Added below). (#2557)
-
-### BREAKING — Connector self-containment: deleted duplicate framework copies
-
-As part of the VIB-4851 / VIB-4928 / VIB-4933 / VIB-4989 epic, protocol code
-(intent compilers, address tables, receipt parsers, capability registries,
-synthetic-intent discovery, contract-role tables) now lives under each
-`almanak.framework.connectors.<protocol>/` package instead of central framework
-modules. The legacy central copies have been removed.
-
-Direct imports that now hard-fail:
-- `from almanak.framework.execution import Chain` — the duplicate execution-layer
-  `Chain` enum has been deleted; use `from almanak.framework.chains import Chain`
-  (single source of truth). (#2628)
-- `from almanak.framework.connectors.polymarket import *` framework originals —
-  Polymarket now lives entirely in its connector package; the duplicate framework
-  copies were removed in CONNECTOR_IMPORT 0. (#2618)
-- Legacy router overlay, generic-taxonomy Pendle entries, and central
-  per-protocol dispatch tables (intent compilers, FlashLoanSelector, address
-  tables) are gone — they are now published by each connector's manifest.
-  (#2562, #2600, #2452, #2580, #2579)
-
-If you were importing framework-internal protocol modules, repoint your imports
-at the connector package. Strategies built with the public `IntentStrategy` /
-`MarketSnapshot` surfaces are unaffected.
-
-### BREAKING — Connector-published metadata replaces central registries
-
-The protocol registries that strategy code relied on at import time are now
-published from each connector's manifest. The shape of the public dicts is
-unchanged where it existed, but they are now lazily assembled from connectors
-at boot — code that *patched* or *mutated* the central registries directly is
-broken. Use the connector capability seams instead.
-
-Affected registries: protocol families, swap classifications, contract roles,
-bridge providers, flash-loan providers, gas-estimate hooks, agent-tool / vault
-capabilities, address tables, permission hooks. (#2614, #2617, #2622, #2621,
-#2543, #2537, #2477, #2498, #2456, #2457, #2564, #2559)
-
-### Added
-
-#### New lending connectors and shared lending read path
-
-- **Benqi lending** state reader + receipt-parser extractors (VIB-4967, #2620)
-- **Euler V2 lending** pre/post-state reader (vault/EVC) (VIB-4966, #2615)
-- **Silo V2 lending** pre/post-state reader (bespoke per-silo) (VIB-4965, #2612)
-- **Spark** enabled on the generic lending read path (VIB-4929 PR-3c /
-  VIB-4963, #2575)
-- Lending **account-state read capability** foundation + Aave/Morpho spec
-  (VIB-4929, #2558, #2561, #2563)
-- Compound V3 multi-collateral health via connector-owned gateway read
-  (VIB-4851 #2 PR-2, #2599)
-- Compound V3 account-state migrated onto the generic spec (VIB-4929 PR-3b,
-  #2574)
-- Closed-state leveraged-lending lifecycle PnL (read-side) (VIB-4976, #2592)
-- Lending NAV helper + surface unrealized carry in `strat pnl` (W1-1, W1-2,
-  #2482)
-- Read-side PnL reporting bundle (VIB-4788 / VIB-4792 / VIB-4793, #2506)
-
-#### Connector self-containment epic (VIB-4851 / VIB-4928 / VIB-4929 / VIB-4933 / VIB-4989 / VIB-4837 / VIB-4854–4860)
-
-- **Connector manifests** for gateway and receipt registration (#2614)
-- Connector-self-registering **receipt parsers** via `ReceiptParserCapability`
-  (VIB-4854, #2457)
-- Connector-self-registering **addresses** + coupling-scan CI gate
-  (VIB-4852 / VIB-4853, #2456)
-- Connector-self-registering **bridge / flash-loan provider registries**
-  (VIB-4837, #2543, #2537)
-- **`GasEstimateCapability`** on every connector (VIB-4858 W6, #2477)
-- **AgentReadToolRegistry + VaultToolCapability** — collapse per-protocol
-  dispatch (VIB-4860 W8, #2498)
-- **AddressRegistry** strategy-side + repointed framework consumers (#2527)
-- Connector-owned `supported_chains` (W5, VIB-4857, #2526)
-- Connector-owned `Primitive` via PrimitiveRegistry (#2525)
-- Connector-owned report sections / report module / metadata routing for
-  Pendle and Uniswap runner hooks (#2629, #2632, #2630, #2625, #2633, #2634)
-- Connector-published swap classifications, protocol families, contract roles
-  (batched via #2614 / #2617 / #2621 / #2622)
-- Lagoon vault lifecycle routed through connector capability (#2623)
-- Strategy-side **per-connector migration** foundation + docs sweep (VIB-4835
-  Phases 1/2/3/4, #2441, #2447, #2448, #2430, #2433, #2436, #2437, #2440)
-- Polymarket self-containment — additive PR A (VIB-4989, #2603)
-- Pendle connector-owned accounting seam — additive PR A (VIB-4931, #2598)
-- Connector-published perp read+value — decouple valuation from single-venue
-  GMX (VIB-4930, #2595)
-
-#### Chain registry consolidation (VIB-4801 / VIB-4803 / VIB-4804 / VIB-4855 / VIB-4857)
-
-- **`ChainDescriptor` + `ChainRegistry`** — retire scattered chain dicts
-  (VIB-4801, #2418)
-- Per-chain knobs unified onto `ChainDescriptor` (VIB-4857, #2472)
-- **`ChainFamily` behavior protocol** (EVM + SVM adapters) (VIB-4803, #2424)
-- **SVM signer extraction** (Jupiter, Kamino) (VIB-4804, #2425)
-- Fold native-token + chain-id dicts onto `ChainDescriptor` (VIB-4933, #2547)
-- Fold `config/rpc_defaults.json` into `ChainDescriptor` (#2461)
-- Native-token symbols on `ChainDescriptor` (VIB-4851 A1, #2605)
-- `ChainDescriptor.external_ids` + per-vendor derive helpers (VIB-4851 B1.1,
-  #2611)
-- Backtesting `chain_id→name` derived from registry (VIB-4851 A2, #2608)
-- Price-layer vendor maps derived from registry (VIB-4851 B1.2, #2616)
-- Integration vendor maps derived from registry (VIB-4851 B1.3, #2619)
-- CLI chain choices + config maps derived from registry (VIB-4851 C2 / C,
-  #2624, #2627)
-- Tenderly/Alchemy simulation folded onto `ChainDescriptor` (VIB-4851 Phase 2,
-  #2540)
-- Connector chain-support validator CI gate (VIB-4802, #2422)
-- `chain == "solana"` string compares replaced with `ChainFamily.SOLANA`
-  (VIB-4855, #2464)
-
-#### MarketSnapshot read-side surface
-
-- **Gas observability** on `MarketSnapshot` (T3-A) + stateless calculator
-  wiring (T3-B) (VIB-4844, #2500)
-- **`twap()` / `lwap()`** via gateway DEX services (VIB-4924, VIB-4948, #2551)
-- **`pool_reader` / `liquidity_depth` / `slippage` / `rate_history`** providers
-  wired (T3-C, T3-D, VIB-4845, #2555)
-- Missing `MarketSnapshot.aave_health_factor` accessor restored (#2602)
-- Multi-indicator support in `render_ta_dashboard` (VIB-4897, #2496)
-- Cross-iteration MarketSnapshot price cache + lazy valuation (VIB-4843,
-  #2466)
-
-#### Gateway PoolHistoryService pipeline (VIB-4749–4754, VIB-4728)
-
-- PoolHistoryService **proto + UAT card** (VIB-4749, #2401)
-- PoolHistoryService **skeleton + kill-switch** (VIB-4750, #2402)
-- PoolHistory **validator + shared history-common** (VIB-4751, #2403)
-- **HistoryCache two-tier cache + dedup** (VIB-4752, #2404)
-- Pool history **providers + dispatcher** (VIB-4753, #2460)
-- Pool history **truncation + finality re-promotion** (VIB-4754, #2479)
-- Framework thin gRPC **PoolHistoryReader** + `NullPoolHistoryReader` (POOL-7,
-  VIB-4755, #2486)
-- Pool history **telemetry + acceptance pack + docs + egress coordination**
-  (POOL-8, POOL-9, VIB-4728, #2489)
-
-#### Rate history capability (VIB-4859 W7)
-
-- **`RateHistoryCapability` + `RateHistoryService`** (W7 steps 1-2, #2474)
-- RateMonitor callers migrated to `MarketSnapshot.lending_rate` (VIB-4869,
-  #2492)
-- W7 deferred clusters — DEX volume + deferred-protocol rate capabilities
-  (VIB-4870, #2493)
-
-#### Accounting
-
-- **Wallet-basis pool** for LP_CLOSE value-weighted distribution (VIB-4264,
-  #2550)
-- LP attribution correctness (T8 + T9 + T12) (VIB-4848, #2487)
-- Canonical token-identity helper for read-side inventory matching (W1-4,
-  #2483)
-- Soft-fail decimal-unit guard hardening + `AccountingWriter` wiring (W1-5,
-  #2485)
-- Repair-teardown-LP-close backfill CLI (VIB-4896, #2510)
-- LP registry preflight + teardown watchdog (VIB-4614 / VIB-3951, #2582)
-- Lag-aware gateway retry + pinned lending post-state read (VIB-4985 / ALM-2777
-  / VIB-4964, #2596)
-- L3/L5 lending position keys aligned on `market_id` (VIB-4981, #2591)
-- Layer 5 accounting assertions added for Pendle / Curve / Fluid+Agni LPs and
-  for Euler V2 / Silo V2 / Benqi / Spark lending (VIB-4599 / VIB-4600 /
-  VIB-4602 / VIB-4605 / VIB-4606 / VIB-4607 / VIB-4608, #2572, #2571, #2570,
-  #2569, #2568, #2567, #2565)
-- LP5 Accountant Test cell — data-presence predicate + PASS branch (VIB-4263,
-  #2583)
-- **Accountant-Test ratchet CI gate** (VIB-3836, #2554)
-- Native-gas symmetry in wallet PnL + sub-cent earn display (VIB-4979 /
-  VIB-4980, #2587)
-- Stamp signed `net_pnl_usd` in lending CLOSE attribution (VIB-4977, #2586)
-- Strategy PnL leveraged-lending headline scoped to debt-netted NAV (VIB-4975,
-  #2585)
-- Lending-report interest signed by event side (VIB-4974, #2584)
-- Canonical token identity for swap FIFO basis + 4 receipt parsers (VIB-4487,
-  #2581)
-- Curve / TraderJoe V2 / V4 PoolId stamping (VIB-4634 / VIB-4637 / VIB-4968,
-  #2607, #2610, #2606)
-- Morpho Blue collateral-withdraw measurement (VIB-4635, #2609)
-- Compound V3 collateral-supply amount + REPAY account-state (VIB-4633, #2613)
-
-#### CLI / `ax` / dashboards
-
-- **`almanak ax lending-reserves`** — read-only lending reserve discovery
-  command (VIB-4925, #2544)
-- **Deployment-start banner** at CLI entry (#2423, #2427, #2435)
-- `support_matrix` derived from `GATEWAY_REGISTRY` + connector metadata
-  (VIB-4856, #2469)
-- Roll up protocol fees + gas-efficiency + win-rate range in `strat pnl`
-  (VIB-4846, #2467)
-- Custom dashboards for `buy_the_dip` + `macd_momentum` (#2434)
-- Strategy-scoped PnL/APR in Money Trail dashboard (robust to unmeasured cost
-  basis) (#2576)
-- Multi-indicator TA dashboard support: Bollinger / CCI / Stochastic / ATR /
-  ADX (VIB-4884, #2494)
-- Thread strategy candle timeframe into TA/LP dashboards (VIB-4969, #2573)
-- Populate Current Position balances in TA template (#2566)
-- TA Performance section populated (trades/PnL); fake win-rate removed (#2594)
-
-#### Other
-
-- USD-cost gas cap + chain-scoped override (VIB-4879, #2488)
-- CoinGecko OHLCV provider + provider-chain invariant (VIB-4847, #2468)
-- CoinGecko cooldown circuit-breaker + stablecoin peg fast-path (VIB-4841,
-  #2462)
-- Polygon native price/OHLCV off live POLUSDT (MATIC→POL rebrand) +
-  MATIC→POL bridge contract (#2476)
-- Aerodrome Slipstream support in `ax pool` and `PoolReader` (#2378)
-- Aave V3 pool addresses sourced from canonical connector table (ALM-2794,
-  #2534)
-- Unified SDK deployment identity (#2398)
-- Hosted `GatewayStateManager` bulk-hydrate recent-open cache (VIB-4894,
-  #2499)
-
-### Changed
-
-- Ratchet coverage `fail_under` floor 72 → 75 → 77 (#2497 and prior commits)
-- Lending position reader is now protocol-agnostic via capability registry
-  (#2533, #2535, #2536)
-- Backtest paper-engine chain coupling routed through `ChainRegistry`;
-  protocol telemetry heuristic dropped (VIB-4861, #2512)
-- Migration backfill no longer carries residual per-protocol coupling
-  (VIB-4864, #2491)
-- `GetStrategyDetails` Postgres fallback for decoupled dashboards (#2593)
-- Banner: env wins over CLI hint; flush stdout to preserve order (#2435)
-- Pendle accounting moved from generic taxonomy onto a connector seam (PR B
-  destructive) (VIB-4931, #2600)
-- Receipt-parser dispatch routed through receipt registry (VIB-4932, #2548)
-- `compiler_constants` no longer carries protocol literals (VIB-4928 PR-3c,
-  #2580)
-- Config-set tables inverted onto connector registries (VIB-4928 PR-3b, #2579)
-- Address tables driven from connector contract-role registry (VIB-4928 PR-3a,
-  #2564)
-- Legacy router overlay retired (VIB-4928 PR-2, #2562)
-- Pendle / Curve / Compound V3 / Morpho Blue / Perp BSC + TraderJoe V2
-  synthetic discovery folded into connectors (#2411–#2415)
-- Aggregator swap / bridge / perp / staking / Solana LP compilers folded into
-  connectors (#2408, #2405, #2397, #2420, #2416)
-- Closed `hyperliquid` / `jupiter_lend` / `joelend` stubs (#2426)
-
-### Deprecated
-
-- Global `*_gwei` gas-cap env vars — superseded by USD-cost gas cap with
-  chain-scoped overrides. The legacy env var still resolves with a deprecation
-  warning. (VIB-4879, #2488)
-
-### Removed
-
-- **Radiant V2** connector + receipt parser + registry entries + incubating
-  strategies + `AAVE_V2_FORKS` / `AAVE_V2_DEPOSIT_SELECTOR` + `Protocol.RADIANT_V2`
-  enum member. (#2557 — see BREAKING)
-- **Execution-layer duplicate `Chain` enum** — use `almanak.framework.chains.Chain`.
-  (#2628 — see BREAKING)
-- **Framework Polymarket originals** (`CONNECTOR_IMPORT 0`) — Polymarket now lives
-  in its connector package. (#2618 — see BREAKING)
-- `audit/` one-off VIB-4062 verification artifact (#2455)
-- Stale `config/` entry from `.syncinclude` (#2522)
-
-### Fixed
-
-- **Survive quiet-pool DEX data gaps** instead of killing the agent (#2528)
-- Forward-fill quiet DEX pools to stop false `DATA_ERROR` (VIB-4875, #2481)
-- Make fork-block-sensitive perp + TJv2 swap tests robust to the weekly
-  fork-pin roll (#2529)
-- **Uniswap V4** correct `PositionManager` address drift + derive from
-  connector (VIB-4874, #2480)
-- Uniswap V4 `PositionManager` / `PoolManager` revert decoding (VIB-2703, #2511)
-- Uniswap V4 PoolKey cache bisection error-family distinction (VIB-4536, #2520)
-- Uniswap V4 surface estimated `sqrtPrice` + cap silent slippage override
-  (VIB-2180, #2508)
-- **Curve NG** intent-test support + drop dead skip guards (VIB-4822 /
-  VIB-4823 / VIB-4824 / VIB-4836, #2445)
-- Curve LP asset-set resolver (VIB-3946, #2577)
-- **TraderJoe V2** teardown LB-pair address + pool auto-detect (VIB-4877 /
-  VIB-3100, #2578)
-- **Token registry** canonical BTCB on BSC (decimals=18) — registry/cache +
-  aster_perps + pancakeswap demos + binance + coingecko maps (#2505)
-- **Teardown** classify execution-failure reasons before slippage escalation
-  (VIB-4532 / VIB-4664 / VIB-4258, #2507)
-- Teardown: invalidate MarketSnapshot cache before each snapshot bracket
-  (VIB-4906, #2516)
-- Teardown: warm + validate price oracle before compile (VIB-4842, #2465)
-- Teardown: emit position_events from Lane B `commit_teardown_intent`
-  (VIB-4895, #2501)
-- Teardown: prevent duplicate `position_events` CLOSE row (VIB-4904, #2504)
-- Teardown: TOKEN/swap teardown ledger + no-position-event boundary (VIB-4790,
-  #2514)
-- **Execution**: clamp simulation-enabled gas estimate to compiler floor
-  (VIB-4915, #2515)
-- **Accounting** sweep: eliminate silent token-decimal fallbacks (VIB-3164,
-  #2556)
-- Accounting: re-stamp MarketSnapshot scope before post-exec snapshot
-  (VIB-4926, #2549)
-- Accounting: surface matched PnL on partial-match SWAPs (VIB-4905, #2518)
-- Accounting: dedup positions by canonical identity (stops confidence
-  poisoning + NAV double-count) (VIB-4838, #2453)
-- Accounting: attribute LP close to its own co-pool open (VIB-4275 / VIB-4301,
-  #2459)
-- Accounting: `wallet_total_value_usd` no longer double-counts TOKEN pseudo-positions
-  (VIB-4909, #2530)
-- Accounting: exclude wallet pseudo-positions from `total_value_usd` (#2541)
-- Accounting: debt-net dashboard NAV for open leveraged-lending positions
-  (VIB-4983, #2590)
-- Accounting: `lp_dual` / `lp_triple` LP sizing clamps to configured
-  allocation (VIB-4917 / VIB-4787, #2532, #2521)
-- **CLI** correct LP_OPEN/CLOSE `_amount_in_usd` raw-wei conversion (W1-3,
-  #2484)
-- CLI: apply hosted `ALMANAK_STRATEGY_CONFIG` env override to loaded strategy
-  config (#2419)
-- **Strat PnL** suppress headline PnL on SWAP-class fallback (VIB-4907, #2513)
-- **buy_the_dip** report live wallet value in teardown positions (VIB-4910,
-  #2509)
-- **Backtest** remove fabricated LP fee-volume fallback; fail loud (VIB-4849,
-  #2463)
-- **Observability** LP_CLOSE log noise + teardown `cycle_id` binding
-  (VIB-4805 / VIB-4807, #2451)
-- Observability: LP_CLOSE durable hydration fallback (VIB-4839, #2490)
-- **Framework source-inspection guard** — denylist → allowlist + L1 closure +
-  L4a/L4b-single closure (VIB-4901 / VIB-4886, #2517, #2502)
-- **Dashboard** resolve `deployment_id` via `mode.py`, drop "deployed"
-  fallback (#2409)
-- Dashboard: multi-indicator TA as one shared-axis subplot figure (VIB-4982,
-  #2589)
-- **Postgres** `PostgresStore.get_position_registry_open_rows` + insert
-  backfill (VIB-4794, #2410)
-- Postgres teardown: align `mark_failed` signature with Protocol (VIB-4338,
-  #2446)
-- Synthetic flash-loan metadata completeness guard + manifest order-collision
-  guard (#2622 follow-up internal hardening)
-- **Intent-tests** unskip VIB-4820 / VIB-4821 / VIB-4825 coverage + Across
-  BRIDGE for Linea (#2449, #2475)
-- **CI**: rename committed accounting fixture off reserved `almanak_state.db`
-  name (#2523)
-- CI: regenerate docs before public-sync rsync so `docs/cli/` exists (#2442)
-- CI: wire `uniswap_v4` sidecar regression coverage (VIB-4543, #2519)
-- Static-tests gateway-isolation allowlist drift (VIB-4817, #2438)
-- Reporting: detect connector strategy classes generically (#2634)
-- Reporting: route legacy connector renderers through registry (#2633)
-- Reporting: discover connector-owned report sections (#2630)
-
-## [2.16.0] - 2026-05-22
-
-### BREAKING — VIB-4281 Retired PAUSE / RESUME lifecycle commands
-
-The `PAUSE` and `RESUME` lifecycle commands have been removed from the gateway's
-`LifecycleService`. The runner accepts only `STOP`; the V2 platform's pause and
-resume endpoints return `410 Gone`. The three-action UX model is **Stop** (kill
-pod, leave positions, hits `/v2/agent/terminate`), **Teardown** (unwind then
-exit, hits `/v2/agent/stop`), and **Emergency Stop** (`kubectl delete`).
-
-The `PAUSED` state is no longer in the gateway's writable vocabulary, but
-historical `agent_state` rows still readable for backwards compatibility.
-
-Local SDK behaviour: `almanak strat pause` / `almanak strat resume` CLI surfaces
-still return success at the CLI layer (they route through
-`DashboardService.ExecuteAction`, not the lifecycle channel) but the queued
-PAUSE/RESUME row is now silently dropped by the runner with a `WARNING` log.
-Scripts that called `almanak strat pause --wait` will time out waiting for a
-`PAUSED` status that never arrives. Use `almanak strat stop` instead; a future
-PR will remove the broken CLI surfaces. Direct callers of
-`LifecycleService.WriteCommand` (PAUSE / RESUME) or `WriteState` (PAUSED) at
-the gRPC layer do now receive `INVALID_ARGUMENT`.
-
-Migration guidance:
-- Restart a stopped strategy with `restartAgent` / `/v2/agent/restart`
-  (cached-image redeploy). Stop + Restart reconstructs the same in-memory
-  state from `metrics_db` rows.
-
-### BREAKING — VIB-4062 Unified MarketSnapshot
-
-The two `MarketSnapshot` classes that have silently diverged since the
-v1→v2 framework migration on 2026-01-26 are unified into a single canonical
-class at `almanak.framework.market.snapshot.MarketSnapshot`.
-
-**Imports that continue to work**:
-- `from almanak import MarketSnapshot`
-- `from almanak import MultiChainMarketSnapshot` (TypeAlias to MarketSnapshot)
-
-**Imports that now hard-fail with `ImportError`**:
-- `from almanak.framework.strategies import MarketSnapshot`
-- `from almanak.framework.data.market_snapshot import MarketSnapshot`
-
-**Imports that still work but are DISCOURAGED** (kept as transitional re-exports
-to soften the upgrade for existing strategies; will be removed in a future
-release):
-- `from almanak.framework.strategies.intent_strategy import MarketSnapshot`
-- `from almanak.framework.strategies.intent_strategy import MultiChainMarketSnapshot`
-- `from almanak.framework.strategies.multichain import MultiChainMarketSnapshot`
-
-See the migration guide at `docs/migration/vib-4062-marketsnapshot.md`. The
-PRD at `docs/internal/PRD-MarketSnapshotFix.md` is the implementation
-source-of-truth.
-
-**Other changes**:
-- Multi-chain snapshots raise `AmbiguousChainError` on `chain=None` (was: silent
-  default-to-primary). Single-chain snapshots raise `ChainNotConfiguredError`
-  on a chain= mismatch (was: silent ignore).
-- `fork_rpc_url` is neutered on the production strategy surface: the property
-  remains on `MarketSnapshot` for compatibility but returns `None` outside
-  paper trading. Paper trading routes fork-aware reads via internal service
-  adapters. Strategies relying on this attribute for production logic will
-  now silently receive `None`.
-- New public `seed_*` API on `MarketSnapshot` (legacy `set_*` retained as
-  aliases until deprecation).
-- New `MarketSnapshotBuilder` with named factories per runtime surface
-  (`for_strategy_runner`, `for_pnl_backtest_state`, `for_paper_fork`,
-  `for_http_backtest_spec`, `seeded`).
-- Every snapshot now carries `runtime_surface` ∈ `{"local_sdk", "hosted",
-  "pnl_backtest", "paper_fork", "http_backtest", "unit_test"}`.
-- Layered drift-prevention CI gates: AST uniqueness, public-surface lockfile,
-  behavioral return-type contract suite, identity assertion under multiple
-  import orders, caller-bifurcation anti-bypass, private-cache-write
-  anti-bypass, direct-constructor anti-bypass, dynamic-import discovery
-  sweep, lean-import regression test.
-
-### Added
-
-#### Connectors & chains
-- Camelot DEX connector (folded into connector framework alongside Fluid) (#2360)
-- Register `aave_v3` on bnb / mantle / xlayer chains (VIB-4345) (#2272)
-- Register `balancer` on avalanche (VIB-4346) (#2271)
-- Land 3 deferred chain×connector entries + ethereum traderjoe_v2 LP test (VIB-4419) (#2312)
-- Register `stargate` bnb USDT BRIDGE chain (VIB-4354) (#2277)
-- Register `uniswap_v3` on monad + bnb chains (VIB-4349, VIB-4350, VIB-4351) (#2274, #2275, #2276)
-- Register `traderjoe_v2` on bnb, ethereum, arbitrum (VIB-4374–4378) (#2304, #2306, #2307, #2308)
-
-#### Other
-- Per-test gateway sidecar — `managed_serve` entrypoint, `test_controller` HTTP service, `strat test --no-gateway` flag, anvil balance-cache fix (#2351)
-- Gateway `PoolAnalyticsService` + framework thin-client (VIB-4727) (#2389)
-- `multi_lp_dual_range` demo — reference template for multi-position LP dispatch (#2388)
-- Uniswap V4 LP accounting end-to-end V0 (VIB-4426): `lp_v4` fixture + Anvil-Base E2E proof, canonical V4 PoolKey seed registry, V4 `extract_lp_open_data` gateway PoolKey lookup, V4 connector hygiene (#2335, #2339, #2340, #2341, #2342)
-- Accounting QA framework (matrix harness + protocol-agnostic algos) (VIB-4316) (#2257)
-- Layer 5 typed accounting events for TA, LP, Looping (VIB-4085 / VIB-4086 / VIB-4087) (#2161)
-- Accountant Test cell #22 registry coherence (VIB-4201 / T15) (#2221)
-- UniV3 LP registry-mode cutover (VIB-4198 / T12) (#2214)
-- L0 persistence-invariant sweep (VIB-4193 / T07) (#2215)
-- `position_reference` JSON shape on accounting_events (VIB-4196 / T10) (#2211)
-- Stamp per-primitive `primitive_version` on every event (VIB-4166) (#2206)
-- `MatchingPolicy.for_primitive()` typed accessor (VIB-4195) (#2204)
-- `Intent.registry_handle` reserved field (VIB-4192) (#2205)
-- Reclassify BRIDGE → TRANSFER + gateway whitelist (VIB-4164) (#2196)
-- Category-handler registry + transfer stub (VIB-4163) (#2194)
-- Canonical primitives taxonomy module (VIB-4161) (#2181)
-- Five placeholder IntentType values + fail-fast compiler guard (VIB-4165) (#2199)
-- `agent_tools` PolicyEngine refuses placeholder primitives (VIB-4167) (#2203)
-- Aerodrome Slipstream local readiness W1+W2+W3 (VIB-4434) (#2331)
-- Aave V3 pre-state `e_mode_category` + `interest_rate_mode` (VIB-4213 / T27) (#2286)
-- PancakeSwap V3 LP — `extract_lp_open_data` + 1-pos & 2-pos fixtures (#2248)
-- SushiSwap V3 LP — `extract_lp_open_data` + 1-pos & 2-pos fixtures (#2247)
-- Aerodrome Slipstream LP — `extract_lp_open_data` + 1-pos & 2-pos fixtures, E2E Anvil verified (#2241)
-- `lp_triple` fixture — order-invariant 3-LP position tracking (VIB-4185) (#2244)
-- `lp_dual` fixture (2 LP positions, basis-pool FIFO) (#2228)
-- Compile-time borrow capacity pre-flight for lending intents (#2129)
-- Intent-coverage gate (opt-out warn-only → enforce by default) — VIB-4298 / VIB-4303 (#2246, #2263)
-- Intent-coverage excused YAML (50 structural cells) (VIB-4309) (#2261)
-- Intent-coverage backlog (98 tests + 3 fixes) (VIB-4307) (#2253)
-- 9 BridgeIntent tests + retire LiFi BRIDGE / FlashLoan / aggregator SWAP (VIB-4341, VIB-4309) (#2267)
-- AST attribution for BridgeIntent + FlashLoanIntent (VIB-4340) (#2264)
-- `ConnectorRegistry` foundation (VIB-4302 / VIB-4298 PR 1) (#2242)
-- Aerodrome §8 follow-up bundle (W5+W6+W7+W8) (VIB-4468) (#2333)
-- VIB-4285 factory UX + 3 mixed-primitive accounting fixtures + dashboard UX (#2237)
-- VIB-4488 Morpho post-merge cleanups (4 tickets) (#2343)
-- VIB-4488 Morpho looping G15 cell + L3 HF guard (16/21 → 17/21+) (#2336)
-- DashboardService RPCs + reconciliation primitives (VIB-4493 Phase 1) (#2337)
-- Dashboard template-renderer scaffold + double-title fix (#2352)
-- Dashboard hosted-parity single-strategy entrypoint (Problem A1) (#2372)
-- Dashboard gateway-backed Positions + Lifecycle wired into LP template (Problem A2) (#2373)
-- Dashboard TA chart subplot — `prepare_ta_session_state` for OHLCV + RSI + buy/sell markers (#2368)
-- Dashboard position alias, positions table, range-history plot (#2326)
-- Dashboard position-value fixes for `lp_dual` audit + multi-position panel (#2290)
-- Dashboard trade-tape readability — LP +/fees, failure reason, datetime, TA exports (#2160)
-- Dashboard reconciliation tab wired + delete unverified-lane scaffolding (VIB-4548) (#2348)
-- Dashboard authoring docs (#2177)
-- 5 framework dashboard templates bake in 3 accounting sections (#2176)
-- RSI custom dashboards (4 strategies) (VIB-3975) (#2325)
-- OHLCV single composition path — factory + dashboard API (VIB-4347) (#2270)
-- Gateway announces `INITIALIZING` state from strategy-pod gateway (#2310)
-- Gateway stamps running almanak version on `agent_state` writes (#2138)
-- Gateway `SumLedgerGasUsd` RPC (#2255)
-- Postgres state RPCs (hosted half of `SaveLedgerAndRegistry`) — VIB-4205 / T19 (#2239)
-- Gateway migration_state RPCs + cutover boot guard (SQLite half) — VIB-4208 / T22 (#2230)
-- `RegistryAutoCollisionError` typed exception (VIB-4200 / T14) (#2222)
-- `save_ledger_and_registry` atomic commit primitive (local SQLite) — VIB-4197 (#2207)
-- Blueprint 28 + `position_registry` schema (VIB-4188 + VIB-4190) (#2197)
-- `PositionService.Reconcile` + `ax positions reconcile` CLI (VIB-4210 / T24) (#2240)
-- Hosted-mode Postgres teardown backend + collapse `is_hosted` forks (VIB-4049) (#2234)
-- Hosted teardown state routed through gateway (VIB-4317) (#2258)
-- `accounting-timeline` rescoped to UX activity feed (VIB-4039 epic) (#2117)
-- `portfolio_snapshots` Phase 4 identity end-to-end (VIB-4091, 8 tickets) (#2162)
-- Config service Phase 6 — typed `AgentToolsConfig` + `FrameworkConfig` submodels migrate framework env reads (#2156)
-- Config service Phase 5 — typed submodels replace 120 env reads (#2152)
-- Config service Phases 0–3 — skeleton, lint gate, gateway boot cutover, Click options helper, strategy schema (#2107)
-- Migrate demo `run_anvil` env reads to config service (VIB-4425) (#2328)
-- Migrate gateway env reads to config service (VIB-4424) (#2324)
-- Migrate framework/service env reads to config service (VIB-4423) (#2313)
-- ALM-2725 report running Almanak version (#2168)
-- `/pr-merger` Stage 6.5 step-back drift check skill (VIB-4141) (#2173)
-- UAT-GATE v2 + pr-merger blocked-PR diagnosis + targeted kitchenloop skills (#2171)
-- `kitchenloop` prd-shred phase for large architectural PRDs (#2198)
-- `kitchenloop` demo-gate re-run gate before PR creation (VIB-4181) (#2190)
-- `accountant` Blueprint 27 v2 rewrite + native-gas in PnL (VIB-4224 ACC-01 + VIB-4225 ACC-02) (#2208)
-
-### Changed
-
-- Fold Uniswap V3 compiler into connector (#2350)
-- Fold Curve compiler into connector (#2354)
-- Fold Fluid / Camelot compilers into connectors (#2360)
-- Fold phase 2 compilers into connectors (#2375)
-- Coverage W1 — accounting category-handlers + basis decomposition (VIB-4078) (#2145)
-- Coverage W2 — gateway services: simulation, funding-rate, dashboard (VIB-4079) (#2149)
-- Coverage W3 — CLI hotspots Phase 4 follow-on extractions (VIB-4080) (#2153)
-- Coverage W4 — dashboard scope clarification (VIB-4081) (#2154)
-- Coverage W5 — backtesting long tail: dead code + paper/engine + risk/reconciler (VIB-4082) (#2157)
-- Coverage W6 — Pendle compilers Phase 2 follow-on (VIB-4083) (#2158)
-- Ratchet `fail_under` floor 72 → 75 (e64c8f028)
-- Audit-engine consolidation + Empty≠Zero deletion (VIB-4228) (#2201)
-- Re-point 4 consumers at `primitives.taxonomy` + per-primitive `matching_policy_version` (VIB-4162) (#2192)
-- Split CDP/LIQUIDATION from LENDING placeholder mapping (VIB-4248) (#2209)
-- Per-protocol extraction-spec overlay (VIB-4320) (#2269)
-- Config service Phase 4b — private key via kwarg, no `os.environ` mutation (#2111)
-- Config service Phase 4c — centralise `ALMANAK_STRATEGY_FOLDER` mutation (#2112)
-- Retire PAUSE/RESUME commands and PAUSED state (VIB-4281) — see BREAKING (#2266)
-- VIB-4218 / T18a — UniV3 LP 21-cell post-T12 baseline (#2219)
-- Layer 5 Uniswap V3 LP assertions added (#2359)
-- Layer 5 Uniswap V4 LP assertions (VIB-4594) (#2369)
-- Layer 5 TraderJoe V2 LP assertions (VIB-4598) (#2366)
-- Layer 5 Morpho Blue lending assertions (VIB-4604) (#2367)
-- Layer 5 Compound V3 lending assertions (VIB-4603) (#2365)
-- Layer 5 Aerodrome + Slipstream LP assertions (VIB-4597) (#2364)
-- Layer 5 Aave V3 lending assertions (VIB-4593) (#2361)
-- Layer 5 SushiSwap V3 LP assertions, all chains (VIB-4595) (#2363)
-- Layer 5 PancakeSwap V3 LP assertions, all chains (VIB-4596) (#2362)
-- Intent-tests for traderjoe_v2 SWAP / LP_OPEN / LP_CLOSE across bnb / ethereum / arbitrum (VIB-4371–4378) (#2300–#2308)
-- Intent-tests for uniswap_v4 SWAP / LP_OPEN / LP_CLOSE / LP_COLLECT_FEES across base / optimism / polygon / avalanche / bnb (VIB-4355–4373) (#2280–#2302)
-- Intent-tests for pancakeswap_v3 base SWAP + LP_OPEN/CLOSE/COLLECT_FEES (VIB-4352, VIB-4353) (#2278, #2279)
-- Intent-tests for uniswap_v3 monad + bnb + avalanche LP / SWAP / COLLECT_FEES (VIB-4348, VIB-4349, VIB-4350, VIB-4351) (#2273–#2276)
-- Optimism aerodrome SWAP intent tests + Zodiac permissions (VIB-4389) (#2319)
-- Optimism aerodrome LP_OPEN + LP_CLOSE intent tests (VIB-4390) (#2318)
-- xfail fork-pin flakes (VIB-4314, VIB-4590) (#2355)
-- Restore sushiswap_v3 SWAP coverage (#2136)
-- BNB pancakeswap_v3 insufficient-balance compile failure intent test fix (#2151)
-- Switch xlayer Uniswap V3 swap to USDT0/USDG (#2133)
-- VIB-4199 / T13 — bug #2130 acceptance test (local-mode) (#2224)
-- VIB-4216 — anti-bypass guard for open-position queries (T30) static test (#2210)
-- VIB-4194 — UniV3 L1 offline goldens incl. `expected_registry_row.json` (T08) (#2212)
-- T02 Tier-1 parser-coverage audit (VIB-4187, Hard Gate 1) docs (#2200)
-- Improve intent-test CI RPC proxy caching (#2121)
-- Sync hand-written docs pages with current SDK state (#2142)
-- Migration spec — T04 Hard Gate 3 cutover for `position_registry` (VIB-4189) (#2202)
-- Catch primitives + position-registry blueprint docs up to 2026-05-11 main (#2229)
-- Blueprints + docs + skill sync to 2026-05-12 main (audit-driven catch-up) (#2243)
-- AGENTS.md slim from 556 to 423 lines (#2220)
-- AGENTS.md — refactor (not allowlist) is the default when CRAP trips (#2134)
-- AGENTS.md — drop uv references; add `almanak strat test` (#2137)
-- E2E flow non-negotiables — add uv-run prefix (#2226)
-- Lending pre/post-state pipeline blueprint + QA cleanup (VIB-3474 shipped) (#2217)
-- Boundary doc — T01 accounting × position registry (VIB-4186) (#2195)
-- VIB-4426 V0 last-mile session report + scalability proof (#2344)
-- VIB-1939 audit — close as resolved + mark W9 done (#2334)
-- VIB-4299 config-service Phase 7 completion record (#2329)
-- Strategy-layer docs — multi-position dispatch one Intent per iteration (#2387)
-- Dashboard docs — canonical `api_client` kwarg in LP examples + regression test (#2380)
-- Dashboard plots package exports + blueprint 23 alignment with actual API (#2155)
-- Dashboard anatomy split into template vs custom paths (#2180)
-- Delete blueprint 09; consolidate dashboard docs into 22 + 23 (#2159)
-- Connector additions documented as required step — ConnectorRegistry (#2245)
-- UAT-card test inventory restored (17→41) (VIB-4210) (#2249)
-- CRAP refactor protocol skill — blueprint-first, Plan-agent handoff, test baseline (#2178)
-- `pr-merger` Stage 4 skill — name CI checks where easy fix is wrong fix (#2175)
-- Bump almanak-code to v1.0.13 (#2144)
-- Bump almanak-code to v1.0.15 (#2179)
-- Misc cleanup — salvage stranded commits + preserve history + drop 14 superseded notes (#2174)
-- Cleanup batch — remove 341 stale internal docs/notes (#2001)
-- Drop stale MarketSnapshot import paths post-VIB-4062 (#2172)
-- Strip Linear ticket refs from user-visible strings (#2163)
-- CI — notify platform repo after RC artifacts publish (#2268)
-- CI — backfill_runtime_images workflow for older SDK releases (#2135)
-- CI — refresh `runtime-image-prepull` DaemonSet after every release (#2139)
-- CI — fix `gke-gcloud-auth-plugin` install on apt-managed gcloud (#2143)
-- Kitchen loop iter 177 / 178 / 179 artifacts (#2184, #2186, #2188)
-- Kitchen loop hotfix tickets in Todo + Triage rescue (VIB-4179) (#2189)
-- Wave 1 accounting/portfolio/teardown/simulator fixes (VIB-4581/4584/4587/4588) (#2353)
-- F1 PRD artifacts + Codex P2/P4 fixes (VIB-4159 follow-up) (#2213)
-- Codex-reproduced bug bundle — VIB-4178 + VIB-4310 + VIB-3210 (#2256)
-- Add `crap-diff-fresh` make target for CI-parity local CRAP gate (#2218)
-- Dependency updates:
-  - bump `actions/cache` from 4 to 5 (#2059)
-  - bump `google-github-actions/setup-gcloud` from 2 to 3 (#2164)
-  - bump `gitpython` from 3.1.47 → 3.1.49 (#2167)
-  - bump `gitpython` from 3.1.49 → 3.1.50 (#2193)
-  - bump `mako` from 1.3.11 → 1.3.12 (#2166)
-  - bump `urllib3` from 2.6.3 → 2.7.0 (#2238)
-
-### Fixed
-
-- Submitter receipt-recover from "nonce too low" to prevent zombie positions (#2358)
-- LP_CLOSE fees-vs-principal conflation on UniV3 / PancakeSwap V3 (#2385)
-- Block-anchored lending post-state reads (VIB-4589 / F7) (#2357)
-- Stale gateway balance cache + S2 preflight design (VIB-4613, VIB-4614) (#2356)
-- `SwapEventPayload` tolerates unmeasured `amount_in` / `amount_out` (VIB-4490, G6 unblock) (#2338)
-- Wire Track-C `position_state_snapshots` through gateway (VIB-4541) (#2347)
-- Drop WETH from `lp_v4` anvil_funding + re-baseline (VIB-4538) (#2345)
-- Fall back to TokenResolver for Aave V3 reserves missing from static registry (#2327)
-- Re-baseline `lp-uniswap_v4-base` LP4 PASS → XFAIL (VIB-4426) (#2332)
-- Morpho looping repay liquid wallet balance before WITHDRAW (#2330)
-- Morpho SUPPLY consumes `supply_collateral_amount` (VIB-4437, MorphoMay15 F2) (#2322)
-- Morpho pre-state resolves loan_token from registry for SUPPLY / WITHDRAW (VIB-4432) (#2321)
-- PriceAggregator fails closed on 2-source divergence (VIB-4439, MorphoMay15 F1) (#2323)
-- Silence misleading "free public RPC" log (VIB-4429) (#2317)
-- Avoid doubled "dashboard" in loading spinner label (#2314)
-- Hosted strategy dashboards general improvements (#2390)
-- Token-decimals-aware tape formatter (WBTC dust) (VIB-3890) (#2371)
-- `test_controller` pre-sets `ALMANAK_GATEWAY_ALLOW_INSECURE` so `managed_serve` subprocess boots (#2374)
-- Runner amount-chaining warning gated on chained 'all' usage (VIB-2036) (#2370)
-- Codex fix — looping demo teardown sequences (#2316)
-- Codex fix — demo teardown routes (#2048)
-- Safe slot probing + revert-reason decoding for FiatToken-proxy funding (#2283)
-- LP payload `pool_address` stored V3 descriptor, not on-chain address (VIB-4396) (#2289)
-- V4 collect-fees flake from live oracle ↔ fork-block coupling (VIB-4427) (#2315)
-- `uniswap_v3` `extract_liquidity` reads wrong slot; strict uint128/uint160 decoding (VIB-4395) (#2288)
-- Aerodrome `extract_registry_payload_open/close` so `position_registry` fills (VIB-4305) (#2251)
-- `swap_handler` resolves address-keyed `token_in` to symbol for `price_inputs_json` lookup (VIB-4304) (#2250)
-- PostgresStore write path for `position_events` (VIB-4315) (#2254)
-- `state_service` asyncpg datetime binding in `UpdateMigrationState` / `MarkBackfillComplete` (VIB-4313) (#2252)
-- Augmentation chokepoint reads `position_registry` (VIB-4278, closes L5_22) (#2236)
-- Guard against pool-descriptor strings at LP consumer sites + producer sweep (VIB-4274) (#2231)
-- `lp_dual` explicit `registry_handle` per leg (VIB-4279) (#2233)
-- Wire LP wallet-basis hooks (VIB-4262, G6 reconciliation closer) (#2225)
-- Populate lending `_before` fields from `pre_state_json` (VIB-4257) (#2223)
-- Merge intent-token prices into teardown ledger oracle (VIB-4318) (#2260)
-- Emit `il_usd` and `hodl_value_usd` on LP close (VIB-4319) (#2259)
-- Rotate Pendle test fixture to live YT-sUSDe-13AUG2026; flag expiries in intent tests (#2235)
-- CoinGecko fail fast on 429 with one bounded 1s retry instead of compounding backoff (#2232)
-- CI mirror BNB fork-block pin to framework-canonical BSC env var (VIB-4003) (#2140)
-- State machine — classify host-unreachable RPC errors as permanent (VIB-1215) (#2187)
-- State machine — expand non-retryable keywords for market/pool/Drift errors (VIB-2866) (#2182)
-- Submitter — decode TraderJoe V2 custom error selectors (VIB-3102) (#2183)
-- Demo-runner — clear `ALMANAK_CHAIN`/`CHAINS` in `run_demo.py` subprocess env (VIB-4177) (#2185)
-- `pr-manager` waits for maturing PRs in post-batch loop (VIB-4180) (#2191)
-- `_fund_anvil_wallets` honors `settings.private_key` fallback (#2170)
-- Expose Quant Data Layer methods on canonical MarketSnapshot (ALM-2696) (#2125)
-- `pcs-v3` swap parser preserves "Empty != zero" (#2127)
-- Teardown retries init under WAL contention; surface init failures (ALM-2705) (#2119)
-- Detect stale CEX upstream + failover to keep RSI fresh (ALM-2697) (#2120)
-
-### Security
-
-- PriceAggregator fails closed on 2-source divergence — prevents single-source manipulation of LP/oracle prices (VIB-4439) (#2323)
-
-## [2.15.0] - 2026-04-23
-
-### Added
-
-- Aerodrome Slipstream (CL) connector for Base - full CL LP lifecycle: `lp_open`, `lp_close`, `collect_fees`, plus `aerodrome_slipstream_lp` demo strategy (VIB-3321) (#1688)
-- `StrategyDataRequirements` - strategies declare data dependencies; runner skips unused fetches (VIB-3392) (#1821)
-- Generalized ERC-4626 vault dispatch - `Intent.vault_deposit` / `vault_redeem` now works with any compliant vault, not just MetaMorpho (VIB-3363) (#1795)
-- `SaveLedgerEntry` RPC on `StateService` - structured trade records persisted to the transaction ledger (VIB-3201) (#1794)
-- On-chain Zodiac Roles permission verification harness with SWAP, LEND, and LP dispatch coverage (#1819, #1822, #1823, #1824)
-- `DATA_ERROR` escalation - HOLD cycles caused by critical market data failures now surface as `DATA_ERROR` instead of counting as silent no-ops (#1810)
-- `ax resolve` expanded via Pendle API + auto-spawns gateway if none is running (#1772)
-
-### Fixed
-
-- Token aliases: ETH and DAI.E resolved to canonical on-chain addresses (#1747); BTC aliased to BTCB on BSC (#1796); POL preferred over MATIC for Polygon native (#1820)
-- Polymarket now routed entirely through the gateway - no direct network calls from strategy container (#1808, #1816)
-- Gateway: `CancelledError` unmasked in audit wrapper; dynamic token resolution restored (#1769)
-- Runner: stuck-resume now runs before the circuit-breaker gate for multi-chain strategies (#1674)
-- Runner: reconciliation enforcement gated behind config flag (defaults to observation mode) - VIB-3158 / VIB-3348 (#1803)
-- Runner: `ACCOUNTING_FAILED` duration includes snapshot-phase time; `_consecutive_errors` double-count eliminated (#1777, #1786)
-- Execution: `_emit_event` None guard; error propagated from receipt in `_phase_enrich`; `_init_pipeline_state` failures routed through exception handler (#1669, #1670, #1671)
-- GMX perp lifecycle: teardown state transition and USD price resolution (#1644)
-- Simulator: `eth_estimateGas` now times out instead of hanging indefinitely (VIB-3295) (#1645)
-- Dashboard: 8-issue latent bug bundle (#1750)
-- CLI: latent bug bundles in run, status, and backtest helpers (#1689, #1695, #1744, #1754)
-- Gateway: OKX data extraction latent bugs (#1760)
-- Uniswap V4 direction fallback; ledger `Decimal(0)` init (#1774)
-- Gateway client pre-validated before strategy loop starts (#1676)
-
-## [2.14.0] - 2026-04-21
-
-### Added
-
-- Curvance isolated lending connector on Monad with 2 markets and intent-compiler wiring (#1563)
-- Aster Perps connector extracted from `pancakeswap_perps` into canonical `aster_perps` package with `broker_id=0` (raw Aster attribution); `pancakeswap_perps` becomes a thin compatibility shim defaulting `broker_id=2` and emitting a `DeprecationWarning` once per process (#1547)
-- `aster_perps_basic` demo strategy: 3x BNB/USD long with open + close round-trip on BNB Anvil fork (#1547)
-- `PerpCloseIntent.position_id` field: close Aster positions directly through the IntentCompiler instead of the direct-SDK workaround; bytes32 validation enforced at intent construction (#1547)
-- Aster Perps 4-layer intent tests: close-via-intent, keeper settlement with broker=0 attribution, min-notional rejection (#1553)
-- Aster DEX Phase 2 research artifacts in `docs/internal/discussions/` (PRD, research brief, RQ-1 Diamond-topology memo) (#1552)
-- `edge_polymarket_megaeth_tail` demo strategy with `max_price` threading (#1565)
-- `almanak strat pnl -s` dedicated PnL view (#1599)
-- `almanak strat check` preflight command (#1572)
-- `almanak ax lp-list`, `lending-list`, `portfolio` read commands (#1536)
-- `almanak ax lending-supply`, `lending-borrow`, `lending-repay`, `lending-withdraw` shortcuts with quieter CLI output (#1535)
-- Persistent compiled-bundle cache across `ax` CLI invocations (#1538)
-- `--chain` flag on `ax balance`, `price`, `swap`, `unwrap` (#1583, #1594)
-- `ALMANAK_CHAIN` env var overrides `config.json` chain (#1550)
-- Config-driven perps direction (LONG/SHORT) in scaffolded strategies (#1574)
-- Deeper auto-generated tests for scaffolded strategies (#1578)
-- `StrEnum` state machines in scaffolded templates (#1576)
-- `get_status()` enriched per template with state/pnl/health (#1600)
-- `validate_config()` lifecycle hook on `IntentStrategy` (#1571)
-- Unified `HealthFactorProvider` for Aave / Morpho / Compound (#1575)
-- Protocol-aware variant resolution in `market.balance()` (e.g. aUSDC vs USDC) (#1582)
-- Protocol-fee extraction interface on `ResultEnricher` (#1602)
-- BRIDGE result enrichment with typed `BridgeData` (VIB-3226) (#1628)
-- Realized `slippage_bps` populated across the swap slippage path and all receipt parsers (VIB-3203) (#1601, #1606)
-- Dynamic gas-worthiness gate in the data layer (VIB-3177) (#1577)
-- USD-denominated per-tx value cap in the execution path (VIB-3133) (#1568)
-- Real pre/post balance reconciliation in the runner with `SwapIntent` enforcement (VIB-3158) (#1570)
-- Mandatory accounting persistence in live mode (VIB-3157) (#1585)
-- Atomic state writes (fsync+rename) across all backends (VIB-3156) (#1584)
-- Compile-time (market, collateral) validation in GMX V2 perps compiler (VIB-3173) (#1573)
-- Compile-time (market, collateral) validation in Drift perps compiler (VIB-3202) (#1596)
-- PnLAttributor v2 with real IL + `fee_pnl` attribution (VIB-3205) (#1604)
-- 12 previously-missing connectors surfaced in `almanak info matrix` (#1566)
-- Prediction-market category added to `almanak info matrix` with Polymarket (VIB-3139) (#1579)
-- `backtest pnl` auto-discovers a local `strategy.py` when `-s` is omitted (VIB-2917) (#1542)
-- Connector RPC/HTTP routed through the gateway with retry policy (enforces the gateway boundary) (VIB-2986) (#1533)
-- Compile-time RPC reads routed through the gateway (#1618)
-- SPL mint RPC fallback for long-tail Solana tokens (VIB-2990) (#1534)
-
-### Changed
-
-- Fail-closed semantics in the compiler: pool validation, price-impact checks, tick math (VIB-3160) (#1587)
-- Fail-closed `ResultEnricher` with a three-variant extract contract (VIB-3159) (#1586)
-- Chain-aware token resolution and pricing across the data layer (#1613, #1616)
-- Placeholder price fallbacks removed from swap adapters (fail on missing oracle instead of pricing wrong) (VIB-3134) (#1589)
-- Polymarket requires explicit price anchors and fails fast on missing env vars (VIB-3131, VIB-3132) (#1567)
-- `backtest pnl` `total_return_pct` now reports actual percentage (33 = 33%) instead of a decimal fraction (VIB-2915) (#1541)
-
-### Fixed
-
-- Aerodrome `LP_CLOSE` accepts a bare pool address as `position_id` (#1632)
-- Demo LP teardown state recovery (#1629)
-- `morpho_looping` `_total_collateral` updates on SUPPLY and persists across restarts (VIB-3297) (#1641)
-- Demo Aave Arbitrum strategies switched from WETH to wstETH (VIB-3294) (#1643)
-- Runner reconciliation treats an empty mismatch list as success (VIB-3292) (#1640)
-- Gateway `MetricsInterceptor` initializes status before awaiting (VIB-3293) (#1642)
-- BridgeIntent destination fields resolved in the runner (VIB-3223, VIB-3224) (#1614)
-- Bridge-wait poll catches all exceptions so the failure callback always runs (#1651)
-- Bridge source-TX verification no longer uses a direct Web3 client; routes through the gateway (#1653)
-- `leverage_loop_cross_chain`: experimental warning, stall fix, live-position tracking (#1654)
-- Slippage-breach timeline event sets `last_execution_result.error` before emitting (#1652)
-- Token symbol extraction strips pool-type suffixes (volatile/stable/cl) to stop noisy oracle misses (#1658)
-- Native-in swaps skip the ERC20 allowance step (VIB-3135) (#1592)
-- Compiler price oracle expanded with wrapped/native aliases (VIB-3136) (#1580)
-- Polygon MATIC<->POL alias added; hardcoded price fallbacks removed (VIB-3137) (#1591)
-- Runner `_TYPE_MAP` covers `lp_collect_fees` and `vault_deposit` (VIB-3183) (#1593)
-- Runner `wrap_native` added to `inner_runner._TYPE_MAP` (VIB-3143) (#1581)
-- Runner classifies CLOB 4xx rejections as non-retryable (VIB-3141) (#1588)
-- Compound V3 base asset validated on borrow/repay (#1620) (#1636)
-- Native supply/borrow emits a wrap tx on Aave-compatible lending protocols (#1619) (#1633)
-- Spark native repay: fail-fast + wrap tx (#1621) (#1634)
-- Kamino: fail-fast on non-Solana dispatch (#1622) (#1635)
-- Fluid `trade_size_usd` reduced to stay within pool capacity (VIB-2844) (#1557)
-- `HotCache` deep-copies on get/set to stop mutable state leak (VIB-3155) (#1569)
-- Polymarket CLOB order submission works end-to-end (VIB-3012, VIB-3013, VIB-3014, VIB-3015) (#1537)
-- Polymarket CLOB pre-flight validations run at dry-run (VIB-3140) (#1590)
-- Polymarket passes `protocol="polymarket"` to resolve USDC.e on Polygon (VIB-3219) (#1609)
-- Polymarket `prediction_monitor` snaps off-tick SELL `min_price` to the market tick (VIB-3217) (#1610)
-- Polymarket `Position` backfills `market_id`/`token_id` from `conditionId` (SDK-P2-02) (#1605)
-- Polymarket distinguishes accept from fill in CLOB execution (VIB-3218) (#1611)
-- Polymarket preserves maker/taker ratio and defaults to limit when `max_price` is set (#1562)
-- Backtesting populates `result.position_id` in `on_intent_executed` (VIB-2916, VIB-2918) (#1556)
-- Gateway CLI advertises `ALMANAK_GATEWAY_AUTH_TOKEN` env var (VIB-2920) (#1540)
-- Three regression bugs: anvil auth, Camelot, Fluid (VIB-3032, VIB-1636, VIB-2822) (#1539)
-- Intent tests isolate modules via fork pristine revert (VIB-3059) (#1555)
-- Smoke test pre-funds the `aerodrome_lp` wallet on Base (VIB-3057) (#1554)
-- Sonic Silo V2 edge strategies excluded from nightly (blocked on connector) (VIB-2850, VIB-2851) (#1558)
-
-## [2.13.0] - 2026-04-17
-
-### Added
-- PancakeSwap Perps connector on BSC (ApolloX) with 4-layer intent tests and demo strategy (#1506)
-- PancakeSwap delta-neutral dynamic LP strategy (PCS V3 + PCS Perps hedge on BSC) (#1511)
-- Morpho Blue on Monad with chain-specific deployment and 2 top-TVL markets (#1526)
-- Morpho Blue on Polygon with 3 markets and WPOL/POL token aliases (#1529)
-- Token resolution UX overhaul: 2500-token pre-populated JSON registry, negative cache, `almanak ax resolve` CLI (#1525)
-- DexScreener fallback for EVM symbol resolution (#1530)
-- Gateway address-based pricing for unknown tokens (#1532)
-- 5 new demo strategies: Silo V2, Joe Lend, Euler V2, Lido staker, GMX V2 perp lifecycle (#1520)
-- Top-level `chain` field in scaffold and demo config.json (#1508)
-
-### Changed
-- Remove deprecated TokenRegistry; use `get_token_resolver()` (#1495)
-
-### Fixed
-- Teardown production readiness: unified approval channel, hardened persistence, fail-closed safety (#1521)
-- 0G Chain: Jaine DEX addresses, Gimo StakePool, W0G wrap mapping (#1528, #1502, #1522)
-- Morpho Blue Arbitrum address correction (#1527)
-- Runner lifecycle state reset after error recovery (#1519)
-- Gateway auth token standardization (#1517, #1518)
-- Silo V2 inverted collateral type enum (#1504)
-- Address-only strategy hardening (#1505)
-- PCS Perps Aster rebrand + over-hedge safety (#1514)
-- LP dashboard template key alignment (#1516)
-- MarketService reinitialization on chain info (#1512)
-- Strategy loader skips abstract base classes (#1499)
-- SQLite-only assertion on ensure_schema() (#1531)
-
-## [2.12.0] - 2026-04-14
-
-### Added
-- Euler V2 lending connector on Avalanche and Ethereum with multi-chain adapter (#1409, #1453, #1424)
-- Silo V2 isolated lending connector on Avalanche (#1407)
-- Joe Lend (Banker Joe) lending connector on Avalanche (#1404)
-- BenQi lending connector for Avalanche (#1402, #1396)
-- Gimo Finance liquid staking connector for 0G Chain (#1456)
-- 0G Chain (Zero Gravity) integration - enums, gas constants, RPC, token registry, demo strategies (#1456)
-- X-Layer intent tests and documentation (#1416)
-- Yield-aware paper trading with persistent fork, YieldPoker, and PnLBreakdown (#1428)
-- Paper trading teardown - close positions on shutdown (#1441)
-- Dashboard Accounting Phases 1-4 - rich accounting data, identity model, equity curve, traceability (#1457, #1463, #1482)
-- OKX OnchainOS portfolio provider with Balance and DeFi APIs (#1410)
-- `token_funding` field in strategy config.json for declarative Anvil wallet funding (#1406)
-- Agentic cost optimization - tool catalog filtering, token telemetry, HuggingFace guard (#1465)
-- 9 new demo strategies: Morpho+UniV3, Morpho+Enso, Aave+PancakeSwap, Aerodrome+Aave, Compound+Velodrome carry trades, Compound V3 on Polygon, Joe Lend lifecycle, Aave V3 debt probe, BenQi lifecycle (#1468, #1395, #1393, #1367, #1365, #1429, #1433, #1417, #1396)
-- Chain registry and receipt parser registry completeness guard tests (#1446, #1452)
-
-### Changed
-- Upgrade Moralis to v2.2 endpoints for prices and DeFi positions (#1412)
-- Update Meteora DLMM API to new datapi.meteora.ag endpoint (#1390)
-- Bump almanak-code to v1.0.4 (#1476)
-- V4 demo strategies default to Base instead of Ethereum (#1437)
-
-### Fixed
-- Fix asyncio UnboundLocalError in run.py that blocked `--once` runs (#1473)
-- Gate gateway readiness on warmup completion (#1438)
-- Pre-warm price cache before decide() to prevent cold-fork timeouts (#1388)
-- Resolve amount='all' for withdraw/repay intents across all lending protocols (#1380)
-- Retry on HTTP 429 in BaseIntegration instead of failing immediately (#1415)
-- Prevent Compound V3 market IDs from leaking into token resolver (#1442)
-- Compound V3 collateral withdraw_all uint128 overflow (#1363)
-- Fix compiler repay_full bug for native AVAX (#1433)
-- Paper trading balance-delta accounting and chain-ID integrity (#1382)
-- Avalanche connector improvements - 17 issues across 4 lending adapters (#1414)
-- Pendle pre-swap balance check, market coverage, and auto-detection (#1379)
-- Stale Orca pool 404 and Anvil shutdown race (#1377)
-- Add Ethereum token CoinGecko ID mappings for CVX, CRV, COMP, etc. (#1487)
-- Verify Linea token decimals and storage slots (#1447)
-- Anvil funding - WETH deposit() via wrapper, USDC whale impersonation, Sonic WETH (#1389)
-- Make force_action one-shot across 12+ incubating strategies (#1485, #1484)
-- 20+ strategy config and timeout fixes (#1400, #1399, #1392, #1479, #1486, #1480, #1478, #1466, #1430, #1431, #1467, #1474, #1481)
-
-### Removed
-- Remove uniswap_v3_swap_bsc strategy - no V3 liquidity on BSC (#1436)
-
-### Security
-- Bump cryptography from 46.0.6 to 46.0.7 (#1397)
-- Remove leaked artifact, harden public mirror syncignore (#1422)
-
-## [2.11.1] - 2026-04-07
-
-### Changed
-- Allow `almanak strat new -o .` in directories containing only dotfiles (#1374)
-- Bump almanak-code to v0.2.13 (#1362)
-
-### Fixed
-- Fix nightly probe bugs: stranded LP position, phase corruption, missing pre-flight balance checks (#1373)
-- Default balancer_flash_arb demo strategy to HOLD instead of swap to eliminate spurious nightly failures (#1370)
-- Resolve copy replay fixture path relative to test file for pytest-xdist compatibility (#1375)
-- Update allowed chains in gateway troubleshooting docs (add xlayer, sync translations)
-- Update T&Cs link and add Spanish version in docs footer
-
-## [2.11.0] - 2026-04-06
-
-### Added
-- Radiant V2 lending connector (#1334)
-- Paper trading bootstrap with decide() dry-run inference (#1355, #1297)
-- Paper-local token override registry for paper trading (#1356)
-- Paper Trading Dashboard integration (#1342)
-- Dashboard Phase 3 - ledger, data client, export, PM integration (#1327)
-- Structured forensic events with cycle_id correlation (#1319)
-- SavePortfolioMetrics/GetPortfolioMetrics gRPC endpoints (#1354)
-- Multi-provider portfolio valuation with circuit-breaker failover (#1339)
-- Gateway Zerion portfolio integration foundation (#1305)
-- Portfolio valuation reconciliation and snapshot metadata (#1306)
-- Dynamic Binance token resolution for price oracles (#1346)
-- Dynamic token resolution - Jupiter/CoinGecko fallback + Solana guard (#1293)
-- Pre-warm gateway price cache on startup (#1349)
-- Orca SOL/USDC LP Anvil fork support + sdk.py IDL fixes (#1296)
-- Aave V3 lending demo + compiler tests on Sonic (#1315)
-- Spark Protocol wstETH/DAI full lending lifecycle (#1329)
-- Auto-expand teardown complements in @almanak_strategy decorator (#1309)
-- PnL backtest regression tests for uniswap_rsi on Arbitrum (#1323)
-- Compound V3 compiler tests for Optimism and Polygon (#1308)
-- Unit tests for ADX, OBV, CCI, Ichimoku calculators (#1299)
-- 12 new demo strategies across 7 chains covering carry trades, lending, LP lifecycle, and yield stacks
-
-### Changed
-- Codebase hygiene Phase 1+2 - split 9 oversized files into sub-modules (#1341, #1352)
-- Auto-expand teardown complement intent types in permission generation (#1270)
-- Bump Almanak Code to v0.2.12
-
-### Fixed
-- Recompute LP amounts from on-chain sqrtPriceX96 to prevent price slippage reverts (#1288)
-- Route Compound V3 SUPPLY to supply_collateral() for collateral tokens (#1310)
-- Route Compound V3 WITHDRAW to withdraw_collateral() for collateral tokens (#1311)
-- Resolve amount='all' in BridgeIntent compilation by querying from_chain balance (#1275)
-- Morpho Blue repay_full=True uses correct RPC on Anvil fork (#1278)
-- Persist strategy state after each successful teardown intent (#1279)
-- Capture portfolio snapshot on all iteration outcomes (#1324)
-- Add certifi SSL context to RpcService aiohttp session (#1269)
-- Anvil port race condition with retry logic (#1321)
-- Add stETH/rETH to token registry + guard balance() silent-zero (#1287)
-- Paper trading bootstrapping - checksum addresses, preserve symbol case (#1295)
-- Inject simulated_balances from config in dry-run mode (#1291)
-- Auto-default strat new to strategies/incubating/ from SDK root (#1290)
-- Skip gateway timeout in cosmetic token symbol lookups (#1298)
-- Suppress false-positive amount chaining warnings (#1307)
-- Add gas buffer to simulator state-setup execution (#1333)
-- Compound V3 collateral routing, gateway price pre-warm fixes (#1335)
-- Throttle dashboard event spam, harden crash resilience (#1338)
-- Bump Zerion cache TTL from 60s to 300s (#1336)
-- Restore PancakeSwap Aave carry BSC strategy deleted by #1332 (#1361)
-- Authoritative registry files use BASE-WINS conflict resolution (#1268)
-
-### Security
-- Bump cryptography from 46.0.5 to 46.0.6 (#1161)
-
-## [2.10.0] - 2026-04-02
-
-### Added
-- X-Layer chain support with Aave V3.6 carry and LP rebalance demo strategies (#1252)
-- Monad production activation with demo strategies and infra (#1248)
-- Lido stETH + Aave V3 wstETH supply composition on Ethereum (#1228)
-- Morpho Blue wstETH/USDC full lifecycle on Base (#1238, #1261)
-- SushiSwap V3 + Aave V3 T2 composition on Arbitrum (#1256)
-- Morpho Blue + Enso lifecycle on Base (#1255)
-- BENQI leveraged loop + Enso swap + teardown on Avalanche (#1237)
-- Compound V3 lending lifecycle execution on Polygon (#1232)
-- Morpho Blue crisis scenario backtest on Ethereum (#1231)
-- Paper trading tests for Compound V3 + Aerodrome composed strategy (#1235)
-- LST/LRT token addresses for swETH, ankrETH, pufETH, CVX (#1241)
-- Demo strategies included in nightly test suite with test-reporter prompt (#1244)
-
-### Changed
-- Bump almanak-code to v0.2.10 (#1249)
-
-### Fixed
-- Aave/Spark repay_full queries wallet balance instead of sending MAX_UINT256 (#1266)
-- Apply certifi SSL context to all AsyncHTTPProvider instances (#1265)
-- X-Layer RPC public fallback, SSL cert fix, correct USDT0 address (#1264)
-- Compound V3 support added to Polygon rate monitor (#1259)
-- Agni Finance fee tier 3000 to 500 for Mantle swap pools (#1258)
-- TraderJoe V2 extract_swap_amounts uses actual token decimals (#1251)
-- Intent.repay() optional amount when repay_full=True (#1250)
-- Aerodrome LP_CLOSE permission discovery with static removeLiquidity hint (#1243, #1246)
-- Strategy templates use symbolic pool format and provide both LP amounts (#1242)
-- Pendle YT sell floor responds to TeardownManager slippage escalation (#1224)
-- Anvil --no-gas-cap replaced with --block-base-fee-per-gas 0 for all versions (#1253)
-- Batch Quick Win bug fixes: chain-specific WETH in diagnostics, intent state machine fail-fast, teardown retry on SKIPPED, Enso routing (#1236)
-- Nightly test failures: anvil_funding configs, compound_v3 polygon, probe excludes (#1254, #1257)
-
-## [2.9.0] - 2026-04-01
-
-### Added
-- `Intent.wrap()` and `Intent.unwrap()` factory methods for native token wrapping (#1196)
-- Polish circuit breaker for strategy execution quality gates (#1229)
-- Lido enricher exposes wstETH amount for `receive_wrapped=True` (#1230)
-- GeckoTerminal DEX OHLCV fallback with gRPC proxy for deployed mode (#1112, #1200)
-- Teardown intent introspection for automatic protocol discovery (#1193)
-- Morpho Blue Arbitrum support with Uniswap V3 yield stack strategy (#1234)
-- Curve StableSwap 3pool LP lifecycle strategy on Ethereum (#1220)
-- Compound V3 + Enso leveraged swap strategy on Base (#1207)
-- Compound V3 + Aerodrome yield farm strategy on Base (#1194)
-- Morpho Blue + Uniswap V3 leveraged LP strategy on Ethereum (#1197)
-- BENQI + Uniswap V3 leveraged swap teardown lifecycle on Avalanche (#1210)
-- Aave V3 + PancakeSwap V3 teardown lifecycle on BSC (#1211)
-- Compound V3 + Uniswap V3 teardown lifecycle on Arbitrum (#1212)
-- Compound V3 + Aerodrome teardown lifecycle on Base (#1202)
-- Enso swap lifecycle tests on Base (#1233)
-- Velodrome V2 PnL backtest on Optimism (#1177)
-- Almanak brand fonts and consistent footer for SDK docs site
-
-### Changed
-- SDK documentation URL updated from docs.almanak.co to sdk.docs.almanak.co
-- Bump Almanak Code version to v0.2.9
-
-### Fixed
-- Halt strategy runner after teardown failure instead of continuing (#1111)
-- Route Aerodrome pool address query through gateway RPC (#1227)
-- Fix Pydantic intent cloning in teardown slippage escalation using `model_copy` (#1226)
-- Pass `routing_strategy=router` in gRPC EnsoRouteRequest (#1225)
-- Bump Stargate LayerZero fee estimates with route-aware values (#1223)
-- Repair 5 broken demo strategies found by Anvil audit (#1216)
-- Widen Enso slippage on Anvil forks to prevent safeRouteSingle reverts (#1206)
-- V4 receipt parser `extract_position_id` fallback and logging (#1204)
-- Pass config.json to teardown introspection in permissions CLI (#1203)
-- Route portfolio snapshots through gateway gRPC instead of SQLite fallback (#1205)
-- Resolve CoinGecko prices by contract address via registry lookup (#1199)
-- Thread `data_granularity` config into all indicator methods (#1198)
-- Pendle YT teardown auto-mode slippage escalation (#1195)
-- Raise V4 LP estimated-price slippage buffer to 30% (#1192)
-
-## [2.8.1] - 2026-03-30
-
-### Added
-- Aave V3 parameter sweep lending demo on Polygon (#1152)
-- PancakeSwap V3 swap lifecycle demo on Base (#1171)
-- Uniswap V3 swap lifecycle demos on Optimism (#1172) and Base (#1176)
-- Crisis scenario backtest for Compound V3 lending on Polygon (#1173)
-
-### Fixed
-- Prevent unexpected `chains` kwarg in strategy `__init__` (#1178)
-- Add S and WS (Wrapped Sonic) tokens to default registry (#1180)
-- Add WAL auto-checkpoint to prevent SQLite state database bloat (#1184)
-
-## [2.8.0] - 2026-03-30
-
-### Added
-- All 75 demo strategies now accessible via `almanak strat demo` - migrated 59 strategies from `strategies/demo/` into the packaged `almanak/demo_strategies/` directory (#1188)
-- Stub README.md generated for all demo strategies with Quick Start instructions (#1188)
-
-### Changed
-- Demo strategies now live exclusively in `almanak/demo_strategies/` - the `strategies/demo/` directory has been removed (#1188)
-- Updated all path references across framework CLI, tests, blueprints, and agent docs (#1188)
-
-### Fixed
-- V4 LP_OPEN on-chain sqrtPrice query, approve gas estimation, and slippage fallback (#1187)
-- EIP-55 checksum for 3 addresses in demo strategies (#1188)
-- `STRATEGY_METADATA` attribute access in strategy `__main__` blocks (#1188)
-- `force_action="supply"` in aave_borrow no longer blocked by unavailable price oracle (#1188)
-- `default_chain` indentation in 30 strategy decorators (#1188)
-
-## [2.7.0] - 2026-03-30
-
-### Added
-- Uniswap V4 full support: Phase 0 contract verification (#1096), Phase 1 UniversalRouter + Permit2 swap (#1098), Phase 2 PositionManager LP adapter + HookFlags (#1100), Phase 3 hook discovery + hookData encoding (#1119), demo strategies (#1120, #1139), 4-layer intent tests for swap (#1138) and LP lifecycle (#1146)
-- Framework-owned portfolio valuation engine with protocol-specific valuers (#1103)
-- Position discovery service for on-chain position detection (#1127)
-- LP position re-pricing via V3 math (#1109)
-- Lending position re-pricing via Aave V3 on-chain data (#1115)
-- GMX V2 perps valuer for mark-to-market position pricing (#1142)
-- Paper trading valuation alignment with PortfolioValuer integration (#1137)
-- Paper trading batch 2: callback parity, resume CLI, force_action guard (#1084)
-- Paper trading batch 3: indicator fallback, fork RPC, health telemetry (#1091)
-- GMX V2 REST API fallback for position queries (#1086)
-- TraderJoe V2 swap via LBRouter2 for BTC.b routing on Avalanche (#1106)
-- Expose public price_to_tick/tick_to_price utilities (#1124)
-- L3 semantic verification for swap intent tests (#1159)
-- Reference strategies: top 3 curated DeFi examples (#1077)
-- New demo strategies: Morpho Blue paper trade (#1141), Compound V3 PnL backtest on Polygon (#1148), PancakeSwap V3 RSI parameter sweep on BSC (#1165), Velodrome V2 swap on Optimism (#1150), TraderJoe V2 LP on Avalanche (#1151), TraderJoe leveraged LP with auto-compound (#1147), PancakeSwap V3 paper trade on BSC (#1082), Uniswap V3 swap on BSC (#1085), PancakeSwap V3 swap on Ethereum (#1095), Compound V3 + Uniswap V3 leveraged yield on Arbitrum (#1104), Aave V3 + Velodrome V2 leveraged LP on Optimism (#1163), Aave V3 + Enso leveraged swap on Sonic (#1179)
-- Crisis scenario backtests: Aerodrome swap on Base (#1121), TraderJoe V2 LP on Avalanche (#1140)
-- Curve CryptoSwap 4-layer intent test on Ethereum (#1105)
-- Comprehensive V4 ACTION_* byte validation + calldata encoding tests (#1168)
-- 27 unit tests for Compound V3 PnL Polygon strategy (#1166)
-
-### Fixed
-- V4 swap two-layer encoding + correct action bytes (#1160)
-- V4 receipt parser + WETH routing via native ETH pools (#1167)
-- V4 receipt parser Transfer amount-fallback for enrichment (#1131)
-- V4 LP_CLOSE on-chain liquidity query (#1174)
-- Correct Uniswap V4 per-chain addresses from official docs (#1156)
-- Remove stale V4 swap xfail markers + add keccak topic verification (#1164)
-- Deduplicate HookFlags with single source of truth (#1130)
-- Paper trading event loop crash and RSI type mismatch (#1145)
-- Paper trading batch 1: resume URL, hex crash, port contention (#1081)
-- Merge strategy state in runner to prevent position_id loss (#1113)
-- GMX V2 PERP_CLOSE reads on-chain size to stop burning keeper fees (#1094)
-- Aerodrome enrichment swap_amounts fallback + lower log level (#1090)
-- AerodromeSDK checksum failure causes zero slippage protection (#1089)
-- Respect strategy teardown slippage in escalation manager (#1088)
-- LP_CLOSE blocked by price gate when no tokens extractable (#1078)
-- Query on-chain balance in get_open_positions() for swap strategies (#1080)
-- Route Enso API calls through gateway gRPC in deployed mode (#1102)
-- Swap ETH/WETH clarity + suppress batch token resolution warnings (#1101)
-- LocalSimulator state-setup TXs hang on EIP-1559 chains (#1097)
-- Anvil --no-gas-cap crash and strategy init kwargs TypeError (#1092)
-- Anvil mode always uses 9999 gwei gas cap (#1154)
-- Bound Anvil --no-gas-cap version fallback to 0.x series (#1122)
-- Metrics server port conflict with graceful fallback to ephemeral port (#1133)
-- Correct misleading Fluid swap min-amount error (#1093)
-- Decode Fluid DEX pool capacity errors with actionable messages (#1117)
-- Persist portfolio snapshots when using gateway state manager (#1108)
-- Derive Compound V3 support_matrix chains from COMET_ADDRESSES (#1123)
-- Add WETH.e (slot 0) to KNOWN_BALANCE_SLOTS for Avalanche (#1125)
-- Add ATH and TORIVA to default token registry (#1110)
-- Enforce bilateral balance deltas in all swap intent tests (#1158)
-- Dashboard explorer links, duplicate instances, empty protocol (#1175)
-- Publish gateway image to both registries on prod release (#1099)
-- Skip Release workflow for pre-releases (RC tags) (#1107)
-- gasPrice fallback and strategy retry from loop review (#1114)
-
-## [2.6.4] - 2026-03-26
-
-### Added
-- Compound V3 WETH market lifecycle on Arbitrum (#1016)
-- PostgreSQL backend for TimelineStore for deployed dashboards (#1022)
-- Fluid DEX swap intent test with 4-layer verification (#1013)
-- BENQI full lending lifecycle on Avalanche (#1049)
-- Curve 3pool paper trade strategy on Ethereum (#1057)
-- TraderJoe V2 LP bin-width sweep on Avalanche (#1015)
-- Aerodrome LP range_width_pct parameter sweep on Base (#1043)
-- Crisis scenario backtest for Uniswap V3 swap on Arbitrum (#1042)
-- PancakeSwap V3 PnL backtest swap strategy on BSC (#1053)
-- Aave V3 lending parameter sweep on Arbitrum (#1052)
-- Aave V3 paper trade leverage loop on Polygon (#1069)
-- Aave V3 paper trade lending strategy on Polygon (#1074)
-- Uniswap V3 RSI PnL backtest on Arbitrum (#1075)
-- Uniswap V3 RSI parameter sweep on Arbitrum (#1073)
-- SushiSwap V3 PnL backtest on Base (#1072)
-- Aerodrome SWAP + Compound V3 lending lifecycle on Base (#1071)
-- Compound V3 PnL backtest on Base (#1068)
-- SDK marketing video composition (#1076)
-- Bump almanak-code to v0.2.8
-
-### Changed
-- Feature strategy params in optimize/walk-forward CLI help text (#1064)
-
-### Fixed
-- GMX V2 Reader position queries with fallback mechanisms (#1067)
-- Bridge gas estimation: raise default and enable eth_estimateGas for all TXs (#1063)
-- GMX V2 close_position uses sentinel value for full close without cache (#1062)
-- Set SUPPORTED_CHAINS in decorator for multi-chain detection (#1040)
-- Sum Alchemy sub-call gas per transaction instead of flattening (#1061)
-- Balancer flash_arb EOA fallback to swap mode (#1056)
-- Increase pendle_yt_yield teardown slippage for illiquid YT (#1055)
-- Aave borrow teardown withdraw amount resolution (#1054)
-- Suppress unclosed aiohttp ClientSession warning on gateway shutdown (#1047)
-- Increase LocalSimulator state setup timeout from 10s to 30s (#1046)
-- Enable Velodrome/Aerodrome swap compilation on Optimism (#1045)
-- Resolve gateway API keys from ALMANAK_GATEWAY_ prefixed env vars (#1041)
-- Reject deprecated stable interest rate mode for Aave V3 and Spark (#1033)
-- Decode Fluid DEX revert errors and lower demo trade size (#1032)
-- Add on_intent_executed/save_state callbacks to bridge-waiting path (#1031)
-- Use bare API key env var names, add settings fallbacks (#1037)
-- Restore almanak.wallets entry point for sidecar wallet resolution (#1035)
-- Curve LP position_id as address with on-chain balance query (#1030)
-- Initialize EXECUTE_SKIPPED_BACKPRESSURE to prevent unbound variable crash (#1029)
-- Register Curve NG pool LP tokens in token resolver (#1025)
-- Curve NG 4-coin pool receipt parsing: include all coin amounts (#1024)
-- Address 5 chronic Kitchen Loop issues from meta-analysis (#1023)
-- Strip pool-type suffixes from token extraction (#1000)
-- Curve LP extract_liquidity() returns human-readable Decimal (#999)
-- Resolve swap amount decimals from Transfer events instead of defaulting to 18 (#1009)
-- Case-insensitive collateral lookup in Compound V3 adapter (#1017)
-- Increase Anvil funding for 2 failing strategies (#1012)
-- Allow single-chain sidecar mode with ALMANAK_GATEWAY_WALLETS (#1010)
-- Resolve empty wallet_address in multi-chain sidecar mode (#1006)
-- Anvil version detection to skip --no-gas-cap on 0.3.x (#996)
-- Cache parse_receipt in ResultEnricher (#989)
-- Paper trading balance cache and RSI return type (#965)
-- Align Curve LP intent tests with human-readable extract_liquidity() (#1026)
-- Normalize AGENT_ID across all deployed dashboard data paths (#1028)
-- Isolate market service test from CI env vars (#1038)
-- Use COVERAGE_CORE=sysmon for near-zero coverage overhead (#1005)
-
-## [2.6.3] - 2026-03-23
-
-### Added
-- Multi-chain sidecar deployment mode: strategies can run with `--no-gateway` using per-chain wallet config via `ALMANAK_GATEWAY_WALLETS` (#1003)
-
-### Fixed
-- Swap amounts decimals resolved from Transfer events instead of defaulting to 18, fixing wrong values for non-18-decimal tokens like USDC (#997)
-- CLI native fallback command now forwards `--flags` correctly to almanak-code binary
-
-## [2.6.2] - 2026-03-23
-
-### Added
-- Forward unknown CLI args to native almanak-code binary via execv, enabling `almanak acp --dangerously-skip-permissions` passthrough
-
-### Fixed
-- Fix CLI test crashes from `ignore_unknown_options` swallowing subcommand flags
-- Sync all version files (_version.py, SKILL.md) to match pyproject.toml
-- Restore MONAD chain and indicator methods (adx, obv, cci, ichimoku) in strategy-builder skill
-
-## [2.6.1] - 2026-03-23 [YANKED]
-
-### Added
-- Forward unknown CLI args to native almanak-code binary via execv, enabling `almanak acp --dangerously-skip-permissions` passthrough
-
-### Fixed
-- Docs sync: add Agni/Fluid connectors, update strategy-builder skill version
-
-## [2.6.0] - 2026-03-23
-
-### Added
-- Gateway multi-wallet abstraction: per-chain wallet config with cross-chain IntentSequence execution (#970)
-- Price impact guard in compiler: fails swap when quoter deviates >50% from oracle (#988)
-- Fluid DEX connector for Arbitrum with swap support (#904)
-- LinearImpactSlippageModel for PnL backtester: depth-aware slippage (#849)
-- GMX V2 on-chain position reads via Reader contract (#979)
-- PancakeSwap V3 swap lifecycle on BSC (#972)
-- Curve StableSwap NG on Optimism (#952)
-- Curve adapter extended to Base chain + WETH/cbETH pool (#872)
-- SushiSwap V3 swap on BSC + BSC Chainlink price feeds (#878)
-- Agni Finance promoted to first-class protocol on Mantle (#827)
-- Compound V3 on Optimism + Morpho Blue on-chain market fallback (#851)
-- Aave V3 lending lifecycle on BSC (#954)
-- Ethena time-warp lifecycle + unstake selector fix (#886)
-- LP enrichment methods for Curve receipt parser (#824)
-- Pre-built base images for V2 strategy/dashboard deploys (#867)
-- Read-only root filesystem container support (#859)
-- Anvil watchdog auto-restart for crashed forks (#848)
-- Template improvements: looping, funding rates, IntentSequence (#844)
-- anvil_funding added to all strat new templates (#957)
-- Longer CoinGecko cache TTL for stablecoins (#986)
-- PM monitoring: pause/resume, consecutive_errors, pnl, LP fees (#877)
-- 17 new demo strategies across Morpho, Compound, Aerodrome, Curve, Aave, SushiSwap, Enso, Fluid, BENQI
-
-### Changed
-- Stablecoin symbols extracted to shared constant (#956)
-
-### Fixed
-- Startup watchdog no longer kills agents still alive (#998)
-- Curve LP position_id returns LP token address, not minted amount (#985)
-- Warn when --once loads stale state from previous run (#984)
-- Balance retry with backoff and cached fallback (#977)
-- Interest_rate_mode wired through all borrow/repay paths (#940)
-- Paper trading stability: RPC masking, datetime, anvil_reset (#938)
-- Case-insensitive price oracle lookup for mixed-case tokens (#931)
-- Slipstream CL swap event parsing in Aerodrome receipt parser (#928)
-- Reject flash loan compilation for EOA wallets (#923)
-- Curve remove_liquidity slippage via on-chain pool.balances() (#891)
-- PancakeSwap V3 extract_swap_amounts uses actual decimals (#908)
-- AaveV3ReceiptParser: extract_supply_amounts() (#889)
-- Sonic Chainlink feeds + Anvil-only RPC methods (#892)
-- Complete BSC Chainlink support (#883)
-- Curve CryptoSwap slippage protection via price_ratio (#831)
-- Strategy state restored correctly on restart (#865)
-- Ghost RUNNING entries: startup reconciliation + heartbeat TTL (#841)
-- Block TraderJoe V2 swap: LBRouter2 interface mismatch (#833)
-- Quarantine Uniswap V4 swap: fabricated addresses (#832)
-- Stale Aave V3 addresses (BSC/Linea) updated (#945)
-- Make teardown fallback price fetch chain-aware (#896)
-- Populate swap quote fields in dry-run mode (#915)
-
-## [2.5.0] - 2026-03-18
-
-### Added
-- Jupiter Lend connector for Solana lending (#785)
-- Uniswap V4 wired into IntentCompiler with intent tests (#746)
-- Vault intent support in PnL backtester (#778)
-- Wrapped token OHLCV proxy fallback with explicit logging (#815)
-- Production-ready logging improvements (#799)
-- Protocol x chain support matrix expanded: 113 to 131 pairs (#798)
-- CI test for adapter config completeness + fix 6 config gaps (#802)
-- Pendle min_amount_out logged during swap compilation (#789)
-- New demo strategies: Pendle YT yield (#806), Aerodrome RSI (#761), Curve CryptoSwap PnL (#782), Aave V3 PnL lending Polygon (#795), Uniswap V3 RSI sweep (#794), TraderJoe paper trade LP (#783), TraderJoe sweep LP (#766), Solana LST depeg arb (#784)
-- `make test-backtest-service` target (#774)
-
-### Fixed
-- Tenderly/Alchemy gas estimation: dynamic instead of capping (#817)
-- Nonce drift on failed transactions (#805)
-- EIP-55 checksums enforced on all static contract addresses (#788)
-- Skip simulation for approve-family TXs to prevent Anvil hangs (#775)
-- Resolve amount='all' for single intents from decide() (#779)
-- Teardown CLI chain config + deterministic retry guard (#821)
-- Auto-generate session auth token for standalone gateway on mainnet (#808)
-- BSC chain aliases for DexScreener and OHLCV provider (#809)
-- Normalize hyphens to underscores in protocol alias resolution (#810)
-- Chain added to unwrap intent params (#803)
-- Pass --anvil-port through almanak strat run wrapper (#780)
-- Wire TraderJoe bin_range from LPOpenIntent protocol_params to compiler (#772)
-- Log fallback teardown price failures instead of silently swallowing (#777)
-- Explicit is-not-None check for price oracle in all teardown sites (#771)
-- Stale GMX V2 Avalanche Reader/SyntheticsReader addresses updated (#787)
-- Missing Curve in almanak info matrix (#790)
-- ax CLI bugs: gateway noise, --yes flag, standalone crash (#800)
-- LP_CLOSE intent added to Aave+Uniswap yield stack teardown (#760)
-
-## [2.4.0] - 2026-03-17
-
-### Added
-- Solana chain support with Jupiter, Kamino, Raydium, and Drift connectors (#444)
-- BacktestService standalone HTTP API with async submit/poll, paper trading sessions, and fee model export (#616, #634, #741, #742, #740)
-- Runner safety components: CircuitBreaker, decide() timeout, StuckDetector wired into live path (#663, #669)
-- TeardownManager safety path for runner teardown (#681)
-- LP PnL toolkit with impermanent loss estimation, fee tracking, and HODL benchmark (#714)
-- 4-source EVM pricing for production resilience (#640)
-- Zodiac Roles permission manifest generator with Target[] export format (#598, #648)
-- Human-approval actuator for high-value agent trades (#547)
-- Protocol aliasing for Uniswap V3 forks, enabling Agni on Mantle (#769)
-- Uniswap V4 swap connector skeleton (#725)
-- Tenderly simulation support for Sonic, Blast, Mantle, Berachain, Monad (#765)
-- Solana LST yield data provider (#724)
-- CLI: `strat list`, `status`, and `logs` commands (#644)
-- CLI: `info matrix` command for chain/protocol support overview (#707)
-- CLI: `--duration` flag for paper trading (#689)
-- CLI: `--describe` flag for ax tools argument schema discovery (#688)
-- CLI: expose strategy positions via `strat status` (#708)
-- `register_token()` convenience API on TokenResolver (#687)
-- `warmup_days` parameter for crisis scenarios in indicator strategies (#729)
-- Paper trader reads `anvil_funding` from strategy config.json (#728)
-- Exit code 2 on SIGTERM so K8s retries preempted pods (#651)
-- Centralized gateway PostgreSQL schema (#587)
-- BTC.b and sAVAX tokens for Avalanche (#751)
-- `StatelessStrategy` base class for strategies that never hold positions (#720)
-- Berachain demo strategy and intent compilation tests (#723)
-- Pendle and BENQI intent compilation tests (#722)
-- New demo strategies: Aave V3 + Uniswap V3 yield stack on Optimism (#756), Aave V3 paper trading on Arbitrum (#732), Aerodrome LP sweep on Base (#738), TraderJoe V2 PnL backtest on Avalanche (#748), Uniswap V3 paper trade on Optimism (#747), Uniswap V3 RSI PnL backtest on Optimism (#739), Aerodrome LP parameter sweep on Base (#733), Solana Narrative Momentum (#744), delta-neutral yield farm (#670), 9 incubating + 3 vault strategies (#593)
-- Strategy templates overhaul: 8 to 10 production-ready archetypes with working teardown (#647, #710)
-
-### Changed
-- `get_open_positions()` and `generate_teardown_intents()` are now abstract in IntentStrategy; `supports_teardown()` removed - use `StatelessStrategy` for strategies without positions (#720)
-
-### Fixed
-- Harden teardown compilation to avoid placeholder prices on mainnet (#764)
-- Return hold intent on RSI data failure instead of defaulting to 50 (#770)
-- Replace OperatorCard placeholder exposure with real portfolio value (#755)
-- Wire funding_rate_provider through IntentStrategy to MarketSnapshot (#754)
-- Add amount_in_human / amount_out_human aliases to SwapAmounts (#752)
-- Use discounted min_amount_out for Pendle PT/YT sell directions (#750)
-- Register BENQI receipt parser in ResultEnricher registry (#745)
-- Remove silent 18-decimal fallback in Uniswap V4 adapter (#731)
-- Use swapExactPtForToken for Pendle PT sell (#696)
-- Add PT-wstETH to token registry and fix silent teardown skip (#695)
-- Correct wstETH Chainlink feed on Base and add price ceiling (#692)
-- Use actual on-chain position for Morpho Blue withdraw_all (#701)
-- Use correct exchange selector for Curve CryptoSwap/Tricrypto pools (#702)
-- Account for Curve virtual_price in LP estimation (#581)
-- Approve GMX V2 Router for ERC-20 collateral (#713)
-- Add GMX V2 Avalanche EventEmitter address (#703)
-- Correct SetAuthorization event topic hash in Morpho Blue receipt parser (#549)
-- Add integrity validation for gateway token resolution cache writes (#719)
-- CoinGecko 429 rate limit resilience for backtesting (#718)
-- Guarantee async session cleanup in PnLBacktester (#716)
-- Backtest engine QA improvements (#612)
-- Validate crisis scenario dates against CoinGecko free tier limit (#641)
-- Backtest console/output inconsistencies from QA audit (#642)
-- Pre-warm price oracle for flash loan callback tokens (#706)
-- Replace hardcoded fallback prices with live market data (#636)
-- Downgrade price lookup logs to WARNING for unpriceable derivative tokens (#757)
-- Unify token extraction across runner paths (#712)
-- Add pre-flight balance check before submitting transactions (#499)
-- Add pre-flight balance check for unwrap_native intent (#667)
-- Prevent gas-wasting retries on REVERT errors and fix stale balance cache (#694)
-- Skip retries for UNAUTHENTICATED and PERMISSION_DENIED gRPC errors (#643)
-- Restore wait_for_ready retry loop for gateway startup (#717)
-- Wait for gateway readiness with retries before strategy startup (#661)
-- Suppress noisy gateway health check logs during startup (#664)
-- Downgrade noisy gas estimation and retry warnings to debug level (#666)
-- Route gateway logs to stdout and disable ANSI colors in containers (#659)
-- Close data provider in warm_cache_async to prevent event loop crash (#638)
-- Skip amount='all' resolution in dry-run mode for IntentSequence (#691)
-- Resolve amount='all' in flash loan callback intents (#686)
-- Alerting production defaults and post-execution balance reconciliation (#682)
-- Consolidate V3 LP_CLOSE into universal blocked combo (#656)
-- Remove ALCHEMY_API_KEY requirement, use shared RPC config (#628)
-- Unify BSC chain naming with central resolve_chain_name (#579)
-- Harden Solana integration for production readiness (#637)
-- Skip ALMANAK_PRIVATE_KEY in sidecar and safe_zodiac modes (#618, #629)
-- Use platform AGENT_ID for lifecycle state writes (#625)
-- Add GCP severity field to strategy logs (#700)
-- Standardize permissions CLI default to zodiac + permissions.json (#767)
-- Add __round__ to RSIData so round(rsi, 2) works in strategies (#602)
-- Allow all chains in CLI so bridge works (#597)
-- Use keyword args for IntentStrategy instantiation in paper trading (#639)
-
-### Security
-- Close compile_intent nested-params policy bypass (#540)
-
-## [2.3.0] - 2026-03-10
-
-### Added
-- `almanak ax` CLI for direct DeFi actions from the command line (#583)
-- MultiStepStrategy base class for declarative state-machine strategies (#517)
-- BENQI lending connector for Avalanche (#528)
-- Monad chain support (#515)
-- MCP stdio transport server for agent tools (#484)
-- Real risk metrics: VaR, Sharpe ratio, volatility, max drawdown (#481)
-- Real pre-trade risk validation via `validate_risk` (#482)
-- Structured decision tracing for agent tool executions (#485)
-- Standardized agent tools error taxonomy with typed enums (#483)
-- PendleMarketResolver for dynamic market discovery (#458)
-- PolicyEngine runtime state persistence across restarts (#473)
-- MockGatewayClient test fixture for agent E2E testing (#471)
-- Shared IntentExecutionService converging ToolExecutor and StrategyRunner (#479)
-- Structured `iteration_summary` log record (#503)
-- `lending_rate()` added to canonical MarketSnapshot (#461)
-- Pre-flight ALCHEMY_API_KEY check for archive-RPC chains (#556)
-- Nightly market data validation and enhanced Slack reporting (#493)
-- 8 new demo strategies: Morpho Blue paper trade (#578), Aave V3 PnL lending (#577), RSI+MACD confluence LP (#576), PancakeSwap V3 LP lifecycle (#575), Balancer flash loan arbitrage (#567), Compound V3 paper trade (#568), TraderJoe V2 ATR-adaptive LP (#551), Aerodrome paper trade (#518)
-
-### Changed
-- Strategy metadata (description, chain, deployment_id) moved from config.json to `@almanak_strategy` decorator; config.json now contains only tunable runtime parameters (#591)
-
-### Fixed
-- Use ALMANAK_EOA_ADDRESS for safe_zodiac mode instead of derived address (#585)
-- Guard Morpho Blue repay against over-repay underflow (#580)
-- BENQI receipt parser handles malformed event data gracefully (#571)
-- Skip revert diagnostic for compilation failures (#570)
-- Guard against zero gas estimate from eth_estimateGas (#569)
-- Close data provider sessions after PnL backtest completes (#562)
-- Guard CAGR calculation against portfolios losing >100% (#561)
-- Use Enso for almanak_rsi teardown to bypass missing price oracle (#553)
-- Bump Spark, Aave V3, and BENQI gas estimates to prevent TX reverts (#552, #544)
-- Suppress circular import warning on strategy auto-discovery (#543)
-- Add OpenZeppelin error selectors to revert decoder (#542)
-- Resolve swap_amounts enrichment for Enso and gateway path (#541)
-- Correct Arbitrum Curve 2pool USDC address (native -> USDC.e) (#533)
-- LiFi and Pendle receipt parsers return SwapAmounts dataclass (#532)
-- Add PancakeSwap V3 LP_POSITION_MANAGERS for Arbitrum and Ethereum (#531)
-- Add state machine wiring for FlashLoan and Bridge intents (#530)
-- Fix Safe wallet address propagation in strategy runner (#529)
-- Resolve token addresses to symbols in teardown price prefetch (#526)
-- Emit ERROR timeline event on MultiStepStrategy decide() exceptions (#522)
-- Remove double slippage in Pendle swap compilation (#521)
-- Morpho quick wins: improved error handling (#520)
-- Pendle pre-swap routing when tokenIn != tokenMintSy (#516)
-- wstETH price resolution on Arbitrum via derived pricing (#514)
-- Clean up expired Pendle market in demo strategy (#513)
-- Chain-aware native token in errors and placeholder prices (#511)
-- QA fixes: teardown CLI, .env template, catch-all anti-pattern (#504)
-- Fail compilation on mainnet when no real prices available (#502)
-- Classify RPC 'header not found' as connection error (#501)
-- Reuse full DictConfigWrapper in teardown CLI (#500)
-- Auto-generate session auth token for managed gateway on mainnet (#498)
-- Remove hardcoded arbitrum fallback in MarketService (#497)
-- Fix dry-run status and backtest CLI command (#496)
-- Suppress port-not-freed warning on Anvil shutdown (#491)
-- Actionable error for missing state machine wiring (#488)
-- Add Sonic chain to framework execution layer (#486)
-- Use actual token decimals in Curve extract_swap_amounts() (#466)
-- Fix intent state machine gaps (#465)
-- Lido stETH approve gas fix and compile_stake_intent tests (#460)
-- Lido improvements: gas estimates, error messages (#459)
-
-### Security
-- Close compile_intent nested-params policy bypass (#550)
-
-## [2.2.1] - 2026-03-03
-
-### Changed
-- `teardown execute` now auto-starts gateway and loads `.env` from strategy directory, matching `strat run` behavior (#477)
-- Added `--no-gateway` flag to `teardown execute` to connect to an existing gateway (#477)
-- Balance provider injection in teardown CLI so `market.balance()` works during teardown (#452)
-
-### Fixed
-- POA middleware injection for Polygon, Avalanche, and BSC chains - strategies no longer crash with `ExtraDataLengthError` (#478)
-- `amount="all"` resolution in teardown intents - demo strategies and scaffold template teardown now works correctly (#478)
-- Chain-aware Chainlink pricing on mainnet - MarketService no longer defaults to Arbitrum for oracle lookups (#478)
-- CLOB bundle routing to ClobActionHandler in single-chain path - Polymarket prediction intents no longer silently fail (#475)
-- Clarify ATR `value_percent` returns percentage points, not decimal fraction (#476)
-- Broken X/Twitter links updated to x.com/almanak
-- Eliminate 177 mkdocs build warnings and update documentation site URL
-
-## [2.2.0] - 2026-03-03
-
-### Added
-- Curve Finance swap and LP support wired into intent compiler (#403)
-- Velodrome V2 (Optimism) addresses added to Aerodrome connector for cross-chain Solidly-fork support (#412)
-- `--teardown-after` CLI flag to auto-close positions after `--once` runs (#416)
-- Live on-chain Aave V3 supply/borrow rates via `market.lending_rate()` (#404)
-- Live on-chain Compound V3 lending rate fetching (#430)
-- `MarketSnapshot.collateral_value_usd()` helper for perp position sizing (#424)
-- Interactive platform selector for `almanak agent install` when no platform is auto-detected (#407)
-- Nightly Market Data API contract tests and 4 new indicator calculators: ADX, OBV, CCI, Ichimoku (#442)
-- Multi-language documentation: Mandarin, French, Spanish translations (#418)
-- `/release` skill for automated changelog, tagging, and GitHub release creation
-
-### Changed
-- Renamed public repo references from almanak-sdk to sdk (#467)
-- Removed ClawHub marketplace references; OpenClaw platform support retained
-
-### Fixed
-- Prevent $6.14B wstETH price via magnitude outlier detection in price aggregator (#401)
-- Suppress spurious amount-chaining warnings for single intents (#443)
-- Pre-fetch prices in teardown path to avoid placeholder fallback (#437)
-- Load .env in backtest commands (#453)
-- Patch _version.py during release so CLI reports correct version (#448)
-- Harden Anvil fork lifecycle and fix flaky intent tests (#417, #441)
-- Correct Polygon WETH balance slot from 3 to 0 (#415)
-- Accurate revert diagnostic for compilation failures (#414)
-- Skip simulation estimation for non-first TXs in multi-TX bundles (#402, #421)
-- BorrowIntent summary shows actual amounts instead of N/A (#427)
-- GMX V2 receipt parser: correct event topic hashes and EventEmitter matching (#423)
-- Prevent 30s gateway timeout during Aerodrome LP_CLOSE compilation (#408)
-- Defer Polymarket warning from init to compile time (#406)
-- Gas price cap quick wins (#405)
-- Receipt parser logs tx=N/A, 0 gas (#410)
-- Transfer-based fallback for Aerodrome LP_CLOSE lp_close_data (#409)
-
-## [2.0.0] - 2026-02-28
-
-First public open-source release of the Almanak SDK.
-
-### Added
-- **Intent-based strategy framework** with 19 intent types (Swap, Hold, LP Open/Close, Borrow, Repay, Supply, Withdraw, Stake, Unstake, Perp Open/Close, Flash Loan, Prediction Buy/Sell/Redeem, and more)
-- **26 protocol connectors**: Uniswap V3, SushiSwap V3, PancakeSwap V3, TraderJoe V2, Aerodrome, Curve, Balancer, Aave V3, Morpho Blue, Compound V3, Spark, Lido, Ethena, Pendle, GMX V2, Hyperliquid, Polymarket, Kraken, Enso, LiFi, and others
-- **12-chain support**: Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Plasma, Blast, Mantle, Berachain
-- **Dual backtesting engine**: PnL backtester (historical price simulation) and Paper Trader (live-like execution on Anvil forks), with parameter sweeps, Monte Carlo, walk-forward optimization, and crisis scenario testing
-- **Gateway architecture**: Secure gRPC sidecar holding all secrets, with strategy containers running user code in isolation
-- **CLI tools**: `almanak strat new`, `almanak strat run`, `almanak strat backtest`, `almanak gateway`, with auto-managed Anvil and gateway lifecycle
-- **17+ demo strategies** covering DEX trading, LP management, lending, perpetuals, prediction markets, CEX integration, yield farming, and copy trading
-- **Multi-language documentation** site at sdk.docs.almanak.co (English, Mandarin, French, Spanish)
-- **AI agent skills**: Strategy builder skill for Claude Code, Codex, Cursor, Copilot, and 6 more platforms via `almanak agent install`
-- **Non-custodial Safe design**: Fine-grained permission controls through Zodiac Roles Modifier, user maintains full control of funds
-- **Three-tier state management**: Automatic HOT/WARM/COLD persistence for strategy state
-- **Production services**: Alerting (Slack/Telegram), stuck detection, emergency management, canary deployments
+- The gateway no longer refuses a stored plan as differing from its own preparation
+  because the node's gas-price suggestion moved between `plan` and `update`, e.g. when
+  a fork's teardown mined a block. Without a gas policy, preparation now prices a
+  legacy transaction from the pinned block's fee history, 12.5% above the higher of
+  its and the next block's base fee, instead of the node's current `eth_gasPrice`;
+  every fork mines one empty local block at start, so the first plan reads this
+  node's base fee rather than the upstream one. On BNB, whose fee history reports
+  no tips, plan revalidation reuses the quote's retained node gas price, as signing
+  and replacement already did, and the policy still bounds the resulting price.
+- A live deployment no longer stops in error when its provider briefly fails a read.
+  A load-balanced provider could serve a just-mined receipt and
+  then answer its block with null or "header not found", or throttle an execution read
+  with HTTP 429; the gateway refused the request and the coordinator exited with a
+  successful transaction unreconciled. Execution, receipt and authority readers now
+  re-send an idempotent read after a throttle (HTTP 429, JSON-RPC 429 or -32005), a
+  transport failure, an HTTP 5xx, an empty block read or a node's unknown-block error,
+  within an 8 s budget per read and a 40 s read deadline per gateway request; observation
+  readers keep their 30 s budget and now cover the same failures. Local fork readers fail
+  at once, as before. A failure that outlasts the budget and a client timeout on a
+  read-only gateway request are marked transient: the coordinator holds that tick and
+  tries again with the worker-timeout back-off, logging `transient_read_hold` and
+  `transient_read_recovered`.
+  A running deployment stops after 30 minutes of held ticks; teardown never stops, but
+  logs `transient_read_hold_escalated` once past that horizon. A held tick commits
+  nothing, so a pending transaction is only looked up again and never replaced by a new
+  economic action. Submissions, refusals and every other failure keep their behaviour.
+- A fork lifecycle over a contract a local Anvil fork cannot execute is refused before
+  funding or any decision. Base's B20 stock tokens (`0xb2…` addresses)
+  answer `eth_getCode` with `0xef`, code the Base node implements natively; mainnet
+  reads and resolution pass, but every fork call failed with `EVM error OpcodeNotFound`
+  and stopped the run at its first decision. Every market token, verified market
+  contract and funded token is read in one batch per chain. `almanak check --fork
+  --online` fails its `fork_compatibility` stage with code `unsupported_on_fork`. Fork
+  setup checks the fork nodes before funding, on every launch including the reuse of
+  an already funded fixture, and stops `failed` with the non-retryable failure
+  `unsupported_on_fork`: status offers `shutdown` rather than `resume`, `almanak run`
+  exits 1 and `test run` reports the kind as the admission refusal's `error`. The
+  refusal names every such contract and states that this is a fork simulation
+  limitation, not a strategy fault. EIP-7702 delegated accounts and empty accounts are
+  unaffected.
+- Every refusal and failure in the `almanak test run` verdict now carries a structured
+  `kind` from its source, a `class` (`infra` or `strategy`) and `transient`, and the
+  verdict a top-level `failure_class`, so a caller decides whether a re-run can help
+  without reading error text. A stopped coordinator's kind is the error kind of the
+  refusal it logged. A refused command's error document now carries
+  `"transient": true` when its source marked the failure transient and
+  `"reverted": true` for a contract revert, which keeps the `rpc` kind and is a
+  `strategy` failure; gateway refusals carry the same `reverted` mark. The fields are
+  additive.
+- A node's JSON-RPC rejection that names a known failure now adds a fixed phrase
+  beside the code, such as `(JSON-RPC -32603: EVM error OpcodeNotFound)` or
+  `header not found`. The provider's own text is still never echoed: an unrecognised
+  message, and every revert, reports the code alone.
+- The economic exchange report no longer reads a pool before an interval-aligned
+  window start whose first block precedes it by a block interval.
+- A composed strategy can cancel its pending GMX request in teardown. The cancellation
+  was prepared through GMX's own component configuration, so the gateway refused it
+  because the permission manifest belongs to the composed configuration, and the
+  deployment stayed in teardown with funds in GMX escrow. GMX now only reads its
+  request and snapshot through its view; the composed backend prepares the plan.
+- Uniswap V3, PancakeSwap V3 and Aerodrome Slipstream liquidity additions no longer
+  revert on the position manager's `Price slippage check` when the pool moves a few
+  ticks between planning and inclusion. The amount minimums were
+  `slippage_bps` below the amounts at the observed price, and in a narrow band each
+  tick shifts the token mix by about 1%, so a ±200-tick band at 100 bps tolerated
+  less than one tick. Minimums and `minimum_liquidity` are now what a mint takes at
+  the edges of the price window the price-movement gate already admits,
+  P·(1 ± `slippage_bps`), so any price that passes the gate also passes the mint.
+  The non-binding token's minimum is correspondingly lower; a strategy wanting
+  tighter protection lowers `slippage_bps`, which also tightens the gate. Plans and
+  recorded checkpoints made by earlier releases replan to different minimums.
+- A mined Safe/Roles transaction that reverts records why. The receipt holds only
+  `ModuleTransactionFailed()`, so the gateway replays the inner call at the parent
+  block with `shouldRevert` cleared and keeps the decoded reason as the outcome's
+  `revert_reason`. The coordinator's `transaction reverted` and `execution_failed`
+  stops name it, and so the deployment's diagnostic does too. A failure that
+  depended on an earlier transaction in the same block is reported as not
+  reproduced.
+- A coordinator or operator request stopped by recorded accounting issues names the
+  first issue instead of reporting unexplained wallet movements, which it also
+  said when every movement was explained, e.g. after a Uniswap V4 hook's code
+  changed. Approvals and revokes on a hooked pool no longer carry that hook's
+  changed-code note, since they never call it.
+- A stopped coordinator now reports why. Exceeding a non-refilling spending quota
+  (Uniswap V3 and V4, PancakeSwap V3, Aerodrome, Aerodrome Slipstream and Curve) is a
+  `quota` refusal naming the asset, the requested amount, what was already spent, the
+  quota and what remains, instead of a generic `invalid_request: gateway request
+  refused` whose reason only reached `logs/gateway.log`. The `gas_limit`, `gas_price`
+  and `gas_budget` refusals name the buffered gas estimate and `max_gas_limit`, the
+  market quote and `max_gas_price_wei`, the transaction's maximum cost and
+  `max_transaction_fee`, the spent, fee and `exit_reserve` against `total_budget` or the
+  payer's balance, and the entry minimum against the payer's balance. The supervisor's
+  `failed` diagnostic is the refusal the coordinator printed in this run, and offline
+  `almanak status` keeps returning it after the supervisor exits; without one the
+  generic instruction to inspect the log remains.
+- A pre-signing simulation that reverts no longer stops a deployment with an unexplained
+  `rpc` refusal. Deployments on PancakeSwap V3 on BSC and on Robinhood stopped at
+  signing with "eth_call: RPC rejected the requested read (JSON-RPC 3)": a narrow-range
+  mint reverted "Price slippage check" after the pool moved about 3 ticks between
+  preparation and signing. The gateway now refuses a reverting simulation as
+  `simulation_reverted` with the decoded reason (`Error(string)`, `Panic(uint256)` or
+  the custom error selector; behind a Safe it reads the inner protocol reason that Roles
+  replaces with `ModuleTransactionFailed()`), and names it in its request log. Provider
+  error text is still never kept. The coordinator treats `simulation_reverted` and
+  `price_movement` from preparation or signing like an expired plan: nothing was signed,
+  so it logs an `unsigned_plan_refused` event, discards the plan and decides afresh,
+  backing off 15 seconds more each time. The fifth consecutive refusal on a chain stops
+  the coordinator with the reason.
+- Production signing and broadcast on OP Stack chains (Base, Optimism) no longer
+  fail with `block_mismatch` whenever the head has moved since the plan's fee
+  quote. Revalidation pins a fresh head and then reads the OP fee parameters at
+  the older quote block; that read left the reader pinned at the quote block, so
+  the Compound V3, Morpho Blue and other revision checks that follow refused the
+  head. The fee parameter read now restores the caller's pinned block. Forks did
+  not show it because their head does not advance on its own.
+- A deployment no longer stops for good when one decision or outcome evaluation runs
+  past its 20-second wall budget. A worker within its 20 CPU seconds can still miss that
+  deadline on a CPU-starved host: one deployment stopped after 15 hours when its host
+  ran at 80 to 90 percent of its available CPU, and another, deciding every 5 seconds on
+  BSC, stopped before its exit ran. The coordinator now logs a degraded
+  `strategy_worker_timeout` event and evaluates the same due decision again after
+  backing off for 5 seconds, doubling to at most 60; nothing an evaluation produces is
+  recorded before its commit, so the retry keeps the original deadline, and a teardown
+  requested meanwhile is evaluated at the next attempt. The first evaluation that
+  completes logs `strategy_worker_recovered`; a tick that evaluates nothing, such as a
+  multi-chain tick on a chain that is not due, leaves the streak running. A worker that
+  misses its 30-second startup bound is retried the same way. A running deployment stops
+  only after its evaluations have timed out without a success for 30 minutes; a
+  deployment in teardown never stops for timeouts. The CPU limit and any other worker
+  failure stay immediately fatal.
+- An idle coordinator no longer reads its whole checkpoint from the gateway twice a
+  second. Between decisions it now reads once per wait, waking at the next deadline or
+  after at most 5 seconds, so a requested teardown or an unsolicited external effect is
+  seen within 5 seconds instead of 1. The dashboard export reuses that read instead of
+  loading the checkpoint again. Ctrl-C and pause are still honored within a second.
+  Multi-chain deployments keep the one-second cadence. One deployment's gateway served
+  425 checkpoint reads, averaging 490 ms, for every 3 observations.
+- The gateway re-verifies a checkpoint's durable authority only when it changes.
+  Every checkpoint read used to recompare the configuration and re-derive every
+  Safe/Roles grant of the retained permission manifest; an unchanged authority now
+  reuses the verdict this gateway process already reached, and any change is
+  checked in full. Locally, re-deriving the one-partition Uniswap V3 manifest of
+  that deployment took 11.5 ms per read, against 24 ms for a whole checkpoint read
+  of the 12 KB reference fixture.
+- ERC-20 tokens whose `approve` returns no data, such as USDT on Ethereum, can be
+  approved and revoked. Every connector's approve and allowance-cleanup simulation
+  now follows OpenZeppelin SafeERC20: an empty return or exactly ABI `true` passes;
+  ABI `false`, any other length and reverts are still refused. Uniswap V4, Aave V3
+  and V4, SparkLend, Morpho Blue, Compound V3 and GMX refused an empty return
+  before. Uniswap V4 clears a residual ERC-20 allowance to Permit2 (left by a
+  mint) to zero before approving a larger amount for Ethereum USDT, which reverts a
+  nonzero-to-nonzero approve; other tokens approve as before, so retained executions
+  replay unchanged. The other connectors already reset to zero first.
+- A fork node starts at the fork block's base fee without Anvil's 1 gwei minimum
+  tip, so its gas quote follows the forked chain and a mainnet-calibrated
+  `strategy.gas` fits; chains whose fee history reports no tips (BNB) start at the
+  upstream gas price.
+- Backtest preparation that refuses a stale `resolution.json` names the file and
+  the recovery: prepare into a fresh directory, or remove it and prepare again.
+- Fork runs on Arbitrum-family chains (Arbitrum One, Robinhood Chain) no longer
+  fail when a read precedes the first transaction. Their upstream block headers
+  carry no Cancun blob fields, so Anvil refused every call at the forked block
+  with "Excess blob gas not set."; an EOA-account fork on Arbitrum One stopped at
+  start in the fixture's zero-balance check. A fork whose head lacks
+  `excessBlobGas` now mines one empty local block once it is ready; the origin
+  and its anchors are unchanged, and other chains are untouched.
+- `almanak check` refuses a zero `hold_seconds`, `deadline_seconds` or Uniswap V4
+  `collect_seconds` at the configuration stage, naming the field. The resolved
+  parameters always required them to be positive, so a zero passed the offline
+  check and failed only at backtest preparation or deployment. The editor schemas
+  require them to be positive too.
+- Economic backtests of a pool holding a beacon-proxy token, such as WBTC on
+  Arbitrum, no longer fail at preparation with "gateway request refused". The
+  historical gateway refused the token verification's reads of the beacon. A
+  beacon pointer captured from a configured contract at the same block now
+  permits exactly the beacon's code, its `implementation()` call and the code that
+  call names; the MATIC proxy slot is followed the same way.
+- A deployment survives a slow service start. The supervisor waits for a starting
+  gateway or read gateway for as long as its process lives, up to 300 seconds, instead
+  of a fixed 25, and says whether the process exited or never answered. A setup failure
+  is now reported as `failure: "start"` on the failed stage, since no coordinator ran; a
+  coordinator that stopped reports `failure: "execution"` and waits for an explicit
+  resume. The supervisor log records how long the gateway and setup took.
+- `almanak status` and the other workspace controls no longer import the backtest, model
+  and Ethereum stacks: the CLI imports its error types only to report an error. Each
+  call takes about a third less CPU.
+- The configuration and operating guides no longer say Base and Optimism refuse
+  authored gas caps everywhere. Only fork runs refuse them; production runs bound
+  the L1 data and operator fees at quote time within the payer ceilings and
+  reconcile the exact charges from each receipt. Agents reading the bundled docs
+  told users that Base could not deploy with a gas policy.
+- A multi-step Uniswap V3, PancakeSwap V3, Aerodrome Slipstream, Aerodrome or Curve
+  action whose intent deadline passes partway through no longer stops the deployment for
+  good. A recorded signed approval has no protocol deadline, so it is rebroadcast after
+  its intent expires instead of being refused as `stale_plan` on every resume; the
+  intent's window still bounds planning and signing. Preparing the next step of an
+  expired intent drops the decision, as a stale signing already did, and the next
+  decision plans afresh; before, the `stale_plan` refusal stopped the coordinator. A
+  Robinhood Chain LP rebalance signed its fourth approval before the 300-second window
+  closed and broadcast it just after, and every later start failed the same way.
+- Permission export writes a Safe Transaction Builder batch only for a Safe that
+  still lacks authority, as the check statement reports it. An installed Safe got
+  a `safe-<n>.json` with no transactions, so a production deployment held only for
+  funding exported an empty batch that hosts offered the owner to sign.
+- GMX V2 on Arbitrum and Avalanche names the deployment that GMX currently
+  authorizes. GMX revoked the RoleStore roles of the previously pinned
+  ExchangeRouter and handlers on 16 and 17 September 2026, after which every
+  request was refused at simulation with an unnamed RPC rejection. The compiled
+  deployment table now carries the live router, Reader, Oracle, handlers and
+  executors, verified against their compiler inputs, and records the roles each
+  contract holds. Deployment verification reads those roles and refuses a
+  retired deployment by contract, address and role. Pending-request decoding and
+  creation receipt checks follow the new revision's `uiFeeFactor` field.
+- The GMX economic funding model applies the deployed rules: minimum and maximum
+  funding factors are read per paying side, an adaptive increase is floored by
+  the market's minimum increase rate, and a zero next saved factor pays nothing.
+  On 17 Arbitrum and 4 Avalanche markets it equals the live Reader's next
+  funding, including per-size payment and claim deltas. The other GMX economic
+  models have not been compared with the new revision.
+- Clicking a section link in an embedded dashboard no longer blanks it. The links were
+  plain `#block-…` anchors, which a `srcdoc` frame resolves against the host page's URL,
+  so the frame navigated away. They now scroll to the section in place and mark it as
+  the current one; previously the first link was always highlighted.
+- Production plan preparation no longer fails with `block_mismatch` on any
+  account. The production gateway's provider guard pins the genesis block to
+  check the chain's identity, and operation validation runs that guard after
+  preparation has pinned the observation block. The contract revision checks
+  that follow (for example the Uniswap V3 pool and position manager checks)
+  then compared the observation block with genesis and refused. The guard now
+  restores the caller's pinned block. The earlier Safe authority fix covered
+  only the second of these two pins, so 3.0.0rc32 still failed. A
+  `block_mismatch` error from a revision check or a pinned contract call now
+  names the contract role or call, the address, the block being checked and
+  the block the reader has pinned.
+- Planning an operation for a Safe account no longer fails with
+  `block_mismatch` ("revision checks require the reader's pinned block").
+  Safe authority verification pins a fresh chain head, and that pin replaced
+  the observation block the plan had pinned. The contract revision checks that
+  follow (for example the Uniswap V3 pool and periphery checks) then compared
+  the observation block with the newer head and refused. Verification now
+  restores the caller's pinned block when it finishes, so those checks read
+  code at the observation block. Any chain whose head advanced during
+  verification was affected; Robinhood Chain, with a block about every 0.26
+  seconds, hit it on the first plan. EOA accounts were not affected.
+- `almanak resume` on a provisioned workspace no longer runs admission inside the
+  supervisor's control request. The control server answers one request at a time, and
+  production admission reads the full Roles history, which could take about two minutes.
+  The CLI request timed out after 35 seconds and status polls queued behind it.
+  Admission, gateway start and coordinator start now run in the same background worker
+  as initial provisioning: `resume` returns once accepted with `provisioning: true`,
+  status keeps answering, other controls except `pause` are refused until it finishes,
+  and a failure is persisted as the `failed` stage with its diagnostic. A workspace
+  without execution state reports `provisioned` while its admission runs instead of the
+  stale `action_required` diagnostic, and a pause requested meanwhile keeps the
+  coordinator from starting.
+- A first start runs production admission once. `setup()` admitted the workspace
+  and then `start_coordinator` admitted it again, so the funding preflight, the
+  full Roles history read and permission verification ran twice back to back
+  (about 8 minutes each on Robinhood Chain) while the started gateway sat idle.
+  The coordinator start now skips admission only when the same worker has just
+  admitted; every other path still admits, and nothing is cached across starts.
+- Production admission accepts standard Safe 1.4.1 deployments. Safe authority
+  verification pinned only the L1 Safe 1.4.1 singleton, refused any fallback handler and
+  required a Roles module with no operator, so such deployments failed with `Safe
+  implementation is outside the supported profile`. It now also admits the SafeL2 1.4.1
+  singleton and Safe's canonical CompatibilityFallbackHandler 1.4.1, each by pinned code
+  hash, and a Roles history whose setup transaction already enabled and assigned the
+  bound operator's role; the exported bundle then omits `assignRoles`. A guard, any
+  other handler or singleton, and any other pre-installation event are still refused.
+- Production admission reads the Roles history far faster. It proved the module's log
+  history by fetching every block header since the Roles setup one request at a time,
+  fetched it all again for `verify` after `generate`, and again on every later
+  admission: on Robinhood Chain one admission for a Safe set up about 13,000 blocks
+  earlier took well over five minutes, growing with the Safe's age. Headers and receipts
+  are now read in JSON-RPC batches of up to 100, one admission shares its verified
+  history between `generate` and `verify`, and the workspace keeps it in
+  `private/deployment/roles-history.json` so the next admission reads only newer blocks.
+  A retained history is used only after its last block is confirmed canonical under the
+  new observation; otherwise the full history is read. Every existing refusal is
+  unchanged. A batch with a missing, duplicated or rejected member fails the read, and a
+  provider's HTTP 429 on a batch is re-sent at most six times.
+- The first production start no longer fails with `gateway_unavailable` about a
+  minute after it reports running. The gateway's `create` request generated and
+  verified the Roles permissions with two more full history walks, which took
+  minutes on an older Safe, while the coordinator waited 60 seconds for any
+  gateway reply. The gateway now starts `create` from the admission checkpoint
+  (passed as `--roles-history`, read and never written by the gateway), so it
+  reads only the blocks since admission, and the coordinator waits up to 10
+  minutes for `create` alone. A `create` that outlives the wait still cannot be
+  applied twice: the deployment database is created exclusively.
+- `almanak check --production` refuses an author file without `strategy.gas` in
+  the offline configuration stage, with or without `--gateway-config`. The rule
+  was enforced only during online resolution, so an offline production check
+  passed and the missing gas policy first failed inside a started deployment.
+  A check without a mode reports the unmet rule under `warnings`; its exit code
+  is unchanged.
+- Production runs with a remote signer (`signing.signer_file`) no longer ask for a
+  keystore password. `almanak run`, `resume` and `teardown` prompted whenever the
+  operator configured no `password_file`, so an unattended production run died with
+  `EOFError` before its supervisor started, and a gateway restart would have passed
+  `--password-stdin` to a remote signer. Only a keystore without a password file prompts
+  now.
+- `almanak ax --block` accepts a decimal block number, `finalized` or `latest` on
+  every subcommand and refuses any other value at parse time with a message
+  naming those forms. `latest` pins one concrete header through either
+  transport, like `finalized`, and every read of the observation names its hash.
+- Composed strategies decode their checkpoint about eight times faster. Each
+  retained decision, plan, pending transaction and outcome is validated as the
+  connector type of the allocation it acts on, instead of against every
+  connector's record type, and the composed codec is built once. The gateway
+  and runtime decode the checkpoint on every request, so composed lifecycle
+  steps had slowed as outcomes accumulated; on a local BNB fork the
+  `bnb_aave_borrow_and_trade_v4` Safe lifecycle fell from 30 to 11 minutes.
+- Multi-chain composed checkpoints route each chain's active decision, plan and
+  pending transaction the same way. Chain work is declared before the
+  configuration, so those records were still validated against every
+  connector's record type, at about 70 ms each, and every gateway request and
+  runtime step paid it again while a chain had work in flight. They now route
+  by the connector of their own target, with the same full-union fallback. For
+  a retained `ethereum_base_borrow_and_trade` checkpoint with a decision and
+  pending transaction on both chains, one decode fell from 321 ms to 131 ms and
+  an in-process gateway `update` from 1.43 s to 0.78 s.
+- `almanak ax perp-markets` enumerates the GMX V2 DataStore market list through
+  its address-set accessors and the Reader's market pages. The previous bytes32
+  accessors answered an empty list, so every label query reported `not_found`.
+- GMX V2 market resolution accepts synthetic markets, whose index token is a
+  venue-derived address with no contract (Arbitrum BTC/USD, DOGE/USD and most
+  other listings). The index precision is read from the venue's data stream
+  multiplier instead of an ERC-20 `decimals()` call, which failed with an ABI
+  error. `perp-markets` reports `index_kind`, verifies a synthetic label against
+  the venue's address derivation, and accepts GMX's `[LONG-SHORT]` collateral
+  notation, for example `BTC/USD [WBTC-USDC]`, to select one of several
+  markets sharing an index.
+- Configuration validation uses the same resolved parameter contract in public
+  checks, runtime creation and backtesting, with execution setup excluded.

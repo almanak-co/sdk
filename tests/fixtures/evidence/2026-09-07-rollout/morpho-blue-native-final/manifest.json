@@ -1,0 +1,1025 @@
+{
+  "status": "candidate_process_evidence",
+  "scope": "Ethereum and Base native Morpho reference lifecycle through identified Anvil fixtures. EOA and generated Safe/Zodiac profiles are listed by retained outcome. No production authority or prepared backtest support is established by these execution proofs.",
+  "cases": [
+    {
+      "name": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb",
+      "reference": "morpho_blue_base_lending",
+      "profile": "safe",
+      "operator_mode": "configured",
+      "status": "passed"
+    },
+    {
+      "name": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0",
+      "reference": "morpho_blue_base_lending",
+      "profile": "safe",
+      "operator_mode": "distinct",
+      "status": "passed"
+    },
+    {
+      "name": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708",
+      "reference": "morpho_blue_ethereum_lending",
+      "profile": "safe",
+      "operator_mode": "configured",
+      "status": "passed"
+    },
+    {
+      "name": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c",
+      "reference": "morpho_blue_ethereum_lending",
+      "profile": "safe",
+      "operator_mode": "distinct",
+      "status": "passed"
+    },
+    {
+      "name": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943",
+      "reference": "morpho_blue_base_lending",
+      "profile": "eoa",
+      "operator_mode": "eoa",
+      "status": "passed"
+    },
+    {
+      "name": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01",
+      "reference": "morpho_blue_ethereum_lending",
+      "profile": "eoa",
+      "operator_mode": "eoa",
+      "status": "passed"
+    }
+  ],
+  "files": [
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/checkpoint.json.gz",
+      "sha256": "9f0a254aded976e59d2f84bf8148e385f02acae8e5e75227f033c846638c9095",
+      "bytes": 69446
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/dashboard.html.gz",
+      "sha256": "b22357e785f36a4394891fe6ff21c2a5b3a2059a055210a9825c56077dfc72f8",
+      "bytes": 14270
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/dashboard.json.gz",
+      "sha256": "eb475f0aad1273e912bb7a0e1d27e5e204500c3abf0891c15f1f70cde9175b2a",
+      "bytes": 2858
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/deployment.json.gz",
+      "sha256": "057906ebe22e11ca455e78b82a1d1d743d4a4a1682d95fdb29bd7f7099813bff",
+      "bytes": 1196
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/fixture-installation.json.gz",
+      "sha256": "ee345e94469fc3cb4d1b33f239d180b1246752b37c4b69d44d72ef3110f9522d",
+      "bytes": 2301
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/fork-routes.json.gz",
+      "sha256": "fdf233e17078b96a4551f4031f006a89ca87a8fa1fe60d954252cd6452bbf3d3",
+      "bytes": 169
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/permission-budget-observations.json.gz",
+      "sha256": "2c08b6603865020641443619e0f4944a78cf6dedc1f314795efa07f8a63fcf7a",
+      "bytes": 738
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/permission-generation.json.gz",
+      "sha256": "2396eb28e76f87e09f807a5c479311e027e9598a027d6dcc46493daeade4ac11",
+      "bytes": 218
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/permission-installation.json.gz",
+      "sha256": "899d08a1ee1f4aa6dbda326b26c0e4735634684b90bb8c65b6ee8ee3f22daf33",
+      "bytes": 6352
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/permission-verification.json.gz",
+      "sha256": "a62452d40f7408eb780661840bcb27513f26ca7e6ca30fde6d7d51d5a81d63d7",
+      "bytes": 562
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/permissions/manifest.json.gz",
+      "sha256": "c092857664e308975fadacd217c372833a9c94a7c0891326734c96308c95aa20",
+      "bytes": 6167
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/permissions/permissions.txt",
+      "sha256": "9202280077b615fd5fe7d8781e66dcdc66d7a17ce06f34bb0ad2a4f55874c40b",
+      "bytes": 2361
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/permissions/safe-0.json.gz",
+      "sha256": "14739ad3713fd773455cb81815df3cd014015840f1331b57e49415c50c72cfbe",
+      "bytes": 1033
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/permissions/safe-1.json.gz",
+      "sha256": "f2f3a4a50d7b2048f71f0d1a4c98b68dbce881f54ebdd0f250239a62e1c60b8b",
+      "bytes": 1347
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/process-0.log.gz",
+      "sha256": "2f3ad7db7d97317ea73c9f3c915f0b8d9131dd75a6e37eada8f1ef41046d51f2",
+      "bytes": 279
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/process-2.log.gz",
+      "sha256": "9d6c9612de250f9e8c0345f55e2ac5cf80ee8d057f21fa060c6d46d406008ec2",
+      "bytes": 216
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/process-3.log.gz",
+      "sha256": "2218a0b7e6c7c8ebe5cf4796b95bb3e93ddda92120b9ae0b18426c7d95605351",
+      "bytes": 138
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/process-4.log.gz",
+      "sha256": "2218a0b7e6c7c8ebe5cf4796b95bb3e93ddda92120b9ae0b18426c7d95605351",
+      "bytes": 138
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/process-5.log.gz",
+      "sha256": "290063bb39eb20bef337b60450760a9ef237a65e75af61f32ce2627dcc83acb1",
+      "bytes": 348
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/process-6.log.gz",
+      "sha256": "e4cf81f0a042a98abb00a9c9278cc005c1d3f8d72a7e88f6f083c82fa4b4ff98",
+      "bytes": 3794
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/report.json.gz",
+      "sha256": "378a9f44c659004527817fd38535f996ad92265e12810409a84de397a8c33b3e",
+      "bytes": 3775
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/result.json.gz",
+      "sha256": "a76cc6ecb1eed217f26e9a219043219fa38b602d9f55910f614a13c43d963313",
+      "bytes": 1962
+    },
+    {
+      "path": "morpho_blue_base_lending-d334c76b92694bbe97ff30a8517fc0eb/state.sqlite.gz",
+      "sha256": "0209a5f02827d77874166b17d6e2d2f3b3709a0b57fd85fccad1d6668f78f650",
+      "bytes": 61168
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/checkpoint.json.gz",
+      "sha256": "67ec8d96110a68689d5e436e2d4fc092fd469c5f48682d1a178f282aca5a0397",
+      "bytes": 70527
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/dashboard.html.gz",
+      "sha256": "27f8733530db54b0ac623516c603747ada36b284bd983270ba6a3e6093f5e912",
+      "bytes": 14303
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/dashboard.json.gz",
+      "sha256": "30c17b9c6dd98775ccf34e5b558173650e4d782d3a64c4ee5829a4ff5a077992",
+      "bytes": 2888
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/deployment.json.gz",
+      "sha256": "5880aa3d734329a67c59a4821db48e173b989f3056c0f64be97e143255f62979",
+      "bytes": 1219
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/fixture-installation.json.gz",
+      "sha256": "ee345e94469fc3cb4d1b33f239d180b1246752b37c4b69d44d72ef3110f9522d",
+      "bytes": 2301
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/fork-routes.json.gz",
+      "sha256": "1bad09fac703586a65f78cd7da61eaec671248f831f8ecf0e8254a6f6b700e28",
+      "bytes": 167
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/permission-budget-observations.json.gz",
+      "sha256": "73338013829e40783de137cab7330b932037efb651f1a20bc308d2b9541dadd6",
+      "bytes": 740
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/permission-generation.json.gz",
+      "sha256": "22402b961a25112a8dd745c7fa210eccb2730928623174487f6f4462c9239a59",
+      "bytes": 218
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/permission-installation.json.gz",
+      "sha256": "470e6a40d86a1fa937f5d8ffb1ca6a86bfce7b43fe385219d4763342ce8fd913",
+      "bytes": 6356
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/permission-verification.json.gz",
+      "sha256": "9844afc1de88095190ff35e570e69c580f25bed1cb1d93c21dbd59e638bb08f8",
+      "bytes": 564
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/permissions/manifest.json.gz",
+      "sha256": "43baf3f88fec5fbe2d5b748107f7f4d45536de6b73a3ac8a9dfe5f1af72c7084",
+      "bytes": 6193
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/permissions/permissions.txt",
+      "sha256": "9202280077b615fd5fe7d8781e66dcdc66d7a17ce06f34bb0ad2a4f55874c40b",
+      "bytes": 2361
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/permissions/safe-0.json.gz",
+      "sha256": "4c9a235d63a358f08db9999660ca01a584123cd67ddbdbb234869b8f07f20467",
+      "bytes": 1031
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/permissions/safe-1.json.gz",
+      "sha256": "647418f648eea34cab73ed314c0d607f37191df24bee152866b7635c327301f0",
+      "bytes": 1346
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/process-0.log.gz",
+      "sha256": "5f9cd1dde2f76916119cd40445d20b938ac199fef12a56418738d11469cf34a3",
+      "bytes": 281
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/process-2.log.gz",
+      "sha256": "f8cc5cb5b5989ff5f97d9ae4c7948109dc1d18cc781a4db151405743f5af09c3",
+      "bytes": 216
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/process-3.log.gz",
+      "sha256": "d7c473fe112cfe2d4800bb3a73d0d3d69a264dd2132506cf003f8a01d1805196",
+      "bytes": 137
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/process-4.log.gz",
+      "sha256": "d7c473fe112cfe2d4800bb3a73d0d3d69a264dd2132506cf003f8a01d1805196",
+      "bytes": 137
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/process-5.log.gz",
+      "sha256": "be21a37f0cafae39dd4e77ed4d3e8d4b616e5996757eb81e57cb4bb5020c28b4",
+      "bytes": 349
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/process-6.log.gz",
+      "sha256": "5680042823dd2dd7084933338df0144f66c1c3b8d094ee0543d414ab09908776",
+      "bytes": 3878
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/report.json.gz",
+      "sha256": "762c3f58735652323a4336835622e8da802df18a2c5a4b9614e22bb215262874",
+      "bytes": 3859
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/result.json.gz",
+      "sha256": "9d39ba7f99165f9d58fde5679bfdc5db001d43c5cdb16f1543cd1d382c70d6df",
+      "bytes": 2002
+    },
+    {
+      "path": "morpho_blue_base_lending-defef8c632d249e2b6be1add74c8b4c0/state.sqlite.gz",
+      "sha256": "3ff6005800769026359737a667975ca5ebd8fbc0b4d80b2b43c9350fce4e5c32",
+      "bytes": 62012
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/checkpoint.json.gz",
+      "sha256": "9c54d03d0834e640c23eed1b0e543266ad37e67dd2241d3126335ec7aea64d74",
+      "bytes": 64563
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/dashboard.html.gz",
+      "sha256": "3763543efab271fe7ddd1b54233aff20f932d17ab1a3b9ab3faf9744eb5c54eb",
+      "bytes": 14294
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/dashboard.json.gz",
+      "sha256": "f9523b1da3da0fd26ec38c17d07a697c2db95563275423f13d283c954fefad51",
+      "bytes": 2866
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/deployment.json.gz",
+      "sha256": "8d7f66e57f733ad019a7685c8af6c5ae1749f66edf78cbe9942cba300be9401e",
+      "bytes": 1210
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/fixture-installation.json.gz",
+      "sha256": "fa1eeacb57362ac05a2155992c2150bcae9e5c4baa132493c53bb5c01bd3865f",
+      "bytes": 2417
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/fork-routes.json.gz",
+      "sha256": "4f1202eda8927a4bbe5de711f1ebca9a61e25d222a41b1dbdaa75a6c57a53496",
+      "bytes": 165
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/permission-budget-observations.json.gz",
+      "sha256": "5dead70da780a40838302142f81c8af014cda640f714a8015f723d59b56cd22d",
+      "bytes": 738
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/permission-generation.json.gz",
+      "sha256": "eae1ee3524f1799f7bb09ea1b06f483449c5c893910c373ec86b6254b7b709b0",
+      "bytes": 221
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/permission-installation.json.gz",
+      "sha256": "c2fac20d9f11f86fda211e04fb5282814bf543850ac86194a91462a9a2bfd308",
+      "bytes": 6626
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/permission-verification.json.gz",
+      "sha256": "58903342d0f067eb5601656738385fb1945f581a17ce4d975266e606311cd942",
+      "bytes": 561
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/permissions/manifest.json.gz",
+      "sha256": "f8fbfbb04ceea61965c2878c2ec1b0eb787bf63697b06c8633b9070f5544835b",
+      "bytes": 6161
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/permissions/permissions.txt",
+      "sha256": "1c1e49aaebffe7dc18d5dad3f68b17ce3be51367f46fb7e635ca54994afeca3a",
+      "bytes": 2352
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/permissions/safe-0.json.gz",
+      "sha256": "29affb777bc36cc5a3c16d339a484b14c896bc0bf752cdbb31053c5a75ec62c4",
+      "bytes": 1045
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/permissions/safe-1.json.gz",
+      "sha256": "1014cbe1a79f2a78ccf4d6b18834462de4401ce373fdde4299e6b6bf8baecdba",
+      "bytes": 1405
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/process-0.log.gz",
+      "sha256": "fb6907fa8f309a25607e8253e2ce3bfd678becd5892dd359a541a19507b64924",
+      "bytes": 275
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/process-2.log.gz",
+      "sha256": "b9834438ec754c4963d35d3b00ab6473ea48d7e0bff1c1cc41cf935dc3c382ec",
+      "bytes": 216
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/process-3.log.gz",
+      "sha256": "8d8e14c2777bc59b576e62133502cf9d80004f94c41b2cfb3c866d021236f618",
+      "bytes": 138
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/process-4.log.gz",
+      "sha256": "8d8e14c2777bc59b576e62133502cf9d80004f94c41b2cfb3c866d021236f618",
+      "bytes": 138
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/process-5.log.gz",
+      "sha256": "75bd2d2029e7ea32158c32fe17790156a21d27f467ff722b5fcd70cdb45338ff",
+      "bytes": 349
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/process-6.log.gz",
+      "sha256": "cc6d7bddb2651b46622b9ecfcd437dfe653f04853d5dbd65e45bff02107cb6b7",
+      "bytes": 3801
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/report.json.gz",
+      "sha256": "388e687f5011cc8ed7615e5c824bdf390fe6d026c3c45f8990eff757a0b5a782",
+      "bytes": 3783
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/result.json.gz",
+      "sha256": "40bb44138b3879c8fab8f9a3e94efda343d06967bd20b61179951a1c14871669",
+      "bytes": 1980
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-570b0a088bb842cdbd7ffb3231d75708/state.sqlite.gz",
+      "sha256": "76b38d3f7e8a6d7299b916ff81de6e1e5c26cb76d35d0c0440ced077d0366c15",
+      "bytes": 55554
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/checkpoint.json.gz",
+      "sha256": "556112e640f6f6617c976dab9f84275f6b3a9db0ad1315f4e96c8a7d404590c7",
+      "bytes": 65651
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/dashboard.html.gz",
+      "sha256": "87aa27c1f3eb7409d333e05c4d6d7af6b91361c945facb689e853be24a041e44",
+      "bytes": 14332
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/dashboard.json.gz",
+      "sha256": "edb785842fbd39d2bc35840a3fea5c0b24f1816dc24cee26eb7567c0e0c6123b",
+      "bytes": 2903
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/deployment.json.gz",
+      "sha256": "9e11b01db1da300d7da3b309cf4b2be7e1a01d2c1bc076a80e8384838172ed8d",
+      "bytes": 1234
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/fixture-installation.json.gz",
+      "sha256": "fa1eeacb57362ac05a2155992c2150bcae9e5c4baa132493c53bb5c01bd3865f",
+      "bytes": 2417
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/fork-routes.json.gz",
+      "sha256": "6faffae079d3165298bfdd5dedee595e167bb90ca8e41ecca7d9caf25fb040d2",
+      "bytes": 167
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/permission-budget-observations.json.gz",
+      "sha256": "c6fe766f7789cc3073607d1d0671404d08ad153e412e3b6ec806c08e999c6dfa",
+      "bytes": 739
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/permission-generation.json.gz",
+      "sha256": "ae788f2d7b6fdd12b674358e4012387fd836255182b6dd380aee288350fbc8e0",
+      "bytes": 221
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/permission-installation.json.gz",
+      "sha256": "d4d9b3068b7900aac801ee956a52bde53ed09f24a1f386033fbce57c840f5f4d",
+      "bytes": 6628
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/permission-verification.json.gz",
+      "sha256": "5ad94bea3c3bb087e6035894b3d85991151ba90f075d8ec0532f014f2cbe8196",
+      "bytes": 562
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/permissions/manifest.json.gz",
+      "sha256": "5f032a19f46d55102d0d734a57a5f2e9a3cdb9650f35649fe18151dbdde44025",
+      "bytes": 6191
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/permissions/permissions.txt",
+      "sha256": "1c1e49aaebffe7dc18d5dad3f68b17ce3be51367f46fb7e635ca54994afeca3a",
+      "bytes": 2352
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/permissions/safe-0.json.gz",
+      "sha256": "6dff6f5c31d44b88fbbce53d9247db2f5a2591325a266509cbbacd3377db4733",
+      "bytes": 1047
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/permissions/safe-1.json.gz",
+      "sha256": "19aca406e86981cbaca86ea7ac8a89b638675c00ff05f1920bac3f988a3e196b",
+      "bytes": 1406
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/process-0.log.gz",
+      "sha256": "aad6ff31804fddb9b5c333754df13fda007609a0748445982ff21c349e796418",
+      "bytes": 274
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/process-2.log.gz",
+      "sha256": "c6c1378c8639dd8ec441c7c9d02735c4617b9d7286522970e11a09b65986ce0b",
+      "bytes": 216
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/process-3.log.gz",
+      "sha256": "1cef1c21eb409c27dc083fd3d3d3f49760a5d359ab82a4dd736965992c8b6087",
+      "bytes": 137
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/process-4.log.gz",
+      "sha256": "1cef1c21eb409c27dc083fd3d3d3f49760a5d359ab82a4dd736965992c8b6087",
+      "bytes": 137
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/process-5.log.gz",
+      "sha256": "83f1a74da25699befd7e366da46fc6c722ae266a62c20228c7341b3f75e94253",
+      "bytes": 349
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/process-6.log.gz",
+      "sha256": "b733051825da72953e4d62c0f7cc1f6dd13d66f4540790663df6b259c9fd88f5",
+      "bytes": 3884
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/report.json.gz",
+      "sha256": "e675b916c7cc9fb777b2c7fd2d2519137c5fff3fb03e11a7fb2eea39b95316a2",
+      "bytes": 3863
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/result.json.gz",
+      "sha256": "1dd500c521aa7bbc6ff44652595a62eeb0127ca0a6db63a582e615a12f237a9b",
+      "bytes": 2019
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-750c0479ee0f4d0c985bf5dd52ba838c/state.sqlite.gz",
+      "sha256": "526e66d1126931fcf677743ad52bebf511a1c3268b6818e68697c5b269e9bf1b",
+      "bytes": 56504
+    },
+    {
+      "path": "safe-source-comparison.json.gz",
+      "sha256": "3fe54609df013a29f6fb13b9b0e05d386626bb41f5e1ed37269c05c144130af7",
+      "bytes": 62558
+    },
+    {
+      "path": "safe-source/__init__.py.gz",
+      "sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec",
+      "bytes": 20
+    },
+    {
+      "path": "safe-source/accounting.py.gz",
+      "sha256": "5d1f864962d4fb2a994747088d86410ee54a2a492f9699a2679516e187922c44",
+      "bytes": 604
+    },
+    {
+      "path": "safe-source/asset_effects.py.gz",
+      "sha256": "dcf529d853782f00deaface29c75062206124f4ee1b094d120844910fdabe253",
+      "bytes": 290
+    },
+    {
+      "path": "safe-source/authority.py.gz",
+      "sha256": "1aa605c639d6ed3b5e4d7ff67a154cb164f53b6b2b500c98654db0978795ea70",
+      "bytes": 1201
+    },
+    {
+      "path": "safe-source/capacity.py.gz",
+      "sha256": "80833be5783ac39aa93b807fa129ec95e15affa3c23939e09048310de4446d2c",
+      "bytes": 983
+    },
+    {
+      "path": "safe-source/connector.py.gz",
+      "sha256": "f4a33e1a2da55fae0ac6ae9400b4c85a8d61289bf20aa00e60afdaeae2a449cd",
+      "bytes": 733
+    },
+    {
+      "path": "safe-source/dashboard.py.gz",
+      "sha256": "e2f9c93f9e4e08624a11a8393630c1f9c83a32e4c0e3cee60b311b5f2edc1bad",
+      "bytes": 1877
+    },
+    {
+      "path": "safe-source/deployment.py.gz",
+      "sha256": "de97202fe21763694c2c83a522518c00b7e7244055af666604d077f44566cc87",
+      "bytes": 1316
+    },
+    {
+      "path": "safe-source/domain.py.gz",
+      "sha256": "8ef4a2c67ca6a4bdcc1b4b87e28f14295d2643c22ca567f04608e9bf6199daca",
+      "bytes": 1835
+    },
+    {
+      "path": "safe-source/execution.py.gz",
+      "sha256": "9cad0abc1dd4807fbd90c2b9e88538baa851d1581127551cb85f08e87c0d69e0",
+      "bytes": 2929
+    },
+    {
+      "path": "safe-source/fork.py.gz",
+      "sha256": "0ede3801695ec96d2e2c50e72fddd03292cf2850bde660c8fa6c0757edf4fc1b",
+      "bytes": 1522
+    },
+    {
+      "path": "safe-source/gas.py.gz",
+      "sha256": "69100d62ffd5df2c87cb2fbe9cdc551bc4c37fbc291c115054572c37fd02ce4b",
+      "bytes": 1161
+    },
+    {
+      "path": "safe-source/lifecycle.py.gz",
+      "sha256": "88c776ce5d3be316279930d2287a50a7cfd7d15362028cb7aa4cc45bda1e540e",
+      "bytes": 1299
+    },
+    {
+      "path": "safe-source/liquidation.py.gz",
+      "sha256": "e6bb9917b941bfafa915ed8bd67efd0432dc4f4ec58fba86b42a19aeac3d5c39",
+      "bytes": 1057
+    },
+    {
+      "path": "safe-source/math.py.gz",
+      "sha256": "cdf18b312aff1f36ca9ac3538867bd4525afaa94f4349de6ecb531cc184cfb1d",
+      "bytes": 1420
+    },
+    {
+      "path": "safe-source/models.py.gz",
+      "sha256": "079fa86080a1048196363ef9ffff3529e9626d382465e8491a21b9d23ce3d554",
+      "bytes": 1936
+    },
+    {
+      "path": "safe-source/observations.py.gz",
+      "sha256": "a604e61dd8a58340bd903b4163bdab63adde522745a3c2356d704bdf198a4c36",
+      "bytes": 1231
+    },
+    {
+      "path": "safe-source/operations.py.gz",
+      "sha256": "dde48a1e7fbd43288b3187ed138b6ceff6e1458f75d9ae8cde2a64abd0d6c271",
+      "bytes": 1457
+    },
+    {
+      "path": "safe-source/permissions.py.gz",
+      "sha256": "56e95fb480b1b6aeac0d1577e81dde0a460653b53072e9c5b600ceb6e1f7945f",
+      "bytes": 2100
+    },
+    {
+      "path": "safe-source/planning.py.gz",
+      "sha256": "1ba854958bc1dd6d72f46664ecd525de33e08d488117310e40405fbe1ac5f880",
+      "bytes": 1248
+    },
+    {
+      "path": "safe-source/reader.py.gz",
+      "sha256": "982655814fea0c26b1a2c06401d7ec17668123cea74fa21109f134420fc675a9",
+      "bytes": 1594
+    },
+    {
+      "path": "safe-source/receipts.py.gz",
+      "sha256": "e14e130281cefa8f4c59e4a1f0c7a9aaf72dbbd8035363cc8aed8d8580e3f688",
+      "bytes": 1805
+    },
+    {
+      "path": "safe-source/reporting.py.gz",
+      "sha256": "bd1ffecabe6b0347cad69c53296c22a75ba89c79e062f412c086eab983333025",
+      "bytes": 1511
+    },
+    {
+      "path": "safe-source/risk.py.gz",
+      "sha256": "05edf3caf62127184b63dd274d1dafae105f9412bc547878e0f806dbc71dbe4d",
+      "bytes": 703
+    },
+    {
+      "path": "safe-source/state.py.gz",
+      "sha256": "f92cb52901cd83de44ef9d3e3f428448bf451fd8b0dbee03df260cbd1868222f",
+      "bytes": 2204
+    },
+    {
+      "path": "safe-source/support.py.gz",
+      "sha256": "606a77cb5230007ab0ea6d6fd42ec829ff705cb09f9c102fbfe125087b20a673",
+      "bytes": 549
+    },
+    {
+      "path": "safe-source/transitions.py.gz",
+      "sha256": "79c53becb367aec46d0d6dcdb8fc92bce0fd1ad75d4f8dbc4bb34c9f69b0954f",
+      "bytes": 962
+    },
+    {
+      "path": "safe-source/morpho_blue_ethereum_lending/strategy.py.gz",
+      "sha256": "f78678e6734e22d19dd7d7f2af6006714f6df4e4cbfd74c75906aa5fd79d6073",
+      "bytes": 1540
+    },
+    {
+      "path": "safe-source/morpho_blue_ethereum_lending/config.yaml.gz",
+      "sha256": "fa04ce9b9f8972b2c38e114fa3ae4282b7c3c5f4b66c87af99794f7aeaef04b8",
+      "bytes": 911
+    },
+    {
+      "path": "safe-source/morpho_blue_base_lending/strategy.py.gz",
+      "sha256": "f78678e6734e22d19dd7d7f2af6006714f6df4e4cbfd74c75906aa5fd79d6073",
+      "bytes": 1540
+    },
+    {
+      "path": "safe-source/morpho_blue_base_lending/config.yaml.gz",
+      "sha256": "089c4b15812462247a3c6fa6b4be1e0b36fa9bb77fc0240ca36382929f0bffb5",
+      "bytes": 895
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/checkpoint.json.gz",
+      "sha256": "0dc4fc314d34ef3d659689dc51a010e6ab9290cc79a2f53b1f4de71de9fc6938",
+      "bytes": 59355
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/dashboard.html.gz",
+      "sha256": "2612a8ce1862f7ffb2451f2b126fd5ff24788370b98092ff0130fd804cdd6b0a",
+      "bytes": 14244
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/dashboard.json.gz",
+      "sha256": "59460ac184e5af57cf8623d73c7096f64932ac01725a9b55de93ddc74210f54d",
+      "bytes": 2832
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/deployment.json.gz",
+      "sha256": "8f891860c3e279b90b01858e0333366ee8a2bd66d3f145df0ad523eecbf4dc8a",
+      "bytes": 958
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/fixture-installation.json.gz",
+      "sha256": "11e7442c4d930ca7da6b604c64e66f86ec1475d3871d2d7c41e2423bb353b551",
+      "bytes": 280
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/fork-routes.json.gz",
+      "sha256": "6f5d3ceb10d6cfa10ae4d76656c0d138394070d285b81c57e67f29a5f8e43408",
+      "bytes": 168
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/process-0.log.gz",
+      "sha256": "d186195cc943892fb84072f0f156f77a9cabdaf646ddedcdaf9be701350d9d43",
+      "bytes": 258
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/process-2.log.gz",
+      "sha256": "ac70edf7d35ee92e518c6ea7076fe482918e5a0a90b8481055c1ecc91658279d",
+      "bytes": 183
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/process-3.log.gz",
+      "sha256": "d636e2bceb33718cc233f43232ab74eaf56f120250f3ed535bb7956221e85081",
+      "bytes": 137
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/process-4.log.gz",
+      "sha256": "d636e2bceb33718cc233f43232ab74eaf56f120250f3ed535bb7956221e85081",
+      "bytes": 137
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/process-5.log.gz",
+      "sha256": "691b28ec50b8beac5ee2ab51fc44cab7d29c543f85f2cd4a2fcd761fa212bbc1",
+      "bytes": 317
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/process-6.log.gz",
+      "sha256": "7ffc5d659720c142fefef8bff1ea44462ef1a109a9a3c9cd60d6dc6be7178cf1",
+      "bytes": 3814
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/report.json.gz",
+      "sha256": "70e16c388177c9912a2824af564cdcff6ca8390fec4839bdb6f620bcc086dd5f",
+      "bytes": 3794
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/result.json.gz",
+      "sha256": "5121751d56784de0b5f8c3c3d3129ef96e7132511a1c43df8bc269ed90cab255",
+      "bytes": 363
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/state.sqlite.gz",
+      "sha256": "299fd9e05e041fdba6bca0c4d276326ac8575f80a6f940074cfd48d8911132db",
+      "bytes": 41607
+    },
+    {
+      "path": "morpho_blue_base_lending-eoa-f8c5a5385e44448fb147b5c10f15a943/transactions.json.gz",
+      "sha256": "7a90f3ee8f77d418e557b0dc3946dcbe4a6245a204564cfc90af0a1b18630ff2",
+      "bytes": 5568
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/checkpoint.json.gz",
+      "sha256": "02b5ed4dd942b781ee845fa1bb32bd9aafb9d5ec44dff3978819f8567fd8de8c",
+      "bytes": 54727
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/dashboard.html.gz",
+      "sha256": "ec252453463d478563f4510e3bdace42bf293d319436b9015af545f6f06069c4",
+      "bytes": 14271
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/dashboard.json.gz",
+      "sha256": "085f08e5e7aae5971cdcb1d37e0d5ca286a3ee6eb53531458fb4e4041d94db00",
+      "bytes": 2848
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/deployment.json.gz",
+      "sha256": "f376e99bc4628004ed91d4a86dd84c2ff133eb0426019ec4e66db5eac52ef9da",
+      "bytes": 976
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/fixture-installation.json.gz",
+      "sha256": "b3db97c399a7ee043255f14a987e6e65ae9e48531803680bda0fb87d2963b29c",
+      "bytes": 297
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/fork-routes.json.gz",
+      "sha256": "aee1a234c910d8190accccf1e20e1c5cedeca88bfa38af025cb0d66eae217c96",
+      "bytes": 167
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/process-0.log.gz",
+      "sha256": "a6a2675bec96cf6a38762c516fc0ba6dcb8261d4fb406764b78b82a684bc25b8",
+      "bytes": 253
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/process-2.log.gz",
+      "sha256": "20000109a38ef4fd893fbe20f63781ac04a2ec546b918102901c266e713e7a0b",
+      "bytes": 181
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/process-3.log.gz",
+      "sha256": "acf11d764975806bc59099e0b7141bbf7bd0bf48bb6bce425038848a3268ec71",
+      "bytes": 136
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/process-4.log.gz",
+      "sha256": "acf11d764975806bc59099e0b7141bbf7bd0bf48bb6bce425038848a3268ec71",
+      "bytes": 136
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/process-5.log.gz",
+      "sha256": "4e7c9fc1041f1dce9f7f657671bda33d26e4278986b147d20d1bc3c05e4988f2",
+      "bytes": 318
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/process-6.log.gz",
+      "sha256": "1f9bb680688770555ab538333e6234b6a3561a584b641bc3d15322965e23f0dc",
+      "bytes": 3814
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/report.json.gz",
+      "sha256": "6aed00aee5d12571b0052de4c41a99d5f09e9623141f2f0ea063e8ac7be52172",
+      "bytes": 3795
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/result.json.gz",
+      "sha256": "3f796a91454837d10f2aa91ed76d13c41df83e1c54233699634be796152239a9",
+      "bytes": 364
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/state.sqlite.gz",
+      "sha256": "576ae1db7a51505ef9a19538a6dafe075aa3f08af0dab402cb0a3341d250cd2c",
+      "bytes": 37626
+    },
+    {
+      "path": "morpho_blue_ethereum_lending-eoa-5d00b3e3246948688c0765172938fa01/transactions.json.gz",
+      "sha256": "0e1a6aef1c676b82814a971953b72265f1e35370f143596e5dec845606da4ed7",
+      "bytes": 5809
+    },
+    {
+      "path": "eoa-source-comparison.json.gz",
+      "sha256": "3fe54609df013a29f6fb13b9b0e05d386626bb41f5e1ed37269c05c144130af7",
+      "bytes": 62558
+    },
+    {
+      "path": "eoa-source/__init__.py.gz",
+      "sha256": "f61f27bd17de546264aa58f40f3aafaac7021e0ef69c17f6b1b4cd7664a037ec",
+      "bytes": 20
+    },
+    {
+      "path": "eoa-source/accounting.py.gz",
+      "sha256": "5d1f864962d4fb2a994747088d86410ee54a2a492f9699a2679516e187922c44",
+      "bytes": 604
+    },
+    {
+      "path": "eoa-source/asset_effects.py.gz",
+      "sha256": "dcf529d853782f00deaface29c75062206124f4ee1b094d120844910fdabe253",
+      "bytes": 290
+    },
+    {
+      "path": "eoa-source/authority.py.gz",
+      "sha256": "1aa605c639d6ed3b5e4d7ff67a154cb164f53b6b2b500c98654db0978795ea70",
+      "bytes": 1201
+    },
+    {
+      "path": "eoa-source/capacity.py.gz",
+      "sha256": "80833be5783ac39aa93b807fa129ec95e15affa3c23939e09048310de4446d2c",
+      "bytes": 983
+    },
+    {
+      "path": "eoa-source/connector.py.gz",
+      "sha256": "f4a33e1a2da55fae0ac6ae9400b4c85a8d61289bf20aa00e60afdaeae2a449cd",
+      "bytes": 733
+    },
+    {
+      "path": "eoa-source/dashboard.py.gz",
+      "sha256": "e2f9c93f9e4e08624a11a8393630c1f9c83a32e4c0e3cee60b311b5f2edc1bad",
+      "bytes": 1877
+    },
+    {
+      "path": "eoa-source/deployment.py.gz",
+      "sha256": "de97202fe21763694c2c83a522518c00b7e7244055af666604d077f44566cc87",
+      "bytes": 1316
+    },
+    {
+      "path": "eoa-source/domain.py.gz",
+      "sha256": "8ef4a2c67ca6a4bdcc1b4b87e28f14295d2643c22ca567f04608e9bf6199daca",
+      "bytes": 1835
+    },
+    {
+      "path": "eoa-source/execution.py.gz",
+      "sha256": "9cad0abc1dd4807fbd90c2b9e88538baa851d1581127551cb85f08e87c0d69e0",
+      "bytes": 2929
+    },
+    {
+      "path": "eoa-source/fork.py.gz",
+      "sha256": "0ede3801695ec96d2e2c50e72fddd03292cf2850bde660c8fa6c0757edf4fc1b",
+      "bytes": 1522
+    },
+    {
+      "path": "eoa-source/gas.py.gz",
+      "sha256": "69100d62ffd5df2c87cb2fbe9cdc551bc4c37fbc291c115054572c37fd02ce4b",
+      "bytes": 1161
+    },
+    {
+      "path": "eoa-source/lifecycle.py.gz",
+      "sha256": "88c776ce5d3be316279930d2287a50a7cfd7d15362028cb7aa4cc45bda1e540e",
+      "bytes": 1299
+    },
+    {
+      "path": "eoa-source/liquidation.py.gz",
+      "sha256": "e6bb9917b941bfafa915ed8bd67efd0432dc4f4ec58fba86b42a19aeac3d5c39",
+      "bytes": 1057
+    },
+    {
+      "path": "eoa-source/math.py.gz",
+      "sha256": "cdf18b312aff1f36ca9ac3538867bd4525afaa94f4349de6ecb531cc184cfb1d",
+      "bytes": 1420
+    },
+    {
+      "path": "eoa-source/models.py.gz",
+      "sha256": "079fa86080a1048196363ef9ffff3529e9626d382465e8491a21b9d23ce3d554",
+      "bytes": 1936
+    },
+    {
+      "path": "eoa-source/observations.py.gz",
+      "sha256": "a604e61dd8a58340bd903b4163bdab63adde522745a3c2356d704bdf198a4c36",
+      "bytes": 1231
+    },
+    {
+      "path": "eoa-source/operations.py.gz",
+      "sha256": "dde48a1e7fbd43288b3187ed138b6ceff6e1458f75d9ae8cde2a64abd0d6c271",
+      "bytes": 1457
+    },
+    {
+      "path": "eoa-source/permissions.py.gz",
+      "sha256": "56e95fb480b1b6aeac0d1577e81dde0a460653b53072e9c5b600ceb6e1f7945f",
+      "bytes": 2100
+    },
+    {
+      "path": "eoa-source/planning.py.gz",
+      "sha256": "1ba854958bc1dd6d72f46664ecd525de33e08d488117310e40405fbe1ac5f880",
+      "bytes": 1248
+    },
+    {
+      "path": "eoa-source/reader.py.gz",
+      "sha256": "982655814fea0c26b1a2c06401d7ec17668123cea74fa21109f134420fc675a9",
+      "bytes": 1594
+    },
+    {
+      "path": "eoa-source/receipts.py.gz",
+      "sha256": "e14e130281cefa8f4c59e4a1f0c7a9aaf72dbbd8035363cc8aed8d8580e3f688",
+      "bytes": 1805
+    },
+    {
+      "path": "eoa-source/reporting.py.gz",
+      "sha256": "bd1ffecabe6b0347cad69c53296c22a75ba89c79e062f412c086eab983333025",
+      "bytes": 1511
+    },
+    {
+      "path": "eoa-source/risk.py.gz",
+      "sha256": "05edf3caf62127184b63dd274d1dafae105f9412bc547878e0f806dbc71dbe4d",
+      "bytes": 703
+    },
+    {
+      "path": "eoa-source/state.py.gz",
+      "sha256": "f92cb52901cd83de44ef9d3e3f428448bf451fd8b0dbee03df260cbd1868222f",
+      "bytes": 2204
+    },
+    {
+      "path": "eoa-source/support.py.gz",
+      "sha256": "606a77cb5230007ab0ea6d6fd42ec829ff705cb09f9c102fbfe125087b20a673",
+      "bytes": 549
+    },
+    {
+      "path": "eoa-source/transitions.py.gz",
+      "sha256": "79c53becb367aec46d0d6dcdb8fc92bce0fd1ad75d4f8dbc4bb34c9f69b0954f",
+      "bytes": 962
+    },
+    {
+      "path": "eoa-source/morpho_blue_ethereum_lending/strategy.py.gz",
+      "sha256": "f78678e6734e22d19dd7d7f2af6006714f6df4e4cbfd74c75906aa5fd79d6073",
+      "bytes": 1540
+    },
+    {
+      "path": "eoa-source/morpho_blue_ethereum_lending/config.yaml.gz",
+      "sha256": "fa04ce9b9f8972b2c38e114fa3ae4282b7c3c5f4b66c87af99794f7aeaef04b8",
+      "bytes": 911
+    },
+    {
+      "path": "eoa-source/morpho_blue_base_lending/strategy.py.gz",
+      "sha256": "f78678e6734e22d19dd7d7f2af6006714f6df4e4cbfd74c75906aa5fd79d6073",
+      "bytes": 1540
+    },
+    {
+      "path": "eoa-source/morpho_blue_base_lending/config.yaml.gz",
+      "sha256": "089c4b15812462247a3c6fa6b4be1e0b36fa9bb77fc0240ca36382929f0bffb5",
+      "bytes": 895
+    },
+    {
+      "path": "combined-pytest.txt",
+      "sha256": "3656f3a09a63678612b4e89ecf7edddfa004e3e67185570f9b5767068898679f",
+      "bytes": 153
+    }
+  ]
+}

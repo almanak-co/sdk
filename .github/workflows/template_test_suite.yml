@@ -1,0 +1,17 @@
+name: Test Suite
+
+on:
+  workflow_call:
+    inputs:
+      coverage:
+        description: "Record shard coverage for the CRAP gate (see template_pytest)."
+        type: boolean
+        required: false
+        default: true
+
+# The CRAP gate is diff-scoped and runs on pull requests only (pr.yml).
+jobs:
+  tests:
+    uses: ./.github/workflows/template_pytest.yml
+    with:
+      coverage: ${{ inputs.coverage }}

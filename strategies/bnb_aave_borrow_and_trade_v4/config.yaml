@@ -1,0 +1,67 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/bnb_aave_borrow_and_trade_v4.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '5'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.1'
+      collateral: true
+      minimum_health_factor: '2'
+      oracle: '0x39bc1bfda2130d6bb6dbefd366939b4c7aa7c697'
+      price_source: '0x0567f2323251f0aab15c8dfb1967e4e8a7d42aee'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      collateral: false
+      minimum_health_factor: '2'
+      oracle: '0x39bc1bfda2130d6bb6dbefd366939b4c7aa7c697'
+      price_source: '0xee845a7a40a090da256420a293803c35b7f436b6'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      capital:
+        asset: eip155:56/erc20:0x55d398326f99059ff775485246999027b3197955
+        quantity: '2.5'
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+      kind: trading
+markets:
+  collateral:
+    connector: aave_v3
+    chain: eip155:56
+    asset: eip155:56/erc20:0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c
+  loan:
+    connector: aave_v3
+    chain: eip155:56
+    asset: eip155:56/erc20:0x55d398326f99059ff775485246999027b3197955
+  pool:
+    connector: uniswap_v4
+    chain: eip155:56
+    currency0: eip155:56/erc20:0x55d398326f99059ff775485246999027b3197955
+    currency1: eip155:56/erc20:0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c
+    fee: 500
+    tick_spacing: 10
+    hooks: '0x0000000000000000000000000000000000000000'
+accounts:
+  fund:
+    chain: eip155:56
+inventory:
+- account: fund
+  balance:
+    asset: eip155:56/erc20:0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c
+    quantity: '0.1'
+- account: fund
+  balance:
+    asset: eip155:56/erc20:0x55d398326f99059ff775485246999027b3197955
+    quantity: '1'

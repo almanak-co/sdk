@@ -1,0 +1,10 @@
+{
+  "eip155:42161": {
+    "prefix": "0xdeadbeef00010203",
+    "length": 15
+  },
+  "eip155:43114": {
+    "prefix": "0x",
+    "length": 0
+  }
+}

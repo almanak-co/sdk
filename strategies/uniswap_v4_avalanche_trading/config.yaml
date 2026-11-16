@@ -1,0 +1,47 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Explicit production example. The operator context is
+# examples/operators/uniswap_v4_avalanche_trading.production.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    trading:
+      market: trading_market
+      account: trading
+      capital:
+        asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '1'
+      hold_seconds: 43200s
+      slippage_bps: 100
+      deadline_seconds: 300s
+      minimum_native_balance: '0.001'
+      kind: trading
+  gas:
+    budget_0:
+      accounts:
+      - trading
+      chain: eip155:43114
+      source: network_rpc_fee_history
+      base_fee_basis: observed_block
+      reward_percentile: 50
+      base_fee_multiplier_bps: 20000
+      max_gas_price_wei: 1000000000000
+      max_gas_limit: 2000000
+      gas_limit_buffer_bps: 2500
+      max_transaction_fee:
+        base_units: 200000000000000000
+      total_budget:
+        base_units: 1000000000000000000
+      exit_reserve:
+        base_units: 200000000000000000
+markets:
+  trading_market:
+    connector: uniswap_v4
+    chain: eip155:43114
+    currency0: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+    currency1: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+    fee: 500
+    tick_spacing: 10
+    hooks: '0x0000000000000000000000000000000000000000'
+accounts:
+  trading:
+    chain: eip155:43114

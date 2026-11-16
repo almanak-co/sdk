@@ -1,0 +1,90 @@
+strategy:
+  connector: sparklend
+  decision_interval: 5s
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      supply_limit: '0.01'
+      borrow_limit:
+        base_units: 0
+      collateral: true
+      minimum_health_factor: '2'
+      oracle: '0x8105f69d9c41644c6a0803fda7d03aa70996cfd9'
+      price_source: '0x2750e4cb635af1fccfb10c0ea54b5b5bfc2759b6'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      supply_limit:
+        base_units: 0
+      borrow_limit: '5'
+      collateral: false
+      minimum_health_factor: '2'
+      oracle: '0x8105f69d9c41644c6a0803fda7d03aa70996cfd9'
+      price_source: '0x42a03f81dd8a1cecd746dc262e4d1cd9fd39f777'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0'
+assets:
+  eip155:1/slip44:60:
+    decimals: 18
+  eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2:
+    decimals: 18
+  eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48:
+    decimals: 6
+markets:
+  collateral:
+    asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+    kind: sparklend
+    pool: '0xc13e21b648a5ee794902342038ff3adab66be987'
+  loan:
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+    kind: sparklend
+    pool: '0xc13e21b648a5ee794902342038ff3adab66be987'
+accounts:
+  fund:
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:1
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: eth-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      block:
+        chain:
+          chain_id: eip155:1
+          environment: mainnet
+        hash: '0x9693086dce59371f595a4fe4843621ea808c4b296b320d820583ee6f9033e0a2'
+        number: 25923416
+        timestamp: 1788759227
+    funds:
+    - account: fund
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+          quantity: '0.01'
+        method: wrap_native
+      - balance:
+          asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+          quantity: '1'
+        method: local_storage
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:1/slip44:60
+        quantity: '5'
+      foundry_account_index: 0

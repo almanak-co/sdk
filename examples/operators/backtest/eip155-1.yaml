@@ -1,0 +1,19 @@
+# Read-only historical provider bindings for backtests of every reference whose
+# accounts live on eip155:1. Hypothetical funds are simulation
+# identities; no account bindings exist. Credentials stay in the selected --env-file.
+schema_version: operator-gateway-config-v1
+modes:
+- backtest
+networks:
+- chain: eip155:1
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+vendors:
+- name: market_prices
+  provider:
+    kind: coingecko
+    api: pro
+    api_key_env: COINGECKO_API_KEY
+accounts:
+  bindings: []

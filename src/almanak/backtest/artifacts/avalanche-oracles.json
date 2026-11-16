@@ -1,0 +1,78 @@
+{
+  "chain_id": "eip155:43114",
+  "verified_block": {
+    "chain": {
+      "chain_id": "eip155:43114",
+      "environment": "mainnet"
+    },
+    "number": 94486606,
+    "hash": "0x64f41ed68ee4741fcbb1e8b314b87b3e8775734da02a25592dc0656f7627fe7b",
+    "timestamp": 1788566400
+  },
+  "contracts": [
+    {
+      "address": "0x0a77230d17318075983913bc2145db16c7366156",
+      "kind": "proxy",
+      "code_hash": "0xbd6f524cdc4268b6bd1bb6f77a8821faeea9c52ee9e0afa0b6d948ce82c966c2",
+      "verification": "https://sourcify.dev/server/v2/contract/43114/0x0a77230d17318075983913bc2145db16c7366156?fields=all",
+      "verification_sha256": "e6675758c4a7c6f84691b0e6c112a50ef5235607629b8e13733fbf7492b40bc6",
+      "comparison": "identical verified runtime outside compiler-declared immutable operands"
+    },
+    {
+      "address": "0x84b50b131a82da689c0205c00d603c1c92a5f8a4",
+      "kind": "oracle",
+      "code_hash": "0x88caaf18c5f1a35ee6fc2e10bf9e37d8ca16cf15bd5838fb802e994e50904aee",
+      "verification": "https://eth.blockscout.com/api/v2/smart-contracts/0x99b2b6cea9c3d2fd8f4d90f86741c44b212a6127",
+      "verification_sha256": "a6786e791fab53630d2fa34748b3de80c1a19a07c6e3485f08b62979f1a1bd9c",
+      "comparison": "identical compiled runtime outside compiler-declared immutable operands"
+    },
+    {
+      "address": "0xb051a0a13fe913c6c723ac7111a17508081dbd3a",
+      "kind": "ocr2",
+      "code_hash": "0xec635dff6a4204a0de141a9a6728b9c84995894680d703e44ac0057ffb38c412",
+      "verification": "https://sourcify.dev/server/v2/contract/43114/0xb051a0a13fe913c6c723ac7111a17508081dbd3a?fields=all",
+      "verification_sha256": "dc63f49ce15783fbf7b77df51a17241d5d4d3ba03e9d23ab1a85d35157287d75",
+      "comparison": "identical verified runtime outside compiler-declared immutable operands"
+    },
+    {
+      "address": "0xb0d7a8bbdcdb1203850b742bb4d7f57a1f1c8483",
+      "kind": "cap",
+      "code_hash": "0xa53375355607da0b2cc293aa73c85d266c81afd856adc44298ae692dc01ccf44",
+      "verification": "https://eth.blockscout.com/api/v2/smart-contracts/0x3f73f03aa83b2a48ed27e964ed0fdb590332095b",
+      "verification_sha256": "494b8a214a74cd6b3972fbfacba95ad105324b873e5cc34a18d8d72f7ee719fe",
+      "comparison": "identical compiled runtime outside compiler-declared immutable operands and validated trailing CBOR metadata"
+    },
+    {
+      "address": "0xcfbfe648ba88bf7d9776d970417a0b26c315feb4",
+      "kind": "ocr2",
+      "code_hash": "0x16f41184f797cb8f8918680df0ebf2a97cc3192aa6b104615f61096fc674f2aa",
+      "verification": "https://sourcify.dev/server/v2/contract/43114/0xb051a0a13fe913c6c723ac7111a17508081dbd3a?fields=all",
+      "verification_sha256": "dc63f49ce15783fbf7b77df51a17241d5d4d3ba03e9d23ab1a85d35157287d75",
+      "comparison": "identical verified runtime outside compiler-declared immutable operands"
+    },
+    {
+      "address": "0xf096872672f44d6eba71458d74fe67f9a77a23b9",
+      "kind": "proxy",
+      "code_hash": "0xbd6f524cdc4268b6bd1bb6f77a8821faeea9c52ee9e0afa0b6d948ce82c966c2",
+      "verification": "https://sourcify.dev/server/v2/contract/43114/0x0a77230d17318075983913bc2145db16c7366156?fields=all",
+      "verification_sha256": "e6675758c4a7c6f84691b0e6c112a50ef5235607629b8e13733fbf7492b40bc6",
+      "comparison": "identical verified runtime outside compiler-declared immutable operands"
+    },
+    {
+      "address": "0x976b3d034e162d8bd72d6b9c989d545b839003b0",
+      "kind": "proxy",
+      "code_hash": "0xbd6f524cdc4268b6bd1bb6f77a8821faeea9c52ee9e0afa0b6d948ce82c966c2",
+      "verification": "https://sourcify.dev/server/v2/contract/43114/0x0a77230d17318075983913bc2145db16c7366156?fields=all",
+      "verification_sha256": "e6675758c4a7c6f84691b0e6c112a50ef5235607629b8e13733fbf7492b40bc6",
+      "comparison": "Full runtime byte-identical to verified 0x0a77230d17318075983913bc2145db16c7366156 at archived and fresh selected-provider boundaries"
+    },
+    {
+      "address": "0x9ff520924dc295074f43a8a01ee30a4d39a4223b",
+      "kind": "ocr2",
+      "code_hash": "0x16f41184f797cb8f8918680df0ebf2a97cc3192aa6b104615f61096fc674f2aa",
+      "verification": "https://sourcify.dev/server/v2/contract/43114/0xb051a0a13fe913c6c723ac7111a17508081dbd3a?fields=all",
+      "verification_sha256": "dc63f49ce15783fbf7b77df51a17241d5d4d3ba03e9d23ab1a85d35157287d75",
+      "comparison": "Full runtime byte-identical to verified 0xcfbfe648ba88bf7d9776d970417a0b26c315feb4 at archived and fresh selected-provider boundaries"
+    }
+  ]
+}

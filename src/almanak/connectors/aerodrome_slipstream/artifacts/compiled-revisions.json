@@ -1,0 +1,352 @@
+{
+  "factory": {
+    "source": "contracts/core/CLFactory.sol",
+    "contract": "CLFactory",
+    "compiler": "0.7.6+commit.7338295f",
+    "runtime_length": 5235,
+    "normalized_code_hash": "0x09641bc1f43230c31fc2f25c1c9b77710930b9e27a91de16f1286362a279f21e",
+    "immutables": {
+      "voter": [
+        {
+          "length": 32,
+          "start": 3175
+        },
+        {
+          "length": 32,
+          "start": 3214
+        },
+        {
+          "length": 32,
+          "start": 3402
+        }
+      ],
+      "poolImplementation": [
+        {
+          "length": 32,
+          "start": 1905
+        },
+        {
+          "length": 32,
+          "start": 4337
+        }
+      ],
+      "factoryRegistry": [
+        {
+          "length": 32,
+          "start": 2073
+        },
+        {
+          "length": 32,
+          "start": 3097
+        }
+      ],
+      "legacyCLFactory": [
+        {
+          "length": 32,
+          "start": 1749
+        },
+        {
+          "length": 32,
+          "start": 4710
+        }
+      ]
+    }
+  },
+  "position_manager": {
+    "source": "contracts/periphery/NonfungiblePositionManager.sol",
+    "contract": "NonfungiblePositionManager",
+    "compiler": "0.7.6+commit.7338295f",
+    "runtime_length": 24542,
+    "normalized_code_hash": "0xe9e8ff9db68e01a0c73556838fc6efd95ea6d3a80187ff8c77d41db60d43a07a",
+    "immutables": {
+      "nameHash": [
+        {
+          "length": 32,
+          "start": 5485
+        }
+      ],
+      "versionHash": [
+        {
+          "length": 32,
+          "start": 5518
+        }
+      ],
+      "factory": [
+        {
+          "length": 32,
+          "start": 2602
+        },
+        {
+          "length": 32,
+          "start": 4309
+        },
+        {
+          "length": 32,
+          "start": 9086
+        },
+        {
+          "length": 32,
+          "start": 9406
+        },
+        {
+          "length": 32,
+          "start": 10928
+        },
+        {
+          "length": 32,
+          "start": 11137
+        },
+        {
+          "length": 32,
+          "start": 11967
+        }
+      ],
+      "WETH9": [
+        {
+          "length": 32,
+          "start": 602
+        },
+        {
+          "length": 32,
+          "start": 6135
+        },
+        {
+          "length": 32,
+          "start": 6318
+        },
+        {
+          "length": 32,
+          "start": 6464
+        },
+        {
+          "length": 32,
+          "start": 16551
+        },
+        {
+          "length": 32,
+          "start": 16621
+        },
+        {
+          "length": 32,
+          "start": 16737
+        }
+      ]
+    }
+  },
+  "router": {
+    "source": "contracts/periphery/SwapRouter.sol",
+    "contract": "SwapRouter",
+    "compiler": "0.7.6+commit.7338295f",
+    "runtime_length": 9908,
+    "normalized_code_hash": "0x2fac8d0c82c0ffc061f6421154d9d2a6c9585cdc572be9b63933a67b5b40363d",
+    "immutables": {
+      "factory": [
+        {
+          "length": 32,
+          "start": 3023
+        },
+        {
+          "length": 32,
+          "start": 4236
+        },
+        {
+          "length": 32,
+          "start": 6319
+        }
+      ],
+      "WETH9": [
+        {
+          "length": 32,
+          "start": 274
+        },
+        {
+          "length": 32,
+          "start": 1143
+        },
+        {
+          "length": 32,
+          "start": 1325
+        },
+        {
+          "length": 32,
+          "start": 1471
+        },
+        {
+          "length": 32,
+          "start": 1535
+        },
+        {
+          "length": 32,
+          "start": 1755
+        },
+        {
+          "length": 32,
+          "start": 5908
+        },
+        {
+          "length": 32,
+          "start": 5978
+        },
+        {
+          "length": 32,
+          "start": 6094
+        }
+      ]
+    }
+  },
+  "quoter": {
+    "source": "contracts/periphery/lens/QuoterV2.sol",
+    "contract": "QuoterV2",
+    "compiler": "0.7.6+commit.7338295f",
+    "runtime_length": 6934,
+    "normalized_code_hash": "0x151c7c6bd06cd1c076ac1e589524330e692dabecc5ad7eb2801a459d053779d8",
+    "immutables": {
+      "factory": [
+        {
+          "length": 32,
+          "start": 1174
+        },
+        {
+          "length": 32,
+          "start": 1662
+        },
+        {
+          "length": 32,
+          "start": 2538
+        }
+      ],
+      "WETH9": [
+        {
+          "length": 32,
+          "start": 734
+        }
+      ]
+    }
+  },
+  "swap_fee_module": {
+    "source": "contracts/core/fees/DynamicSwapFeeModule.sol",
+    "contract": "DynamicSwapFeeModule",
+    "compiler": "0.7.6+commit.7338295f",
+    "runtime_length": 9270,
+    "normalized_code_hash": "0xc213214b257c67c7bb12e676d4998420be8f0633f02f32c7920f474583a451dc",
+    "immutables": {
+      "factory": [
+        {
+          "length": 32,
+          "start": 1515
+        },
+        {
+          "length": 32,
+          "start": 1714
+        },
+        {
+          "length": 32,
+          "start": 2114
+        },
+        {
+          "length": 32,
+          "start": 2521
+        },
+        {
+          "length": 32,
+          "start": 2723
+        },
+        {
+          "length": 32,
+          "start": 2868
+        },
+        {
+          "length": 32,
+          "start": 3067
+        },
+        {
+          "length": 32,
+          "start": 3399
+        },
+        {
+          "length": 32,
+          "start": 3754
+        },
+        {
+          "length": 32,
+          "start": 3953
+        },
+        {
+          "length": 32,
+          "start": 4346
+        },
+        {
+          "length": 32,
+          "start": 4545
+        },
+        {
+          "length": 32,
+          "start": 4906
+        },
+        {
+          "length": 32,
+          "start": 5220
+        },
+        {
+          "length": 32,
+          "start": 5494
+        },
+        {
+          "length": 32,
+          "start": 5811
+        },
+        {
+          "length": 32,
+          "start": 6093
+        },
+        {
+          "length": 32,
+          "start": 6433
+        },
+        {
+          "length": 32,
+          "start": 7180
+        },
+        {
+          "length": 32,
+          "start": 7223
+        },
+        {
+          "length": 32,
+          "start": 7422
+        }
+      ]
+    }
+  },
+  "unstaked_fee_module": {
+    "source": "contracts/core/fees/CustomUnstakedFeeModule.sol",
+    "contract": "CustomUnstakedFeeModule",
+    "compiler": "0.7.6+commit.7338295f",
+    "runtime_length": 967,
+    "normalized_code_hash": "0x98c56ddcfcb4a998e21192c724e777f67cb5c0cd3140f7e10cc15a465614ae0d",
+    "immutables": {
+      "factory": [
+        {
+          "length": 32,
+          "start": 355
+        },
+        {
+          "length": 32,
+          "start": 546
+        },
+        {
+          "length": 32,
+          "start": 879
+        }
+      ]
+    }
+  },
+  "pool": {
+    "source": "contracts/core/CLPool.sol",
+    "contract": "CLPool",
+    "compiler": "0.7.6+commit.7338295f",
+    "runtime_length": 24279,
+    "normalized_code_hash": "0xe63484f408c701770737a3c40e435c8183c66b1663f3a8777ce44dd73aff339b",
+    "immutables": {}
+  }
+}

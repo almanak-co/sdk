@@ -1,0 +1,55 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/curve_base_tricrypto_lp.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    proportional:
+      market: crypto_pool
+      account: proportional
+      funding_asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+      trading_asset: eip155:8453/erc20:0x417ac0e078398c154edfadd9ef675d30be60af93
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:8453/erc20:0x417ac0e078398c154edfadd9ef675d30be60af93
+        quantity: '0'
+      - asset: eip155:8453/erc20:0x236aa50979d5f3de3bd1eeb40e81137f22ab794b
+        quantity: '0'
+      - asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+        quantity: '0.01'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      minimum_native_balance:
+        base_units: 0
+    single_coin:
+      market: crypto_pool
+      account: single_coin
+      funding_asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+      trading_asset: eip155:8453/erc20:0x417ac0e078398c154edfadd9ef675d30be60af93
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:8453/erc20:0x417ac0e078398c154edfadd9ef675d30be60af93
+        quantity: '0'
+      - asset: eip155:8453/erc20:0x236aa50979d5f3de3bd1eeb40e81137f22ab794b
+        quantity: '0'
+      - asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+        quantity: '0.01'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      minimum_native_balance:
+        base_units: 0
+      single_coin_exit: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+markets:
+  crypto_pool:
+    connector: curve
+    chain: eip155:8453
+    pool: '0x6e53131f68a034873b6bfa15502af094ef0c5854'
+accounts:
+  proportional:
+    chain: eip155:8453
+  single_coin:
+    chain: eip155:8453

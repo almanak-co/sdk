@@ -1,0 +1,59 @@
+# Operator execution context for a fork run of strategies/compound_v3_base_lending. Provider
+# credentials stay in the selected --env-file. The account bindings are
+# placeholders: fork provisioning generates the actual fixture accounts, and a
+# production run requires reviewed bindings and signing files outside
+# strategy-readable paths.
+schema_version: operator-gateway-config-v1
+modes:
+- fork
+networks:
+- chain: eip155:8453
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: lender
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:8453
+          environment: mainnet
+        address: '0x0000000000000000000000000000000000000001'
+  - name: borrower
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:8453
+          environment: mainnet
+        address: '0x0000000000000000000000000000000000000002'
+fork:
+  # OP Stack forks cannot bound L1 data and operator fees, so this fork runs
+  # gasless; the authored strategy.gas is retained but not enforced.
+  author_gas: unenforced
+  anchors:
+  - chain: eip155:8453
+    height: 50999824
+    reference: '0x2cf0e0bf6d93d8a5b5700f7ae3ffe9f4347abf75401363b89ce63ff4743c832e'
+  funds:
+  - kind: safe_roles
+    account: lender
+    operator: operator
+    assets:
+    - asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+      amount: 1000000000
+  - kind: safe_roles
+    account: borrower
+    operator: operator
+    assets:
+    - asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+      amount: 1000000000000000000
+    - asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+      amount: 20000000
+  operators:
+  - name: operator
+    native_balance:
+      asset: eip155:8453/slip44:60
+      amount: 5000000000000000000

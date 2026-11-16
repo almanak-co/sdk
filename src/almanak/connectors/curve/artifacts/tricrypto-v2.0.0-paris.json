@@ -1,0 +1,187 @@
+{
+  "pool": {
+    "runtime_length": 22141,
+    "normalized_code_hash": "0x4f12f2503d18a9e68328f6230fd07046b8feb14d1564484dca700f8e2424be64",
+    "immutables": {
+      "WETH20": [
+        {
+          "start": 21693,
+          "length": 32
+        }
+      ],
+      "MATH": [
+        {
+          "start": 21725,
+          "length": 32
+        }
+      ],
+      "coins": [
+        {
+          "start": 21757,
+          "length": 96
+        }
+      ],
+      "name": [
+        {
+          "start": 21853,
+          "length": 96
+        }
+      ],
+      "symbol": [
+        {
+          "start": 21949,
+          "length": 64
+        }
+      ],
+      "NAME_HASH": [
+        {
+          "start": 22013,
+          "length": 32
+        }
+      ],
+      "CACHED_CHAIN_ID": [
+        {
+          "start": 22045,
+          "length": 32
+        }
+      ],
+      "salt": [
+        {
+          "start": 22077,
+          "length": 32
+        }
+      ],
+      "CACHED_DOMAIN_SEPARATOR": [
+        {
+          "start": 22109,
+          "length": 32
+        }
+      ]
+    }
+  },
+  "factory": {
+    "runtime_length": 4691,
+    "normalized_code_hash": "0x78c3ed6490690135ac811e901dea7ea560a13e00eeb63d35d48e68617375adf0",
+    "immutables": {}
+  },
+  "math": {
+    "runtime_length": 11022,
+    "normalized_code_hash": "0xc18d3684ac1089bb05840b9df2e08ed67008e544468a21b4e58342cc4c69d783",
+    "immutables": {}
+  },
+  "views": {
+    "runtime_length": 8346,
+    "normalized_code_hash": "0xefe6a870425ce1f046ecc6a578cb3efafa25940ca2f02d6fd8bc0142cafead41",
+    "immutables": {}
+  },
+  "provenance": {
+    "pool_evm_version": "paris",
+    "factory_evm_version": "paris",
+    "math_evm_version": "paris",
+    "views_evm_version": "paris",
+    "evidence": "docs/internal/reports/evidence/2026-09-07-rollout/curve-arbitrum-discovery/manifest.json",
+    "verification": "Independent compiled pool, factory, math and views runtimes match pinned Arbitrum deployment with explicit immutable normalization."
+  },
+  "pool_storage_layout": {
+    "nonreentrant.lock": {
+      "type": "nonreentrant lock",
+      "slot": 0
+    },
+    "packed_precisions": {
+      "type": "uint256",
+      "slot": 1
+    },
+    "factory": {
+      "type": "address",
+      "slot": 2
+    },
+    "price_scale_packed": {
+      "type": "uint256",
+      "slot": 3
+    },
+    "price_oracle_packed": {
+      "type": "uint256",
+      "slot": 4
+    },
+    "last_prices_packed": {
+      "type": "uint256",
+      "slot": 5
+    },
+    "last_prices_timestamp": {
+      "type": "uint256",
+      "slot": 6
+    },
+    "initial_A_gamma": {
+      "type": "uint256",
+      "slot": 7
+    },
+    "initial_A_gamma_time": {
+      "type": "uint256",
+      "slot": 8
+    },
+    "future_A_gamma": {
+      "type": "uint256",
+      "slot": 9
+    },
+    "future_A_gamma_time": {
+      "type": "uint256",
+      "slot": 10
+    },
+    "balances": {
+      "type": "uint256[3]",
+      "slot": 11
+    },
+    "D": {
+      "type": "uint256",
+      "slot": 14
+    },
+    "xcp_profit": {
+      "type": "uint256",
+      "slot": 15
+    },
+    "xcp_profit_a": {
+      "type": "uint256",
+      "slot": 16
+    },
+    "virtual_price": {
+      "type": "uint256",
+      "slot": 17
+    },
+    "packed_rebalancing_params": {
+      "type": "uint256",
+      "slot": 18
+    },
+    "future_packed_rebalancing_params": {
+      "type": "uint256",
+      "slot": 19
+    },
+    "packed_fee_params": {
+      "type": "uint256",
+      "slot": 20
+    },
+    "future_packed_fee_params": {
+      "type": "uint256",
+      "slot": 21
+    },
+    "admin_actions_deadline": {
+      "type": "uint256",
+      "slot": 22
+    },
+    "balanceOf": {
+      "type": "HashMap[address, uint256]",
+      "slot": 23
+    },
+    "allowance": {
+      "type": "HashMap[address, HashMap[address, uint256]]",
+      "slot": 24
+    },
+    "totalSupply": {
+      "type": "uint256",
+      "slot": 25
+    },
+    "nonces": {
+      "type": "HashMap[address, uint256]",
+      "slot": 26
+    }
+  }
+}

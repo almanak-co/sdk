@@ -1,1 +1,0 @@
-"""DefiLlama integration metadata."""

@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+# The hourly WETH closes the strategy declares, read from its pool's on-chain state,
+# start 120 hours before the window, so the first decision already has a full RSI window.
+# Decisions run every five minutes instead of the configured minute: reduced cadence
+# fidelity, reported by the run; the strategy reads hourly closes either way.
+mode: economic
+window:
+  start: '2026-09-19T00:00:00+00:00'
+  end: '2026-09-21T06:00:00+00:00'
+  end_policy: teardown
+  cleanup: 600s
+inventory:
+  funds:
+    fund:
+      balances:
+      - asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+        quantity: '0'
+      - asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+        quantity: '100'
+      - asset: eip155:8453/slip44:60
+        quantity: '1'
+execution:
+  latency: 5s
+  decision_interval: 300s
+  models:
+    swap_model: prepared_integer_pool
+    liquidity_model: bracketed_historical_fee_growth
+data:
+  source: uniswap_v3_archive
+  sample_seconds: 600s
+  max_age_seconds: 720s
+  max_samples: 400
+  max_bitmap_words: 100
+  max_initialized_ticks: 10000
+  max_liquidity_events: 100000
+  max_liquidity_log_requests: 1000
+  coverage:
+  - allocation: position
+    lower: -201000
+    upper: -195000
+costs:
+  kind: excluded

@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Uniswap V4 pool position",
+  "description": "A liquidity allocation states its tick bounds and may state collection timing; a trading allocation states neither.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "market",
+    "account",
+    "kind",
+    "capital",
+    "slippage_bps",
+    "deadline_seconds",
+    "minimum_native_balance"
+  ],
+  "properties": {
+    "market": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "account": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "kind": {
+      "enum": [
+        "trading",
+        "liquidity"
+      ]
+    },
+    "range": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "lower",
+            "upper"
+          ],
+          "properties": {
+            "lower": {
+              "$ref": "#/$defs/Tick"
+            },
+            "upper": {
+              "$ref": "#/$defs/Tick"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "band": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Band"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "capital": {
+      "$ref": "#/$defs/Amount"
+    },
+    "entry_swap_bps": {
+      "description": "Share of capital that sizes each entry quote, capped by the funding inventory held. Trading: the quote swaps that share, and entries repeat while funding remains. Liquidity: the quote swaps the part of that share the mint pairs with, and is offered only while no position is held; open_liquidity mints with all inventory held, so with the usual single entry swap a value below 10000 leaves about the rest of capital idle in the funding asset. A banded allocation that recentres through rebalance_quote, or a strategy that swaps repeatedly before minting, is not limited this way. 0 offers no entry quote: use it for a liquidity allocation that deposits without an entry swap. A trading allocation requires at least 1.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000,
+      "default": 10000
+    },
+    "hold_seconds": {
+      "anyOf": [
+        {
+          "$ref": "../strategy.schema.json#/$defs/PositiveDuration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional. Read only by strategy code for its own timed exit; connectors never act on it. Omit to hold until teardown."
+    },
+    "collect_seconds": {
+      "description": "Optional, liquidity only. Read only by strategy code to time its own fee collection; connectors never collect on a schedule. Omit when the strategy collects no fees before exit: closing the position takes the fees it accrued.",
+      "anyOf": [
+        {
+          "$ref": "../strategy.schema.json#/$defs/PositiveDuration"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "slippage_bps": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9999
+    },
+    "deadline_seconds": {
+      "$ref": "../strategy.schema.json#/$defs/PositiveDuration"
+    },
+    "minimum_native_balance": {
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    }
+  },
+  "$defs": {
+    "Tick": {
+      "type": "integer",
+      "minimum": -887272,
+      "maximum": 887272
+    },
+    "Band": {
+      "description": "Width of each position, centred on the observed tick: width ticks, or width_bps either side of the price. Optional lower and upper ticks form an envelope the gateway enforces; without one the band recentres around the price indefinitely.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "lower": {
+          "$ref": "#/$defs/Tick"
+        },
+        "upper": {
+          "$ref": "#/$defs/Tick"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "width_bps": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "dependentRequired": {
+        "lower": [
+          "upper"
+        ],
+        "upper": [
+          "lower"
+        ]
+      },
+      "oneOf": [
+        {
+          "required": [
+            "width"
+          ]
+        },
+        {
+          "required": [
+            "width_bps"
+          ]
+        }
+      ]
+    },
+    "Amount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset",
+        "quantity"
+      ],
+      "properties": {
+        "asset": {
+          "type": "string",
+          "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+        },
+        "quantity": {
+          "$ref": "../strategy.schema.json#/$defs/Quantity"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "liquidity"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "oneOf": [
+          {
+            "required": [
+              "range"
+            ],
+            "properties": {
+              "range": {
+                "type": "object"
+              }
+            }
+          },
+          {
+            "required": [
+              "band"
+            ],
+            "properties": {
+              "band": {
+                "type": "object"
+              }
+            }
+          }
+        ]
+      },
+      "else": {
+        "properties": {
+          "range": {
+            "type": "null"
+          },
+          "band": {
+            "type": "null"
+          },
+          "collect_seconds": {
+            "type": "null"
+          },
+          "entry_swap_bps": {
+            "minimum": 1
+          }
+        }
+      }
+    }
+  ]
+}

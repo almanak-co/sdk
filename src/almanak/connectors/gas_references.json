@@ -1,0 +1,1127 @@
+{
+  "schema": "almanak-gas-references-v1",
+  "description": "Largest of gasUsed and the parent estimate per connector, chain, account profile and operation, from mined fork receipts of supervised runs. Regenerate with scripts/gas_references.py.",
+  "references": [
+    {
+      "connector": "aave_v3",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "approve",
+      "gas_used": 126624,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-arb/aavema",
+        "transaction": "0x825d70239587706525dde8104e414dbf002edd004b5dcacb1aad14bc9c0b7d1a",
+        "block": 508329621,
+        "block_timestamp": 1790294806
+      }
+    },
+    {
+      "connector": "aave_v3",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "borrow",
+      "gas_used": 381094,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-arb/aavema",
+        "transaction": "0xb5a011585ba7694dffc46c4e87badd08a3c566b5dc2b5d11c541359a0d8897b2",
+        "block": 508329619,
+        "block_timestamp": 1790222786
+      }
+    },
+    {
+      "connector": "aave_v3",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "repay",
+      "gas_used": 245224,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-arb/aavema",
+        "transaction": "0x62a12254f150d430dc6f70aafd8691696e742498a526633c64c660ec0e66ee32",
+        "block": 508329622,
+        "block_timestamp": 1790294821
+      }
+    },
+    {
+      "connector": "aave_v3",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "revoke",
+      "gas_used": 101361,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-arb/aavema",
+        "transaction": "0xf8220523bae2917c0ad26610f316ced8282dc75ae51296678fcbbfb04b79fbfa",
+        "block": 508329623,
+        "block_timestamp": 1790294839
+      }
+    },
+    {
+      "connector": "aave_v3",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "supply",
+      "gas_used": 290440,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-arb/aavema",
+        "transaction": "0x74e80847bd3787fe1927e3223dae6af8674771db4fe6ed6bcb2fb79828ed8600",
+        "block": 508329618,
+        "block_timestamp": 1790222737
+      }
+    },
+    {
+      "connector": "aave_v3",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "withdraw",
+      "gas_used": 244489,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-arb/aavema",
+        "transaction": "0xece49637aa3610206500b921203497788fd7fd9d8cc10a9bb77984f918c048f9",
+        "block": 508329624,
+        "block_timestamp": 1790294869
+      }
+    },
+    {
+      "connector": "gmx_v2",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "gmx_approval",
+      "gas_used": 124615,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "testflow-sdk-work/gmxma-gasprobe-1 (max_gas_limit raised for measurement)",
+        "transaction": "0x7884ea7ac0974e976559a2b9c3f2f7b5f27874c11994624b5cc1fcbe608c122c",
+        "block": 512846417,
+        "block_timestamp": 1791453420
+      },
+      "gas_estimate": 126965
+    },
+    {
+      "connector": "gmx_v2",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "gmx_create_order",
+      "gas_used": 1576743,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "testflow-sdk-work/gmxma-gasprobe-1 (max_gas_limit raised for measurement)",
+        "transaction": "0xda2b87e4167ef3af052657fe3981873bfb30e47f8eed15f23ecd0a70fc2d9660",
+        "block": 512846418,
+        "block_timestamp": 1791453445
+      },
+      "gas_estimate": 1708985
+    },
+    {
+      "connector": "morpho_blue",
+      "chain": "eip155:999",
+      "profile": "safe_roles",
+      "action": "approve",
+      "gas_used": 119214,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-hyperevm/morphoc",
+        "transaction": "0xfc3d89e99701b9d1d72926aaa94394dc4d8dad99d7d78afe48e59fc5d56429b8",
+        "block": 49017710,
+        "block_timestamp": 1792470796
+      }
+    },
+    {
+      "connector": "morpho_blue",
+      "chain": "eip155:999",
+      "profile": "safe_roles",
+      "action": "borrow",
+      "gas_used": 231961,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-hyperevm/morphoc",
+        "transaction": "0x18fbb937534694432d7da12e10d39563bee6bb335e77161d91eedd6f11b69105",
+        "block": 49017714,
+        "block_timestamp": 1792470918
+      }
+    },
+    {
+      "connector": "morpho_blue",
+      "chain": "eip155:999",
+      "profile": "safe_roles",
+      "action": "repay",
+      "gas_used": 259192,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-hyperevm/morphoc",
+        "transaction": "0x928cc665096edf0d6690842e1cd9c1f6aa0b3819d533e5538e77ee04fdeeb882",
+        "block": 49017720,
+        "block_timestamp": 1792471011
+      }
+    },
+    {
+      "connector": "morpho_blue",
+      "chain": "eip155:999",
+      "profile": "safe_roles",
+      "action": "revoke",
+      "gas_used": 96159,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-hyperevm/morphoc",
+        "transaction": "0xd29da9859b3cb57f3cc1a211601fea9b5bd9b4327b9b01e66429789db41f5c0e",
+        "block": 49017721,
+        "block_timestamp": 1792471027
+      }
+    },
+    {
+      "connector": "morpho_blue",
+      "chain": "eip155:999",
+      "profile": "safe_roles",
+      "action": "supply",
+      "gas_used": 215511,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-hyperevm/morphoc",
+        "transaction": "0xbd09fe87ea7503681abdc9651ad1ff253e9ec4827e05013e3f4b9f7d763360d0",
+        "block": 49017711,
+        "block_timestamp": 1792470804
+      }
+    },
+    {
+      "connector": "morpho_blue",
+      "chain": "eip155:999",
+      "profile": "safe_roles",
+      "action": "withdraw",
+      "gas_used": 264461,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-hyperevm/morphoc",
+        "transaction": "0x85e9ef314ae9c3a691fb6423ace907d237b3a141e8eed206505b7085bb276ed9",
+        "block": 49017718,
+        "block_timestamp": 1792470979
+      }
+    },
+    {
+      "connector": "uniswap_v3",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "approve",
+      "gas_used": 126612,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-arb/ema",
+        "transaction": "0xb4ef4067318b3c737ea893d88ee0bff28f027c308cddd43c5cb081b404701f43",
+        "block": 511524837,
+        "block_timestamp": 1791094019
+      }
+    },
+    {
+      "connector": "uniswap_v3",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "swap",
+      "gas_used": 393432,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-arb/ema",
+        "transaction": "0x9ee9ccd97b09962c0871f45e9f679732bebe93bb33231c5807ddc2129776e8fa",
+        "block": 511524838,
+        "block_timestamp": 1791094029
+      }
+    },
+    {
+      "connector": "uniswap_v3",
+      "chain": "eip155:8453",
+      "profile": "safe_roles",
+      "action": "approve",
+      "gas_used": 151182,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-base/fork-lpregime",
+        "transaction": "0x184aac74aab5294ffa0e427b8ff1402af6eeb99d66a46f8462d946ab9cc80b8c",
+        "block": 52096947,
+        "block_timestamp": 1790983224
+      }
+    },
+    {
+      "connector": "uniswap_v3",
+      "chain": "eip155:8453",
+      "profile": "safe_roles",
+      "action": "swap",
+      "gas_used": 400289,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-base/fork-bbands",
+        "transaction": "0x692da34e16a000229673db05d587d6f49c1dd71fdb6616a486441f6c5592e9ee",
+        "block": 52213045,
+        "block_timestamp": 1791238077
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "approve_erc20",
+      "gas_used": 129108,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "hooks-stable-pair",
+        "transaction": "0xc1fe661ad610e1541cfc736b4a2174131da52c8bd10983a82cbd2ef0817f316d",
+        "block": 26154493,
+        "block_timestamp": 1791544425
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "approve_erc20",
+      "gas_used": 119287,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-eth-usdc",
+        "transaction": "0x0fea2b1e84b469a2509efc9a2c7229afef4f36a767d96fed6d92f3e6eca43164",
+        "block": 26199356,
+        "block_timestamp": 1792084504
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "approve_permit2",
+      "gas_used": 260972,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "hooked-lp-stable-pair",
+        "transaction": "0x0b8c8279cd96047d5dc4a667e9bf7fc6983b5affeaee086e12b5cf8859eace7f",
+        "block": 26184083,
+        "block_timestamp": 1791900539
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "approve_permit2",
+      "gas_used": 237481,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-eth-usdc",
+        "transaction": "0x09bfdac5576e47d528b8110e6b958ab790cc0a72a837246bd55dc776d710c13b",
+        "block": 26199357,
+        "block_timestamp": 1792084518
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "burn",
+      "gas_used": 648742,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "hooked-lp-stable-pair",
+        "transaction": "0xd248b9f0ba0a8ee630375607b893525ed7acd53781666207ef7cb5b4d846087b",
+        "block": 26184090,
+        "block_timestamp": 1791900936
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "burn",
+      "gas_used": 915661,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-eth-usdc",
+        "transaction": "0xb90b4183916821127b40ffa4feefc9b4aee96b16c79ba6c94fb2d21c4cce5332",
+        "block": 26199364,
+        "block_timestamp": 1792084917
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "collect",
+      "gas_used": 553305,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "hooked-lp-stable-pair",
+        "transaction": "0x18cee73d34ebf436f08d72cafd07b74fdeaeffb64d28fa4c7995b3be27553dbf",
+        "block": 26184087,
+        "block_timestamp": 1791900744
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "collect",
+      "gas_used": 820954,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-eth-usdc",
+        "transaction": "0xd2cb41e427b70ee8c794db416c1a2f0a8c6c3fa75fb0bc24db826549b6588439",
+        "block": 26199361,
+        "block_timestamp": 1792084725
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "mint",
+      "gas_used": 887610,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "hooked-lp-stable-pair",
+        "transaction": "0xa83da6612b165fd63ba5c66aa5032b00bc494a942a5e040c4b8303f6fbc154df",
+        "block": 26184084,
+        "block_timestamp": 1791900553
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "mint",
+      "gas_used": 1086397,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-eth-usdc",
+        "transaction": "0x87050b180d144ec4b5766e88393203bfda466cc683b54afb419bda0906ec6de5",
+        "block": 26199358,
+        "block_timestamp": 1792084533
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "revoke_permit2",
+      "gas_used": 236974,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "hooked-lp-stable-pair",
+        "transaction": "0x44b9a1b3fabe128936b11fb074d49af875ebc1551e0365517ddd7e685f9fb608",
+        "block": 26184096,
+        "block_timestamp": 1791901112
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "revoke_permit2",
+      "gas_used": 215749,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-eth-usdc",
+        "transaction": "0x2083a62d14774d2c36c47f2d24b7c72096ea8acc810053e5b69c4f95dba6d5b5",
+        "block": 26199372,
+        "block_timestamp": 1792085141
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "swap",
+      "gas_used": 801372,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-eth-usdc",
+        "transaction": "0x98d7b5bf172719ab97b812ecf1220a793d0e4fd6a90e1b57e16321c8139a80bf",
+        "block": 26184491,
+        "block_timestamp": 1791905397
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:1",
+      "profile": "safe_roles",
+      "action": "swap",
+      "gas_used": 741374,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-eth-usdc",
+        "transaction": "0x7ae4afefec93da8aac504616b4a682cad7e89be43b13a1265a3b7b4aa1f11382",
+        "block": 26199352,
+        "block_timestamp": 1792084375
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:137",
+      "profile": "safe_roles",
+      "action": "approve_erc20",
+      "gas_used": 119154,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-pol-usdc",
+        "transaction": "0x050cfa10d8982cf67d8153c6b11936597a8989a99728f63dc9119fa11c03db51",
+        "block": 95587730,
+        "block_timestamp": 1792087060
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:137",
+      "profile": "safe_roles",
+      "action": "approve_permit2",
+      "gas_used": 237469,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-pol-usdc",
+        "transaction": "0x26799ff2df379e36cf30698d9e25d69a83056dc9c3a6f24f2172f1e12c17f98b",
+        "block": 95587731,
+        "block_timestamp": 1792087074
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:137",
+      "profile": "safe_roles",
+      "action": "burn",
+      "gas_used": 915720,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-pol-usdc",
+        "transaction": "0x871837957e84113671a7a61bc04f3553b3c3389defbd1b73394335380bb2c244",
+        "block": 95587738,
+        "block_timestamp": 1792087475
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:137",
+      "profile": "safe_roles",
+      "action": "collect",
+      "gas_used": 820984,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-pol-usdc",
+        "transaction": "0xe16d45749be43db080abc8c4b3a4dafeb1bb7d0ee19f12ece44ed649760c09b5",
+        "block": 95587735,
+        "block_timestamp": 1792087282
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:137",
+      "profile": "safe_roles",
+      "action": "mint",
+      "gas_used": 1086476,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-pol-usdc",
+        "transaction": "0x185012d203f6c508d3d2ee3e42e39854367e448b348d2c6173ceb60759bd1f5b",
+        "block": 95587732,
+        "block_timestamp": 1792087090
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:137",
+      "profile": "safe_roles",
+      "action": "revoke_permit2",
+      "gas_used": 215749,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-pol-usdc",
+        "transaction": "0x4dd54d868f184c5807e6e1455aa1718425c6632c8ad3bedd8ad8986d1bbdab94",
+        "block": 95587746,
+        "block_timestamp": 1792087704
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:137",
+      "profile": "safe_roles",
+      "action": "swap",
+      "gas_used": 741356,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-pol-usdc",
+        "transaction": "0x73030bc05263e1102876ca09c88754606bc922d1270b2fa9c7e41facc3fc780b",
+        "block": 95587726,
+        "block_timestamp": 1792086929
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "approve_erc20",
+      "gas_used": 127413,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-arb/macd",
+        "transaction": "0x773a73e82ef9a1d57041145f68f42735b89abf129ab80cbb2005a1c6aa40d1a6",
+        "block": 507602598,
+        "block_timestamp": 1790726788
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "approve_erc20",
+      "gas_used": 119166,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-arb-eth-usdc",
+        "transaction": "0x3f88059d4216d9410590582dd8de1667bd75cbb30255852d35a6265efa60fe52",
+        "block": 515125906,
+        "block_timestamp": 1792084886
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "approve_permit2",
+      "gas_used": 186141,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "stflow-arb/macd",
+        "transaction": "0x55164f208125c7ec86dd9959db58c240af4e315232d3a3031a645529dada4219",
+        "block": 507602595,
+        "block_timestamp": 1790035626
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "approve_permit2",
+      "gas_used": 237481,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-arb-eth-usdc",
+        "transaction": "0x3742f256cc700f6b72bfaa4c4ca565313f1914c64a7c97939d26ac262976a8b3",
+        "block": 515125907,
+        "block_timestamp": 1792084899
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "burn",
+      "gas_used": 930433,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-arb-eth-usdc",
+        "transaction": "0xf3844e3639193152d623255548f897bf41ed70d4c3e6111a87b4b7d52464c8fa",
+        "block": 515125914,
+        "block_timestamp": 1792085299
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "collect",
+      "gas_used": 828216,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-arb-eth-usdc",
+        "transaction": "0x5cc03e5486b4a6fc1d71f9dc1a6a2f602a6480ec1e814412be3c1d4bce7f3d49",
+        "block": 515125911,
+        "block_timestamp": 1792085107
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "mint",
+      "gas_used": 1108600,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-arb-eth-usdc",
+        "transaction": "0x040f4bdfbb2b464d417c0feb7534f1b934ab49a7e1705ca725253cb702e340a5",
+        "block": 515125908,
+        "block_timestamp": 1792084915
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "revoke_permit2",
+      "gas_used": 162229,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-arb-eth-usdc",
+        "transaction": "0x61d433a34e570dfe3362d79236e718dd60f0e6fb8d7cb04028733f80833f2ee5",
+        "block": 514474238,
+        "block_timestamp": 1791906418
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "revoke_permit2",
+      "gas_used": 215749,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-arb-eth-usdc",
+        "transaction": "0x69f454ca53dab78c334f201494347a0d6280754f4617c6471c1c249e166f5b4f",
+        "block": 515125922,
+        "block_timestamp": 1792085524
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "swap",
+      "gas_used": 816865,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-arb-eth-usdc",
+        "transaction": "0xc105539b19f7544b76e40082fefc6a1aa5becbb16affcf579619a9118dcc4173",
+        "block": 514474233,
+        "block_timestamp": 1791906345
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:42161",
+      "profile": "safe_roles",
+      "action": "swap",
+      "gas_used": 757728,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-arb-eth-usdc",
+        "transaction": "0xef875948ddc73da95e8d14d662239fe129cdabe998124663ebfb97ae6cff089b",
+        "block": 515125902,
+        "block_timestamp": 1792084756
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:43114",
+      "profile": "safe_roles",
+      "action": "approve_erc20",
+      "gas_used": 119142,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-avax-usdc",
+        "transaction": "0x4c9b82f6bfdb3eec13240e4d3d42b7ac5e6b7247c70fbfd55f6ac55fa7523d8b",
+        "block": 97638725,
+        "block_timestamp": 1792087443
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:43114",
+      "profile": "safe_roles",
+      "action": "approve_permit2",
+      "gas_used": 237457,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-avax-usdc",
+        "transaction": "0xe2d8563e87379c6c06784693d9e0dcc410a99713e19f09a9e89ecf81edcf57b2",
+        "block": 97638726,
+        "block_timestamp": 1792087459
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:43114",
+      "profile": "safe_roles",
+      "action": "burn",
+      "gas_used": 913588,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-avax-usdc",
+        "transaction": "0x7e94b03c3d83fdc65a219a2bbe16d045d51afc929a5fd3385913401e6ed31fbc",
+        "block": 97638733,
+        "block_timestamp": 1792087862
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:43114",
+      "profile": "safe_roles",
+      "action": "collect",
+      "gas_used": 820887,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-avax-usdc",
+        "transaction": "0x8e162445b541124d38cf8f8ff34249c5b80c11d89383db168f20c596eec8cc30",
+        "block": 97638730,
+        "block_timestamp": 1792087669
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:43114",
+      "profile": "safe_roles",
+      "action": "mint",
+      "gas_used": 1131959,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-avax-usdc",
+        "transaction": "0x5e1b977299b1b12bc0f1f684831a9a534599a9a209e98a9de59f82d701a93674",
+        "block": 97638727,
+        "block_timestamp": 1792087474
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:43114",
+      "profile": "safe_roles",
+      "action": "revoke_permit2",
+      "gas_used": 215737,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-avax-usdc",
+        "transaction": "0x95f072bb36c37fb7de1f038f699fe9ced9810a52632fc475b6ac5a965ffe5029",
+        "block": 97638741,
+        "block_timestamp": 1792088099
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:43114",
+      "profile": "safe_roles",
+      "action": "swap",
+      "gas_used": 736347,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-avax-usdc",
+        "transaction": "0x8e21f70d1133d6589e54198ec097d717ad7f9de9d9184c15deee01de8d98bf64",
+        "block": 97638721,
+        "block_timestamp": 1792087311
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:4663",
+      "profile": "safe_roles",
+      "action": "approve_erc20",
+      "gas_used": 129091,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-fables-weth-usdg",
+        "transaction": "0xfac8fa726f60474b72c7818e9984b1aacf46a3198a140d2d98c4dccea7940a0f",
+        "block": 87630448,
+        "block_timestamp": 1791906515
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:4663",
+      "profile": "safe_roles",
+      "action": "approve_erc20",
+      "gas_used": 121681,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-fables-band",
+        "transaction": "0x622d38b0e58f2eaa3935ac8fb8c7cdeb06ad72daafea957f50d1befb4dc729c5",
+        "block": 89404575,
+        "block_timestamp": 1792085616
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:4663",
+      "profile": "safe_roles",
+      "action": "approve_permit2",
+      "gas_used": 260948,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "hooked-lp-fables",
+        "transaction": "0x91be1a5d5ef73ee76ba1c1e2350c7721b1fd1f70f15e5ecbc6fff7b540cb911a",
+        "block": 87576028,
+        "block_timestamp": 1791901159
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:4663",
+      "profile": "safe_roles",
+      "action": "approve_permit2",
+      "gas_used": 237457,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-fables-band",
+        "transaction": "0x2c1126d37d8f61cc6394d43ac2f87116ffe4d733c6436da02883a1b2afeddf64",
+        "block": 89404576,
+        "block_timestamp": 1792085631
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:4663",
+      "profile": "safe_roles",
+      "action": "burn",
+      "gas_used": 641655,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "hooked-lp-fables",
+        "transaction": "0xc59e35412f832ff0b5e5f0afcd8b0280c0a8d6b4db7b5f9536131a789c600f7f",
+        "block": 87576035,
+        "block_timestamp": 1791901559
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:4663",
+      "profile": "safe_roles",
+      "action": "burn",
+      "gas_used": 949918,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-fables-band",
+        "transaction": "0xbd2b2a0596d79f39c4ddbacaa0564188bda63d0878da04bf05c4ac4225b3362e",
+        "block": 89404582,
+        "block_timestamp": 1792086019
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:4663",
+      "profile": "safe_roles",
+      "action": "collect",
+      "gas_used": 553293,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "hooked-lp-fables",
+        "transaction": "0xac20e6a86a2ecbc4644d7595789fe9099fb0b46bb3fd33e74900b4da7b6eb86a",
+        "block": 87576032,
+        "block_timestamp": 1791901366
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:4663",
+      "profile": "safe_roles",
+      "action": "mint",
+      "gas_used": 798604,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "hooked-lp-fables",
+        "transaction": "0x31568578356152dfd08e148c87a3a9ccbb81fbf05ea191c8fde08eab6b1aff75",
+        "block": 87576029,
+        "block_timestamp": 1791901174
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:4663",
+      "profile": "safe_roles",
+      "action": "mint",
+      "gas_used": 1100547,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-fables-band",
+        "transaction": "0x6b132ad717d61f37be94bb270a0b93bf59717743222955af960a429fe6fda568",
+        "block": 89404577,
+        "block_timestamp": 1792085646
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:4663",
+      "profile": "safe_roles",
+      "action": "revoke_permit2",
+      "gas_used": 232074,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "hooked-lp-fables",
+        "transaction": "0x993ddc2cba935853c5c6c05b209fa54d91ef87fb9c95b18e13eab93106652362",
+        "block": 87576041,
+        "block_timestamp": 1791901735
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:4663",
+      "profile": "safe_roles",
+      "action": "revoke_permit2",
+      "gas_used": 215737,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-fables-band",
+        "transaction": "0xea2f0e48868ec4aef626fad03901e2c000f641611ad65dc54b137b407d556799",
+        "block": 89404590,
+        "block_timestamp": 1792086241
+      }
+    },
+    {
+      "connector": "uniswap_v4",
+      "chain": "eip155:4663",
+      "profile": "safe_roles",
+      "action": "swap",
+      "gas_used": 853297,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-pons-novaai",
+        "transaction": "0xf6f626a19262f1cdc8c4504332c9aa2281f870e41bb33b874c2b23af2f736a74",
+        "block": 87631911,
+        "block_timestamp": 1791906645
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:4663",
+      "profile": "safe_roles",
+      "action": "swap",
+      "gas_used": 787338,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-fables-band",
+        "transaction": "0x7d40892d6783a82fe9c694a03155f158071738758268ce3678c010083d1b88f0",
+        "block": 89404571,
+        "block_timestamp": 1792085487
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:56",
+      "profile": "safe_roles",
+      "action": "approve_erc20",
+      "gas_used": 109947,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-bnb-usdt",
+        "transaction": "0x1fb864db68244f9f253200c6ca2be16a02ce01df196bac330f1220690f815e91",
+        "block": 127826085,
+        "block_timestamp": 1792085253
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:56",
+      "profile": "safe_roles",
+      "action": "approve_permit2",
+      "gas_used": 237541,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-bnb-usdt",
+        "transaction": "0x1452ea1f4f1011095c4b18762fab0dd81ced0e7345ef15a3ef5c809ecd42ee2d",
+        "block": 127826086,
+        "block_timestamp": 1792085267
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:56",
+      "profile": "safe_roles",
+      "action": "burn",
+      "gas_used": 905515,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-bnb-usdt",
+        "transaction": "0x22e06fb34cdc26fcc0634501c265b2ce9fa5241a19f743e42c505b434d785620",
+        "block": 127826093,
+        "block_timestamp": 1792085665
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:56",
+      "profile": "safe_roles",
+      "action": "collect",
+      "gas_used": 820954,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-bnb-usdt",
+        "transaction": "0x5c0b2945377bfc5dc460617ee45223f186fc9b919d9862b3ccbbb74b49253c99",
+        "block": 127826090,
+        "block_timestamp": 1792085473
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:56",
+      "profile": "safe_roles",
+      "action": "mint",
+      "gas_used": 1060849,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-bnb-usdt",
+        "transaction": "0x86aade2e2033f8627705db57e1f71779ef5daeb6918f61a21ba6a3f73a7a8ab1",
+        "block": 127826087,
+        "block_timestamp": 1792085281
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:56",
+      "profile": "safe_roles",
+      "action": "revoke_permit2",
+      "gas_used": 215749,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-bnb-usdt",
+        "transaction": "0x3e4fa71bc1107143a2349f0753329144a5aecabe1a8a5a8e31bcdddda7dcca8e",
+        "block": 127826101,
+        "block_timestamp": 1792085887
+      }
+    },
+    {
+      "variant": "native",
+      "connector": "uniswap_v4",
+      "chain": "eip155:56",
+      "profile": "safe_roles",
+      "action": "swap",
+      "gas_used": 731192,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "native-lp-bnb-usdt",
+        "transaction": "0x3debfe922067664b73ca801e685ff9a1eb2d8bde31c5cc408452b51dd1dcd957",
+        "block": 127826081,
+        "block_timestamp": 1792085123
+      }
+    }
+  ]
+}

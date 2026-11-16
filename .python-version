@@ -1,1 +1,4 @@
-3.12
+# Retained prepared datasets and legacy snapshots were written by CPython 3.12.13,
+# which links SQLite 3.50.4; other SQLite/zlib builds change their bytes. CI sets
+# UV_PYTHON itself and skips the evidence-dependent modules.
+3.12.13

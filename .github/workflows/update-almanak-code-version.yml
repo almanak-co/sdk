@@ -1,0 +1,38 @@
+name: Update Almanak Code version
+
+on:
+  repository_dispatch:
+    types: [almanak-code-release]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-22.04
+    steps:
+      # create-pull-request pushes the branch with this checkout's credentials,
+      # so persist-credentials stays enabled here unlike every other workflow.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Pin the released tag
+        env:
+          # The dispatch payload is attacker influenced; validate it before it
+          # reaches a shell or a file.
+          TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::unexpected tag: $TAG"; exit 1; }
+          echo "$TAG" > .almanak-code-version
+
+      # A pull request opened with GITHUB_TOKEN does not trigger pull_request
+      # workflows, so this branch gets no CI until a human pushes to it.
+      - uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8.1.3
+        with:
+          commit-message: "chore: pin Almanak Code ${{ github.event.client_payload.tag }}"
+          branch: almanak-code-${{ github.event.client_payload.tag }}
+          title: "Pin Almanak Code ${{ github.event.client_payload.tag }}"
+          body: |
+            Automated pin of the bundled Almanak Code release.
+
+            Release: https://github.com/almanak-co/almanak-code/releases/tag/${{ github.event.client_payload.tag }}

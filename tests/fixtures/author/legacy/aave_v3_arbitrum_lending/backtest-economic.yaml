@@ -1,0 +1,39 @@
+mode: economic
+window:
+  start: '2026-09-08T08:17:07+00:00'
+  end: '2026-09-08T08:17:37+00:00'
+  end_policy: teardown
+  cleanup: 60s
+inventory:
+  funds:
+    fund:
+      balances:
+      - asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+        quantity: '0.01'
+      - asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+        quantity: '1'
+      - asset: eip155:42161/slip44:60
+        quantity: '5'
+execution:
+  latency: 1s
+  models:
+    liquidation_model: immediate_underlying_v3_revision11
+data:
+  history:
+  - chain:
+      chain_id: eip155:42161
+      environment: mainnet
+    provider:
+      kind: alchemy
+      network: arb-mainnet
+      api_key_env: ALCHEMY_API_KEY
+  source: aave_v3_archive
+  risk_model: pool_oracle_each_block
+  sample_seconds: 60s
+  max_age_seconds: 120s
+  max_accounting_samples: 10
+  max_risk_blocks: 512
+  max_risk_samples: 1024
+  max_liquidations_per_event: 8
+costs:
+  kind: excluded

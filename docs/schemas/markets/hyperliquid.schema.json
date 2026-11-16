@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HyperCore perp market selection",
+  "description": "One first-dex HyperCore perpetual, named by its coin as the venue's meta names it. HyperCore is a venue of eip155:999; its asset index, size decimals and maximum leverage are resolved from /info. Backtests and identified HyperEVM forks; production waits for D7.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "connector",
+    "chain",
+    "market"
+  ],
+  "properties": {
+    "connector": {
+      "const": "hyperliquid"
+    },
+    "chain": {
+      "const": "eip155:999"
+    },
+    "market": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9]{1,32}$"
+    },
+    "assertions": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "asset_index": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "size_decimals": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "max_leverage": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

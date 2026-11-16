@@ -1,0 +1,55 @@
+{
+  "observation": {
+    "source": {
+      "kind": "uniswap_v4",
+      "chain": {
+        "chain_id": "eip155:1",
+        "environment": "mainnet"
+      },
+      "pool_manager": "0x000000000004444c5dc75cb358380d2e3de08a90",
+      "state_view": "0x7ffe42c4a5deea5b0fec41c94c136cf115597227",
+      "currency0": "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "currency1": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "fee": 3000,
+      "tick_spacing": 60,
+      "hooks": "0x0000000000000000000000000000000000000000"
+    },
+    "block": {
+      "chain": {
+        "chain_id": "eip155:1",
+        "environment": "mainnet"
+      },
+      "number": 25908472,
+      "hash": "0xebd2f4a6612e094a8db8d1ab770970f7060bdaf3a18a49e4274f8935d5348ea0",
+      "timestamp": 1788579287
+    },
+    "currency0": {
+      "chain": {
+        "chain_id": "eip155:1",
+        "environment": "mainnet"
+      },
+      "identifier": "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "decimals": 6
+    },
+    "currency1": {
+      "chain": {
+        "chain_id": "eip155:1",
+        "environment": "mainnet"
+      },
+      "identifier": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "decimals": 18
+    },
+    "sqrt_price_x96": 1599756361582467820309777883160003,
+    "tick": 198270,
+    "liquidity": 636887065164792,
+    "protocol_fee": 2048500,
+    "lp_fee": 3000
+  },
+  "pool_id": "0xb9fd8b8b6580b80432037a379071b6fb22bbceff6bafbd57390889c01d8757b9",
+  "source": {
+    "kind": "alchemy",
+    "network": "eth-mainnet",
+    "api_key_env": "ALCHEMY_API_KEY"
+  },
+  "verification": "Read-only admission of an additional configured hookless PoolKey without connector changes."
+}

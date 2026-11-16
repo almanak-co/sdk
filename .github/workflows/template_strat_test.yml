@@ -1,0 +1,40 @@
+name: Strategy Test
+
+on:
+  workflow_call:
+    inputs:
+      skip:
+        description: "Skip the strategy test (no-op success, used by path-based filtering)."
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Skip notice
+        if: ${{ inputs.skip }}
+        run: echo "Skipping strategy test; no relevant file changes detected by the path filter."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: ${{ !inputs.skip }}
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-repo
+        if: ${{ !inputs.skip }}
+        with:
+          install-bwrap: "true"
+
+      - name: Run security checks
+        if: ${{ !inputs.skip }}
+        run: make security
+
+      - name: Check every reference strategy offline
+        if: ${{ !inputs.skip }}
+        # Candidate strategies on chains their connectors do not publicly
+        # support must be refused; the script derives that from the support
+        # matrix, so any other refusal fails.
+        run: uv run --locked python scripts/ci/check_strategies.py --summary "$GITHUB_STEP_SUMMARY"

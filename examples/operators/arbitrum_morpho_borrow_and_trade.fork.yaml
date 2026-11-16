@@ -1,0 +1,54 @@
+# Operator execution context for a fork run of strategies/arbitrum_morpho_borrow_and_trade. Provider
+# credentials stay in the selected --env-file. The account bindings are
+# placeholders: fork provisioning generates the actual fixture accounts, and a
+# production run requires reviewed bindings and signing files outside
+# strategy-readable paths.
+schema_version: operator-gateway-config-v1
+modes:
+- fork
+networks:
+- chain: eip155:42161
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: fund
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:42161
+          environment: mainnet
+        address: '0x0000000000000000000000000000000000000001'
+fork:
+  anchors:
+  - chain: eip155:42161
+    height: 503075812
+    reference: '0x6942855ea29cd6c5f52fdce92f31c5c5d4ed76e251e0b3ee8b28216916bc2063'
+  funds:
+  - kind: safe_roles
+    account: fund
+    operator: operator
+    assets:
+    - asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+      amount: 10000000000000000
+    - asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+      amount: 2000000
+  operators:
+  - name: operator
+    native_balance:
+      asset: eip155:42161/slip44:60
+      amount: 5000000000000000000
+  gas:
+  - accounts:
+    - fund
+    max_gas_price_wei: 133333333
+    max_gas_limit: 1200000
+    max_transaction_fee:
+      asset: eip155:42161/slip44:60
+      amount: 160000000000000
+    total_budget:
+      asset: eip155:42161/slip44:60
+      amount: 4800000000000000
+    allow_replacement: false

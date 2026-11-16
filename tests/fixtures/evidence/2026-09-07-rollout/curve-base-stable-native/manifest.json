@@ -1,0 +1,3172 @@
+{
+  "scope": "Actual StableSwap NG configured two-coin LP reference through dedicated gateway on identified Base Anvil fork; configured shared-operator Safe, distinct-operator Safes and EOA funds; no production authority or public support promotion. Pytest selector also included four unpromoted Aerodrome cases which failed support admission; those are not Curve proofs and the overall command is not a passing suite.",
+  "cases": [
+    {
+      "case": "curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec",
+      "status": "passed",
+      "phases": [
+        "generated_permissions_installed_and_verified",
+        "generated_permissions_rejected_forbidden_calls",
+        "submitted_pending_identity_survived_runtime_and_gateway_replacement",
+        "entered_and_held",
+        "runtime_resumed",
+        "gateway_replaced_and_resumed",
+        "closed"
+      ]
+    },
+    {
+      "case": "curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80",
+      "status": "passed",
+      "phases": [
+        "submitted_pending_identity_survived_runtime_and_gateway_replacement",
+        "entered_and_held",
+        "runtime_resumed",
+        "gateway_replaced_and_resumed",
+        "closed"
+      ]
+    },
+    {
+      "case": "curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8",
+      "status": "passed",
+      "phases": [
+        "generated_permissions_installed_and_verified",
+        "generated_permissions_rejected_forbidden_calls",
+        "submitted_pending_identity_survived_runtime_and_gateway_replacement",
+        "entered_and_held",
+        "runtime_resumed",
+        "gateway_replaced_and_resumed",
+        "closed"
+      ]
+    }
+  ],
+  "files": {
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/checkpoint.json": {
+      "sha256": "17c704c5f4d3bb40dbea09275fa4e5717f76fd678cae84fff99d7304d3ea72d7",
+      "bytes": 2028022
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/deployment.json": {
+      "sha256": "5cbc3f79d1c0158ca5fb0b51f03e802ff1d51e442fb3b3167210d504795f1260",
+      "bytes": 6415
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/fixture-installation.json": {
+      "sha256": "10ccda9cb6b5cfabb5207850552cf6de3987cc2c5bb959cc800a3874e7e63a9f",
+      "bytes": 19527
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/fork-routes.json": {
+      "sha256": "6227c1b7143339f519ad8739c6aa6b63ac47f3c8314e580cc1c86b5e83acfe11",
+      "bytes": 204
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/permission-budget-observations.json": {
+      "sha256": "16d1cd14dca7e9b6f270293311389c66a605be370b258ee34f420f2553955856",
+      "bytes": 7543
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/permission-generation.json": {
+      "sha256": "6218ce88726e73e99794bfba76f7f88f296d30cc8e8f63bc08d50d5bff8784e4",
+      "bytes": 305
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/permission-installation.json": {
+      "sha256": "ecb5d9c44d908ad4ca4f45c0edda7c9a1e53038fa2efd2d0355aecd917a64d93",
+      "bytes": 130188
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/permission-verification.json": {
+      "sha256": "128ec524a917cb2bc60ef04388a603bb46875f80f8fa746e1a4957ceb79e5b50",
+      "bytes": 1665
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/permissions/manifest.json": {
+      "sha256": "94de6b2d11b9f49382e2c5d757cf3c96184aa149adde014fed9abdfa1b391124",
+      "bytes": 127848
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/permissions/permissions.txt": {
+      "sha256": "76e7d48689add20b973db204cb72ca25f3e77fdd0c7cd187f051833172d985e4",
+      "bytes": 1797
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/permissions/safe-0.json": {
+      "sha256": "c635dc31749afe0108bc9ae256e99e72aa977bf098d20c2fb47a77877496912f",
+      "bytes": 35628
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/permissions/safe-1.json": {
+      "sha256": "b1cf2862cd0e3f14a541e645869f5dcd747ff18a3f3907be558850499328824a",
+      "bytes": 40801
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/process-0.log": {
+      "sha256": "831a30c6a4365d6fe4cf0c36a63246e48bf3d0e1d45acf63aeded0d6c914b0cf",
+      "bytes": 3951
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/process-1.log": {
+      "sha256": "52c12385532743af0abdf21fdd62129daa8a76866b861d2595a1274a83043fdd",
+      "bytes": 19
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/process-2.log": {
+      "sha256": "0f9a9b1de543c2e8bf94b06921a7bfd83938b2766e996a3409903d29b8e2a399",
+      "bytes": 26985
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/process-3.log": {
+      "sha256": "25be0a99553900bbfbb6d8f8a73fed088587a01e859306653543bcffb149fc36",
+      "bytes": 137
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/process-4.log": {
+      "sha256": "25be0a99553900bbfbb6d8f8a73fed088587a01e859306653543bcffb149fc36",
+      "bytes": 137
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/process-5.log": {
+      "sha256": "c6a98c7ad884fb75846fddc53b2a57725db9b7eaa89e631fad8dfe3dd58639df",
+      "bytes": 8708
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/process-6.log": {
+      "sha256": "37f97b72ace882c7cdc8e3563b9953f312e357712408f33c160fb4746943d574",
+      "bytes": 71716
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/report.json": {
+      "sha256": "ffa9ad9e27f81bb065d31cebb56b53aceece3f2a4ba2428410e19e8612830fd6",
+      "bytes": 71644
+    },
+    "native/curve_base_stable_lp-e85807c557a94fae823a01d421abe7ec/result.json": {
+      "sha256": "7504a45d8011d61d71d06e8b8cd5c021ac30b704329b523ecba7ddacd358a99d",
+      "bytes": 49746
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/checkpoint.json": {
+      "sha256": "2e4dfe109043d1f78d097eb0286467f6e8588724440707f56f36a053911c4838",
+      "bytes": 1886099
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/deployment.json": {
+      "sha256": "89794f56aa2a6aac9276b4ae128fd6c7c39395208c787414210abc9b5f363786",
+      "bytes": 5315
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/fixture-installation.json": {
+      "sha256": "d80fb02e4a3e1d14df9905f2764f055b5f0c9ace4bd1a7e02c3be97a3009980a",
+      "bytes": 541
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/fork-routes.json": {
+      "sha256": "4d304e0a0ed985079ce19940ee173ab6f34c6f2c2f6dd413666abf90278004d0",
+      "bytes": 204
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/process-0.log": {
+      "sha256": "08c31df2f164e45694e0df1a1518e9700fed381d882d5fe77ec84018ef0b886a",
+      "bytes": 3643
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/process-1.log": {
+      "sha256": "52c12385532743af0abdf21fdd62129daa8a76866b861d2595a1274a83043fdd",
+      "bytes": 19
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/process-2.log": {
+      "sha256": "7a2f8a9b4fb5c493f84c8927d598b62144ef8c2ffd759a85077b464db342d89b",
+      "bytes": 26583
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/process-3.log": {
+      "sha256": "e2a56d3d0d486f01be9f238be6fec9a98513f7c329ea985df84e0c2b0dbbddb8",
+      "bytes": 137
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/process-4.log": {
+      "sha256": "e2a56d3d0d486f01be9f238be6fec9a98513f7c329ea985df84e0c2b0dbbddb8",
+      "bytes": 137
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/process-5.log": {
+      "sha256": "56cc9844acfd7de2f72a849e80c038f0b8acba2de64743347169532fc6a2d466",
+      "bytes": 7908
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/process-6.log": {
+      "sha256": "073c521d3d99fe2f8807a61882ff1afddf42dfce0f4f7ef8a66e180c147bb2bc",
+      "bytes": 71680
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/report.json": {
+      "sha256": "c972b900f93482465608d60909082ecf54f997961d46b0f06cf6559c528c751e",
+      "bytes": 71608
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/result.json": {
+      "sha256": "5795fd1ffa798cf20dfa4008400f087efddad90e68a10eccaf05a1b692692397",
+      "bytes": 585
+    },
+    "native/curve_base_stable_lp-eoa-5e2a3bd08da148a5adeffef18dee4f80/transactions.json": {
+      "sha256": "16711eb250013fa67ca6c3e110ada528541c0366f4fe2e41cc959edd81beb8bd",
+      "bytes": 97372
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/checkpoint.json": {
+      "sha256": "235a120b3926b658942e973107ff9c1186bb773a7e32a8f8475ee712ff39dd23",
+      "bytes": 2027928
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/deployment.json": {
+      "sha256": "535fe9223d63c1b9865151706d6a9f940165f4a5eb635fce59a418addfb4f788",
+      "bytes": 6415
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/fixture-installation.json": {
+      "sha256": "b134c8d40013bd56e65bcde4c1693bd40422b8154cd4c3b3a9084f44874aca67",
+      "bytes": 19527
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/fork-routes.json": {
+      "sha256": "96f13cefdeb9dc0427470f3073f79c0a108006a1014af6640aeeabb47bdd7f58",
+      "bytes": 204
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/permission-budget-observations.json": {
+      "sha256": "7171f9496104e3cdacfe5f27f5d2d676d20b3f5c3551fb9d13b02303c4ef703b",
+      "bytes": 7543
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/permission-generation.json": {
+      "sha256": "0e8f104f185c58c8240b4678993d667c4fa4ac756b55c1d7576a035f912f3091",
+      "bytes": 305
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/permission-installation.json": {
+      "sha256": "34617df3554cc92c1b2592fb0e5ffd755b74c79f2e54d6375c8282a93fc6b0d8",
+      "bytes": 130188
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/permission-verification.json": {
+      "sha256": "3e07438b1ca0b72e38173f4d2f45b177366a29847a491cd5ba5d68acf6edbd1f",
+      "bytes": 1665
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/permissions/manifest.json": {
+      "sha256": "b7b1b88d19546dce4c9f115ff6cb9826e8dac2239496b3e73dff9ee15855ef3c",
+      "bytes": 127848
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/permissions/permissions.txt": {
+      "sha256": "76e7d48689add20b973db204cb72ca25f3e77fdd0c7cd187f051833172d985e4",
+      "bytes": 1797
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/permissions/safe-0.json": {
+      "sha256": "6674b85000da86444e3bbc380f9716ee8fb2a3dbcbadf22ec3dc231483b1bb7a",
+      "bytes": 35628
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/permissions/safe-1.json": {
+      "sha256": "4d38cb9f90559aa1e2556905d5bcdacfe730a43daee9e836d91c8d3fc14ccbd7",
+      "bytes": 40801
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/process-0.log": {
+      "sha256": "ea5c2d92aba83150aa7d3e77b114f10f6aadcbb4c30a55def36eed6e9508b1f2",
+      "bytes": 3951
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/process-1.log": {
+      "sha256": "52c12385532743af0abdf21fdd62129daa8a76866b861d2595a1274a83043fdd",
+      "bytes": 19
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/process-2.log": {
+      "sha256": "6ccbf223d34aeaf8347cdd490073800395716a03a61f60b619b08b54ffda2017",
+      "bytes": 27051
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/process-3.log": {
+      "sha256": "080467ab0bf40fc74802b5ddb6388498ed0cf71e65a0c0f05b1691e0b1335d0d",
+      "bytes": 137
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/process-4.log": {
+      "sha256": "080467ab0bf40fc74802b5ddb6388498ed0cf71e65a0c0f05b1691e0b1335d0d",
+      "bytes": 137
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/process-5.log": {
+      "sha256": "c56ab7871d1b9a52d1ce53df833c0f0f2eb2b235d34a7ad05f40afab5ee15a84",
+      "bytes": 8376
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/process-6.log": {
+      "sha256": "1877d3da133acfefc4e38b9b2aa38aee91793609e0dc169790460726ffba7484",
+      "bytes": 71225
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/report.json": {
+      "sha256": "f9e3ecfc19efe268770516bee78fec264469d84450520281015368e7cc33dcb7",
+      "bytes": 71153
+    },
+    "native/curve_base_stable_lp-f53cd61663c746bc91acdcb5133d36e8/result.json": {
+      "sha256": "b34d43400dc3e8bbb1b729f27f668080aef9385db602c773afdbccb9dec8706c",
+      "bytes": 49748
+    },
+    "source/src/almanak_v3/__init__.py": {
+      "sha256": "f2950d3b292f349633d8930b101141c3ec90f34fd23158096feede5ee2832e48",
+      "bytes": 67
+    },
+    "source/src/almanak_v3/api.py": {
+      "sha256": "2c255e61724c394299d659ecc75b6968683a29394a3f8030c86993f186416ae4",
+      "bytes": 615
+    },
+    "source/src/almanak_v3/asset_amounts.py": {
+      "sha256": "a917c072287f73529b0500c062c6dd6f24d5a37c60bde59b13c1437bdadb679d",
+      "bytes": 1124
+    },
+    "source/src/almanak_v3/author_capabilities.py": {
+      "sha256": "c0ed5079a0536fa46ede9f3410aa4511d99fa0f3abbb4e5ac46f8c904c663b9e",
+      "bytes": 1146
+    },
+    "source/src/almanak_v3/backtest/__init__.py": {
+      "sha256": "b6dae58235c4898430a5ff320263efc46f2d6a5b242a3aa3e964eb1bd1419faa",
+      "bytes": 67
+    },
+    "source/src/almanak_v3/backtest/artifacts/avalanche-oracles.json": {
+      "sha256": "6068232107c8d478265d9817170671c771ce0ba9f4fade1bb396903758c53a61",
+      "bytes": 3346
+    },
+    "source/src/almanak_v3/backtest/artifacts/ethereum-oracles.json": {
+      "sha256": "4673300437674f9a925593442143470cbad56f4a46e623dc7ace9174b2986941",
+      "bytes": 3082
+    },
+    "source/src/almanak_v3/backtest/cli.py": {
+      "sha256": "89592a8211dbb1f69ad7636a91661999b3ca274c831ce3cd9e6c248ce4d47041",
+      "bytes": 14225
+    },
+    "source/src/almanak_v3/backtest/collection.py": {
+      "sha256": "c9f861d5af2bd050c347863df011e33220030ad2936f48ec3490f9e91a051039",
+      "bytes": 2134
+    },
+    "source/src/almanak_v3/backtest/config.py": {
+      "sha256": "7eb9948c24db2001857c44c0755ce7660f4e6cfab92d02814db1f28174f08ee3",
+      "bytes": 6002
+    },
+    "source/src/almanak_v3/backtest/dataset.py": {
+      "sha256": "815fc65332b2f4a747b2db1d8d0d603ef198261da53bf7035e01aac09443a643",
+      "bytes": 7094
+    },
+    "source/src/almanak_v3/backtest/dependencies.py": {
+      "sha256": "2fefd4b30b26327bb57f287608e0fa2cd2a3d17720939700b343d359aee04f8a",
+      "bytes": 1316
+    },
+    "source/src/almanak_v3/backtest/economic_acquisition.py": {
+      "sha256": "45061a5cfbd00433d13307ff90b44b792db53e08d1979e548458c8f76068551d",
+      "bytes": 5270
+    },
+    "source/src/almanak_v3/backtest/economic_actions.py": {
+      "sha256": "2d29a4299b3a6dfae48c016ab6243d5a9faf9296f7deaf014166fd4de52ea47b",
+      "bytes": 5729
+    },
+    "source/src/almanak_v3/backtest/economic_availability.py": {
+      "sha256": "5690500dcc0c378462f582e91534f30b3c910be8cbed3f4bc459a22c26d862d1",
+      "bytes": 1629
+    },
+    "source/src/almanak_v3/backtest/economic_book.py": {
+      "sha256": "29dde220185277242dc7597d9b5ec7e9aeb6a367f4027e5a3f45b4f841d2ca2f",
+      "bytes": 10437
+    },
+    "source/src/almanak_v3/backtest/economic_cli.py": {
+      "sha256": "6c74b76c05a80371b180676f87d73469c95362de9c3774b98141ee50cea1a5a2",
+      "bytes": 6731
+    },
+    "source/src/almanak_v3/backtest/economic_data.py": {
+      "sha256": "948a898b419b890ba14bb84a8e763834c32b07aefcc5f2de27b29e81b39b7dee",
+      "bytes": 7710
+    },
+    "source/src/almanak_v3/backtest/economic_events.py": {
+      "sha256": "cd1cdf087cd5384d851d3dce21d97d22bdaaae0857ef919ffb933edb628e04e0",
+      "bytes": 6525
+    },
+    "source/src/almanak_v3/backtest/economic_liquidation.py": {
+      "sha256": "4809fb68f26d81fc5d4e16ff587d95d41724c1d42c7fb82e86ba6a7997c20862",
+      "bytes": 10293
+    },
+    "source/src/almanak_v3/backtest/economic_manifest.py": {
+      "sha256": "b43a6631a48062f70390edb6e813b4865ee8b34a20636c5501fd958604935685",
+      "bytes": 1059
+    },
+    "source/src/almanak_v3/backtest/economic_math.py": {
+      "sha256": "eb1ee672473c88e332a52574a4bcf2e5b3eea8091958ab68c6a4f87c86363175",
+      "bytes": 5716
+    },
+    "source/src/almanak_v3/backtest/economic_model.py": {
+      "sha256": "35859d67eaae9dc214b1086c13e56bb5011202ed043f24b7044777568034f957",
+      "bytes": 14968
+    },
+    "source/src/almanak_v3/backtest/economic_oracles.py": {
+      "sha256": "505b7da56a3ebe7c78adde636575cb6134d5d8ea1d98dfb75dbe04c8567fec40",
+      "bytes": 8273
+    },
+    "source/src/almanak_v3/backtest/economic_prepare.py": {
+      "sha256": "02766e131693f440746ebf784453a350428c30dfbf6115c5e30ce3d1372cfa68",
+      "bytes": 35356
+    },
+    "source/src/almanak_v3/backtest/economic_state.py": {
+      "sha256": "a8be2546b94af468e9795806c6d4d80e2c5f9bdf62132295fa688a4ef95c25a8",
+      "bytes": 4923
+    },
+    "source/src/almanak_v3/backtest/engine.py": {
+      "sha256": "9c7aee7eae66c14b276f67b51b6d0d3826a7fb40a46db7b29a57bd2623f234fb",
+      "bytes": 17722
+    },
+    "source/src/almanak_v3/backtest/evm.py": {
+      "sha256": "36afeddec894a1d8feb7aba3aa9cd01bbb362dd19648f63f7f2105b8a343466f",
+      "bytes": 3035
+    },
+    "source/src/almanak_v3/backtest/gateway.py": {
+      "sha256": "15fcb1931740d13bf22f5fa8ff2c833d709a0e6975570972de0fa9d20db7876d",
+      "bytes": 3872
+    },
+    "source/src/almanak_v3/backtest/history.py": {
+      "sha256": "5d006ceb31f3c1a51896b1d3306099943d9e7e9cb93beede4ab70c4a7594ba3d",
+      "bytes": 15099
+    },
+    "source/src/almanak_v3/backtest/history_batch.py": {
+      "sha256": "b619ed2074ebe3fc4ad0c1b014b1a4eba9ae942680b52ec5265846b46ac61490",
+      "bytes": 10660
+    },
+    "source/src/almanak_v3/backtest/history_logs.py": {
+      "sha256": "5e6ca92eea8f238d02e928ab302610905eb2c3829fdc537b7671803ef21cacfa",
+      "bytes": 5588
+    },
+    "source/src/almanak_v3/backtest/inputs.py": {
+      "sha256": "d26cc1f74ff3f8da133d6913fde9b0d34f49503134ebcdb81e5126d13a426aee",
+      "bytes": 913
+    },
+    "source/src/almanak_v3/backtest/inventory.py": {
+      "sha256": "1b265a1c8b64f8d498ec0ad97bb26b4dbd126c4a117a9d8ef3b67c0df87e5799",
+      "bytes": 3347
+    },
+    "source/src/almanak_v3/backtest/manifest.py": {
+      "sha256": "a788c5b3f82d91826d5f27dbd362d1a803dbe13032d373b2f238715759b01974",
+      "bytes": 1248
+    },
+    "source/src/almanak_v3/backtest/prepared.py": {
+      "sha256": "3ec24db9f57e68ecf8197cf1df13c037e087edb186b3b47118bea23a9bb9ea20",
+      "bytes": 13934
+    },
+    "source/src/almanak_v3/backtest/pricing.py": {
+      "sha256": "e54f38568ae32e7dd39f246f8c76aa1c7e4a118f77df02b60e55e5c3887930e2",
+      "bytes": 3940
+    },
+    "source/src/almanak_v3/backtest/progress.py": {
+      "sha256": "89be0cb3eaaa574b055536281712e0f3fde3c59c67d9f3a3d5686c1700068416",
+      "bytes": 16168
+    },
+    "source/src/almanak_v3/backtest/progress_cli.py": {
+      "sha256": "5f98005217ff77595547ced78821d5995699fef2b8707103979836e0342d6076",
+      "bytes": 7397
+    },
+    "source/src/almanak_v3/backtest/progress_history.py": {
+      "sha256": "88e8031f03fa2d5767fe84ad50333f0340b5e5a3c6d7026a01ce1bf5adfc848c",
+      "bytes": 1377
+    },
+    "source/src/almanak_v3/backtest/progress_types.py": {
+      "sha256": "37058dcd88c1be5e7b6a3a840fc7a3b9fae83d2ada5ec88d7de92e4ca2bc994a",
+      "bytes": 2256
+    },
+    "source/src/almanak_v3/backtest/sampling.py": {
+      "sha256": "c1cb0f1832bd8bab0e93ce7cb1c1e7404397a316f9dab7d9b037519a87249874",
+      "bytes": 614
+    },
+    "source/src/almanak_v3/backtest/types.py": {
+      "sha256": "b561b39c401657a0c063ddde42a087c6b15e64dbbee6806c7fdcb4e236c9df78",
+      "bytes": 2536
+    },
+    "source/src/almanak_v3/backtest/vendor.py": {
+      "sha256": "aa103c46160b802b7585c9a156ffeb332b9c671e2e610d626575cbe5dda93a03",
+      "bytes": 16358
+    },
+    "source/src/almanak_v3/backtest/vendor_discovery.py": {
+      "sha256": "938804d28bff1b840f19bdf19d3bb95e78ba841a48d230c7829e10665373a32c",
+      "bytes": 2675
+    },
+    "source/src/almanak_v3/caip.py": {
+      "sha256": "02e45de7d13a6eda9b48fa3a865080a3d3a420eb3c6d0f1f3fb254b0a1600e84",
+      "bytes": 6184
+    },
+    "source/src/almanak_v3/capabilities.py": {
+      "sha256": "8fae89e9add0ccdeb3d4fb28b8822f2f3665d252098d6960ed36b5fc73e7f4a7",
+      "bytes": 2490
+    },
+    "source/src/almanak_v3/capability_worker.py": {
+      "sha256": "afc28c85f0c71f77ae7ba136124cf581a22447dc552f4d18da9a8d9c532b969b",
+      "bytes": 535
+    },
+    "source/src/almanak_v3/chains.py": {
+      "sha256": "20a82d7f7e960b672626cb74226bad65e8dc56fe5858504bd77290fd6a770d7f",
+      "bytes": 4244
+    },
+    "source/src/almanak_v3/checks.py": {
+      "sha256": "344f6f0a934ef88f650f24b74b7c016622904239b656d5a580d7eebe4a8a18dc",
+      "bytes": 7472
+    },
+    "source/src/almanak_v3/cli.py": {
+      "sha256": "d312bb3ebdc8fa9e4cadf6a0b965baf49445351f42503d6b040041a7aa3c3e50",
+      "bytes": 12963
+    },
+    "source/src/almanak_v3/cli_arguments.py": {
+      "sha256": "1058f09b2ba4eff1ebd48656d7ca07f293faa1a9ed0bd273aad735efae1d4cd7",
+      "bytes": 7048
+    },
+    "source/src/almanak_v3/configuration/__init__.py": {
+      "sha256": "1dd1e91301a44296e7f61bdec95dd5973a3a3aef5d51ac975bf4744c6f4f1c8d",
+      "bytes": 273
+    },
+    "source/src/almanak_v3/configuration/author.py": {
+      "sha256": "87ea60dbf24ee8af9326d6d01376554f295c7f0368bc313f1272a736e17306c6",
+      "bytes": 20387
+    },
+    "source/src/almanak_v3/configuration/backtest.py": {
+      "sha256": "24446675646e02cfc25d7c71f71a3c55cf65ecdcb3cba557782cf443fe73e0a6",
+      "bytes": 5503
+    },
+    "source/src/almanak_v3/configuration/composed.py": {
+      "sha256": "a58356b54b57acfc25ca094ecc300eda7173fc30e866940a7e9c8733b526497a",
+      "bytes": 7957
+    },
+    "source/src/almanak_v3/configuration/exchange.py": {
+      "sha256": "119560cb5c92d5aa16a4403c996fbaad8984712d03c5bd259f32c5624c288f7d",
+      "bytes": 747
+    },
+    "source/src/almanak_v3/configuration/markets.py": {
+      "sha256": "4d83dfad33b19cb97e610a97bbc8d536df8a74c4663e819824e9f70995942f05",
+      "bytes": 2189
+    },
+    "source/src/almanak_v3/configuration/metadata.py": {
+      "sha256": "d054c0441f90da484c79960a644a105c0a4a90b631c2888c7062f183beba8c29",
+      "bytes": 949
+    },
+    "source/src/almanak_v3/configuration/values.py": {
+      "sha256": "6121cfabd937483c05f5408d8164881d5a2f20be41080ab6b408e717ed9e5dd0",
+      "bytes": 3143
+    },
+    "source/src/almanak_v3/configuration/yaml.py": {
+      "sha256": "22579f73e3c9a844dc918a9be6a49252b52811ebb44c69a9e547bff2dd082cf2",
+      "bytes": 4609
+    },
+    "source/src/almanak_v3/connectors/__init__.py": {
+      "sha256": "99198d24c251bb289630b0be1d63722b163bf5fb6763d7d80c06e906932bba0d",
+      "bytes": 84
+    },
+    "source/src/almanak_v3/connectors/aave_v3/__init__.py": {
+      "sha256": "5dcbcef52cc762632c0c131b4ff392ccfea00d121441b1e09727c527e4f8d7ec",
+      "bytes": 83
+    },
+    "source/src/almanak_v3/connectors/aave_v3/asset_effects.py": {
+      "sha256": "daebee9d1cfb3b82cf3bb916281d33dc1d1e7bc0acd462bfce08f1cfb1673701",
+      "bytes": 156
+    },
+    "source/src/almanak_v3/connectors/aave_v3/authority.py": {
+      "sha256": "535ddfc6e01d7fe1b57d86499e44af4415ebef642750f40367014d1811ae431d",
+      "bytes": 2251
+    },
+    "source/src/almanak_v3/connectors/aave_v3/connector.py": {
+      "sha256": "ddae0cd7c624b328ae0b1e446f697dd54f83ab25146eb922810b702a3f9eb9d9",
+      "bytes": 2240
+    },
+    "source/src/almanak_v3/connectors/aave_v3/dashboard.py": {
+      "sha256": "739936dfd36f63b23c49ef847d424e48c1cf99305f671c1efddea8b72f1a366f",
+      "bytes": 5504
+    },
+    "source/src/almanak_v3/connectors/aave_v3/domain.py": {
+      "sha256": "73cc49261c9e060ac45d0dccb587a82b34ecf1a8b6050c8f2a12e2745e9eb682",
+      "bytes": 3842
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_acquisition.py": {
+      "sha256": "58f558f320ac663ed0727bfd6a297b568e8e2533a3d4cb0656ee8857ba9f6cff",
+      "bytes": 8620
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_actions.py": {
+      "sha256": "e9c316cd64cc31704f198fa0d8842725b9507cdccd9543658f3506b835ad1fbf",
+      "bytes": 8952
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_binding.py": {
+      "sha256": "fbbac2d202c997308d33876cd644f1f43f2c04a760a4612e5a300e33c7180eb0",
+      "bytes": 2696
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_book.py": {
+      "sha256": "3e98f588c18ea2bbcd13a9913bbc7ef18c5d713980da5e0eb0f12e17aed52c97",
+      "bytes": 5843
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_config.py": {
+      "sha256": "413b92a015691c2dca7cff96dc9c0f6e136cfb8caa33e0fcaf3d84d6c2fb86be",
+      "bytes": 1657
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_data.py": {
+      "sha256": "3f521292f39bcafee6b1b3a1c5b05ed4c1c4f3fa738339974464aaf569e34546",
+      "bytes": 6039
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_events.py": {
+      "sha256": "780bcb5c35526aff24b8509d9e1dce32a0c0cec51a510958a01e6b17dcf98199",
+      "bytes": 5295
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_liquidation.py": {
+      "sha256": "0dacfdf8af29191e605e2c90981647c602b0b4850a7034699f2e38f7c5557737",
+      "bytes": 6603
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_math.py": {
+      "sha256": "ba3ce86c558172b364689b1cc94a6d27478eab0130317a3b5ae23f892801a05e",
+      "bytes": 3338
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_model.py": {
+      "sha256": "d1bb249a3ce2690fb450c989af9016925f2f8a904e81293a5a3b934f666980c6",
+      "bytes": 12578
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_parameters.py": {
+      "sha256": "1fa8e5629f14dcf4a1f473aafd5ae6e4878bf7ddfc6571ee150adbc4c9bb677a",
+      "bytes": 4609
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_prepare.py": {
+      "sha256": "655397e239df6597f376492c5b524cdec2102b92f60baf06d79fea9baaf010c4",
+      "bytes": 9577
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_reporting.py": {
+      "sha256": "266e51ed6641d73c95add8687b0c8fc5a8528beb82bac448f753e6cf6f59d5e4",
+      "bytes": 5740
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_state.py": {
+      "sha256": "9b2b18eab653abfb5feda2ac1a5239a08278105cd9627224ddc69049931f5998",
+      "bytes": 4273
+    },
+    "source/src/almanak_v3/connectors/aave_v3/economic_views.py": {
+      "sha256": "651edbdeaaae1432356918b33caadcd0d1258377d708cb6d76189dcd016c8ec4",
+      "bytes": 886
+    },
+    "source/src/almanak_v3/connectors/aave_v3/execution.py": {
+      "sha256": "ab35dabe26e33627bd35810a48c6105b00cb10dac5ebf9ce604f124107951287",
+      "bytes": 12205
+    },
+    "source/src/almanak_v3/connectors/aave_v3/fork.py": {
+      "sha256": "d8393d62c54dffbd421e4565223bcfdd6fc034071578b62431a09a4abfb937e3",
+      "bytes": 4745
+    },
+    "source/src/almanak_v3/connectors/aave_v3/lifecycle.py": {
+      "sha256": "bc8c71404e2a8330b53fdb241edde11c29df240cb3e348f903e033700119686e",
+      "bytes": 2052
+    },
+    "source/src/almanak_v3/connectors/aave_v3/liquidation.py": {
+      "sha256": "fc337a81e8c63c15840918d67ab758e809a4d235eb1551792639c3b2c1580bc1",
+      "bytes": 6991
+    },
+    "source/src/almanak_v3/connectors/aave_v3/math.py": {
+      "sha256": "e2bcb31e7f8a3a7134279836e9abd7fe8e6c391cf833a5198b665f145d017a5d",
+      "bytes": 3008
+    },
+    "source/src/almanak_v3/connectors/aave_v3/models.py": {
+      "sha256": "13c9680015e815f9d2bee63caf70232410111e120a38948c6b897edc5a8c42e6",
+      "bytes": 6449
+    },
+    "source/src/almanak_v3/connectors/aave_v3/observations.py": {
+      "sha256": "dfb69f4c06d836c7838eb2fb4f3fdf75c7b2fd53716895df51ea110c91a18bb7",
+      "bytes": 4257
+    },
+    "source/src/almanak_v3/connectors/aave_v3/operations.py": {
+      "sha256": "4f18d70456cd68e4339043eb1ade56a21b2482598455d75a6aaecad1f0bfc399",
+      "bytes": 1224
+    },
+    "source/src/almanak_v3/connectors/aave_v3/permissions.py": {
+      "sha256": "45c7903a7a82f0d7479c0eeffdeae63fd96b251c994c647cf27c4312afe0b0c2",
+      "bytes": 2028
+    },
+    "source/src/almanak_v3/connectors/aave_v3/planning.py": {
+      "sha256": "d988427cad328dc11f855f4913321b6360e6668bce0d80734b860f98d8fe5e7e",
+      "bytes": 7798
+    },
+    "source/src/almanak_v3/connectors/aave_v3/projection.py": {
+      "sha256": "b174181bb308ebfbd091e73aa2c413acac42a9301ce05cc36740bb3b84da83c8",
+      "bytes": 5858
+    },
+    "source/src/almanak_v3/connectors/aave_v3/reader.py": {
+      "sha256": "607dca65ef830eb35bfc2a2c099f7c13f8075155779cce905965175d0819129e",
+      "bytes": 6684
+    },
+    "source/src/almanak_v3/connectors/aave_v3/receipts.py": {
+      "sha256": "10defcd2e943c6c27f727f9308492607e37ddb0f0383e2fa0a0da74623569b1b",
+      "bytes": 3815
+    },
+    "source/src/almanak_v3/connectors/aave_v3/reporting.py": {
+      "sha256": "4cf642095ec68ce850b5ee9945dd6ef78d1096211ce32792f62b3ea1d21e9e43",
+      "bytes": 4733
+    },
+    "source/src/almanak_v3/connectors/aave_v3/risk.py": {
+      "sha256": "95fe9f1437f0d029c2c10e674f47cbbb833e48dddf4e7a236d8b04e58e80960f",
+      "bytes": 4625
+    },
+    "source/src/almanak_v3/connectors/aave_v3/state.py": {
+      "sha256": "b67a5b95801df529481f363b9c5d348114698c6b4efb5afa46929dc905c01abf",
+      "bytes": 6977
+    },
+    "source/src/almanak_v3/connectors/aave_v3/support.py": {
+      "sha256": "15396a0274af360203a17b1265c4446b97acc55a8746f347635aaaf43a5bbc14",
+      "bytes": 2251
+    },
+    "source/src/almanak_v3/connectors/aave_v4/__init__.py": {
+      "sha256": "125765fdbfecfaec7229a9781abb20283ab03ecc63e875f8ad78e2042cf02c71",
+      "bytes": 64
+    },
+    "source/src/almanak_v3/connectors/aave_v4/api.py": {
+      "sha256": "aa568a7edddb51e99b569c7ad2f185c8e3eba53d4a1acd082a735fc77df6323b",
+      "bytes": 1046
+    },
+    "source/src/almanak_v3/connectors/aave_v4/authority.py": {
+      "sha256": "84bc1c3d477507d876d8554a9f02f539e88e032528310d30f2dee1d0c9c20639",
+      "bytes": 3692
+    },
+    "source/src/almanak_v3/connectors/aave_v4/backtest.py": {
+      "sha256": "6c55e6df8a034b764d35ff721d942e8f1c67db9f8b4af6fed55711a3345f11d7",
+      "bytes": 19054
+    },
+    "source/src/almanak_v3/connectors/aave_v4/backtest_binding.py": {
+      "sha256": "2ca387bbf8f47ba75e9d2de46ec44b0c5a74814b514d5065c43edb1c52b6808b",
+      "bytes": 4127
+    },
+    "source/src/almanak_v3/connectors/aave_v4/connector.py": {
+      "sha256": "3755024b34295d582580a54285fe21c71a87f2855ae3e3dcc3e6ed90733ffcc5",
+      "bytes": 2409
+    },
+    "source/src/almanak_v3/connectors/aave_v4/dashboard.py": {
+      "sha256": "2656093522fbb33ff9b485be3265fde16d9a7a3faac9535da349dddd58494712",
+      "bytes": 9434
+    },
+    "source/src/almanak_v3/connectors/aave_v4/debt.py": {
+      "sha256": "056f3508f177b508e81058fb0c13c06abebc8049d57abaf78aee7f516a2d838c",
+      "bytes": 5469
+    },
+    "source/src/almanak_v3/connectors/aave_v4/deployments.py": {
+      "sha256": "6e7a17290f8d3afad8cee17a40bade4c72b053d4743d9b554de833929230b3c9",
+      "bytes": 4721
+    },
+    "source/src/almanak_v3/connectors/aave_v4/domain.py": {
+      "sha256": "bc5f832576d6e3322f7c515ad712cb6bd29f12043b78a584376d1cf115aa0c48",
+      "bytes": 2036
+    },
+    "source/src/almanak_v3/connectors/aave_v4/economic_binding.py": {
+      "sha256": "7c520e8ae8197f492c1b9e43c7829d7df9c9851dcd83ff3ac058de1405cf8275",
+      "bytes": 8030
+    },
+    "source/src/almanak_v3/connectors/aave_v4/execution.py": {
+      "sha256": "3f3b422f8095ee728142e44c6cf12c838e48dbabe375affdc8f8aa385f71d8eb",
+      "bytes": 18095
+    },
+    "source/src/almanak_v3/connectors/aave_v4/fork.py": {
+      "sha256": "82a493f92de8ff8eae2fbbf9cbff3b0abc6c92c1d93f85131d712a245e81d12a",
+      "bytes": 8892
+    },
+    "source/src/almanak_v3/connectors/aave_v4/history.py": {
+      "sha256": "97970591243310dae7a5c475311737c47effeccedc363b49c4d005a08a909f55",
+      "bytes": 3521
+    },
+    "source/src/almanak_v3/connectors/aave_v4/history_config.py": {
+      "sha256": "9272642964eb6f5b11af3ccba1777801e34611c8824b95fba7f5485c20c6274b",
+      "bytes": 223
+    },
+    "source/src/almanak_v3/connectors/aave_v4/lifecycle.py": {
+      "sha256": "a40d0b7c3de9a057c2ccd4c59f496b63868ae3958d13a1f0cf2a9bf52bac2084",
+      "bytes": 5040
+    },
+    "source/src/almanak_v3/connectors/aave_v4/models.py": {
+      "sha256": "4f517a2091265d15b2c8e99dda591409b19302b13628094691cc87819816b0ad",
+      "bytes": 11112
+    },
+    "source/src/almanak_v3/connectors/aave_v4/operations.py": {
+      "sha256": "23b0b0ef6a602b69c72c3b4cf6535ad886b7994ac7b1876a10755496bfaa2979",
+      "bytes": 2291
+    },
+    "source/src/almanak_v3/connectors/aave_v4/permission_adapter.py": {
+      "sha256": "9a8c910718c7eb49bb9fed2299069c3c2ed805c267c06bb315b14f492ac98d62",
+      "bytes": 2764
+    },
+    "source/src/almanak_v3/connectors/aave_v4/permissions.py": {
+      "sha256": "b7e14d678854724364c8b33eda1f57fbfe678dda8cbdd36390b07ab7e1d4f428",
+      "bytes": 4367
+    },
+    "source/src/almanak_v3/connectors/aave_v4/preflight.py": {
+      "sha256": "edb7f7b8a8fcca9bd2f955c31aa8a0eec1187fd4464cf35fad5a5e423cdf3c87",
+      "bytes": 1450
+    },
+    "source/src/almanak_v3/connectors/aave_v4/reader.py": {
+      "sha256": "24ef3ea77f888f0fbc265b5a77f46de04c274741d670797ad3aab8c104966108",
+      "bytes": 10865
+    },
+    "source/src/almanak_v3/connectors/aave_v4/reporting.py": {
+      "sha256": "4c2879959df0f10acff0721a0039a0cee9e2538a8f88e825e0fb4f07ab983d7c",
+      "bytes": 6615
+    },
+    "source/src/almanak_v3/connectors/aave_v4/state.py": {
+      "sha256": "a56656c6ee0cf871580d5ae1e675566fcd8011673eaba58e8ad384576f6ba2c3",
+      "bytes": 6112
+    },
+    "source/src/almanak_v3/connectors/aave_v4/validation.py": {
+      "sha256": "3c317c86e7558e50db8e457473af92036e61a528776f2973bd8514c1f69d506d",
+      "bytes": 5210
+    },
+    "source/src/almanak_v3/connectors/aerodrome/__init__.py": {
+      "sha256": "b0850675dae9009f2c6255a87d6c372c2db6cf4b7c9b90ac5a4dbd5d0829c020",
+      "bytes": 61
+    },
+    "source/src/almanak_v3/connectors/aerodrome/abi.py": {
+      "sha256": "7da0030bb0d4d8cd837eb80839a6aaca36e891e3dd4beef4909a0d5e166c6a93",
+      "bytes": 3115
+    },
+    "source/src/almanak_v3/connectors/aerodrome/api.py": {
+      "sha256": "20fd22ddeafd392ac985d8e3fa2b46a7926bd1d87de5fafb6767ed84fc817787",
+      "bytes": 787
+    },
+    "source/src/almanak_v3/connectors/aerodrome/artifacts/compiled-revisions.json": {
+      "sha256": "f8754812e0edd17682da5400b29df35a81187d053cdfa6e6d449d132c450f6df",
+      "bytes": 6097
+    },
+    "source/src/almanak_v3/connectors/aerodrome/asset_effects.py": {
+      "sha256": "951c6e37a6fd72bc0289fae2e91db46948257ce051ecc6d8646945dbf36157a7",
+      "bytes": 144
+    },
+    "source/src/almanak_v3/connectors/aerodrome/authoring.py": {
+      "sha256": "d0dd35db9ff9c525b102264f4bd982e1c8a36bbac642f28d1e33da3c641d5d23",
+      "bytes": 2518
+    },
+    "source/src/almanak_v3/connectors/aerodrome/authority.py": {
+      "sha256": "1238b787235a10a416036327e6215baa53852043085db42df64c7d6e2f4e3bb3",
+      "bytes": 2587
+    },
+    "source/src/almanak_v3/connectors/aerodrome/connector.py": {
+      "sha256": "9f427359f0ff6b72fc8079da126b9ffe6d3013be16ea8ff9a8a57b8f6b0d55cd",
+      "bytes": 2367
+    },
+    "source/src/almanak_v3/connectors/aerodrome/dashboard.py": {
+      "sha256": "22a2284b89e56c957d8b0c66f56be509224aeea933b8b0eb4afd605de873a33e",
+      "bytes": 2841
+    },
+    "source/src/almanak_v3/connectors/aerodrome/deployments.py": {
+      "sha256": "2331d3485ae8f83818370c9cd466319716a07990d7dd0d2c37ad523eb56f3385",
+      "bytes": 6698
+    },
+    "source/src/almanak_v3/connectors/aerodrome/domain.py": {
+      "sha256": "5206b5aae594e81e694d923f3bb5f7636202424462540b9ed97fe20fd48b2773",
+      "bytes": 2712
+    },
+    "source/src/almanak_v3/connectors/aerodrome/economic_acquisition.py": {
+      "sha256": "4aebdfec5f07fa156f9ecc6b1a18571bc191d345787125a59ab52f57f23c970d",
+      "bytes": 1394
+    },
+    "source/src/almanak_v3/connectors/aerodrome/economic_binding.py": {
+      "sha256": "c76866601395408dc81449aeb33ca08533ec862da47958f233c72784fc13bf12",
+      "bytes": 1710
+    },
+    "source/src/almanak_v3/connectors/aerodrome/economic_book.py": {
+      "sha256": "56fecd3237ae667857a0e82f3ecf8adf100958f08b03f12022e3a7add55cda20",
+      "bytes": 4641
+    },
+    "source/src/almanak_v3/connectors/aerodrome/economic_collection.py": {
+      "sha256": "8be222176d6d45d5189f5d270a25acb78c3d336f3cfa43fb492117004ec3e342",
+      "bytes": 2919
+    },
+    "source/src/almanak_v3/connectors/aerodrome/economic_config.py": {
+      "sha256": "85b4a80a8a6f6bd49b2a55069506a724680fb553cfd316f790f600c68953061b",
+      "bytes": 1401
+    },
+    "source/src/almanak_v3/connectors/aerodrome/economic_data.py": {
+      "sha256": "66ba8d9071c17b244f0db69807e1027df159d7998334c5c2872418fe850dd244",
+      "bytes": 2014
+    },
+    "source/src/almanak_v3/connectors/aerodrome/economic_model.py": {
+      "sha256": "de9f9f605a89fe48bae8bd45e0fd810699e18fb1693e1613a4b62255b7dd6a6b",
+      "bytes": 1906
+    },
+    "source/src/almanak_v3/connectors/aerodrome/economic_parameters.py": {
+      "sha256": "19faffb96950305ba363b0644031a4c749a39dff8bc0925c2af8f497d3ebb7a2",
+      "bytes": 1204
+    },
+    "source/src/almanak_v3/connectors/aerodrome/economic_prepare.py": {
+      "sha256": "a3b86baadfa94df9c9102fe1c194fded5f2050f3e2fee21207de40daf8d7adc2",
+      "bytes": 2452
+    },
+    "source/src/almanak_v3/connectors/aerodrome/economic_reporting.py": {
+      "sha256": "af6849269bd1626755c19d94d6408a703cddafc8b3efdbb32c303c9157a7c206",
+      "bytes": 3166
+    },
+    "source/src/almanak_v3/connectors/aerodrome/economic_simulation.py": {
+      "sha256": "7069f1887c54d05fe80d40392e5a50eade2b1c46b6fc7534323532778aa53fc9",
+      "bytes": 6579
+    },
+    "source/src/almanak_v3/connectors/aerodrome/economic_state.py": {
+      "sha256": "f6e92269d6b74ba71d2ddce7952eb0a5a98e3d6f68447de2ccc91075e5f08b34",
+      "bytes": 3260
+    },
+    "source/src/almanak_v3/connectors/aerodrome/economic_validation.py": {
+      "sha256": "a64816ac0ae015e09bb6dcc0ef3d802713a31bca4203fb257db9644b02aeeb2c",
+      "bytes": 3596
+    },
+    "source/src/almanak_v3/connectors/aerodrome/execution.py": {
+      "sha256": "3ddd1bdbc8474bc016d82f0d3578d4ac8a2a1bdd542599b7c19253e60b74adeb",
+      "bytes": 3850
+    },
+    "source/src/almanak_v3/connectors/aerodrome/fork.py": {
+      "sha256": "3c158fddf3bc1bf51129725d1457092a8caa1f5a4ec49e7c57e8a6c029c60c5c",
+      "bytes": 464
+    },
+    "source/src/almanak_v3/connectors/aerodrome/lifecycle.py": {
+      "sha256": "d4b74d82c5bb9507852c5f3e6eb654f8299387d5ad2497ffa91b23d7be0a3ebe",
+      "bytes": 3542
+    },
+    "source/src/almanak_v3/connectors/aerodrome/math.py": {
+      "sha256": "be71ef7e305106069ccfb8f89f5c0a4afa7f6c35a463bccafe67fa47532c3581",
+      "bytes": 4688
+    },
+    "source/src/almanak_v3/connectors/aerodrome/models.py": {
+      "sha256": "ec47cc0d1c2b292948178cb70311e4e6cdd525837bcece61d612a68237993e73",
+      "bytes": 6108
+    },
+    "source/src/almanak_v3/connectors/aerodrome/observations.py": {
+      "sha256": "769d7e25b086a2c96c02c148245d91c24e7d74e702907ddf0df92e02de21722e",
+      "bytes": 7338
+    },
+    "source/src/almanak_v3/connectors/aerodrome/operations.py": {
+      "sha256": "21fec9bbee887dfa7bd6ba5ba85a72a605ebc5fcc3b7356ebdf0684b506d647c",
+      "bytes": 3927
+    },
+    "source/src/almanak_v3/connectors/aerodrome/ownership.py": {
+      "sha256": "eb61da5240796858eea312c9d4b76476fcf6d472746058a38410196d858aa05e",
+      "bytes": 1986
+    },
+    "source/src/almanak_v3/connectors/aerodrome/permissions.py": {
+      "sha256": "2dcbbc7708b39602c4c11133c32149fb9be381d839f2113370bc97e13f126b79",
+      "bytes": 6294
+    },
+    "source/src/almanak_v3/connectors/aerodrome/planning.py": {
+      "sha256": "9af1f3bf70af6fac3f89291b0c1411818aa048439af9f57672142df6b408a962",
+      "bytes": 7175
+    },
+    "source/src/almanak_v3/connectors/aerodrome/positions.py": {
+      "sha256": "1a6c35579fca5209763905b22fd0c0b62463c4079880a4772f54b54ce05b2368",
+      "bytes": 2390
+    },
+    "source/src/almanak_v3/connectors/aerodrome/reader.py": {
+      "sha256": "cf5a452de6053ecbd6eab9bde4462714c2085bfb41d6943ff0222d31584d3ddd",
+      "bytes": 4253
+    },
+    "source/src/almanak_v3/connectors/aerodrome/receipts.py": {
+      "sha256": "ab64624494f09e35d008b4eefce81414d2ae63d81d0fafad8f258e92b638d7f3",
+      "bytes": 8201
+    },
+    "source/src/almanak_v3/connectors/aerodrome/reconciliation.py": {
+      "sha256": "ca5aa6bd4ac42971620bb7dec588c20b7b626624b1e482f0def4cbe0dd2421c8",
+      "bytes": 6972
+    },
+    "source/src/almanak_v3/connectors/aerodrome/reporting.py": {
+      "sha256": "ee0c5bdc7b3c4a51e0fd83832e9fee76a11718c3201547cc48ace52a659ea0ce",
+      "bytes": 1024
+    },
+    "source/src/almanak_v3/connectors/aerodrome/simulation.py": {
+      "sha256": "8a276f56171456e77e4a82012d66dfaa2496806d25eb9910f3f65d31a20cb493",
+      "bytes": 2417
+    },
+    "source/src/almanak_v3/connectors/aerodrome/state.py": {
+      "sha256": "de0abeb316e2e6c011219cf0c442bd3e76ecda28febf2d91129d60836dd49d2a",
+      "bytes": 7197
+    },
+    "source/src/almanak_v3/connectors/aerodrome/support.py": {
+      "sha256": "7fc281713e72702e28fbae0f88c23a8b4c2164d277b8a1271d120eb1592eaf32",
+      "bytes": 1204
+    },
+    "source/src/almanak_v3/connectors/aerodrome/validation.py": {
+      "sha256": "3f216e235aa6b2f08e4a78d1bc12af2621c1a77eb76e9bf81cc9c7b9d83cc2fa",
+      "bytes": 8844
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/__init__.py": {
+      "sha256": "2cf89364da9f6132f01c155c76f8adeb8c10816292bf4fc005b27339a81bbdc0",
+      "bytes": 77
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/abi.py": {
+      "sha256": "69a916aa94a64eaf75da7f376b77c381262d41730eb7d27834f5c0a183f8929c",
+      "bytes": 1759
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/api.py": {
+      "sha256": "bccb59116e37aef41a4d359955aa5171e6155e80c32e69a5b69c658fa7b5cc2c",
+      "bytes": 793
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/artifacts/compiled-revisions.json": {
+      "sha256": "d016c49322496eab23c7d5f0c23e3be9109097f908166849ce0e36938b7b0068",
+      "bytes": 7028
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/asset_effects.py": {
+      "sha256": "9a1baf45ed5d214b4f33947327f9a21068b9ee62f82251da87168d43c48556de",
+      "bytes": 147
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/authoring.py": {
+      "sha256": "3e855b7be239693c30baf68083d0c5d7ec8c967fd4169836ff4bff82bedbd20f",
+      "bytes": 1358
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/authority.py": {
+      "sha256": "2f0a266b604db1e8f32bb8df2f32a7c3e65ca6b61f5254985e9a472dd15ee005",
+      "bytes": 1120
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/connector.py": {
+      "sha256": "c107dcdf1fbeafd33ba2304780283b2a41013483f57192a5a8ee3152fab218cc",
+      "bytes": 2514
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/dashboard.py": {
+      "sha256": "a1d3072abba00aa0d02c9808a671c5e5e7fbc1354ca2524839b328cdbc357309",
+      "bytes": 683
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/deployments.py": {
+      "sha256": "646573b66482cfd3b8dd4bef56e53b66fee0f084cea59f3166304e63e94fe6d1",
+      "bytes": 6399
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/domain.py": {
+      "sha256": "1019c1437b2a8a8d3f111b1be5d41d7abdfbb3e689e480aca1afe3d3d61014f3",
+      "bytes": 1538
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/economic_acquisition.py": {
+      "sha256": "64324479ed16a6007af4b11066e2f6523f28e24726bb93482ca7de08ef59ae18",
+      "bytes": 1261
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/economic_binding.py": {
+      "sha256": "05c15246e1ddb0633991896f2d7f14408cc2e3eae9a1b6567071bb2afaf3e039",
+      "bytes": 1814
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/economic_book.py": {
+      "sha256": "585767dd27e2c397f58895f3f801892eab64be3fb7f6ec634342b59ba9d03a9e",
+      "bytes": 1208
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/economic_collection.py": {
+      "sha256": "171060f5f0ed9cac2115bcfc2dbfcab6fab3b8b61c327e7be2119f44a98d37c7",
+      "bytes": 820
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/economic_config.py": {
+      "sha256": "a8ec4667afd653f0e6b428728f94702a71e1c341087936d883a3f2d1f6fb77e1",
+      "bytes": 401
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/economic_data.py": {
+      "sha256": "4f1a2124c2d3a0360ad756ae9131fb0671c4347a94fddf7620ecce9fc4703786",
+      "bytes": 1460
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/economic_model.py": {
+      "sha256": "aa91abd15a0587d3b84a03078e5a044a1a246ccf08248669d787d67730aa07c0",
+      "bytes": 1083
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/economic_parameters.py": {
+      "sha256": "499f8c21197873b1a4cf237d643724610bbc640c5ba30ee06af42f1b2582be79",
+      "bytes": 1248
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/economic_prepare.py": {
+      "sha256": "f555be8f77724737f5c57232ccff892e0d9dae9e92c5ee3301b6863489a4c2a5",
+      "bytes": 2106
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/economic_reporting.py": {
+      "sha256": "44de66e6428ff6c34d79f094a4bb28b4652767d5e02189752f03b02cb9e1dac0",
+      "bytes": 524
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/economic_simulation.py": {
+      "sha256": "7c255cbb27135eec84db10a81c083df4526c2b878172e19e0e48db1cfb20ebfb",
+      "bytes": 679
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/economic_state.py": {
+      "sha256": "0920221ea2043200c13eaf1f4f1f634b509473db819abb46d92efbc5f98e1835",
+      "bytes": 1168
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/execution.py": {
+      "sha256": "2a867eb23ea20a0690a6fbd0b5f1b9e00da39d1ee8b370ce3b9b71fcb6e7c3c0",
+      "bytes": 1501
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/fork.py": {
+      "sha256": "8264ffd0c133bf22b4a5a464956933a9d58894318decf231887eeabc9e5c624c",
+      "bytes": 727
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/history.py": {
+      "sha256": "ac898a98cfc5702520adeddf89f7a1fadec33c7d1a0754e129f4eb65e088e2e0",
+      "bytes": 1164
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/lifecycle.py": {
+      "sha256": "31c7563cec5a6cfd7bb2dc9febda642a1025e7ea0148863211e5fb013a546ed8",
+      "bytes": 1090
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/models.py": {
+      "sha256": "23209182ece2f8a0a48e585e36fc9cc04429cb36bbae93c09693936f774c3641",
+      "bytes": 3457
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/observations.py": {
+      "sha256": "a206896261296ce6ab8dbb7b93839601628d3968cca7a92746a00e8d7fbe132f",
+      "bytes": 1745
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/operations.py": {
+      "sha256": "ea2a5b0de9c09297bf7cb9f7c86e6bd84394d8a43502e511bc62fc31f160cf1f",
+      "bytes": 1141
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/permissions.py": {
+      "sha256": "08e9064dd70edbf9c865d1b5aa95d807a09f7eb8a97b804eb6a6d159a94c180d",
+      "bytes": 3707
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/planning.py": {
+      "sha256": "9f616ac110828263f024ce6aca7c4ba7f58b34d128a32a2a2ead3198137a8a53",
+      "bytes": 434
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/positions.py": {
+      "sha256": "608af5195cc4bff5fc480dc16e8203eaf78b90f90b2e5e9fa13090b5f016fbdc",
+      "bytes": 536
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/reader.py": {
+      "sha256": "f3006343f04eabdf511ccd6c892ec0aa56e1c6688338d580264d8bc2e6b5cb1e",
+      "bytes": 3642
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/receipts.py": {
+      "sha256": "c47d4253e70b89eaab69eabacc305a6b8d33443e99d91ca529557e20074b67eb",
+      "bytes": 1961
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/reconciliation.py": {
+      "sha256": "30393f8dccba71386d63de2d1d5cc03bec9d46fe47fc7f8258c85fab67c67f22",
+      "bytes": 1547
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/reporting.py": {
+      "sha256": "a8b973e69cdd8b0808bb8aa53676bd99f4d9180a7cdf7e270fb01704f053acdc",
+      "bytes": 722
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/simulation.py": {
+      "sha256": "fbf88974c401c928c264807c69ff867409ea087a7c54c768ea388e7931de70e0",
+      "bytes": 673
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/state.py": {
+      "sha256": "233db7239dcba7b473d8955eaa7106567ecbf7e4837ee4c509e24079f8566d68",
+      "bytes": 7078
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/support.py": {
+      "sha256": "f39d8cdd220c0aea8dbb903a67f17d9ba8caace466effe58b4133a114bae689d",
+      "bytes": 1214
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/swap_math.py": {
+      "sha256": "65f46f1196177790b40b79cc7cedc8dae473fc9a6329db52aa57e779bb3888a7",
+      "bytes": 370
+    },
+    "source/src/almanak_v3/connectors/aerodrome_slipstream/validation.py": {
+      "sha256": "fdbce86849cf80a34696c79043f48721233b57626d3ebf9f244d29b852546d93",
+      "bytes": 1405
+    },
+    "source/src/almanak_v3/connectors/composed/__init__.py": {
+      "sha256": "c7dd46a30bfd7958e9cead54c8b64568ac2fea93bcf6b0c5e980412f2e0263e5",
+      "bytes": 85
+    },
+    "source/src/almanak_v3/connectors/composed/api.py": {
+      "sha256": "6ad88698c67b2c1f99998807ab8b081be83397f5de0d94720fc2bdd778c3e577",
+      "bytes": 2062
+    },
+    "source/src/almanak_v3/connectors/composed/authority.py": {
+      "sha256": "5f18ca418e54a638efefdcf2b431a063a79b94e8d55a3abfd1493ed42e09d059",
+      "bytes": 2515
+    },
+    "source/src/almanak_v3/connectors/composed/codec.py": {
+      "sha256": "ff1887de27f16de6944fabf8d238ec7306557466063d3c1fc64e66cbaa9cd8ed",
+      "bytes": 2026
+    },
+    "source/src/almanak_v3/connectors/composed/connector.py": {
+      "sha256": "20f72abfe2dc60bbe64c5774dcc487f0c9ec4749639177177b3a4048d10df686",
+      "bytes": 1572
+    },
+    "source/src/almanak_v3/connectors/composed/dashboard.py": {
+      "sha256": "f5f51845a5f2a5be971c2e8714dfd6521234025d31030eba7694569192c3b86c",
+      "bytes": 5801
+    },
+    "source/src/almanak_v3/connectors/composed/economic_binding.py": {
+      "sha256": "ac99d8c74aa8b487b16bd9b9a4f0a870f53a83fd1e5d710ba8dc3a0fda3e5d55",
+      "bytes": 2694
+    },
+    "source/src/almanak_v3/connectors/composed/economic_book.py": {
+      "sha256": "6e0b6f226c355bafc47ae408a25e4df751c2bdb532e141afa9415d5617029edf",
+      "bytes": 3183
+    },
+    "source/src/almanak_v3/connectors/composed/economic_config.py": {
+      "sha256": "f3cb3b6579b7409684de5d541a694c36bc20318eff092774af7c4c62d475398e",
+      "bytes": 3773
+    },
+    "source/src/almanak_v3/connectors/composed/economic_events.py": {
+      "sha256": "b9e6ecaa8d989f240b89d4e0cad5f30b3ef75ce5e3c5945846cc031b11d4e606",
+      "bytes": 2023
+    },
+    "source/src/almanak_v3/connectors/composed/economic_inventory.py": {
+      "sha256": "2ea14a8276d268b6461227aed5fb4803168955def6d214d604125c36b97d95bc",
+      "bytes": 5620
+    },
+    "source/src/almanak_v3/connectors/composed/economic_model.py": {
+      "sha256": "82fad5e3643715d390b74f460893cbac2f105ae1429c73c206a8e16f37ec28ae",
+      "bytes": 11611
+    },
+    "source/src/almanak_v3/connectors/composed/economic_prepare.py": {
+      "sha256": "a4adb123ce30537fd7046f68ad56829ba4891971d206555e59470b0414457542",
+      "bytes": 5695
+    },
+    "source/src/almanak_v3/connectors/composed/economic_reporting.py": {
+      "sha256": "c78f9fe530d49747c3f55371ce91e964d5f3b6f8bde72031ae99fb7276c21390",
+      "bytes": 3866
+    },
+    "source/src/almanak_v3/connectors/composed/economic_state.py": {
+      "sha256": "9d48a66f53c0562d232a2dde1148f1f00ad696d50a18e16ed23be073139c49d5",
+      "bytes": 3255
+    },
+    "source/src/almanak_v3/connectors/composed/execution.py": {
+      "sha256": "9af593277bd0e26d92a556ddc78fe09574ca3182103192103925cb1d1ec6bff7",
+      "bytes": 6895
+    },
+    "source/src/almanak_v3/connectors/composed/fork.py": {
+      "sha256": "4fe498adb2643bfa7cc23a2ca94402a0b600c8fb26bee584a08c00469f388527",
+      "bytes": 6312
+    },
+    "source/src/almanak_v3/connectors/composed/inventory.py": {
+      "sha256": "2886dbdbb3474307fdbd454f17327a6bc2f9a0cfcf075b714faf3c0bbefcdce9",
+      "bytes": 5786
+    },
+    "source/src/almanak_v3/connectors/composed/lifecycle.py": {
+      "sha256": "f1c00f0b92a3a92395a58bcb6d40fd952d0182ba23a4c460b2db1521d6e3ed45",
+      "bytes": 4184
+    },
+    "source/src/almanak_v3/connectors/composed/models.py": {
+      "sha256": "0f683fada53f3b13218cb4f6c0d333df0aecf35665cce6ee8028352fd68f6fa0",
+      "bytes": 4092
+    },
+    "source/src/almanak_v3/connectors/composed/permissions.py": {
+      "sha256": "aa233d3823dba92a60a9c8a8d2fd3579d99e0cda0adf2bfa49968fb11f499fd0",
+      "bytes": 2238
+    },
+    "source/src/almanak_v3/connectors/composed/reporting.py": {
+      "sha256": "aba288709eb1099e771bec7fbf2802ece6dc87f95e5f5bb8a249e32243355228",
+      "bytes": 2833
+    },
+    "source/src/almanak_v3/connectors/composed/state.py": {
+      "sha256": "81054a6a54d80016008a0a6ad27efd7f2fb27c9cb00f806f3a5e26bc1a94e46f",
+      "bytes": 4400
+    },
+    "source/src/almanak_v3/connectors/composition.py": {
+      "sha256": "21ac5d197d9140f580c1674562cdcfc8c37e0b662140fcb0175d76093da294e9",
+      "bytes": 10712
+    },
+    "source/src/almanak_v3/connectors/compound_v3/__init__.py": {
+      "sha256": "0bef014215b5f52312f7bc149e8639c5db05dd466634ba2fe64960302882a676",
+      "bytes": 78
+    },
+    "source/src/almanak_v3/connectors/compound_v3/accounting.py": {
+      "sha256": "bb913baab20439bfa9521efbdfd54b0fe61416f05ff1fa07ec811b901dcd5c84",
+      "bytes": 2467
+    },
+    "source/src/almanak_v3/connectors/compound_v3/asset_effects.py": {
+      "sha256": "1616dd0f01b0b6ea67e50cfb702c398249a0ecefa166c4f5da634cb45cb915e6",
+      "bytes": 561
+    },
+    "source/src/almanak_v3/connectors/compound_v3/authority.py": {
+      "sha256": "bf76c555871440aed04a8089ebbae7e00d5d8a677f080975947da057e2b32960",
+      "bytes": 3894
+    },
+    "source/src/almanak_v3/connectors/compound_v3/capacity.py": {
+      "sha256": "e860cbd00ca01d4f14921cbb8b78e980827b58f6d3414f3d0242e7c503ce93e3",
+      "bytes": 3931
+    },
+    "source/src/almanak_v3/connectors/compound_v3/connector.py": {
+      "sha256": "135ba21ce65b97dca50c8210454719b73527d1812ca1891e032267672fa17556",
+      "bytes": 2344
+    },
+    "source/src/almanak_v3/connectors/compound_v3/dashboard.py": {
+      "sha256": "e4f5812d8257d6e9fb5bc5d4d5a4dfd9e9a2d88d7c75313963cf110a25214e5c",
+      "bytes": 5808
+    },
+    "source/src/almanak_v3/connectors/compound_v3/deployment.py": {
+      "sha256": "a5a362ee27b03e3f486b9610a70abfd8d4b7d34d75dd118145050f1f924dae3c",
+      "bytes": 4078
+    },
+    "source/src/almanak_v3/connectors/compound_v3/domain.py": {
+      "sha256": "6852d096c78877a782f677fd3536a9a6703e47b29c60a692065d0d6b2b7a8a8c",
+      "bytes": 9637
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_acquisition.py": {
+      "sha256": "e290f52ab0494c440eeff0892471d9ff891e93206411353226174395abeccd09",
+      "bytes": 9582
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_actions.py": {
+      "sha256": "a8682d839561b4f90c11c0dffea8efc7399e819b3836c57d51aec270596d4502",
+      "bytes": 8813
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_binding.py": {
+      "sha256": "d93c7548cc70d08a5ba932fc0eeb7f55dc9416a989f55288da14bc0551c9f9a8",
+      "bytes": 2743
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_book.py": {
+      "sha256": "bb751d8d387e880561a1b022fd1603fecc40413c7c9de002731492f549efbb6a",
+      "bytes": 5717
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_config.py": {
+      "sha256": "109fb3367096c7cb2555bbac55896f75badbe836998bc8b33df4caded3b4cf25",
+      "bytes": 1673
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_data.py": {
+      "sha256": "a94aae26de3ad9e7466b4c46bc9444d161519ed7239ba0c352a075120179a381",
+      "bytes": 5642
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_events.py": {
+      "sha256": "9246f3564c386c40efac3b4441907d4886d279e7c6ca6a779101d0c3cbaa530b",
+      "bytes": 5167
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_liquidation.py": {
+      "sha256": "97d084116fab6e0f678d3f288feed270e2bc78c1dc58371d84baf6ecdb41283d",
+      "bytes": 2867
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_model.py": {
+      "sha256": "f62e39e1eab00b36b59f396928c1b49411db5170c99e45172da3becf4d68bbfe",
+      "bytes": 12478
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_parameters.py": {
+      "sha256": "9288e24f0c77d27cb6c9cdbd6ab7a460cc8a0ab824bfff76ded507f64efe18e3",
+      "bytes": 4053
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_prepare.py": {
+      "sha256": "36230bf67a58767e905963112ec7cb70ac4450a196dd69d7ae381fae501cf61d",
+      "bytes": 9461
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_reporting.py": {
+      "sha256": "f0fda403a5fdf9559581580c5d4c218ca211e4b03f971b120c3bd4c5d03b1d22",
+      "bytes": 5719
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_state.py": {
+      "sha256": "65c8f36da395c7cc2379c45eac017cc84fc610d728a1b7faa58e22497f0390e5",
+      "bytes": 5457
+    },
+    "source/src/almanak_v3/connectors/compound_v3/economic_views.py": {
+      "sha256": "f1c4d13c6a1ee0fcb0ebe6bb632d2f6eaf5895b1fbc89f2f936d6129b154ef23",
+      "bytes": 2731
+    },
+    "source/src/almanak_v3/connectors/compound_v3/execution.py": {
+      "sha256": "0778e7674908f453b693d93dc144dc4fc76a56a877ff226cc406b7f930f1a0d8",
+      "bytes": 9349
+    },
+    "source/src/almanak_v3/connectors/compound_v3/fork.py": {
+      "sha256": "be79ec72d4ab256cf878fef2be6324ca3f291c260654da67c343f92bd99dda93",
+      "bytes": 4862
+    },
+    "source/src/almanak_v3/connectors/compound_v3/lifecycle.py": {
+      "sha256": "f9609524ed31af789ec42a682af3deb91433dc7762f4468ba556b272cdbbb9b9",
+      "bytes": 4076
+    },
+    "source/src/almanak_v3/connectors/compound_v3/liquidation.py": {
+      "sha256": "5aef1bcfc2682f2c011ef3ee8a7401487c1063268451b7165bc1f98502e65b6f",
+      "bytes": 3004
+    },
+    "source/src/almanak_v3/connectors/compound_v3/math.py": {
+      "sha256": "e7e53153c899109ae7521f53ce205358c60b811095718cf4705941ee9996d073",
+      "bytes": 3660
+    },
+    "source/src/almanak_v3/connectors/compound_v3/models.py": {
+      "sha256": "7daf3fe025e82e7817c58cd4b28ed5ab29ad3a36e9602de5781b0c240b84044f",
+      "bytes": 7319
+    },
+    "source/src/almanak_v3/connectors/compound_v3/observations.py": {
+      "sha256": "c40f1d20d9b11e0784fb9289723c410f49cab50c1e895bd1acb9c431a4fb8730",
+      "bytes": 4354
+    },
+    "source/src/almanak_v3/connectors/compound_v3/operations.py": {
+      "sha256": "85237c8e00abe8309d6f133fc25eee72483dc8138046109fea5dfb3c27d29cb3",
+      "bytes": 4068
+    },
+    "source/src/almanak_v3/connectors/compound_v3/permissions.py": {
+      "sha256": "562f1030a50f35ffd1f3bc2f6afc55a1f06e980e1e250d7657033b0d66eb631d",
+      "bytes": 5655
+    },
+    "source/src/almanak_v3/connectors/compound_v3/planning.py": {
+      "sha256": "dbbb24ac9c208c2d99c8cf76e7b21bf54fa97f9d003b16e797ce4ba0a9b2859a",
+      "bytes": 4634
+    },
+    "source/src/almanak_v3/connectors/compound_v3/projection.py": {
+      "sha256": "a0676a6fc169cdadc9a2138107f8491fc962c2743b5a209aa048a86095fa1865",
+      "bytes": 7006
+    },
+    "source/src/almanak_v3/connectors/compound_v3/reader.py": {
+      "sha256": "ae4c43086f185dcd160e91ed250eecf43564ed2b23fd133f94c9211719b80ac1",
+      "bytes": 6603
+    },
+    "source/src/almanak_v3/connectors/compound_v3/receipts.py": {
+      "sha256": "a237462804ac50b24073c47a39151e107a4132c601163b536f347c02e20df8ce",
+      "bytes": 6722
+    },
+    "source/src/almanak_v3/connectors/compound_v3/reporting.py": {
+      "sha256": "a48b233a2deab79f1fb53dd4e8bb9dac66c7264d22a3450c2ac79fb8ada37ce2",
+      "bytes": 4986
+    },
+    "source/src/almanak_v3/connectors/compound_v3/revisions.json": {
+      "sha256": "f102f608c3f9f72549a3853d1c6aad5596d5b366ffcf2fd207b4bf796bdc25b7",
+      "bytes": 26349
+    },
+    "source/src/almanak_v3/connectors/compound_v3/risk.py": {
+      "sha256": "a0c10bbb9c2a4864f7c86669e4fd86682f25b3a63763ea81af88efa1754771a4",
+      "bytes": 2673
+    },
+    "source/src/almanak_v3/connectors/compound_v3/state.py": {
+      "sha256": "23b4b00e950010902a536fe8dfc3a4c89344cfa4d181389304486b80eb14ca91",
+      "bytes": 7087
+    },
+    "source/src/almanak_v3/connectors/compound_v3/support.py": {
+      "sha256": "9fb2e49250494ae0abff2c44cf7ff207d1fe8eb968be62cc683782de55fa03f4",
+      "bytes": 1179
+    },
+    "source/src/almanak_v3/connectors/compound_v3/transitions.py": {
+      "sha256": "b922d3ee48382d91d85ff2a311560597abef5a10264ce5892c4e5f70ab6687b1",
+      "bytes": 3339
+    },
+    "source/src/almanak_v3/connectors/concentrated_math.py": {
+      "sha256": "4fa5efefa1fc223a8b03dd577d660530f2b2551bc5ed7c1babb94bc9a8124b94",
+      "bytes": 4901
+    },
+    "source/src/almanak_v3/connectors/concentrated_policy.py": {
+      "sha256": "bccd926d4d282f3aba49fb7964771d300563a532fcd35f1c09366f2bc6f87a6d",
+      "bytes": 1831
+    },
+    "source/src/almanak_v3/connectors/concentrated_pool.py": {
+      "sha256": "6d306d3f1bfd5ad4f019211f86e2e5ae5992f04950d74145582f0d895d46fd79",
+      "bytes": 1898
+    },
+    "source/src/almanak_v3/connectors/concentrated_swap.py": {
+      "sha256": "38023590202017b8bcfcfa0c1e20b22795f2f1244833d9c47b77b1db87e0b582",
+      "bytes": 3810
+    },
+    "source/src/almanak_v3/connectors/curve/__init__.py": {
+      "sha256": "5ed42f8fcda58bad5994d5671ab2d28f285882f0b935207b86f8366c1a133584",
+      "bytes": 84
+    },
+    "source/src/almanak_v3/connectors/curve/abi.py": {
+      "sha256": "aed80c6536e87e1c1630feca4cc1511eb3d5328a06f1e66e4bef07771caf3a30",
+      "bytes": 2990
+    },
+    "source/src/almanak_v3/connectors/curve/api.py": {
+      "sha256": "32cc5730394b3458c03c5aa6aaac78c72fc72141caf625a389621f6e61c3019e",
+      "bytes": 2138
+    },
+    "source/src/almanak_v3/connectors/curve/artifacts/stable-20231115.json": {
+      "sha256": "bbb2516e20df8534825eb3583910bcd93083d38aa7b895a19a38a2bcf1ab48d4",
+      "bytes": 2430
+    },
+    "source/src/almanak_v3/connectors/curve/artifacts/stable-20231212.json": {
+      "sha256": "f839f46e2b9d8631e593ae86392200d042e0b4995da8e6d3cb660cad587365e5",
+      "bytes": 2761
+    },
+    "source/src/almanak_v3/connectors/curve/artifacts/tricrypto-v2.0.0.json": {
+      "sha256": "de45cd288ea8b9b2d3a941175afc7ceb4104e94dfdeecd408278a506279f6c89",
+      "bytes": 3761
+    },
+    "source/src/almanak_v3/connectors/curve/artifacts/twocrypto-v2.1.0.json": {
+      "sha256": "a24498faa1060aa1195b358a361271520da4e8007ff58fafe721de73d81985fe",
+      "bytes": 3794
+    },
+    "source/src/almanak_v3/connectors/curve/asset_effects.py": {
+      "sha256": "1da144eb406ff1883bfc250e0647cff97ddc54f3055226779b4d47c503701b8f",
+      "bytes": 226
+    },
+    "source/src/almanak_v3/connectors/curve/authoring.py": {
+      "sha256": "ac3dce9c960a5e73b58f855080df7fd86984f011fab8df16231fad14cad9071f",
+      "bytes": 3043
+    },
+    "source/src/almanak_v3/connectors/curve/authority.py": {
+      "sha256": "41f94b86646d5589957cc45d00722ee310ed6b531ec99df475d78402520404ac",
+      "bytes": 2755
+    },
+    "source/src/almanak_v3/connectors/curve/connector.py": {
+      "sha256": "16604c207e1b16980d8f3e08c3a64266d8986864de26c849875eb91b5f236304",
+      "bytes": 2496
+    },
+    "source/src/almanak_v3/connectors/curve/crypto_deployment.py": {
+      "sha256": "4ae11e252691ed8aebbdc6d9c1a5b0ca116f9337fc9e97256e88ff1d6d162c52",
+      "bytes": 3975
+    },
+    "source/src/almanak_v3/connectors/curve/crypto_history.py": {
+      "sha256": "836e11e253bf4da221c4edbbef2b35dbb1b16cbf3100c41aba922d887c5b293f",
+      "bytes": 4243
+    },
+    "source/src/almanak_v3/connectors/curve/crypto_integer.py": {
+      "sha256": "23f134c15214f3a406efd0deb2c92a86d8d24b9eaaa66e8eeb4c209a15177088",
+      "bytes": 2830
+    },
+    "source/src/almanak_v3/connectors/curve/crypto_observation.py": {
+      "sha256": "fc6841a56e27c5aa0d5138e5a346d54a9460c2829655fbf07a6056c5a7f0e1f4",
+      "bytes": 6042
+    },
+    "source/src/almanak_v3/connectors/curve/crypto_prices.py": {
+      "sha256": "fe8e2a54d39001aa61464c87af0ead7d50cf7ba2ca2e770bf4f461e15b0c6841",
+      "bytes": 2496
+    },
+    "source/src/almanak_v3/connectors/curve/crypto_reader.py": {
+      "sha256": "b6ef9c924c3206cdaeca5dc4316ed75b9f6785a68c2898444d31f8f72621570b",
+      "bytes": 3325
+    },
+    "source/src/almanak_v3/connectors/curve/crypto_receipts.py": {
+      "sha256": "87d78f0fe445b7ddad68da0100fdeea0566b99576073cffa3ab49f020c45144e",
+      "bytes": 5680
+    },
+    "source/src/almanak_v3/connectors/curve/dashboard.py": {
+      "sha256": "0198d1f2e576e348d19fa81d2a5c8ca515052309f9a4ba406e7e7072c0139a35",
+      "bytes": 4097
+    },
+    "source/src/almanak_v3/connectors/curve/deployment.py": {
+      "sha256": "f3fe0183fcb18ebaa7dfca6ff3e8c8f43e860740a1d015e6197161051e938e22",
+      "bytes": 5954
+    },
+    "source/src/almanak_v3/connectors/curve/domain.py": {
+      "sha256": "72b76e3af9e3e75b85125041120131c0ccf68e285c1a060deb027402ed54d9fe",
+      "bytes": 5145
+    },
+    "source/src/almanak_v3/connectors/curve/economic_acquisition.py": {
+      "sha256": "9319d649302e78442f941a31fb454c07071d83af076e657669f4796e9414b333",
+      "bytes": 1455
+    },
+    "source/src/almanak_v3/connectors/curve/economic_binding.py": {
+      "sha256": "17dda269cb620011db4ac28a3c9c65ef608bf2fbddb19c28e9919a440c51e658",
+      "bytes": 2161
+    },
+    "source/src/almanak_v3/connectors/curve/economic_book.py": {
+      "sha256": "d21eab29390052a916e0ca7881ee860fe13d9e196fe18a54b4f190c84cd978c5",
+      "bytes": 6224
+    },
+    "source/src/almanak_v3/connectors/curve/economic_collection.py": {
+      "sha256": "617df3a7e5126cc7bb6e428ec5e21acb09921b88828d5c8046c2e46ba4f6639a",
+      "bytes": 4402
+    },
+    "source/src/almanak_v3/connectors/curve/economic_config.py": {
+      "sha256": "25db2fbca2147aa9d56886556a181a5111277345b597182ebf3204aa9fa11e1a",
+      "bytes": 1602
+    },
+    "source/src/almanak_v3/connectors/curve/economic_data.py": {
+      "sha256": "660eb05dd971603e622a84afb86f77a232cae396c3916b82345bd4c057e98de3",
+      "bytes": 4654
+    },
+    "source/src/almanak_v3/connectors/curve/economic_history.py": {
+      "sha256": "d2992a0ddf82192aa45a40bb596b5cc1009536d21e0c065080e9a5fbeda5247a",
+      "bytes": 5644
+    },
+    "source/src/almanak_v3/connectors/curve/economic_model.py": {
+      "sha256": "03bb7453babdc363426dc09c94bcc30e87e352fec0251e20a981209a7f81b466",
+      "bytes": 3702
+    },
+    "source/src/almanak_v3/connectors/curve/economic_parameters.py": {
+      "sha256": "0177f3da0aa4b2d90740435a755c3105cc515040d98930a3712df6c83cbd3337",
+      "bytes": 1188
+    },
+    "source/src/almanak_v3/connectors/curve/economic_pool.py": {
+      "sha256": "8113a2153e715f42926022beb708f03990ec3434123c28da8dc5005a77f7ead4",
+      "bytes": 4131
+    },
+    "source/src/almanak_v3/connectors/curve/economic_prepare.py": {
+      "sha256": "9a2b3554a749da65ceaf705bd8b057d9a3e50b3fdb8ab2772208f37d767d95f1",
+      "bytes": 3851
+    },
+    "source/src/almanak_v3/connectors/curve/economic_reporting.py": {
+      "sha256": "2f54b624391c7c8251fc8c2e0e376f159c5dac47650e54ff13b03cddd18adf6b",
+      "bytes": 4528
+    },
+    "source/src/almanak_v3/connectors/curve/economic_simulation.py": {
+      "sha256": "7e0521724e113a1540f6fbe8527d479b204d177f27cf5021fa221df780565ea5",
+      "bytes": 7325
+    },
+    "source/src/almanak_v3/connectors/curve/economic_state.py": {
+      "sha256": "312de03e71130c9887ae035de6dd063ed57281dfae8a7a783f4b0933257244c8",
+      "bytes": 3568
+    },
+    "source/src/almanak_v3/connectors/curve/economic_validation.py": {
+      "sha256": "eaecd8b4fca76d60442605a201a74913045a3d967e681ce931d2fc41bb8c7186",
+      "bytes": 4218
+    },
+    "source/src/almanak_v3/connectors/curve/execution.py": {
+      "sha256": "519decb4795d005237039d045951c44424d631649f0242cc80a1df00af0cd408",
+      "bytes": 3615
+    },
+    "source/src/almanak_v3/connectors/curve/fork.py": {
+      "sha256": "912cac9b206cc85fc44cb670fe0279f49c1050f608d6533685138033b557c441",
+      "bytes": 1112
+    },
+    "source/src/almanak_v3/connectors/curve/lifecycle.py": {
+      "sha256": "78379d84aa3bc3a9b8813662b570549f46166b74f30a297a97cdf54e48493ca0",
+      "bytes": 3526
+    },
+    "source/src/almanak_v3/connectors/curve/liquidity_quotes.py": {
+      "sha256": "ad2bdee83b0523f6605c7ef11a1efb64eff9a71f9363a553bbea1390e04465f2",
+      "bytes": 1934
+    },
+    "source/src/almanak_v3/connectors/curve/models.py": {
+      "sha256": "07f0d51214af96c413f88f97fdb898c46c4f403df5064b68ac4151116f10381e",
+      "bytes": 5892
+    },
+    "source/src/almanak_v3/connectors/curve/observations.py": {
+      "sha256": "89b6eaa4e70a2ebfc94331fb06ad62aa2a62c2163cf8782456ae4adf6131e6bb",
+      "bytes": 7401
+    },
+    "source/src/almanak_v3/connectors/curve/operations.py": {
+      "sha256": "304ca0c12062bf6a1b8b90bdb81e56acb77712fc68ad298fdd911dc87f4254f7",
+      "bytes": 3366
+    },
+    "source/src/almanak_v3/connectors/curve/ownership.py": {
+      "sha256": "f5a2954e57d6b1234673dac0d529130b0c4c0bde6ab9d8ce6ce2ecdb0ccb36dd",
+      "bytes": 987
+    },
+    "source/src/almanak_v3/connectors/curve/permissions.py": {
+      "sha256": "f8575a7646078454a06c8dd98e79ac653d391e9d68e2ae21745b7444738212cd",
+      "bytes": 6470
+    },
+    "source/src/almanak_v3/connectors/curve/planning.py": {
+      "sha256": "e06b5ac56b7b512c8c5491f735619a111086b7bab3e983c1798b360b145e7b3b",
+      "bytes": 6219
+    },
+    "source/src/almanak_v3/connectors/curve/pool_abi.py": {
+      "sha256": "4be343e3a54b4d037c3804f2ee501e6fcaf0cb5dce6987d26e4c7ecae6dd8b57",
+      "bytes": 1529
+    },
+    "source/src/almanak_v3/connectors/curve/positions.py": {
+      "sha256": "f5e6cb8a014862bd4f39f288840c3938f273b17ad6e59e4f1e3d64bf71507152",
+      "bytes": 2162
+    },
+    "source/src/almanak_v3/connectors/curve/reader.py": {
+      "sha256": "145bc8e45565cbbb6054b237b186d4a6e6f311e3195939787fadea35fc0a2d1d",
+      "bytes": 4039
+    },
+    "source/src/almanak_v3/connectors/curve/receipts.py": {
+      "sha256": "adbdf14aae2e38157185b6886f0335715f9d0c069c2eb6a2296c815066086c4a",
+      "bytes": 8796
+    },
+    "source/src/almanak_v3/connectors/curve/reconciliation.py": {
+      "sha256": "79a3dc49624a128faa471a461de23397f87f34f521b28a1dc9e75ba82f078928",
+      "bytes": 4967
+    },
+    "source/src/almanak_v3/connectors/curve/reporting.py": {
+      "sha256": "169b0863db2da89a2bd3084e2eca6509f3512be4bd46d5d52096aa005d79f81a",
+      "bytes": 1613
+    },
+    "source/src/almanak_v3/connectors/curve/simulation.py": {
+      "sha256": "8fb309880b837e1b829a337c62181d2b1d399efcacda7d1afe23381a0e41dbf2",
+      "bytes": 2266
+    },
+    "source/src/almanak_v3/connectors/curve/stable_math.py": {
+      "sha256": "ce5f9c27d564910199bdaf5bd0d1268f359e13af0c652eb1594f9bf5bf4385f1",
+      "bytes": 10635
+    },
+    "source/src/almanak_v3/connectors/curve/state.py": {
+      "sha256": "12dc23926d65033c1f44a5350f63ffdd386171a3cc4f315c4a3ea7b304787b31",
+      "bytes": 7174
+    },
+    "source/src/almanak_v3/connectors/curve/support.py": {
+      "sha256": "76e84d4965fe574a7b92cf07c45d008eb1ff18dbb263edd3419dfd85f672eb2e",
+      "bytes": 3177
+    },
+    "source/src/almanak_v3/connectors/curve/tricrypto_cubic.py": {
+      "sha256": "37c5477d0505d746e7225b72d1b91a50d97e5e55127b7ef17fec0d841a1c1bc1",
+      "bytes": 2333
+    },
+    "source/src/almanak_v3/connectors/curve/tricrypto_deployment.py": {
+      "sha256": "158847664b24642cd05d8780b23c83af2cc14f3a1ef6d07607a1925cf33ead11",
+      "bytes": 3302
+    },
+    "source/src/almanak_v3/connectors/curve/tricrypto_liquidity.py": {
+      "sha256": "359fa8bdaff1e01af6b4effdd6272b43ccbb2b47eb6855b862017ca3c609ec0d",
+      "bytes": 6163
+    },
+    "source/src/almanak_v3/connectors/curve/tricrypto_math.py": {
+      "sha256": "8ea16e0a933944d29023222a0cade9444e6f90fa5943eb8f73c22add50517d2a",
+      "bytes": 8121
+    },
+    "source/src/almanak_v3/connectors/curve/tricrypto_observation.py": {
+      "sha256": "ee8ba296010f7b016ec2685a8f173029d3ad0ead27fff4f25974bdd8d619ee04",
+      "bytes": 6181
+    },
+    "source/src/almanak_v3/connectors/curve/tricrypto_quotes.py": {
+      "sha256": "37a3e47cab07429e252e9d4ccf06e2e26743eeeecb2d172f94c6a8a009d8521c",
+      "bytes": 2789
+    },
+    "source/src/almanak_v3/connectors/curve/tricrypto_reader.py": {
+      "sha256": "bda313ed84173ea9bfcdcb71691b1cd18af210c61f3343dd36d7c62a404ba3d2",
+      "bytes": 4084
+    },
+    "source/src/almanak_v3/connectors/curve/tricrypto_rebalancing.py": {
+      "sha256": "57f6fa5709e5aec3789c02a7ca2b602ac1633e2ba8af942ddd1d8e31e09f6ed6",
+      "bytes": 4295
+    },
+    "source/src/almanak_v3/connectors/curve/tricrypto_receipts.py": {
+      "sha256": "ec40d088bd7a8ad8fc40487dd9b1a3e79f0d71d5dd6e02f518797442de795c23",
+      "bytes": 5265
+    },
+    "source/src/almanak_v3/connectors/curve/tricrypto_transitions.py": {
+      "sha256": "070abf00d08dba208596578f6e6d4787ff67cd5fc3893a3c0a49d3ac353fb7d9",
+      "bytes": 5659
+    },
+    "source/src/almanak_v3/connectors/curve/twocrypto_liquidity.py": {
+      "sha256": "6104459510957fa1fe3910e6656ecb371bc19a53935c52aeef3101c9f4e5e384",
+      "bytes": 6627
+    },
+    "source/src/almanak_v3/connectors/curve/twocrypto_math.py": {
+      "sha256": "917f01e4731c586f78cb41bc543eda383d269e6dc82686fd6110ae3047c66c0f",
+      "bytes": 7008
+    },
+    "source/src/almanak_v3/connectors/curve/twocrypto_prices.py": {
+      "sha256": "2a949a40f1ca2d1cc8b36738b1d1df4c5d09f76905d88db2e5c4174a8c9b95a1",
+      "bytes": 1668
+    },
+    "source/src/almanak_v3/connectors/curve/twocrypto_quotes.py": {
+      "sha256": "a62a09978555a25bb21a96d2b81a0434c50bb7b96c19813b075ec6dcc53f25c8",
+      "bytes": 2527
+    },
+    "source/src/almanak_v3/connectors/curve/twocrypto_rebalancing.py": {
+      "sha256": "d56215466c9392a59b7133f351325286c1c1155162c1570643dc3df6f4ffc6c1",
+      "bytes": 3602
+    },
+    "source/src/almanak_v3/connectors/curve/twocrypto_transitions.py": {
+      "sha256": "4bca1957ea4c69bf72231873f3f67b6f1c716a4c4353dc4f7d597217405f717e",
+      "bytes": 5475
+    },
+    "source/src/almanak_v3/connectors/curve/validation.py": {
+      "sha256": "c9f730d6010838f9384bcebcae7d562d88d85d444b3cbe6f79ba58714a71707f",
+      "bytes": 7635
+    },
+    "source/src/almanak_v3/connectors/decision_observations.py": {
+      "sha256": "dcff698d836a0570df5e8b52723cfa383d3d7f00d50a998d3817ed71e75f1f43",
+      "bytes": 1073
+    },
+    "source/src/almanak_v3/connectors/dex_api.py": {
+      "sha256": "3c021d3e9877d1a9676923dc458d162f580005109f4f9ba25c5ffc82f7ccde34",
+      "bytes": 2588
+    },
+    "source/src/almanak_v3/connectors/dex_dashboard.py": {
+      "sha256": "19a20133ca33b7e53d09fb5ece24ca242048c8874d1338b04219db207a7fffb2",
+      "bytes": 5122
+    },
+    "source/src/almanak_v3/connectors/dex_economic_binding.py": {
+      "sha256": "467299defc368790327286aa1360f544a0e6353ac302462c78c3acdc80eb6fd8",
+      "bytes": 1491
+    },
+    "source/src/almanak_v3/connectors/dex_economic_dataset.py": {
+      "sha256": "e15116ebcddf2829f431055b5c2da2700cabc9d6699df8a286e59efa063789d0",
+      "bytes": 1061
+    },
+    "source/src/almanak_v3/connectors/dex_economic_inventory.py": {
+      "sha256": "b64346fb71d5fac5da5203967d67c6e7ebdbb3cdf5053e47dd2fb02c5bc68b65",
+      "bytes": 1987
+    },
+    "source/src/almanak_v3/connectors/dex_economic_model.py": {
+      "sha256": "99802d90c8900e500ce78f656a3d73460352e083a95448cc249a1967e26231af",
+      "bytes": 12900
+    },
+    "source/src/almanak_v3/connectors/dex_economic_parameters.py": {
+      "sha256": "c45fa236da27aa15a3686d73cd8a470a4f983122a72bfaae424d27fbe64d9ae0",
+      "bytes": 4410
+    },
+    "source/src/almanak_v3/connectors/dex_economic_prepare.py": {
+      "sha256": "ec61a0d8f288724cfaf9231f983880b7d36a7a8dbf5787378b59f925c4a284aa",
+      "bytes": 9000
+    },
+    "source/src/almanak_v3/connectors/dex_economic_replay.py": {
+      "sha256": "7e38feed8f90ba5f8b2dc1bd3faf5e843a574ba46294a7ccacf7c688b80c7556",
+      "bytes": 1260
+    },
+    "source/src/almanak_v3/connectors/dex_economic_reporting.py": {
+      "sha256": "1cc90f166feed49dc794aef53a032a324fd46443488c79e442f37e3b4445f58e",
+      "bytes": 3035
+    },
+    "source/src/almanak_v3/connectors/dex_effects.py": {
+      "sha256": "500f41815703b5b3ac7a0aa7c837fb5d441dfaf81708ecc9fedddb7d742ff7ec",
+      "bytes": 517
+    },
+    "source/src/almanak_v3/connectors/dex_fork.py": {
+      "sha256": "3bc61e9fed26addae8d1bc6a2fff4cb7058ac95292e3cf425bf24dd941b41cfa",
+      "bytes": 4910
+    },
+    "source/src/almanak_v3/connectors/dex_reporting.py": {
+      "sha256": "62fa1faef16b99fa8c816158fafee6934ec8a42b88a4e077f4b14bbd1d9b231c",
+      "bytes": 4289
+    },
+    "source/src/almanak_v3/connectors/evm_revision.py": {
+      "sha256": "a10b2c9f27e55dca7d24cd5f683ce4badf526b77ea57755243547f0607ba0c6c",
+      "bytes": 2513
+    },
+    "source/src/almanak_v3/connectors/identifiers.py": {
+      "sha256": "dd0ed4d58e8c979520a54a9ba01b6e912126588b139f22e5ec7111dae0ac0736",
+      "bytes": 458
+    },
+    "source/src/almanak_v3/connectors/interfaces.py": {
+      "sha256": "a86a8e55add60103ca1d7514eb2238f3b01f1d03ba5c0d0ec589b7fa09982112",
+      "bytes": 6101
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/__init__.py": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/accounting.py": {
+      "sha256": "486ee807079405f0570405642986def9ba2ff4f3ba17fa22f8b2ba7cd273d949",
+      "bytes": 1727
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/asset_effects.py": {
+      "sha256": "446ac96300871a985ceadfc7b333ce2759c2394df3c8b88194c0ad546bccd6ac",
+      "bytes": 562
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/authority.py": {
+      "sha256": "ba311bb769cb0f7e83762e68c1faa3bdf3ee806718c6d5da290fc364b4b22251",
+      "bytes": 4154
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/capacity.py": {
+      "sha256": "bc32e776a2cdcfef182dcfafcdbfb864366f26650ce6d5fe2e67a8a05220845e",
+      "bytes": 3832
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/connector.py": {
+      "sha256": "f0d09ef6b078bbeed8aae9fab24fda0068db33210edc2956c3faa023424aa490",
+      "bytes": 2321
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/dashboard.py": {
+      "sha256": "d8e2f82c5619dc16aa249608fbd01fc8ba5cc1e8421217c1ef1f5df66bc0cd9d",
+      "bytes": 6397
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/deployment.py": {
+      "sha256": "30a20c2b9e1d0f5bcfc85164f72afaaf75df6eb4d0cc6553add39a57ef969463",
+      "bytes": 3581
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/domain.py": {
+      "sha256": "199b1996fd845e990933e0ba42b3e487f795719079b47d09259e8b36939dde2c",
+      "bytes": 6669
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_account.py": {
+      "sha256": "483110fa04092af2ecd28bbdd1b2a1098f6868ca8e6ae26b0adb75003aa42414",
+      "bytes": 3381
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_acquisition.py": {
+      "sha256": "b2daa9dc085fa13cae5054637547003cffad6e43d7a98584d41bdeb45c1f5458",
+      "bytes": 7095
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_actions.py": {
+      "sha256": "1111c401acc818d0ade50936f00905640d748ae34eda3e672b230a3efc6d465e",
+      "bytes": 5676
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_binding.py": {
+      "sha256": "6b5af079106d0a286240efd764b0dcb214fefda850142607000130ca4e99ccff",
+      "bytes": 2738
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_book.py": {
+      "sha256": "53cc00a67955597d25998e7042fdb5aa00d08816c32643c50118d99c1ceb1bff",
+      "bytes": 6136
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_config.py": {
+      "sha256": "49685eb37c033b0d4b78547f9110ba4d18a0bd37e01619d864652a1d59b4ea0b",
+      "bytes": 1684
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_data.py": {
+      "sha256": "0b552ab79e67b3e1a85ded5985bf446d56e2488294c67679ffe0e0bdec660675",
+      "bytes": 2655
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_events.py": {
+      "sha256": "c1b7fdb3d74b5fa254a220839c8f85022084244b84aa5e9e506eb9a39728e42f",
+      "bytes": 6715
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_journal.py": {
+      "sha256": "c3f11dd3b96b040f89cc3b60c8ca34e560b5627360b485303cd9beb7ee81c0fd",
+      "bytes": 1458
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_liquidation.py": {
+      "sha256": "a817d821a218968a2c1b0f4f5c1297e8d6e0c44f5c9cb174de50e346e6339fea",
+      "bytes": 2614
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_market.py": {
+      "sha256": "f24483d7939ecba6b2006dc57e899f0867c6bbb2b680d125599cca4922885734",
+      "bytes": 5020
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_model.py": {
+      "sha256": "84d03f247faa554b2ed77e4584972ce5ba7fb2719ea5f375880f7bd88f85f5ec",
+      "bytes": 12997
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_parameters.py": {
+      "sha256": "4d98467769e06fe6731b1d991a68210c352643056ff037f66bf8c6cc0a1a07da",
+      "bytes": 4140
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_positions.py": {
+      "sha256": "40d86933ad9a16fa4961dd4d37f3562e4d464f199513f98458f72e2ea1f388ad",
+      "bytes": 2503
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_prepare.py": {
+      "sha256": "b030dfb17eee0e4fd38a5d0ad3dedd30af8b3e9c4fc806d82a3d58736c838e76",
+      "bytes": 9474
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_reporting.py": {
+      "sha256": "9aae0b28cd12555e84af846cc3d69fae820b377d699684a7957539d0db4c579f",
+      "bytes": 5877
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/economic_state.py": {
+      "sha256": "aefd5690693dd613241d60a08dacdae96a613020421c0a89db6f2265cc845a7d",
+      "bytes": 6690
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/execution.py": {
+      "sha256": "609b000c905f5db477fb10e5e5f8d08cb6faadda8dcab695a512cabcd1589271",
+      "bytes": 10642
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/fork.py": {
+      "sha256": "8b529e1d18e4d0531c2207777fdc57cf516296c03c6d9b322b2c23d1debcfb31",
+      "bytes": 4868
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/gas.py": {
+      "sha256": "1839937a848d4f7c5a3141b0afd78d0aac16392427d529bb765fefa6cac5d80c",
+      "bytes": 3002
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/lifecycle.py": {
+      "sha256": "899bb65210a55784080bbde18baa29d59a8b102a3655b9b037956fb0d043fba9",
+      "bytes": 4380
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/liquidation.py": {
+      "sha256": "5d284fda67fdf4b1cdda1670f65612353c06a02aee09a5a3ece45ad0ee8a9702",
+      "bytes": 3612
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/math.py": {
+      "sha256": "852edea844bd7d8eb7d1b76240c69c2e9c4a8f778d26a78bd3bb986015e97f59",
+      "bytes": 4192
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/models.py": {
+      "sha256": "c6b500f4aaeb3e1c637de1e9c6e0b5f9bfb14a888916ec30ca2279e636701823",
+      "bytes": 7398
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/observations.py": {
+      "sha256": "dbea2963e0de442bcb72535e0af9705e2f6dab24c101bb155b3e406a83a04d7f",
+      "bytes": 4045
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/operations.py": {
+      "sha256": "dc27f45ff1a13dab37a92196ad47618d2c6b0a29a49e75b1357dfd6acd3a4935",
+      "bytes": 4880
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/permissions.py": {
+      "sha256": "f7375df09cd7c502b4f4d61c9cd747430d6601b67e9cc4586d90951cf0cd72d1",
+      "bytes": 6438
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/planning.py": {
+      "sha256": "a633e82aab256f85b735758bfe7924d9ad0846ea5e28e87839e3b5122b70c2ec",
+      "bytes": 4534
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/reader.py": {
+      "sha256": "571bdffbe94313b01dfab9bfcdf06bb4dfd8d2bb1395fc1015c3b1cdab65722e",
+      "bytes": 5145
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/receipts.py": {
+      "sha256": "1a63bc08acd3f1c5e939d8613bfd10db6ca99cabeed7c0274c8681a897513d6a",
+      "bytes": 6636
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/reporting.py": {
+      "sha256": "6f678651bbbd392caef4e83756caf132a83ebfef17bef3d836175407ca8fbbfd",
+      "bytes": 4935
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/revisions.json": {
+      "sha256": "8173335ea66572f28f0c7ac523ed45c1bc4f586c8414a40c289d5ac787eded6f",
+      "bytes": 6002
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/risk.py": {
+      "sha256": "c60ff4aac438c94dac984a069b4cd0b7777cee6776a559eb34db6fc4914e68cf",
+      "bytes": 2276
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/state.py": {
+      "sha256": "25b5ff747d44cc0cf53af212ea203ab162a5edc0eb5a23be5d313b1b5cfa1756",
+      "bytes": 7402
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/support.py": {
+      "sha256": "b3097dbcc0f67c9686add8226e45686ea677adcd486ee01ab588cda8ab078ebb",
+      "bytes": 1251
+    },
+    "source/src/almanak_v3/connectors/morpho_blue/transitions.py": {
+      "sha256": "4f7d126d20bfc8bb42f59ae073ed05a257a2145491dcbb0216a35ae14fc3eaf4",
+      "bytes": 3607
+    },
+    "source/src/almanak_v3/connectors/ownership.py": {
+      "sha256": "553bfb4b32899e823d07503564b5dbb5afc333fe9d39a07f121dfca145ff8107",
+      "bytes": 358
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/__init__.py": {
+      "sha256": "b8e0a4254ec6605e9f78381e0e1c76135e5ef930ca39783c849d5c1f329bceda",
+      "bytes": 52
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/abi.py": {
+      "sha256": "cbacd9316e2e5f2c8b71d04c09ac5b388f5646005084092c472715411dd21838",
+      "bytes": 1407
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/api.py": {
+      "sha256": "717c2286207fd65d3644701fcb09da52d5b971b8c5efef6cc85def4a3c1f2320",
+      "bytes": 775
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/artifacts/compiled-revisions.json": {
+      "sha256": "746e3d12bad41aed75be356eeba278d43b977b534fc21ef8431585b1688c1e44",
+      "bytes": 9583
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/asset_effects.py": {
+      "sha256": "9a1baf45ed5d214b4f33947327f9a21068b9ee62f82251da87168d43c48556de",
+      "bytes": 147
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/authoring.py": {
+      "sha256": "52347da294f79cc915562c19aacbb7d77880f73128c2dcf2ab379dde83ff36a8",
+      "bytes": 1352
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/authority.py": {
+      "sha256": "27e5deda0b87654bb1d62d8fa0d0ce72739a34367626c3436d5254d6a0def8cc",
+      "bytes": 1087
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/connector.py": {
+      "sha256": "b22e8178642823f3700bf47a1e1db2bb14e1f05dab6820f3d4e0369508e5dfcf",
+      "bytes": 2400
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/dashboard.py": {
+      "sha256": "fd17637c54a806f7d2563cd3598bbc81e23272750fa2ceaae9c4c66876239551",
+      "bytes": 677
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/deployments.py": {
+      "sha256": "15628862c6050823c1f3eb0e590f4f8b201f9d2b85e75abbee0c7069abf4b7c6",
+      "bytes": 5942
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/domain.py": {
+      "sha256": "09b301c2ad253555ea62955a517482687bc422909d8c3d58a64f30429f496418",
+      "bytes": 1120
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/economic_acquisition.py": {
+      "sha256": "f11d717897f3704094cbb29f1adf2569596dc9637d070c757256d686f04ad5b0",
+      "bytes": 1199
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/economic_binding.py": {
+      "sha256": "de203f9c4d0e0da286aaf147211db5c0af2daa44db38cebe07831d2c28598de8",
+      "bytes": 1759
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/economic_book.py": {
+      "sha256": "9308fed54c547719e93267a62275130e04bc643a11d371a8fdd43709379d474b",
+      "bytes": 1059
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/economic_collection.py": {
+      "sha256": "17d0b036e03381a49144c6abaa059f398921c872477e71b8b464a6c5241f2857",
+      "bytes": 802
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/economic_config.py": {
+      "sha256": "7f3eecc98bd3bfe015c77a5df77b71ee73d089d28b87b1f34ec1f79cd86951cf",
+      "bytes": 389
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/economic_data.py": {
+      "sha256": "1eef97b045ff68ea77b77998e6e7cd13a6346e9199f3a95ca9c46a06b2cce146",
+      "bytes": 1450
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/economic_model.py": {
+      "sha256": "5fcf18dffffb1b06f323bdf70e2b81fbd5c5b593bc16a1f8e77bcb8a5ad2d548",
+      "bytes": 1059
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/economic_parameters.py": {
+      "sha256": "717f092088a9038002152329d2813fe63617d9c0a022f42ed31f5e5012547bda",
+      "bytes": 1224
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/economic_prepare.py": {
+      "sha256": "4b8b5f5d83bc49bc7a28c6991c23ae5a267ba716435039020c98237457865dc1",
+      "bytes": 2140
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/economic_reporting.py": {
+      "sha256": "717e72f6243c64f5986fd8c792f22f95477c4814bdf1ccf3ba0275c0f718d004",
+      "bytes": 152
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/economic_simulation.py": {
+      "sha256": "97a57cccbb9e1b899870b42bddfb0925bc8de65de38f486bf3911b87d63d8fcc",
+      "bytes": 667
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/economic_state.py": {
+      "sha256": "cc128817fd0ad6466e9721997b3b0e81d666c8aecebf6d4b7e16160619d6d960",
+      "bytes": 1150
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/economic_validation.py": {
+      "sha256": "09f8a1494eaae7ce6c6b75b0b0c044ad7a1651b2c76bb07cf5a0b840a756d83b",
+      "bytes": 160
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/execution.py": {
+      "sha256": "166b43035414c42fbc326f376b1b239e3c5dfa6b56702c7408b7f8545aad5a9d",
+      "bytes": 1456
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/fee_growth.py": {
+      "sha256": "fee3ee2e839546f69e8d72db699ca7879181470cbf58171a936b588c599bee8b",
+      "bytes": 362
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/fork.py": {
+      "sha256": "1107f8c4014d0ce8a9f5aae3ce80fdc344db0710c41841385810d7b2c454dbbd",
+      "bytes": 706
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/history.py": {
+      "sha256": "0cdfbcc171dcb05af211c44dc11f735b84bdc23c7e70556362f20989e464a16c",
+      "bytes": 1124
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/lifecycle.py": {
+      "sha256": "964d740518410d588344b23d9ea1aef75ad288d468d0682ad8ee717427a576c7",
+      "bytes": 1075
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/models.py": {
+      "sha256": "b77711f4e1e8d48b61d2940798a479d89b71c765d64c8f251fb01ae4d6992997",
+      "bytes": 3430
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/observations.py": {
+      "sha256": "17ef6f226520014f34d2231282a2255edd98a452fdcbcc942bb02bed9e0def15",
+      "bytes": 1204
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/operations.py": {
+      "sha256": "f325de2cca88389261f12c1a9f6fae9bd1e22f7b2dae56f0763b241b331ce11d",
+      "bytes": 1135
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/permissions.py": {
+      "sha256": "19c600b19834f616272eb48e81f71ca49abbf5221db0fb440131a5ada2e9fe63",
+      "bytes": 3654
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/planning.py": {
+      "sha256": "2ab94f4f71afc4e33920bb933be3b10a58dacf78f320416f7fa556147db30b1c",
+      "bytes": 422
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/positions.py": {
+      "sha256": "70e4f8f6c59e504a31da7326b0f181e92819eaa268a3ca4506d4b62fbdafe6f3",
+      "bytes": 530
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/reader.py": {
+      "sha256": "00fe5a78eb231a154cc7b6de6ea9dc5856abb0e98d62d36b62302871138d2530",
+      "bytes": 2231
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/receipts.py": {
+      "sha256": "d1ef68ec614774cbe3a0faac31f3ac5bb66a1420be5dfc426e172d8292d0cbb6",
+      "bytes": 1999
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/reconciliation.py": {
+      "sha256": "83a264715f8f77af3b8d1a1b3d8f29ba2cde0ef99245060fbbe9f23efeb0b360",
+      "bytes": 1239
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/reporting.py": {
+      "sha256": "a8b973e69cdd8b0808bb8aa53676bd99f4d9180a7cdf7e270fb01704f053acdc",
+      "bytes": 722
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/simulation.py": {
+      "sha256": "fbf88974c401c928c264807c69ff867409ea087a7c54c768ea388e7931de70e0",
+      "bytes": 673
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/state.py": {
+      "sha256": "ebd50c2de0a24ab193e7cbd2bfc7a46981c405e6c904af46594880e1b3e475d7",
+      "bytes": 7033
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/support.py": {
+      "sha256": "551c89296e888951cda3fe44f0abcf763db2c98b43f27c7a91752c76453ae935",
+      "bytes": 1269
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/swap_math.py": {
+      "sha256": "b9493b3f8d8ade9ce397692415b5a36c318bbbded701f5abb35bbc13990cb54b",
+      "bytes": 1223
+    },
+    "source/src/almanak_v3/connectors/pancakeswap_v3/validation.py": {
+      "sha256": "0bca1750c13ebbd1bb10bdc3f9b7dbac61a88afc5cafbe514e3981c31e036914",
+      "bytes": 1399
+    },
+    "source/src/almanak_v3/connectors/pool_lending_authority.py": {
+      "sha256": "528fa9a0492aa19fba90d0ebc75b5cb2c127fc4aab6a0b2f61eed6f0de1ee858",
+      "bytes": 1751
+    },
+    "source/src/almanak_v3/connectors/pool_lending_domain.py": {
+      "sha256": "fad489612c4770578dd5fde07161c5be6642f5b7e6228355a1c33048ea29445c",
+      "bytes": 3321
+    },
+    "source/src/almanak_v3/connectors/pool_lending_effects.py": {
+      "sha256": "2b250e531b6c2f4381ff226bfcb344c7d6b4937a62643422d2b1c9f416a7e034",
+      "bytes": 654
+    },
+    "source/src/almanak_v3/connectors/pool_lending_lifecycle.py": {
+      "sha256": "a7409692f99c14db70fbc8932720e41bccf9feec4d3c3b6a26692dad24a93b2e",
+      "bytes": 2666
+    },
+    "source/src/almanak_v3/connectors/pool_lending_math.py": {
+      "sha256": "49c1534a292d8984f12833612f1f10f410f81ad503c83a90992603f547e1302e",
+      "bytes": 634
+    },
+    "source/src/almanak_v3/connectors/pool_lending_operations.py": {
+      "sha256": "da13e03dbc60f4f480bf8e25f72c6142a20287f16ed0b418ecce43d4a9642356",
+      "bytes": 5005
+    },
+    "source/src/almanak_v3/connectors/pool_lending_permissions.py": {
+      "sha256": "6a5b542a0a2690cb5d21bdd8a7546f6d0099b5fc73a5d5e2bee0bd46dc09d87f",
+      "bytes": 4971
+    },
+    "source/src/almanak_v3/connectors/pool_lending_reader.py": {
+      "sha256": "70c3502ae1a9d98d510aace86cdeca2ab660dcff60572ac739a7089fd0589f93",
+      "bytes": 2647
+    },
+    "source/src/almanak_v3/connectors/pool_lending_receipts.py": {
+      "sha256": "9de649ca0575c4885661cdee13e76ad5345e1c633e7858d88ee007ea03c36216",
+      "bytes": 5532
+    },
+    "source/src/almanak_v3/connectors/pool_lending_risk.py": {
+      "sha256": "44e7d8fd6c45bf81df52c2221f579e31b507d24edd41ea09d4c402601031fd8b",
+      "bytes": 1369
+    },
+    "source/src/almanak_v3/connectors/sparklend/__init__.py": {
+      "sha256": "d539a358e1fe5db7dafc1b4b1b8c0bed758683378cb3524e48c58aa093e93524",
+      "bytes": 83
+    },
+    "source/src/almanak_v3/connectors/sparklend/asset_effects.py": {
+      "sha256": "daebee9d1cfb3b82cf3bb916281d33dc1d1e7bc0acd462bfce08f1cfb1673701",
+      "bytes": 156
+    },
+    "source/src/almanak_v3/connectors/sparklend/authority.py": {
+      "sha256": "1ac9f8c847b2b8aed33964663f0ba44da37d14a720de4471a0f01486a856dfde",
+      "bytes": 2263
+    },
+    "source/src/almanak_v3/connectors/sparklend/connector.py": {
+      "sha256": "343e29e007f9002296e25496ae59633a8badcdc66b4b04f8654b3fcd724e5954",
+      "bytes": 2276
+    },
+    "source/src/almanak_v3/connectors/sparklend/dashboard.py": {
+      "sha256": "9e786111001eeb99bea593780d81927dec973391f22487b2355560b749316f88",
+      "bytes": 5508
+    },
+    "source/src/almanak_v3/connectors/sparklend/domain.py": {
+      "sha256": "ecc61e7a6d79059b8eb9a39f9a9764f70233e1fdd2102d256c7cfcde0aa6b163",
+      "bytes": 4027
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_acquisition.py": {
+      "sha256": "ffb5ac2693a6a650fea1cfcdfcf06daae125ea30b25d0171b57bfa5aeb96bd3e",
+      "bytes": 9076
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_actions.py": {
+      "sha256": "1c2dc8a2cc36d6baaf43c85022ec313713d4d2b1911eb8e349a02b13d089992e",
+      "bytes": 10002
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_binding.py": {
+      "sha256": "0fb24840ede9c667cd8cfcde0cc5415851020cad4f90d443442b94c63e3ef6d8",
+      "bytes": 2724
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_book.py": {
+      "sha256": "9186ac532b9b48e5da6f611501a5bb3cb34f2c7ee054ffd061e2ea20a2172f48",
+      "bytes": 5634
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_config.py": {
+      "sha256": "e62eb0232d6e3c3a88d70546e4a91b584110784cd83a48c0d338e3faee62a2d2",
+      "bytes": 1672
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_data.py": {
+      "sha256": "23548fea4669f3b5412f44895b18a11087034592ee9b22b6fa78694955d40cb0",
+      "bytes": 6922
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_events.py": {
+      "sha256": "d0e79a4a580c6f1070600425f87a532b2e64e0ffec116c1dbcd6be2e0840f028",
+      "bytes": 5190
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_liquidation.py": {
+      "sha256": "d6f209bf75618cb764ee95f2f6de45917b2a2d65575037d7354051fb5bbffb43",
+      "bytes": 5685
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_math.py": {
+      "sha256": "1d22f2fd976189611571ea3a495cef6773098020a4f0e4d37bf533ac8807f122",
+      "bytes": 3452
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_model.py": {
+      "sha256": "a4fdfc537518fa80e036cf0683ab76826cf309eafc5b0ebf9bb5f9db9615e8f6",
+      "bytes": 12618
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_parameters.py": {
+      "sha256": "91a0a993cd3b47836130bbc9e238fe2d9683b4dc5dfc59e3c7f3ecbca375b99d",
+      "bytes": 4617
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_prepare.py": {
+      "sha256": "40df5bc4f65fe7770e328e84224d79cf6cbfdc956817c3a616e71d6f02b87c8e",
+      "bytes": 9699
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_reporting.py": {
+      "sha256": "026c33bde7155f6b353d94abc7abdc0ec06310be488daff3873d156951eca23f",
+      "bytes": 5959
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_state.py": {
+      "sha256": "63b1b641c4892f606b7b72314227e5875c0e277f1a4ad9b12731847f7b412fbb",
+      "bytes": 4931
+    },
+    "source/src/almanak_v3/connectors/sparklend/economic_views.py": {
+      "sha256": "209923d9f3f4dec9c10ebe0d27de3a77d9005269c914d9d660a1037186b70e8d",
+      "bytes": 918
+    },
+    "source/src/almanak_v3/connectors/sparklend/execution.py": {
+      "sha256": "217f291b9efad4606e1f97a10c85ea4ca494535fb22e597ae1ade472dd3b0d0d",
+      "bytes": 12762
+    },
+    "source/src/almanak_v3/connectors/sparklend/fork.py": {
+      "sha256": "66dd7382460cdf41048ebbae7912042b6b15cf5e48f955ab68d4cb314357c5a1",
+      "bytes": 4779
+    },
+    "source/src/almanak_v3/connectors/sparklend/lifecycle.py": {
+      "sha256": "211cb5b412bda84644db335afc3203ceb6e7bf65fd1e0632591c2ead41a44d72",
+      "bytes": 2057
+    },
+    "source/src/almanak_v3/connectors/sparklend/liquidation.py": {
+      "sha256": "cfd9dbefa945e0de9cd002550a69f35e537913c4c3d57c983b77bff3278270c3",
+      "bytes": 5802
+    },
+    "source/src/almanak_v3/connectors/sparklend/math.py": {
+      "sha256": "91cb9611adcbd6a020d4802a9fd7d7045178d6c099bc5368c6b5d71630ddc41a",
+      "bytes": 3400
+    },
+    "source/src/almanak_v3/connectors/sparklend/models.py": {
+      "sha256": "16a2dca04032f45440562c5ee963449b76e002f14dbc8883a4fa37eda9aabdd4",
+      "bytes": 6463
+    },
+    "source/src/almanak_v3/connectors/sparklend/observations.py": {
+      "sha256": "1c804a2f2791b1a98c757c47cce7459299497d1e59215b69be17de6d7e07a8ee",
+      "bytes": 4284
+    },
+    "source/src/almanak_v3/connectors/sparklend/operations.py": {
+      "sha256": "1ca4c70cc2d2a5c585e9b907555cdad46a2e6b595c5a374b6d8af4b1abe5a413",
+      "bytes": 1228
+    },
+    "source/src/almanak_v3/connectors/sparklend/permissions.py": {
+      "sha256": "86d140f7dcd344608aaa32c4df3f257fae648fd4b40c24e14b4a6ecd4f2355ef",
+      "bytes": 2090
+    },
+    "source/src/almanak_v3/connectors/sparklend/planning.py": {
+      "sha256": "251be8a579b48367b86f62f8046a695d1ea31a8ddbd78e4f9eac12896e7f0a7c",
+      "bytes": 7698
+    },
+    "source/src/almanak_v3/connectors/sparklend/projection.py": {
+      "sha256": "f62bad21a3bca549383a730b133c6bec00c5e2b48d032d7650101f237b2a0a3b",
+      "bytes": 6235
+    },
+    "source/src/almanak_v3/connectors/sparklend/reader.py": {
+      "sha256": "cb72da4b8b810d57403e4960645426b9c9251760eeca373e162d4159a6c2bcd0",
+      "bytes": 5827
+    },
+    "source/src/almanak_v3/connectors/sparklend/receipts.py": {
+      "sha256": "8509c8a19b22b0aa015c819125b9b2b40fb742b8ad73063c2b30a50bfcc75660",
+      "bytes": 3819
+    },
+    "source/src/almanak_v3/connectors/sparklend/reporting.py": {
+      "sha256": "3bbe73981a173dbbe4a7dec0c66ec7192a96d1cee7dd2add37572a7b7a76e852",
+      "bytes": 4739
+    },
+    "source/src/almanak_v3/connectors/sparklend/risk.py": {
+      "sha256": "dedf794894cb6c76dab6e565fb3848827fc485d18e76397313e8a5f03aac23be",
+      "bytes": 4933
+    },
+    "source/src/almanak_v3/connectors/sparklend/state.py": {
+      "sha256": "2dc6ed18f087c1d99a4e95f7e86a35850523d6b21df70457a51be0d188bc7667",
+      "bytes": 6988
+    },
+    "source/src/almanak_v3/connectors/sparklend/support.py": {
+      "sha256": "71918cdc4e662b0570250984bda43ee739e90aa7d4b664ef26de1ba90c5e381d",
+      "bytes": 1502
+    },
+    "source/src/almanak_v3/connectors/support.py": {
+      "sha256": "469a55c7dd6304796f9915ad3b023c76b4533fdb97f3bd1b156bbb8a835da65d",
+      "bytes": 8560
+    },
+    "source/src/almanak_v3/connectors/target_routing.py": {
+      "sha256": "73b67d26c7fcee118f02cb0c883b4a183cf26068122becb589891412bfbb2751",
+      "bytes": 3538
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/__init__.py": {
+      "sha256": "0360c3e6f2d3e02ef74d0d21d8f32947facf4a32f71f2b2534a772abf137e861",
+      "bytes": 78
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/abi.py": {
+      "sha256": "69f160e4fbb3ec831f4958a195aa0c8ea63c3d247878cd425c5664dfc8e92cf2",
+      "bytes": 1492
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/api.py": {
+      "sha256": "30d76443dc98d87ff26160205b92c19b96787cc4f235a150d085df35c4dc3374",
+      "bytes": 763
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/artifacts/compiled-revisions.json": {
+      "sha256": "5aca195ada16e22d2fcf73eff91cb930a15f3798266943be8849ae07f5cd9814",
+      "bytes": 6885
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/asset_effects.py": {
+      "sha256": "9a1baf45ed5d214b4f33947327f9a21068b9ee62f82251da87168d43c48556de",
+      "bytes": 147
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/authoring.py": {
+      "sha256": "4d4728e44674691f9dbf08a0c0f3010f211c1e61c8a0bf7c37e7b25b6bbea2b0",
+      "bytes": 1348
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/authority.py": {
+      "sha256": "f967fbe8fae733a98a639c501efb6f3be6153b41a7b3afe665587e6ed6d259ed",
+      "bytes": 1079
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/connector.py": {
+      "sha256": "99159ea5ab3765861096dc55d910bda1e204804bdb3d1d4d9b26e89c62657526",
+      "bytes": 2348
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/dashboard.py": {
+      "sha256": "e5bb00b1a931ab9b221dfa2b52bb1f98a09a55f9f762ed4544173be8c2f4590a",
+      "bytes": 673
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/deployments.py": {
+      "sha256": "7b43a4aa0374a130d162700409322d040b11ca1fc1766840b0591317c66a9023",
+      "bytes": 4272
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/domain.py": {
+      "sha256": "b8ae2064f58c1983bdc9bf22495175a922a9fe5ed10ed51c683b6d4af46a5c8c",
+      "bytes": 1084
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/economic_acquisition.py": {
+      "sha256": "27d3e27ad44173c045eb262b26bc837f538a272cbb5394c52391a4ecb5376bc5",
+      "bytes": 1179
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/economic_binding.py": {
+      "sha256": "9913a82064d24d4d629c35d54322e446efe2d0f7604c6682b3ea26c1a7bcb6db",
+      "bytes": 1711
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/economic_book.py": {
+      "sha256": "3b5a8365cc1af12119817696cc9fbe3c096d0f5292dc118da926ae36f05673aa",
+      "bytes": 468
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/economic_collection.py": {
+      "sha256": "5a8341d637cc3126fe737c24dcc0d6a5eb4f9be0442b3379c801fdd3618acaf0",
+      "bytes": 790
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/economic_config.py": {
+      "sha256": "3418ca2b33124f8cadb62f222ea04aa13e78e9df934d268d3dc6430517ea337a",
+      "bytes": 381
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/economic_data.py": {
+      "sha256": "15ea9924f532bc28f5b40fe67d125ec3c94d75d29ad5b4ada5b45cc2fc97a1b7",
+      "bytes": 1430
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/economic_model.py": {
+      "sha256": "72f37ae82dc8568c4e0927d05aed8626fe90302c9601a266cf72f0a4adb7e995",
+      "bytes": 1043
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/economic_parameters.py": {
+      "sha256": "dcbd815b777b8d2aba92f16baf1a9c5539c016542985acbf44e51d94ae57ff45",
+      "bytes": 1208
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/economic_prepare.py": {
+      "sha256": "2988ecefc6dc5056d5542f541637759ada5b7d213536bc3bfff9685f13bea36a",
+      "bytes": 827
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/economic_reporting.py": {
+      "sha256": "c168e743615959037618738413701e9a2c6c6e429aa04682cee431a3c32180c8",
+      "bytes": 239
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/economic_simulation.py": {
+      "sha256": "3b331b49e5a4dc28bffa54d51e144e085c746141b13a3d2ca7ec573bcf800947",
+      "bytes": 659
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/economic_state.py": {
+      "sha256": "d8f455a159f217553b2f90df05521e23727220d2a56ab88079b5473306f4b4f7",
+      "bytes": 1138
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/economic_validation.py": {
+      "sha256": "09f8a1494eaae7ce6c6b75b0b0c044ad7a1651b2c76bb07cf5a0b840a756d83b",
+      "bytes": 160
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/execution.py": {
+      "sha256": "f14e72bafcb76a4a409cbf9e9a712da25abfbd3a4ce9ccdb5e21dbdba120c302",
+      "bytes": 1428
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/fee_growth.py": {
+      "sha256": "6f88ff31c84d6356638f8cba8a46b23f9d61d55ced612697fb0fde870b2d1208",
+      "bytes": 354
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/fork.py": {
+      "sha256": "3e8ca45529c10b3483eb70d6893beeb729633905d7387e0eacb495e6649d690e",
+      "bytes": 694
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/history.py": {
+      "sha256": "e98f8522b0baa263709e65ed0c80043daa0f2b5ae104ad663448d8e28d63cc4c",
+      "bytes": 1116
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/lifecycle.py": {
+      "sha256": "536964787985d27f44e13128801c7c873da222da7ee420b67d3151b0e0f129e1",
+      "bytes": 1067
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/models.py": {
+      "sha256": "9cf04c4a092807b8c1cfb8b6a90130a29b4d75dadc6f1f8b6c3a4a8577470fac",
+      "bytes": 3418
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/observations.py": {
+      "sha256": "1f97a775b5fcd15970c30d2e56019d949e6ca220aee86305911e175fb57fd320",
+      "bytes": 1184
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/operations.py": {
+      "sha256": "5a4e7fa0a6aee2a534f6a5530e0c3474430a49889d6b3b856d8944f4a6383396",
+      "bytes": 1131
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/permissions.py": {
+      "sha256": "85b27475338625d00ed198c6cb7d5cb054413b700c69acbdeb8062d8ddca12dd",
+      "bytes": 3686
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/planning.py": {
+      "sha256": "3c637077e2d21b2add53d12ca5f6faee80c6348d01c4921e747748b920e32122",
+      "bytes": 414
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/positions.py": {
+      "sha256": "92d1bf318fda19dcefac6c6bf7edc84ada0a5698734b8605164b80f4e1f3bedf",
+      "bytes": 526
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/reader.py": {
+      "sha256": "325f5d92a55e02a1c4f67e495667206d2ef02c482074871cc76b893def48800c",
+      "bytes": 2088
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/receipts.py": {
+      "sha256": "c47d4253e70b89eaab69eabacc305a6b8d33443e99d91ca529557e20074b67eb",
+      "bytes": 1961
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/reconciliation.py": {
+      "sha256": "cdadaeb79d717e1276831338acaf4a58f709b61d24b5cc0959edd92da200e262",
+      "bytes": 1227
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/reporting.py": {
+      "sha256": "a8b973e69cdd8b0808bb8aa53676bd99f4d9180a7cdf7e270fb01704f053acdc",
+      "bytes": 722
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/simulation.py": {
+      "sha256": "b95fcd70d290a492ea61a273886d54b01d0888d6efc5c652fc092ca3fd8b3a11",
+      "bytes": 690
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/state.py": {
+      "sha256": "9eca92e67060ad17bbd2dfc37467c603a232323d9d6999396aa864561c74185a",
+      "bytes": 7017
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/support.py": {
+      "sha256": "13670817286c93b17a88fc2b3699236337bcd3bade2b2152875a8514379710ad",
+      "bytes": 819
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/swap_math.py": {
+      "sha256": "76d05a64ee026bbf13501d62b2818d49e55c051ca69a71bd84b8b24aa7f4d7c1",
+      "bytes": 1017
+    },
+    "source/src/almanak_v3/connectors/uniswap_v3/validation.py": {
+      "sha256": "3845a055d0c38c4d9ba345dd9024f96931dd8e06eda18a9d06bd186bfcdf2454",
+      "bytes": 1395
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/__init__.py": {
+      "sha256": "748e7b2f433d7d9870129aca73723853e9a6bfecb225c0d0914746490e57356d",
+      "bytes": 82
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/abi.py": {
+      "sha256": "0dce7a6fd0e85f779e2b1117a85fc9c7bf6f4ffb24e0803c7cc72b57aa128042",
+      "bytes": 4250
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/api.py": {
+      "sha256": "5fdbddf5e4442db68b430ea08561878e2d71a9951290412e7fd8c99ca7e34f0a",
+      "bytes": 2002
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/artifacts/avalanche-protocol.json": {
+      "sha256": "ef6d30148ff28fe3c507747f65447271955cc269f5d50109e0d97412a9e36b66",
+      "bytes": 1779
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/artifacts/avalanche-safe-gas-calibration.json": {
+      "sha256": "789b7273dd00bcd450c24a258a4141dbd339809d79dc9b1fc8a7695326cd0d1b",
+      "bytes": 141188
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/artifacts/ethereum-25908472.json": {
+      "sha256": "3bf926feeee22b6c9cfcdcc842a5ab42fd59e3a4af1f7b9999b6ab14ad5b6c52",
+      "bytes": 2548
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/artifacts/ethereum-protocol.json": {
+      "sha256": "a0ea907e9ec403f7d2f8574f12ecf504d60a6db5b988db2729e53c2a7194ffc7",
+      "bytes": 1779
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/artifacts/safe-gas-calibration.json": {
+      "sha256": "dd5a34a46ce80d0ef9d95dd0ad9c95abb227a5d83d36adc5e288d95d9266250f",
+      "bytes": 252615
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/artifacts/sources.json": {
+      "sha256": "c43c9c22f59284f87bd044795a55691873875b7190f456bf08e2b376310d86ea",
+      "bytes": 1338
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/authoring.py": {
+      "sha256": "005114de4aa190a723c3b92373acb4ca7d745be17176d08a40bc806bdd78f628",
+      "bytes": 1843
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/authority.py": {
+      "sha256": "a95e592c8e0332f50d09619e6f4e8aabf355381cdad0d336d83622b8ec40e002",
+      "bytes": 2504
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/backtest.py": {
+      "sha256": "4e4c20414e3a2d0862367674d9b535e155d37b0aeeb93f584c9b2313e60a23e7",
+      "bytes": 16314
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/backtest_binding.py": {
+      "sha256": "32f54fc0ebd645dbf1d179af2b42d50e22372efb822812ad3b9b49d23de3d80e",
+      "bytes": 6178
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/backtest_config.py": {
+      "sha256": "043622f54ab6d1778b894ca0daac9297535cbd21e48ec54f391eeb9437dcb47f",
+      "bytes": 973
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/calibration.py": {
+      "sha256": "3dd110229f2d0dc6a5879c35ce0fb2c7d4eee3c1f9e21b4c70c1f5f607a2d1ad",
+      "bytes": 3942
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/connector.py": {
+      "sha256": "dde6e904249d5e098ea150b0740e6ff45817976bde9007aedc450e83b94ff3bb",
+      "bytes": 2370
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/dashboard.py": {
+      "sha256": "2cc52496802b713f2035f0f7b711b0104cb48336bf17627ba2220260af52fed9",
+      "bytes": 2015
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/deployments.py": {
+      "sha256": "a22a773a60159defedaf76fc623d1fbda46d04f6e9bc72f9a64c65738c9c2de6",
+      "bytes": 3897
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/domain.py": {
+      "sha256": "5e9847a4c8ebee317502470025cd29f02d9b7703f0691f966fc10eba64c22a1d",
+      "bytes": 3178
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/economic_acquisition.py": {
+      "sha256": "ea73cb748a32d0c936afbef31873d3b03cfd036a53405a360c365e972f104cc6",
+      "bytes": 4382
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/economic_binding.py": {
+      "sha256": "982b3b330618d34e33a67ea0e13dbd9d18b854be0da3c3f94be4af3f43fefbe0",
+      "bytes": 3657
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/economic_book.py": {
+      "sha256": "688f1a7072658ea71e0a66cf01d81b94e2662e81e0a76b0a8bb25e8389a92f6f",
+      "bytes": 4437
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/economic_config.py": {
+      "sha256": "72b09fad97f6b52fda30898d6a0b7bd04710493920c35e9a24bfc257cb4236de",
+      "bytes": 1726
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/economic_data.py": {
+      "sha256": "46062da4b34bc4c54409ee8fe39c6c990a59ab22363360f8bd3f0d3142ca6601",
+      "bytes": 2063
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/economic_model.py": {
+      "sha256": "da30a043f0836b3b6a355f5831f97b27c8517fba3195b96de5e504a675c495fb",
+      "bytes": 10430
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/economic_prepare.py": {
+      "sha256": "944e02177df23df6e2e9a2d8e8d42dcd208823c7445cb557ec88dc62241a455d",
+      "bytes": 10126
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/economic_state.py": {
+      "sha256": "bf0c77d1977651ccbc69c02841280eaebd993c115706005384142f79e3cf337b",
+      "bytes": 1758
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/execution.py": {
+      "sha256": "1156d7e291d75bca5829546863e8a8d9d5e67cb30b2db8cca0310e7b3f8e5b0e",
+      "bytes": 4060
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/exit.py": {
+      "sha256": "b8cdbf8c407b1b8e4b07a853f1edbc8e04e8d1d00f88e6413e8791243e0d0ee2",
+      "bytes": 1305
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/fork.py": {
+      "sha256": "fe24f18f789539f18a2279e99f6c296be45b394f0341de5b9c68144618a383db",
+      "bytes": 4953
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/history.py": {
+      "sha256": "30c474f86374a2c43802eeeb150ed8927a1446cf55c1249e2330760023b3f1bf",
+      "bytes": 7175
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/lifecycle.py": {
+      "sha256": "5448c7c7b51a5d165373c5a4b4de69384c6f59985fb2e1106174707ab5bfd72f",
+      "bytes": 2830
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/math.py": {
+      "sha256": "dd03682c12356b1358f485ca464b634ec75985731c3136bffc1b6d8b5cdaaa81",
+      "bytes": 2014
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/models.py": {
+      "sha256": "89e42b257bb017a498975fa33eacf69fb11f456b5cde54f7f88ca5af34997e44",
+      "bytes": 7547
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/observations.py": {
+      "sha256": "9b5a35544cd75ce5f388d06b06d9dd51ebcc992e8acf04c4cc7d93c93134f375",
+      "bytes": 5741
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/permissions.py": {
+      "sha256": "e89abd60507d6b4d4c33272d6921ab0849328dc28138caf905a36770ae178ecd",
+      "bytes": 8073
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/planning.py": {
+      "sha256": "364a33eca66ea420b5b4156f83c7206e79aea0dab8b312e6642b85fdfb0c5982",
+      "bytes": 5550
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/pool.py": {
+      "sha256": "604e84055f98e9da445b55933aee9c7f1dd6e3b5c6eeff231a4816ade89a2f82",
+      "bytes": 2284
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/reader.py": {
+      "sha256": "e6c32b9feb170565cd5629ec92f7b70035461907032927453df180eca990bda6",
+      "bytes": 6129
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/receipts.py": {
+      "sha256": "76b62078e3db081335813ade7ba895217a7a17b1229e38a1b8d3b8003a073e0a",
+      "bytes": 6381
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/reconciliation.py": {
+      "sha256": "7d51243eafee6bfcddfbd24fbfa894290994ffd4511e9eb8ff9328733fb59a32",
+      "bytes": 7148
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/reporting.py": {
+      "sha256": "cf3f1ad495ce4e935385b5557f4e097491d799ac19e7473b57df01ab6f765c1c",
+      "bytes": 5949
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/simulation.py": {
+      "sha256": "53ab4e7a76925a526d03af2d4a443d6d6b0179662fdeb0a9323fd0d9ab668f65",
+      "bytes": 6511
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/state.py": {
+      "sha256": "b3e30072786b492729d61ccaeac7f19e7104be01a77ab7990b67c8bf2829bf08",
+      "bytes": 10463
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/swap_math.py": {
+      "sha256": "a8af0bf703e7b4c6bf9cec03702e8383c15f434ffbe99f6f29756b888f3beb6f",
+      "bytes": 2016
+    },
+    "source/src/almanak_v3/connectors/uniswap_v4/validation.py": {
+      "sha256": "40dfe34809b5cf79e20dd64d458cca6e25b8b06d8b6c47f91d2735c0b1e7391f",
+      "bytes": 7879
+    },
+    "source/src/almanak_v3/connectors/v3_economic_book.py": {
+      "sha256": "ab2834a6702b01d8b24c7ba7967e3a326faf81fc553d9e9085b1785f454c9f6c",
+      "bytes": 5354
+    },
+    "source/src/almanak_v3/connectors/v3_economic_collection.py": {
+      "sha256": "871565a6fb54db0535b1b12e31c823963621dfe68774ca6ea573e4b171f26cda",
+      "bytes": 4123
+    },
+    "source/src/almanak_v3/connectors/v3_economic_config.py": {
+      "sha256": "01677ad5a0e386dcb1ecc10e4c2320742d07122ec9a1f5276538b543f1107e8e",
+      "bytes": 1522
+    },
+    "source/src/almanak_v3/connectors/v3_economic_model.py": {
+      "sha256": "f985b5a903f657021369dcc46708eb119315192018b4180fdf9858aec111a371",
+      "bytes": 944
+    },
+    "source/src/almanak_v3/connectors/v3_economic_prepare.py": {
+      "sha256": "20177fa63c05a7fdf1e4649ea9b9393837b9b8b83752280df5232e8c9496d9d2",
+      "bytes": 1191
+    },
+    "source/src/almanak_v3/connectors/v3_economic_reporting.py": {
+      "sha256": "ab4850a38c86350a951280d8ab1495a9f20a3cfea203506eb6205de8672b9d0b",
+      "bytes": 3057
+    },
+    "source/src/almanak_v3/connectors/v3_economic_simulation.py": {
+      "sha256": "69645f2fa8fb6838462ddb513385e2ce20efb8306197c6b54f0b20a49f12d40d",
+      "bytes": 7504
+    },
+    "source/src/almanak_v3/connectors/v3_economic_state.py": {
+      "sha256": "86e9494161a85625fa7f1fdeadc7a6f4eaef8be545cce0fa5ba312dbe3d18cd3",
+      "bytes": 3492
+    },
+    "source/src/almanak_v3/connectors/v3_economic_validation.py": {
+      "sha256": "57445584cec00d9ec80b085e4a7489c29441ccd9bc7567b57a514786a630da8f",
+      "bytes": 2881
+    },
+    "source/src/almanak_v3/connectors/v3_fee_growth.py": {
+      "sha256": "d20635d73df0ee9aaa27fff8f6c2f847e861e8de8665584a6cad4ad81d99dd22",
+      "bytes": 2106
+    },
+    "source/src/almanak_v3/connectors/v3_pool_abi.py": {
+      "sha256": "d97250b78d79a39e50141017885de48d74ea7dacc02195288249c0227d54c8a3",
+      "bytes": 3309
+    },
+    "source/src/almanak_v3/connectors/v3_pool_authoring.py": {
+      "sha256": "5d868c85a7d96ff9faa614def0aa841dd0dc767dcddb2cfa494d05873d7d912e",
+      "bytes": 3005
+    },
+    "source/src/almanak_v3/connectors/v3_pool_authority.py": {
+      "sha256": "d4459cfe483d0e6a8dc9fc794115dde3edfc5a7d745f0380702505b46694071c",
+      "bytes": 1437
+    },
+    "source/src/almanak_v3/connectors/v3_pool_domain.py": {
+      "sha256": "05efaf41188ea000186998749d49743d0ee47a132af15d07dbc2460a85d16244",
+      "bytes": 4663
+    },
+    "source/src/almanak_v3/connectors/v3_pool_execution.py": {
+      "sha256": "e87b80b869677f72ac94bdae08465bfd2687eb1ee5edba48ed91840571128a88",
+      "bytes": 3352
+    },
+    "source/src/almanak_v3/connectors/v3_pool_history.py": {
+      "sha256": "7b61176bc26851b8d2c9ea64d5b9c29da2eba9f7984c4ee4c8bd5c0f9879bfd5",
+      "bytes": 6308
+    },
+    "source/src/almanak_v3/connectors/v3_pool_lifecycle.py": {
+      "sha256": "a2b5719ba6f2fd90ced287beef0887bcf61496a1a2b46e1ec0bd093ccdd3612c",
+      "bytes": 3176
+    },
+    "source/src/almanak_v3/connectors/v3_pool_models.py": {
+      "sha256": "db6af68d5cf5adc5ad62a239c9c28029181be6901130d7d8403c0ac846eecf5c",
+      "bytes": 3076
+    },
+    "source/src/almanak_v3/connectors/v3_pool_observations.py": {
+      "sha256": "149982bf34f090033b6166a2304422cdcfaeb6639ce6e3922423ff6c5fd3134f",
+      "bytes": 7982
+    },
+    "source/src/almanak_v3/connectors/v3_pool_operations.py": {
+      "sha256": "90be59a0d586f0d3c9f4e6e58d0a6392b94fbe24be22559c29ff9969465e4d9e",
+      "bytes": 4016
+    },
+    "source/src/almanak_v3/connectors/v3_pool_planning.py": {
+      "sha256": "4f2745d50e3fa1c1a108a3f7d401ab226f46f3277229226e44100633345ba4ff",
+      "bytes": 7919
+    },
+    "source/src/almanak_v3/connectors/v3_pool_positions.py": {
+      "sha256": "43f58bbd5efc0af19e5d5a618590596964e2119eaa12667539218d49261fb350",
+      "bytes": 2692
+    },
+    "source/src/almanak_v3/connectors/v3_pool_reader.py": {
+      "sha256": "cfc4f5a654583726ae5a3ee7ac8c1dab8b947c01cf422a4094ad22a6d61f989a",
+      "bytes": 2459
+    },
+    "source/src/almanak_v3/connectors/v3_pool_receipts.py": {
+      "sha256": "aa806e96c7c09ef458e54c7a8e0f52b2885ec1a12493e63d019515a3eff6caeb",
+      "bytes": 9479
+    },
+    "source/src/almanak_v3/connectors/v3_pool_reconciliation.py": {
+      "sha256": "1367c6b3837738fbe36a61e41d8883eb0f8364de8527c71411f2d9bd4021b00d",
+      "bytes": 7323
+    },
+    "source/src/almanak_v3/connectors/v3_pool_simulation.py": {
+      "sha256": "bbaff250639242802ee6f2b44d6ff28637fe46e17c685ea40632a9ae110fb434",
+      "bytes": 3212
+    },
+    "source/src/almanak_v3/connectors/v3_pool_state.py": {
+      "sha256": "c0cc9e927c3c083c4e2e76956ab98a232ef89726dbcbde46649ad6e879351746",
+      "bytes": 360
+    },
+    "source/src/almanak_v3/connectors/v3_pool_validation.py": {
+      "sha256": "6c7761cf80aecf8c988cf4bd1639422294c6b00b653afd2dfddde060986a7ebd",
+      "bytes": 8406
+    },
+    "source/src/almanak_v3/connectors/v3_prepared_acquisition.py": {
+      "sha256": "8bcd15aef5491781f87fa4137863827b4ce2ae6919c369d7da1fc67562a41c65",
+      "bytes": 5136
+    },
+    "source/src/almanak_v3/connectors/v3_prepared_data.py": {
+      "sha256": "1f3db91b401cadb00866a846ec884de134bfff382e15d83cbd44f279bf6831f1",
+      "bytes": 929
+    },
+    "source/src/almanak_v3/dashboard/__init__.py": {
+      "sha256": "d719f48eb074bd0753e0bb34c2504d4a7a777b69050c47b2f80f8d0943945875",
+      "bytes": 1086
+    },
+    "source/src/almanak_v3/dashboard/debt_projection.py": {
+      "sha256": "00b21ebaf1be86c18b1f48550d7d4adee1056f651155b4de60b5b65a26d214ef",
+      "bytes": 3195
+    },
+    "source/src/almanak_v3/dashboard/evaluate.py": {
+      "sha256": "7cc2cfdada5fcdd7fb5264c143692210f71b3bf2d8b00b7d1c705696f92986fa",
+      "bytes": 2877
+    },
+    "source/src/almanak_v3/dashboard/models.py": {
+      "sha256": "2061d51e1bc066ea503612bf15693320060159f821f3e291708cb02e8176fc44",
+      "bytes": 12836
+    },
+    "source/src/almanak_v3/dashboard/preview.py": {
+      "sha256": "48277d61b9019d09108710453460b24636d2bfe22ca817b4ae6c75f0a0a089bf",
+      "bytes": 3973
+    },
+    "source/src/almanak_v3/dashboard/projection.py": {
+      "sha256": "69031e53a420b06aaee5374de1f0c5032384b62fd0dd5045f793d4e25f534a82",
+      "bytes": 2004
+    },
+    "source/src/almanak_v3/dashboard/worker.py": {
+      "sha256": "f3e92a9a36235d8a40aeb19d264245aa87aa527d73aedc7942f7492b3aa82495",
+      "bytes": 164
+    },
+    "source/src/almanak_v3/dex_intents.py": {
+      "sha256": "2f8c85ea0637b856e73b27dfe65ba797031f6da028231ee78d97de10df0dc734",
+      "bytes": 5116
+    },
+    "source/src/almanak_v3/effects.py": {
+      "sha256": "1e71b8c32b4ab9a6750503ac574f73d0afaeffa2e6bd47aa931e1b8f50046ad6",
+      "bytes": 3579
+    },
+    "source/src/almanak_v3/gateway/__init__.py": {
+      "sha256": "2ef861ebc72c09d62490d2a1a6d743c0015a06e72cd3aa2dace0de4490f4ecf0",
+      "bytes": 61
+    },
+    "source/src/almanak_v3/gateway/aave_authority.py": {
+      "sha256": "9d2b1d8a357de9913360ccd72259217bfdd42e4354cedcd3c0ff74e4da1ceb65",
+      "bytes": 700
+    },
+    "source/src/almanak_v3/gateway/accounts.py": {
+      "sha256": "b30217de100906d7e281ae41b2765b121c9c332bc82bd3e930ac717668d9fe5f",
+      "bytes": 3484
+    },
+    "source/src/almanak_v3/gateway/admission.py": {
+      "sha256": "ae10c20acdf6ad760e6c0f4e62c7706800ea0325738de0d5783ba2ba8ecb3904",
+      "bytes": 2751
+    },
+    "source/src/almanak_v3/gateway/artifacts/avalanche-94581397-authority.json": {
+      "sha256": "b83d720b9c8344d5e82b1d9308f45154733c2c792a549a5530725a05c89d711d",
+      "bytes": 4279
+    },
+    "source/src/almanak_v3/gateway/artifacts/base-50972164-authority.json": {
+      "sha256": "b21d4a9815ce3398e3b4fa424458c8c19ea4af233302e6247d69119e1245fb64",
+      "bytes": 1190
+    },
+    "source/src/almanak_v3/gateway/artifacts/ethereum-25908472-authority.json": {
+      "sha256": "a2927f8ca3538b9f387d055788e5f604943c6ab04d6a34964b6323fc956c159c",
+      "bytes": 3520
+    },
+    "source/src/almanak_v3/gateway/artifacts/roles-2.1.0-abi.json": {
+      "sha256": "67f30020e8f0294542ea363d70af814e5875d893da5a14c26e7a6eb9a5c9cbe5",
+      "bytes": 27417
+    },
+    "source/src/almanak_v3/gateway/artifacts/roles-2.1.0-bytecode.json": {
+      "sha256": "37547e235bd5ed09bd57b246c3f992905f2c7f8d72815c303f64c7683f929389",
+      "bytes": 99950
+    },
+    "source/src/almanak_v3/gateway/artifacts/roles-2.1.0-sourcecode.json": {
+      "sha256": "858dcfc2733981fb5d081350450b4f19db8f94fc829305c00f265ceb6118923e",
+      "bytes": 133614
+    },
+    "source/src/almanak_v3/gateway/artifacts/roles-2.1.0-storage.json": {
+      "sha256": "87936c64b96cf1f1917f430a386145ed4418536c33177426a5d5498b24fb4b32",
+      "bytes": 7548
+    },
+    "source/src/almanak_v3/gateway/artifacts/sources.json": {
+      "sha256": "39ad12a1cc5556516ba2332c3a4fdb4ae1f8be40c668beb0d724d49ec5a72514",
+      "bytes": 298
+    },
+    "source/src/almanak_v3/gateway/auth.py": {
+      "sha256": "ad56745374616b964120728678c8625b278ba004e67e8cfbed63f66ab31b18dc",
+      "bytes": 468
+    },
+    "source/src/almanak_v3/gateway/client.py": {
+      "sha256": "bb3af04666f5f0e6d13ae7de0051f54f68f935308b2eabdec329a00f67d091e5",
+      "bytes": 8425
+    },
+    "source/src/almanak_v3/gateway/credentials.py": {
+      "sha256": "1e183fa30ab7cf2bccea259c87a8dbf3c35c05cb0cb29f882c2a0a46e9bc3c46",
+      "bytes": 3449
+    },
+    "source/src/almanak_v3/gateway/environments.py": {
+      "sha256": "3f6f60b13d73fe4b2f88189c919d25ef99cd594b07d92308b568ff4996f6c47b",
+      "bytes": 3746
+    },
+    "source/src/almanak_v3/gateway/ethereum.py": {
+      "sha256": "be2ae2518e94cc5b06fe9cc1cd53295797375392072867bf9f1db4c1c391c846",
+      "bytes": 7574
+    },
+    "source/src/almanak_v3/gateway/evm.py": {
+      "sha256": "3cbcd6d920bf1a15b98f4c5a86862ae3bd553a3d82df68bf5287996208f2354a",
+      "bytes": 1951
+    },
+    "source/src/almanak_v3/gateway/evm_fees.py": {
+      "sha256": "796181df9f046142efb277126eb7c77ae300d6feda483274b6f3567198facba4",
+      "bytes": 2926
+    },
+    "source/src/almanak_v3/gateway/evm_logs.py": {
+      "sha256": "a115f44503327ca815563b05db567675302c2e7506920ad9f77a0ffc8b558484",
+      "bytes": 1820
+    },
+    "source/src/almanak_v3/gateway/execution.py": {
+      "sha256": "8d3473e2b3b656bae5be62c4c61d2ca2cf652a22f4a0d2d3bfa0c3fd268275cc",
+      "bytes": 20896
+    },
+    "source/src/almanak_v3/gateway/fastlz.py": {
+      "sha256": "920d5ed62c4c8c5c52dbe802e61210a38bc2efb758f01ec13ded0179e175e65a",
+      "bytes": 2213
+    },
+    "source/src/almanak_v3/gateway/fork_config.py": {
+      "sha256": "8564993b29098dc84bbd28dacfce90ddfc3225e613c3274d189489092ae17019",
+      "bytes": 7797
+    },
+    "source/src/almanak_v3/gateway/fork_execution.py": {
+      "sha256": "4d1dac4cd7cad94376134030c64df79dc7f223eeeefa9a24db6cb8986fdac2c0",
+      "bytes": 3954
+    },
+    "source/src/almanak_v3/gateway/fork_fixture.py": {
+      "sha256": "5c1a5419f1df01853a796c3fb95cc35ce7df8b036c96f6478f486ff6d03db1a5",
+      "bytes": 14714
+    },
+    "source/src/almanak_v3/gateway/fork_permissions.py": {
+      "sha256": "096afc54206214683202e102d7b8415358bfded6aac70606164222a8aa4cb81d",
+      "bytes": 1202
+    },
+    "source/src/almanak_v3/gateway/fork_workspace.py": {
+      "sha256": "d734f888b8c3a1f4d35b63771d427ca03542534930036f3eb1ff21cf9249cb1c",
+      "bytes": 5826
+    },
+    "source/src/almanak_v3/gateway/op_fees.py": {
+      "sha256": "34948c93a1cfa2f6a519a7ddada5d99600ceca17aa6dee00e6304d3dd1247543",
+      "bytes": 4133
+    },
+    "source/src/almanak_v3/gateway/permission_models.py": {
+      "sha256": "1bbaf867419da8fd44afa078b6144393b97bf67868d3c93914d38d0ed7a9bc18",
+      "bytes": 1498
+    },
+    "source/src/almanak_v3/gateway/permissions.py": {
+      "sha256": "7155bb461963e5fea75e2dc59dc1763090e89748c376e9401a9e19d1d6948eb2",
+      "bytes": 9609
+    },
+    "source/src/almanak_v3/gateway/production.py": {
+      "sha256": "a307dc1cb06e94f2fb9db0dfcac89d99fd4a40cbbd772164ce5bab26ac0ce23b",
+      "bytes": 2192
+    },
+    "source/src/almanak_v3/gateway/production_cli.py": {
+      "sha256": "7fd0d09068ca008110a787abe00ccb1a22cdb4a71f5d7c5880f70f6745d5abad",
+      "bytes": 5685
+    },
+    "source/src/almanak_v3/gateway/production_config.py": {
+      "sha256": "ca25010c4a42f810e0ccca172b045e3ef2df44df62e269b1a03b36925cdda7a6",
+      "bytes": 5847
+    },
+    "source/src/almanak_v3/gateway/production_fees.py": {
+      "sha256": "6d01e099ecff057df4e945be14d934a71934d11990e89c50e216533e44025166",
+      "bytes": 4158
+    },
+    "source/src/almanak_v3/gateway/providers.py": {
+      "sha256": "dc17c7e7022cd700591c41a87683c4fda95bc497248c9b68f88d931b215857b7",
+      "bytes": 1547
+    },
+    "source/src/almanak_v3/gateway/provisioning.py": {
+      "sha256": "33217d8755e72ae411ad2f630026d66f00cf14827f3f9bbb7a1e79c7aedfa2cc",
+      "bytes": 891
+    },
+    "source/src/almanak_v3/gateway/rate_limits.py": {
+      "sha256": "f9a6fe85844ae0fea39c3b040310be539d91f02512470345c1ea9c84a2ce748d",
+      "bytes": 2658
+    },
+    "source/src/almanak_v3/gateway/replacement.py": {
+      "sha256": "50739d17454c23f07cb1365d8bdc80bb3a155798a90d3a84ac8c2d5c02817842",
+      "bytes": 12914
+    },
+    "source/src/almanak_v3/gateway/replacement_assets.py": {
+      "sha256": "b45b6d48fc7f113124b67ac09f0a5f444dd8f165b3a07c0ad7f46e8d20bb34e6",
+      "bytes": 1718
+    },
+    "source/src/almanak_v3/gateway/roles_conditions.py": {
+      "sha256": "f4e6d31e4bd5085145d4dcbb511f003ae31df0cd95257bed83986a46f8e904da",
+      "bytes": 5849
+    },
+    "source/src/almanak_v3/gateway/roles_history.py": {
+      "sha256": "0e135edcbaf56eccdfa644e76c22d75184dc15e4dd52945c7e2033d61ea50473",
+      "bytes": 7303
+    },
+    "source/src/almanak_v3/gateway/roles_storage.py": {
+      "sha256": "482206fa5253aeb59823d9b0fab54affb8cf363fb3b1325d67251db1bd96e26e",
+      "bytes": 8049
+    },
+    "source/src/almanak_v3/gateway/routing.py": {
+      "sha256": "ab0f8e33129f1186df8ab147843b4c0ac81d930174d4b543b76be949f706e414",
+      "bytes": 3362
+    },
+    "source/src/almanak_v3/gateway/safe_fixture.py": {
+      "sha256": "58bd22a483bbcb85a620f4fa9faa8f4b12e850b02c88f9c84dfccc830f6788e3",
+      "bytes": 5984
+    },
+    "source/src/almanak_v3/gateway/safe_funding.py": {
+      "sha256": "4b864e325a2b0d11b324f31784310ea1f186ef857bcb32dd639d2e4d49959998",
+      "bytes": 4877
+    },
+    "source/src/almanak_v3/gateway/scoped_service.py": {
+      "sha256": "2c9f64b193e9dfea5e011c0c3906165693e790a22b5326d5c30f5f022a65d760",
+      "bytes": 3351
+    },
+    "source/src/almanak_v3/gateway/service.py": {
+      "sha256": "63bb8f2e15cee06c4ba057585b6facb607084a6c077d73451bbe0cee31018571",
+      "bytes": 26048
+    },
+    "source/src/almanak_v3/gateway/signed_transaction.py": {
+      "sha256": "c3bc01acfad564f0dca18ac12ca3b5f14c99951c6fdb9b168a9225ae09596f1a",
+      "bytes": 1383
+    },
+    "source/src/almanak_v3/lending.py": {
+      "sha256": "05f5cab993de3cdbcdc9af8b60336e93b7a251e30b5b709a656fbf25adacf1ea",
+      "bytes": 2070
+    },
+    "source/src/almanak_v3/lending_intents.py": {
+      "sha256": "a39fd81c5fe23467c6446d086f683599839a7f75bf9d9294c3f6284134abf31b",
+      "bytes": 3671
+    },
+    "source/src/almanak_v3/memory_codec.py": {
+      "sha256": "f33681162afb764f8f8cb71bef85e3d3da815a43b93ce8b003db560f023f486f",
+      "bytes": 2214
+    },
+    "source/src/almanak_v3/models.py": {
+      "sha256": "95c3881a9625ac8cc3c8921f5a47b5c79719ee78dacf7964a1a39166998ea64c",
+      "bytes": 5063
+    },
+    "source/src/almanak_v3/presentation.py": {
+      "sha256": "756dee3e58f5a281b7e33c101397987e5d4be0fcb73508d4dfc1eae5926cab4b",
+      "bytes": 1824
+    },
+    "source/src/almanak_v3/production_setup.py": {
+      "sha256": "56f9dab9fbf7f2e265d4f4d1902f6fe822cf72c98a386a7a3739f8be64752379",
+      "bytes": 1713
+    },
+    "source/src/almanak_v3/replacement_runtime.py": {
+      "sha256": "00f9be6dc6a388d1ae3046b64b74525897b16cd152dd7945df59fecedfa3975d",
+      "bytes": 1548
+    },
+    "source/src/almanak_v3/report_layout.py": {
+      "sha256": "c6ecbaef043b0402e87ddea70aa995fe51d6d49d4787db8d77595986ce97be69",
+      "bytes": 7744
+    },
+    "source/src/almanak_v3/report_values.py": {
+      "sha256": "2707a34f1dc25398f99f0f029dc9dc03c729401d2b7aa1ab897b4edc6aaf67cf",
+      "bytes": 2542
+    },
+    "source/src/almanak_v3/reporting.py": {
+      "sha256": "f2d5b8b2dadad73e0d93a96b28b8a41a7d94a26e1a940780b3c91a65d618dd15",
+      "bytes": 790
+    },
+    "source/src/almanak_v3/reports.py": {
+      "sha256": "38485b53d9c9e77afd017d439b40f867329b5f206b382e5cde807850d38b9731",
+      "bytes": 4786
+    },
+    "source/src/almanak_v3/runtime.py": {
+      "sha256": "e0435d895b8d8435a661d3bce40d90c93cd4b8cbb0478989e671844455b18dfe",
+      "bytes": 15916
+    },
+    "source/src/almanak_v3/sandbox.py": {
+      "sha256": "4dbb98cb16b8350083ed4d55bba2a0a0d47d0747e7a9f30ca9ac3d7ca08525c6",
+      "bytes": 3176
+    },
+    "source/src/almanak_v3/state.py": {
+      "sha256": "52d6f8e4a0b74dc0c36135a0bd9f6c7c242cd7661719efe3864ed597d6e66e36",
+      "bytes": 9178
+    },
+    "source/src/almanak_v3/strategy.py": {
+      "sha256": "e71dbe1a142465e4ef93f138a8faf64ecde36cdcbf14ed2e6723db7e4feb25cd",
+      "bytes": 1321
+    },
+    "source/src/almanak_v3/strategy_api.py": {
+      "sha256": "5bd372e65890a72884d9cb7f1eb566f94633ecc4c78a3a9a6404c01fd77de760",
+      "bytes": 3210
+    },
+    "source/src/almanak_v3/strategy_worker.py": {
+      "sha256": "37fa183ee605adbcd89c615e0ddc6c57d4e0ad9c7edf3a04ea9c12e8331728b9",
+      "bytes": 5444
+    },
+    "source/src/almanak_v3/supervisor.py": {
+      "sha256": "9c7f67c37565383332497c2e6cd5927b2de6937d0ef88a07ac27c50f072fcac4",
+      "bytes": 15602
+    },
+    "source/src/almanak_v3/supervisor_forks.py": {
+      "sha256": "4f0eef7c3bcb984eec1b8a762fc4999202d24e187e4c1abe0f5f7bfb84bc231b",
+      "bytes": 3296
+    },
+    "source/src/almanak_v3/supervisor_process.py": {
+      "sha256": "cf685f7e3655c5d256e7a8efc0c2292dcf7a14b13ae634fb1aa61ea233509e7b",
+      "bytes": 2553
+    },
+    "source/src/almanak_v3/transaction_family.py": {
+      "sha256": "675987a3b25513ddb8ad3b28a24a314ffa60221707ce3312c8bb4021211f116b",
+      "bytes": 7228
+    },
+    "source/src/almanak_v3/triggers.py": {
+      "sha256": "5996bb1169feb347b207a0421b08a6e394ce07973b3c11b2d7cd1c6fd61629e2",
+      "bytes": 3919
+    },
+    "source/src/almanak_v3/work.py": {
+      "sha256": "10cb969ef67e03ac6a407731b447cdb5d5d07eb83deb7e412f59d6c620e1c131",
+      "bytes": 8437
+    },
+    "source/src/almanak_v3/worker_policy.py": {
+      "sha256": "d4abd198c62422b3f3108d9ca9883a53d20295955f8f5e85e5c12ca49c6ef764",
+      "bytes": 2821
+    },
+    "source/src/almanak_v3/worker_process.py": {
+      "sha256": "181b1990656e075efa67bcc2756e6b6278d653731e9d061e9479c430594cfb8d",
+      "bytes": 2041
+    },
+    "source/src/almanak_v3/worker_server.py": {
+      "sha256": "8b67f49e0b1f5f301249e3db1a6f9751c09dd7748e3019a5335d3ff5b7539e45",
+      "bytes": 3417
+    },
+    "source/src/almanak_v3/worker_session.py": {
+      "sha256": "749baec9b6d47d18ed9a5dd442f88a7df6d25c55c1ad104234207cb2e40d1dcb",
+      "bytes": 2648
+    },
+    "source/src/almanak_v3/workspace.py": {
+      "sha256": "fe354317cba359ef140a925bd0438f8228c9ef6ae516f74f5e629b93adeb48d5",
+      "bytes": 7464
+    },
+    "source/strategies/curve_base_stable_lp/README.md": {
+      "sha256": "fd3fe1ded623d6b0169402dbe89a94a3e1db6253f679f5eb60d486f147764266",
+      "bytes": 1159
+    },
+    "source/strategies/curve_base_stable_lp/backtest-economic.yaml": {
+      "sha256": "47b3eb1895e2f9b93d48d8a6d7f598b5006c16757964d83b15cd10aae5ee50df",
+      "bytes": 1281
+    },
+    "source/strategies/curve_base_stable_lp/config.yaml": {
+      "sha256": "0ca6a973df025addae9afc481c35603c84d9c8fc43b2949534d16573f203fcde",
+      "bytes": 3918
+    },
+    "source/strategies/curve_base_stable_lp/strategy.py": {
+      "sha256": "4dfa9819e700872107c5865e1880890573b99796feb9fa15b3476edd29724fa9",
+      "bytes": 3033
+    },
+    "source/tests/strategy_fork/scenarios/curve_base_stable_lp/assertions.py": {
+      "sha256": "1e8bb6c53d25313853b21a0e3818b248543353562696ec2e8515d525bb9dbdeb",
+      "bytes": 435
+    },
+    "source/tests/strategy_fork/curve_authority.py": {
+      "sha256": "8b7cd5d04248c24d8d4895670a221a1620ed26a3986d23003de74c93f7d0b9dd",
+      "bytes": 5269
+    },
+    "source/tests/strategy_fork/curve_assertions.py": {
+      "sha256": "cdb0728117ae3f2a8403a539642cb564f966eea3313add505bc5532d539d6356",
+      "bytes": 4494
+    },
+    "source/tests/fork/test_curve_eoa.py": {
+      "sha256": "7c77ea5f34419c83059057acc463911e7197e9953c50af6f0781a0295705d18c",
+      "bytes": 3190
+    },
+    "source/source-snapshot.json": {
+      "sha256": "b3494213478e8249d7f2d1359586acf848c08ccd568ba563e411221c74e70b9e",
+      "bytes": 173256
+    },
+    "source/candidate-overlay.json": {
+      "sha256": "8fbcb26b9db53bd7ec9b62924f0a2538ea8dd6e644b12d188c23d852f02828c6",
+      "bytes": 480
+    },
+    "native/pytest.log": {
+      "sha256": "0baf2a4ca30bb89961a5b6417ce4502e60dbadc9f95070b8bdc2bc1c91486a57",
+      "bytes": 25442
+    }
+  }
+}

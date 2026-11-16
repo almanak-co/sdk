@@ -1,0 +1,1332 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "historical_path",
+          "title": "Market Model",
+          "type": "string"
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "start": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "end": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "end_policy": {
+              "enum": [
+                "teardown",
+                "mark"
+              ]
+            },
+            "cleanup": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)(s|m|h|d)$"
+                }
+              ]
+            }
+          },
+          "required": [
+            "start",
+            "end",
+            "end_policy",
+            "cleanup"
+          ]
+        },
+        "inventory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "funds": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "balances": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "asset": {
+                          "type": "string",
+                          "description": "Full CAIP-19 asset type"
+                        },
+                        "quantity": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[0-9]+(\\.[0-9]+)?$"
+                            },
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "base_units": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "base_units"
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "asset",
+                        "quantity"
+                      ]
+                    }
+                  },
+                  "payer": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "balances"
+                ]
+              }
+            },
+            "payers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "chain": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$",
+                        "description": "CAIP-2 chain of a public payer identity"
+                      },
+                      {
+                        "$ref": "#/$defs/Chain"
+                      }
+                    ]
+                  },
+                  "balances": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "asset": {
+                          "type": "string",
+                          "description": "Full CAIP-19 asset type"
+                        },
+                        "quantity": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[0-9]+(\\.[0-9]+)?$"
+                            },
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "base_units": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "base_units"
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "asset",
+                        "quantity"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "chain",
+                  "balances"
+                ]
+              }
+            }
+          },
+          "required": [
+            "funds"
+          ]
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "latency": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)(s|m|h|d)$"
+                }
+              ]
+            },
+            "decision_interval": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)(s|m|h|d)$"
+                }
+              ]
+            },
+            "models": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {},
+              "required": []
+            }
+          },
+          "required": [
+            "latency"
+          ]
+        },
+        "costs": {
+          "discriminator": {
+            "mapping": {
+              "excluded": "#/$defs/ExcludedCosts",
+              "fixed_native": "#/$defs/FixedCosts"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ExcludedCosts"
+            },
+            {
+              "$ref": "#/$defs/FixedCosts"
+            }
+          ],
+          "title": "Costs"
+        }
+      },
+      "required": [
+        "mode",
+        "window",
+        "inventory",
+        "execution",
+        "costs"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "economic",
+          "title": "Market Model",
+          "type": "string"
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "start": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "end": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "end_policy": {
+              "enum": [
+                "teardown",
+                "mark"
+              ]
+            },
+            "cleanup": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)(s|m|h|d)$"
+                }
+              ]
+            }
+          },
+          "required": [
+            "start",
+            "end",
+            "end_policy",
+            "cleanup"
+          ]
+        },
+        "inventory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "funds": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "balances": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "asset": {
+                          "type": "string",
+                          "description": "Full CAIP-19 asset type"
+                        },
+                        "quantity": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[0-9]+(\\.[0-9]+)?$"
+                            },
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "base_units": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "base_units"
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "asset",
+                        "quantity"
+                      ]
+                    }
+                  },
+                  "payer": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "balances"
+                ]
+              }
+            },
+            "payers": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "chain": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$",
+                        "description": "CAIP-2 chain of a public payer identity"
+                      },
+                      {
+                        "$ref": "#/$defs/Chain"
+                      }
+                    ]
+                  },
+                  "balances": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "asset": {
+                          "type": "string",
+                          "description": "Full CAIP-19 asset type"
+                        },
+                        "quantity": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[0-9]+(\\.[0-9]+)?$"
+                            },
+                            {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "properties": {
+                                "base_units": {
+                                  "type": "integer",
+                                  "minimum": 0
+                                }
+                              },
+                              "required": [
+                                "base_units"
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "asset",
+                        "quantity"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "chain",
+                  "balances"
+                ]
+              }
+            }
+          },
+          "required": [
+            "funds"
+          ]
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "latency": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)(s|m|h|d)$"
+                }
+              ]
+            },
+            "decision_interval": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)(s|m|h|d)$"
+                }
+              ]
+            },
+            "models": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {},
+              "required": []
+            }
+          },
+          "required": [
+            "latency"
+          ]
+        },
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "const": "aave_v4_archive",
+              "title": "Source",
+              "type": "string"
+            },
+            "rate_sample_seconds": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "string",
+                  "pattern": "^(0|[1-9][0-9]*)(s|m|h|d)$"
+                }
+              ]
+            },
+            "risk_prices": {
+              "enum": [
+                "spoke_oracle_events",
+                "configured"
+              ],
+              "title": "Risk Prices",
+              "type": "string"
+            },
+            "prices": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PriceBinding"
+              },
+              "title": "Prices",
+              "type": "array"
+            },
+            "vendors": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/VendorBinding"
+              },
+              "title": "Vendors",
+              "type": "array"
+            },
+            "sampling_overrides": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/SamplingOverride"
+              },
+              "title": "Sampling Overrides",
+              "type": "array"
+            },
+            "history": {
+              "items": {
+                "$ref": "#/$defs/HistoryBinding"
+              },
+              "minItems": 1,
+              "title": "History",
+              "type": "array"
+            }
+          },
+          "required": [
+            "source",
+            "rate_sample_seconds",
+            "risk_prices"
+          ],
+          "title": "EconomicDataPolicy",
+          "type": "object"
+        },
+        "costs": {
+          "discriminator": {
+            "mapping": {
+              "excluded": "#/$defs/ExcludedCosts",
+              "fixed_native": "#/$defs/EconomicFixedCosts"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ExcludedCosts"
+            },
+            {
+              "$ref": "#/$defs/EconomicFixedCosts"
+            }
+          ],
+          "title": "Costs"
+        }
+      },
+      "required": [
+        "mode",
+        "window",
+        "inventory",
+        "execution",
+        "data",
+        "costs"
+      ]
+    }
+  ],
+  "$defs": {
+    "AaveBacktestConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "schedule": {
+          "$ref": "#/$defs/Schedule"
+        },
+        "history": {
+          "items": {
+            "$ref": "#/$defs/HistoryBinding"
+          },
+          "minItems": 1,
+          "title": "History",
+          "type": "array"
+        },
+        "funds": {
+          "items": {
+            "$ref": "#/$defs/Fund"
+          },
+          "minItems": 1,
+          "title": "Funds",
+          "type": "array"
+        },
+        "market_model": {
+          "const": "historical_path",
+          "title": "Market Model",
+          "type": "string"
+        },
+        "costs": {
+          "discriminator": {
+            "mapping": {
+              "excluded": "#/$defs/ExcludedCosts",
+              "fixed_native": "#/$defs/FixedCosts"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ExcludedCosts"
+            },
+            {
+              "$ref": "#/$defs/FixedCosts"
+            }
+          ],
+          "title": "Costs"
+        }
+      },
+      "required": [
+        "schedule",
+        "history",
+        "funds",
+        "market_model",
+        "costs"
+      ],
+      "title": "AaveBacktestConfig",
+      "type": "object"
+    },
+    "Account": {
+      "additionalProperties": false,
+      "properties": {
+        "chain": {
+          "$ref": "#/$defs/Chain"
+        },
+        "address": {
+          "title": "Address",
+          "type": "string"
+        }
+      },
+      "required": [
+        "chain",
+        "address"
+      ],
+      "title": "Account",
+      "type": "object"
+    },
+    "AlchemyProvider": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "alchemy",
+          "title": "Kind",
+          "type": "string"
+        },
+        "network": {
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "title": "Network",
+          "type": "string"
+        },
+        "api_key_env": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "title": "Api Key Env",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "network",
+        "api_key_env"
+      ],
+      "title": "AlchemyProvider",
+      "type": "object"
+    },
+    "AssetAmount": {
+      "additionalProperties": false,
+      "description": "Nonnegative base-unit amount with explicit asset identity.",
+      "properties": {
+        "asset": {
+          "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$",
+          "title": "Asset",
+          "type": "string"
+        },
+        "amount": {
+          "minimum": 0,
+          "title": "Amount",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "asset",
+        "amount"
+      ],
+      "title": "AssetAmount",
+      "type": "object"
+    },
+    "Chain": {
+      "additionalProperties": false,
+      "properties": {
+        "chain_id": {
+          "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$",
+          "title": "Chain Id",
+          "type": "string"
+        },
+        "environment": {
+          "minLength": 1,
+          "title": "Environment",
+          "type": "string"
+        }
+      },
+      "required": [
+        "chain_id",
+        "environment"
+      ],
+      "title": "Chain",
+      "type": "object"
+    },
+    "CoinGeckoPrice": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "coingecko",
+          "title": "Kind",
+          "type": "string"
+        },
+        "provider": {
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "title": "Provider",
+          "type": "string"
+        },
+        "coin_id": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coin Id"
+        },
+        "quote": {
+          "const": "USD",
+          "title": "Quote",
+          "type": "string"
+        },
+        "interval": {
+          "enum": [
+            "hourly",
+            "5m",
+            "daily"
+          ],
+          "title": "Interval",
+          "type": "string"
+        },
+        "max_age_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Max Age Seconds",
+          "type": "integer"
+        },
+        "availability": {
+          "const": "retrospective_timestamp",
+          "title": "Availability",
+          "type": "string"
+        },
+        "availability_lag_seconds": {
+          "minimum": 0,
+          "title": "Availability Lag Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "provider",
+        "quote",
+        "interval",
+        "max_age_seconds",
+        "availability",
+        "availability_lag_seconds"
+      ],
+      "title": "CoinGeckoPrice",
+      "type": "object"
+    },
+    "CollectionLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "max_in_flight": {
+          "default": 4,
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max In Flight",
+          "type": "integer"
+        },
+        "batch_size": {
+          "default": 32,
+          "maximum": 32,
+          "minimum": 1,
+          "title": "Batch Size",
+          "type": "integer"
+        },
+        "requests_per_second": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requests Per Second"
+        },
+        "max_retries": {
+          "default": 3,
+          "maximum": 8,
+          "minimum": 0,
+          "title": "Max Retries",
+          "type": "integer"
+        }
+      },
+      "title": "CollectionLimits",
+      "type": "object"
+    },
+    "DataKey": {
+      "additionalProperties": false,
+      "properties": {
+        "connector": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Connector",
+          "type": "string"
+        },
+        "chain": {
+          "$ref": "#/$defs/Chain"
+        },
+        "source": {
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "title": "Source",
+          "type": "string"
+        },
+        "product": {
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "title": "Product",
+          "type": "string"
+        }
+      },
+      "required": [
+        "connector",
+        "chain",
+        "source",
+        "product"
+      ],
+      "title": "DataKey",
+      "type": "object"
+    },
+    "EconomicBacktestConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "schedule": {
+          "$ref": "#/$defs/Schedule"
+        },
+        "history": {
+          "items": {
+            "$ref": "#/$defs/HistoryBinding"
+          },
+          "minItems": 1,
+          "title": "History",
+          "type": "array"
+        },
+        "funds": {
+          "items": {
+            "$ref": "#/$defs/Fund"
+          },
+          "minItems": 1,
+          "title": "Funds",
+          "type": "array"
+        },
+        "market_model": {
+          "const": "economic",
+          "title": "Market Model",
+          "type": "string"
+        },
+        "data": {
+          "$ref": "#/$defs/EconomicDataPolicy"
+        },
+        "costs": {
+          "discriminator": {
+            "mapping": {
+              "excluded": "#/$defs/ExcludedCosts",
+              "fixed_native": "#/$defs/EconomicFixedCosts"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ExcludedCosts"
+            },
+            {
+              "$ref": "#/$defs/EconomicFixedCosts"
+            }
+          ],
+          "title": "Costs"
+        }
+      },
+      "required": [
+        "schedule",
+        "history",
+        "funds",
+        "market_model",
+        "data",
+        "costs"
+      ],
+      "title": "EconomicBacktestConfig",
+      "type": "object"
+    },
+    "EconomicDataPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "const": "aave_v4_archive",
+          "title": "Source",
+          "type": "string"
+        },
+        "rate_sample_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Rate Sample Seconds",
+          "type": "integer"
+        },
+        "risk_prices": {
+          "enum": [
+            "spoke_oracle_events",
+            "configured"
+          ],
+          "title": "Risk Prices",
+          "type": "string"
+        },
+        "prices": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PriceBinding"
+          },
+          "title": "Prices",
+          "type": "array"
+        },
+        "vendors": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/VendorBinding"
+          },
+          "title": "Vendors",
+          "type": "array"
+        },
+        "sampling_overrides": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SamplingOverride"
+          },
+          "title": "Sampling Overrides",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source",
+        "rate_sample_seconds",
+        "risk_prices"
+      ],
+      "title": "EconomicDataPolicy",
+      "type": "object"
+    },
+    "EconomicFixedCosts": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "fixed_native",
+          "title": "Kind",
+          "type": "string"
+        },
+        "supply": {
+          "minimum": 0,
+          "title": "Supply",
+          "type": "integer"
+        },
+        "withdraw": {
+          "minimum": 0,
+          "title": "Withdraw",
+          "type": "integer"
+        },
+        "borrow": {
+          "minimum": 0,
+          "title": "Borrow",
+          "type": "integer"
+        },
+        "repay": {
+          "minimum": 0,
+          "title": "Repay",
+          "type": "integer"
+        },
+        "collateral": {
+          "minimum": 0,
+          "title": "Collateral",
+          "type": "integer"
+        },
+        "refresh": {
+          "minimum": 0,
+          "title": "Refresh",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "supply",
+        "withdraw",
+        "borrow",
+        "repay",
+        "collateral",
+        "refresh"
+      ],
+      "title": "EconomicFixedCosts",
+      "type": "object"
+    },
+    "ExcludedCosts": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "excluded",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ExcludedCosts",
+      "type": "object"
+    },
+    "FixedCosts": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "fixed_native",
+          "title": "Kind",
+          "type": "string"
+        },
+        "approve": {
+          "minimum": 0,
+          "title": "Approve",
+          "type": "integer"
+        },
+        "supply": {
+          "minimum": 0,
+          "title": "Supply",
+          "type": "integer"
+        },
+        "withdraw": {
+          "minimum": 0,
+          "title": "Withdraw",
+          "type": "integer"
+        },
+        "revoke": {
+          "minimum": 0,
+          "title": "Revoke",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "approve",
+        "supply",
+        "withdraw",
+        "revoke"
+      ],
+      "title": "FixedCosts",
+      "type": "object"
+    },
+    "Fund": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "title": "Name",
+          "type": "string"
+        },
+        "fund": {
+          "$ref": "#/$defs/Account"
+        },
+        "balances": {
+          "items": {
+            "$ref": "#/$defs/AssetAmount"
+          },
+          "title": "Balances",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "fund",
+        "balances"
+      ],
+      "title": "Fund",
+      "type": "object"
+    },
+    "HistoryBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "chain": {
+          "$ref": "#/$defs/Chain"
+        },
+        "provider": {
+          "discriminator": {
+            "mapping": {
+              "alchemy": "#/$defs/AlchemyProvider",
+              "rpc_url": "#/$defs/UrlProvider"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/AlchemyProvider"
+            },
+            {
+              "$ref": "#/$defs/UrlProvider"
+            }
+          ],
+          "title": "Provider"
+        },
+        "collection": {
+          "$ref": "#/$defs/CollectionLimits",
+          "default": {
+            "max_in_flight": 4,
+            "batch_size": 32,
+            "requests_per_second": null,
+            "max_retries": 3
+          }
+        }
+      },
+      "required": [
+        "chain",
+        "provider"
+      ],
+      "title": "HistoryBinding",
+      "type": "object"
+    },
+    "PriceBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "purpose": {
+          "enum": [
+            "risk",
+            "valuation",
+            "strategy"
+          ],
+          "title": "Purpose",
+          "type": "string",
+          "description": "A strategy price listed here is a single value (no window) and must equal the strategy's data_dependencies declaration; a pool candle series is declared only by the hook."
+        },
+        "chain": {
+          "$ref": "#/$defs/Chain"
+        },
+        "asset": {
+          "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$",
+          "title": "Asset",
+          "type": "string"
+        },
+        "market": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataKey"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "source": {
+          "discriminator": {
+            "mapping": {
+              "coingecko": "#/$defs/CoinGeckoPrice",
+              "protocol_oracle": "#/$defs/ProtocolPrice"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CoinGeckoPrice"
+            },
+            {
+              "$ref": "#/$defs/ProtocolPrice"
+            }
+          ],
+          "title": "Source"
+        }
+      },
+      "required": [
+        "purpose",
+        "chain",
+        "asset",
+        "source"
+      ],
+      "title": "PriceBinding",
+      "type": "object"
+    },
+    "ProtocolPrice": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "protocol_oracle",
+          "title": "Kind",
+          "type": "string"
+        },
+        "key": {
+          "$ref": "#/$defs/DataKey"
+        }
+      },
+      "required": [
+        "kind",
+        "key"
+      ],
+      "title": "ProtocolPrice",
+      "type": "object"
+    },
+    "SamplingOverride": {
+      "additionalProperties": false,
+      "properties": {
+        "sample_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Sample Seconds",
+          "type": "integer"
+        },
+        "max_age_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Max Age Seconds",
+          "type": "integer"
+        },
+        "key": {
+          "$ref": "#/$defs/DataKey"
+        }
+      },
+      "required": [
+        "sample_seconds",
+        "max_age_seconds",
+        "key"
+      ],
+      "title": "SamplingOverride",
+      "type": "object"
+    },
+    "Schedule": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "maximum": 253402300799,
+          "minimum": 0,
+          "title": "Start",
+          "type": "integer"
+        },
+        "end": {
+          "maximum": 253402300799,
+          "minimum": 0,
+          "title": "End",
+          "type": "integer"
+        },
+        "decision_interval_override_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decision Interval Override Seconds"
+        },
+        "latency_seconds": {
+          "minimum": 0,
+          "title": "Latency Seconds",
+          "type": "integer"
+        },
+        "end_policy": {
+          "enum": [
+            "mark_open",
+            "teardown"
+          ],
+          "title": "End Policy",
+          "type": "string"
+        },
+        "cleanup_seconds": {
+          "minimum": 0,
+          "title": "Cleanup Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "latency_seconds",
+        "end_policy",
+        "cleanup_seconds"
+      ],
+      "title": "Schedule",
+      "type": "object"
+    },
+    "UrlProvider": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "rpc_url",
+          "title": "Kind",
+          "type": "string"
+        },
+        "url_env": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "title": "Url Env",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "url_env"
+      ],
+      "title": "UrlProvider",
+      "type": "object"
+    },
+    "VendorBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "title": "Name",
+          "type": "string"
+        },
+        "kind": {
+          "const": "coingecko",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ],
+      "title": "VendorSelection",
+      "type": "object"
+    }
+  }
+}

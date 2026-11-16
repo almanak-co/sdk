@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HyperCore perp position",
+  "description": "One fund's HyperCore account trading one named perp market at a fixed cross leverage. Capital is USDC on eip155:999; how much to deposit and the size of each Ioc order are the strategy's decisions. Backtests and identified HyperEVM forks; production waits for D7.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "market",
+    "account",
+    "capital",
+    "leverage",
+    "slippage_bps"
+  ],
+  "properties": {
+    "market": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "account": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "capital": {
+      "description": "USDC on eip155:999 the fund starts with. It is not a limit.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset",
+        "quantity"
+      ],
+      "properties": {
+        "asset": {
+          "const": "eip155:999/erc20:0xb88339cb7199b77e23db6e890353e22632ba630f"
+        },
+        "quantity": {
+          "$ref": "../strategy.schema.json#/$defs/Quantity"
+        }
+      }
+    },
+    "leverage": {
+      "description": "The fixed cross leverage every entry needs, set while flat; at most the market's maximum.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "slippage_bps": {
+      "description": "How far an Ioc order's limit lies from its reference price.",
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 1000
+    },
+    "hold_seconds": {
+      "$ref": "../strategy.schema.json#/$defs/PositiveDuration"
+    },
+    "minimum_native_balance": {
+      "description": "HYPE the operator keeps for the gas of a fork run's custody transactions; below it, no new exposure. None by default; backtests exclude gas.",
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    }
+  }
+}

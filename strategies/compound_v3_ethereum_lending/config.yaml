@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/compound_v3_ethereum_lending.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '200'
+  allocations:
+    earn:
+      market: earn
+      account: lender
+      capital: '1000'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    collateral:
+      market: collateral
+      account: borrower
+      capital: '1'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: borrower
+      borrow: true
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+markets:
+  earn:
+    connector: compound_v3
+    chain: eip155:1
+    comet: '0xc3d688b66703497daa19211eedff47f25384cdc3'
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+  collateral:
+    connector: compound_v3
+    chain: eip155:1
+    comet: '0xc3d688b66703497daa19211eedff47f25384cdc3'
+    asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+  loan:
+    connector: compound_v3
+    chain: eip155:1
+    comet: '0xc3d688b66703497daa19211eedff47f25384cdc3'
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+accounts:
+  lender:
+    chain: eip155:1
+  borrower:
+    chain: eip155:1

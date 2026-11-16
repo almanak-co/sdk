@@ -1,0 +1,38 @@
+{
+  "actions": [],
+  "chains": [
+    "eip155:56"
+  ],
+  "checkpoint": "evidence",
+  "scopes": [
+    {
+      "actions": [
+        "supply",
+        "borrow",
+        "repay",
+        "withdraw"
+      ],
+      "chains": [
+        "eip155:56"
+      ],
+      "connector": "aave_v3",
+      "model": "",
+      "variants": []
+    },
+    {
+      "actions": [
+        "swap_exact_input",
+        "exit_exchange"
+      ],
+      "chains": [
+        "eip155:56"
+      ],
+      "connector": "curve",
+      "model": "",
+      "variants": [
+        "stableswap_ng"
+      ]
+    }
+  ],
+  "variants": []
+}

@@ -1,0 +1,60 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/aave_v3_base_sma_borrow.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # SMA lookback and the hourly closes each decision reads.
+    period: 48
+    window: 60
+    # Borrow while the close exceeds the average by this factor; repay once it is below
+    # it by this one. The gap keeps a price hovering at the average from churning.
+    borrow_above: 1.005
+    repay_below: 0.99
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '5'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.01'
+      collateral: true
+      minimum_health_factor: '2'
+      oracle: '0x2cc0fc26ed4563a5ce5e8bdcfe1a2878676ae156'
+      price_source: '0x9da00d23465282005db222a441a663ee7b9dfcc8'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      collateral: false
+      minimum_health_factor: '2'
+      oracle: '0x2cc0fc26ed4563a5ce5e8bdcfe1a2878676ae156'
+      price_source: '0xf52d010c7d4ecbfda92c2509900593ce34535d86'
+      minimum_native_balance: '0'
+  gas:
+    # Example Base amounts; size them from the live gas price.
+    # Entry takes 2 transactions and exit 4 (almanak check --production):
+    # exit_reserve = 4 fees, total_budget = exit_reserve + 2 entry + 20 later fees.
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:8453
+      max_transaction_fee:
+        base_units: 75000000000000
+      total_budget:
+        base_units: 1950000000000000
+      exit_reserve:
+        base_units: 300000000000000
+markets:
+  collateral:
+    connector: aave_v3
+    chain: eip155:8453
+    asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+  loan:
+    connector: aave_v3
+    chain: eip155:8453
+    asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+accounts:
+  fund:
+    chain: eip155:8453

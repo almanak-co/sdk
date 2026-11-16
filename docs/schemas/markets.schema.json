@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Almanak named market selections",
+  "description": "Each named market selects one connector target. Adding a connector adds a file under markets/ and one entry here; the author root never changes.",
+  "type": "object",
+  "minProperties": 1,
+  "propertyNames": {
+    "type": "string",
+    "minLength": 1,
+    "pattern": "^\\S+$"
+  },
+  "additionalProperties": {
+    "oneOf": [
+      {
+        "$ref": "markets/aave_v4.schema.json"
+      },
+      {
+        "$ref": "markets/uniswap_v3.schema.json"
+      },
+      {
+        "$ref": "markets/aave_v3.schema.json"
+      },
+      {
+        "$ref": "markets/sparklend.schema.json"
+      },
+      {
+        "$ref": "markets/compound_v3.schema.json"
+      },
+      {
+        "$ref": "markets/morpho_blue.schema.json"
+      },
+      {
+        "$ref": "markets/uniswap_v4.schema.json"
+      },
+      {
+        "$ref": "markets/pancakeswap_v3.schema.json"
+      },
+      {
+        "$ref": "markets/aerodrome_slipstream.schema.json"
+      },
+      {
+        "$ref": "markets/aerodrome.schema.json"
+      },
+      {
+        "$ref": "markets/curve.schema.json"
+      },
+      {
+        "$ref": "markets/gmx_v2.schema.json"
+      },
+      {
+        "$ref": "markets/hyperliquid.schema.json"
+      }
+    ]
+  }
+}

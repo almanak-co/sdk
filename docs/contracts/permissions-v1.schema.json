@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "almanak-permissions-v1",
+  "title": "Almanak Safe permissions statement",
+  "description": "The `permissions` block of `almanak check --production --online --json` when an account uses the Safe/Roles profile. Each partition is one Safe; a pending partition carries the Safe Transaction Builder batch its owner executes before admission, the same batch admission exports. Installed state is an observation at `observed_block`; admission generates and verifies again.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "manifest_digest", "pending", "partitions", "runtime_checks"],
+  "properties": {
+    "schema": { "const": "almanak-permissions-v1" },
+    "manifest_digest": { "$ref": "#/$defs/Digest" },
+    "pending": { "type": "boolean" },
+    "partitions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/Partition" }
+    },
+    "runtime_checks": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "ChainId": { "type": "string", "pattern": "^eip155:[0-9]{1,32}$" },
+    "Address": { "type": "string", "pattern": "^0x[0-9a-fA-F]{40}$" },
+    "Partition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account",
+        "chain",
+        "safe",
+        "roles_module",
+        "operator",
+        "observed_block",
+        "status",
+        "explanation",
+        "bundle"
+      ],
+      "properties": {
+        "account": { "type": "string", "minLength": 1 },
+        "chain": { "$ref": "#/$defs/ChainId" },
+        "safe": { "$ref": "#/$defs/Address" },
+        "roles_module": { "$ref": "#/$defs/Address" },
+        "operator": { "$ref": "#/$defs/Address" },
+        "observed_block": { "type": "integer", "minimum": 0 },
+        "status": { "enum": ["installed", "pending"] },
+        "explanation": { "type": "array", "items": { "type": "string" } },
+        "bundle": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/SafeBundle" }]
+        }
+      },
+      "if": { "properties": { "status": { "const": "pending" } } },
+      "then": { "properties": { "bundle": { "$ref": "#/$defs/SafeBundle" } } },
+      "else": { "properties": { "bundle": { "type": "null" } } }
+    },
+    "SafeBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "chainId", "createdAt", "meta", "transactions"],
+      "properties": {
+        "version": { "const": "1.0" },
+        "chainId": { "type": "string", "pattern": "^[0-9]{1,32}$" },
+        "createdAt": { "type": "integer", "minimum": 0 },
+        "meta": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "txBuilderVersion", "createdFromSafeAddress"],
+          "properties": {
+            "name": { "type": "string" },
+            "txBuilderVersion": { "type": "string" },
+            "createdFromSafeAddress": { "$ref": "#/$defs/Address" }
+          }
+        },
+        "transactions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["to", "value", "data"],
+            "properties": {
+              "to": { "$ref": "#/$defs/Address" },
+              "value": { "const": "0" },
+              "data": { "type": "string", "pattern": "^0x([0-9a-fA-F]{2})*$" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

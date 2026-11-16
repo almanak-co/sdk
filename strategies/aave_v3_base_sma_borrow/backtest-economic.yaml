@@ -1,0 +1,40 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+# The hourly WETH closes the strategy declares, read from the Base WETH/USDC Uniswap V3
+# pool's on-chain state, start 60 hours before the window, so the first decision already
+# has a full moving-average window. Decisions run every five minutes instead of the
+# configured minute: reduced cadence fidelity, reported by the run. Aave risk is read at
+# every block, so the window is short: the close is 1% above its average, the strategy
+# supplies and then borrows, and teardown repays and withdraws. Repaying on the signal
+# needs about five hours of blocks and is covered by the strategy's unit tests.
+mode: economic
+window:
+  start: '2026-09-20T02:00:00Z'
+  end: '2026-09-20T02:06:00Z'
+  end_policy: teardown
+  cleanup: 180s
+inventory:
+  funds:
+    fund:
+      balances:
+      - asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+        quantity: '0.01'
+      - asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+        quantity: '1'
+      - asset: eip155:8453/slip44:60
+        quantity: '5'
+execution:
+  latency: 1s
+  decision_interval: 300s
+  models:
+    liquidation_model: immediate_underlying_v3_revision11
+data:
+  source: aave_v3_archive
+  risk_model: pool_oracle_each_block
+  sample_seconds: 600s
+  max_age_seconds: 720s
+  max_accounting_samples: 10
+  max_risk_blocks: 600
+  max_risk_samples: 1200
+  max_liquidations_per_event: 8
+costs:
+  kind: excluded

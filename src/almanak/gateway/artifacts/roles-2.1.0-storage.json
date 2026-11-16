@@ -1,0 +1,281 @@
+{
+  "storage": [
+    {
+      "astId": 473,
+      "contract": "contracts/Roles.sol:Roles",
+      "label": "avatar",
+      "offset": 0,
+      "slot": "0",
+      "type": "t_address"
+    },
+    {
+      "astId": 476,
+      "contract": "contracts/Roles.sol:Roles",
+      "label": "target",
+      "offset": 0,
+      "slot": "1",
+      "type": "t_address"
+    },
+    {
+      "astId": 710,
+      "contract": "contracts/Roles.sol:Roles",
+      "label": "consumed",
+      "offset": 0,
+      "slot": "2",
+      "type": "t_mapping(t_address,t_mapping(t_bytes32,t_bool))"
+    },
+    {
+      "astId": 38,
+      "contract": "contracts/Roles.sol:Roles",
+      "label": "modules",
+      "offset": 0,
+      "slot": "3",
+      "type": "t_mapping(t_address,t_address)"
+    },
+    {
+      "astId": 2110,
+      "contract": "contracts/Roles.sol:Roles",
+      "label": "roles",
+      "offset": 0,
+      "slot": "4",
+      "type": "t_mapping(t_bytes32,t_struct(Role)7643_storage)"
+    },
+    {
+      "astId": 2115,
+      "contract": "contracts/Roles.sol:Roles",
+      "label": "allowances",
+      "offset": 0,
+      "slot": "5",
+      "type": "t_mapping(t_bytes32,t_struct(Allowance)7655_storage)"
+    },
+    {
+      "astId": 3720,
+      "contract": "contracts/Roles.sol:Roles",
+      "label": "unwrappers",
+      "offset": 0,
+      "slot": "6",
+      "type": "t_mapping(t_bytes32,t_contract(ITransactionUnwrapper)7858)"
+    },
+    {
+      "astId": 6665,
+      "contract": "contracts/Roles.sol:Roles",
+      "label": "defaultRoles",
+      "offset": 0,
+      "slot": "7",
+      "type": "t_mapping(t_address,t_bytes32)"
+    }
+  ],
+  "types": {
+    "t_address": {
+      "encoding": "inplace",
+      "label": "address",
+      "numberOfBytes": "20"
+    },
+    "t_bool": {
+      "encoding": "inplace",
+      "label": "bool",
+      "numberOfBytes": "1"
+    },
+    "t_bytes32": {
+      "encoding": "inplace",
+      "label": "bytes32",
+      "numberOfBytes": "32"
+    },
+    "t_contract(ITransactionUnwrapper)7858": {
+      "encoding": "inplace",
+      "label": "contract ITransactionUnwrapper",
+      "numberOfBytes": "20"
+    },
+    "t_enum(Clearance)7589": {
+      "encoding": "inplace",
+      "label": "enum Clearance",
+      "numberOfBytes": "1"
+    },
+    "t_enum(ExecutionOptions)7585": {
+      "encoding": "inplace",
+      "label": "enum ExecutionOptions",
+      "numberOfBytes": "1"
+    },
+    "t_mapping(t_address,t_address)": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "label": "mapping(address => address)",
+      "numberOfBytes": "32",
+      "value": "t_address"
+    },
+    "t_mapping(t_address,t_bool)": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "label": "mapping(address => bool)",
+      "numberOfBytes": "32",
+      "value": "t_bool"
+    },
+    "t_mapping(t_address,t_bytes32)": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "label": "mapping(address => bytes32)",
+      "numberOfBytes": "32",
+      "value": "t_bytes32"
+    },
+    "t_mapping(t_address,t_mapping(t_bytes32,t_bool))": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "label": "mapping(address => mapping(bytes32 => bool))",
+      "numberOfBytes": "32",
+      "value": "t_mapping(t_bytes32,t_bool)"
+    },
+    "t_mapping(t_address,t_struct(TargetAddress)7629_storage)": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "label": "mapping(address => struct TargetAddress)",
+      "numberOfBytes": "32",
+      "value": "t_struct(TargetAddress)7629_storage"
+    },
+    "t_mapping(t_bytes32,t_bool)": {
+      "encoding": "mapping",
+      "key": "t_bytes32",
+      "label": "mapping(bytes32 => bool)",
+      "numberOfBytes": "32",
+      "value": "t_bool"
+    },
+    "t_mapping(t_bytes32,t_bytes32)": {
+      "encoding": "mapping",
+      "key": "t_bytes32",
+      "label": "mapping(bytes32 => bytes32)",
+      "numberOfBytes": "32",
+      "value": "t_bytes32"
+    },
+    "t_mapping(t_bytes32,t_contract(ITransactionUnwrapper)7858)": {
+      "encoding": "mapping",
+      "key": "t_bytes32",
+      "label": "mapping(bytes32 => contract ITransactionUnwrapper)",
+      "numberOfBytes": "32",
+      "value": "t_contract(ITransactionUnwrapper)7858"
+    },
+    "t_mapping(t_bytes32,t_struct(Allowance)7655_storage)": {
+      "encoding": "mapping",
+      "key": "t_bytes32",
+      "label": "mapping(bytes32 => struct Allowance)",
+      "numberOfBytes": "32",
+      "value": "t_struct(Allowance)7655_storage"
+    },
+    "t_mapping(t_bytes32,t_struct(Role)7643_storage)": {
+      "encoding": "mapping",
+      "key": "t_bytes32",
+      "label": "mapping(bytes32 => struct Role)",
+      "numberOfBytes": "32",
+      "value": "t_struct(Role)7643_storage"
+    },
+    "t_struct(Allowance)7655_storage": {
+      "encoding": "inplace",
+      "label": "struct Allowance",
+      "members": [
+        {
+          "astId": 7646,
+          "contract": "contracts/Roles.sol:Roles",
+          "label": "refill",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_uint128"
+        },
+        {
+          "astId": 7648,
+          "contract": "contracts/Roles.sol:Roles",
+          "label": "maxRefill",
+          "offset": 16,
+          "slot": "0",
+          "type": "t_uint128"
+        },
+        {
+          "astId": 7650,
+          "contract": "contracts/Roles.sol:Roles",
+          "label": "period",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_uint64"
+        },
+        {
+          "astId": 7652,
+          "contract": "contracts/Roles.sol:Roles",
+          "label": "balance",
+          "offset": 8,
+          "slot": "1",
+          "type": "t_uint128"
+        },
+        {
+          "astId": 7654,
+          "contract": "contracts/Roles.sol:Roles",
+          "label": "timestamp",
+          "offset": 24,
+          "slot": "1",
+          "type": "t_uint64"
+        }
+      ],
+      "numberOfBytes": "64"
+    },
+    "t_struct(Role)7643_storage": {
+      "encoding": "inplace",
+      "label": "struct Role",
+      "members": [
+        {
+          "astId": 7633,
+          "contract": "contracts/Roles.sol:Roles",
+          "label": "members",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_mapping(t_address,t_bool)"
+        },
+        {
+          "astId": 7638,
+          "contract": "contracts/Roles.sol:Roles",
+          "label": "targets",
+          "offset": 0,
+          "slot": "1",
+          "type": "t_mapping(t_address,t_struct(TargetAddress)7629_storage)"
+        },
+        {
+          "astId": 7642,
+          "contract": "contracts/Roles.sol:Roles",
+          "label": "scopeConfig",
+          "offset": 0,
+          "slot": "2",
+          "type": "t_mapping(t_bytes32,t_bytes32)"
+        }
+      ],
+      "numberOfBytes": "96"
+    },
+    "t_struct(TargetAddress)7629_storage": {
+      "encoding": "inplace",
+      "label": "struct TargetAddress",
+      "members": [
+        {
+          "astId": 7625,
+          "contract": "contracts/Roles.sol:Roles",
+          "label": "clearance",
+          "offset": 0,
+          "slot": "0",
+          "type": "t_enum(Clearance)7589"
+        },
+        {
+          "astId": 7628,
+          "contract": "contracts/Roles.sol:Roles",
+          "label": "options",
+          "offset": 1,
+          "slot": "0",
+          "type": "t_enum(ExecutionOptions)7585"
+        }
+      ],
+      "numberOfBytes": "32"
+    },
+    "t_uint128": {
+      "encoding": "inplace",
+      "label": "uint128",
+      "numberOfBytes": "16"
+    },
+    "t_uint64": {
+      "encoding": "inplace",
+      "label": "uint64",
+      "numberOfBytes": "8"
+    }
+  }
+}

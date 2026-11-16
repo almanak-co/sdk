@@ -1,0 +1,66 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/avalanche_morpho_borrow_and_trade_v4.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '0.1'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '1'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      capital:
+        asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '0.05'
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance: '0'
+      kind: trading
+markets:
+  collateral:
+    connector: morpho_blue
+    chain: eip155:43114
+    market_id: '0x2358f128789e67e053f9b9082cfbe4c0ceca8c51fa67c72f3a395e140b96607b'
+    leg: collateral
+  loan:
+    connector: morpho_blue
+    chain: eip155:43114
+    market_id: '0x2358f128789e67e053f9b9082cfbe4c0ceca8c51fa67c72f3a395e140b96607b'
+    leg: loan
+  pool:
+    connector: uniswap_v4
+    chain: eip155:43114
+    currency0: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+    currency1: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+    fee: 500
+    tick_spacing: 10
+    hooks: '0x0000000000000000000000000000000000000000'
+accounts:
+  fund:
+    chain: eip155:43114
+inventory:
+- account: fund
+  balance:
+    asset: eip155:43114/erc20:0xa25eaf2906fa1a3a13edac9b9657108af7b703e3
+    quantity: '1'
+- account: fund
+  balance:
+    asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+    quantity: '0.011'
+- account: fund
+  balance:
+    asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+    quantity: '0'

@@ -1,0 +1,326 @@
+"""Operator deployments: requests without a strategy on the shared execution path.
+
+Component evidence against captured Aave V4 receipts, without signing or chain
+access. It is not fork or process recovery evidence.
+"""
+
+import json
+from datetime import UTC, datetime
+
+import pytest
+
+from almanak.connectors.aave_v4.state import TransactionPlan
+from almanak.connectors.composition import connector_for
+from almanak.gateway.ethereum import DataError
+from almanak.gateway.service import GatewayService
+from almanak.operator_deployment import supports_operator
+from almanak.operator_runtime import OperatorRuntime
+from almanak.state import Journal
+from almanak.triggers import DecisionSchedule, IntervalEvent, OperatorEvent
+from tests.test_runtime_recovery import CapturedGateway, Interrupted
+
+START = datetime(2026, 9, 5, tzinfo=UTC)
+REQUEST = "a1" * 16
+
+
+class Backend(CapturedGateway):
+    """The captured gateway with the adapter surface the service re-verifies against."""
+
+    def snapshot(self, allocation, block, observation):
+        return self.verify_snapshot(observation)
+
+    def prepare(self, state, intent, observed=None, attempt_id=None):
+        plan = super().prepare(state, intent)
+        return plan if attempt_id is None else plan.model_copy(update={"attempt_id": attempt_id})
+
+    def unsigned_plan(self, pending):
+        return TransactionPlan.model_validate(
+            pending.model_dump(exclude={"raw_transaction", "tx_hash", "family"})
+        )
+
+    def verify_signed_admission(self, before, pending):
+        # Captured bytes are synthetic; signature checks belong to the fork proofs.
+        return True
+
+
+class GatewayJournal:
+    """Commits an update only after the gateway's own validation accepts it."""
+
+    def __init__(self, journal, service):
+        self.journal, self.service = journal, service
+        self.path = journal.path
+
+    def load(self):
+        return self.journal.load()
+
+    def update(self, change):
+        before = self.journal.load()
+        after = change(before)
+        if after != before:
+            self.service.validate_update(before, after)
+        return self.journal.update(lambda _: after)
+
+
+class Desk:
+    def __init__(self, tmp_path, recorded):
+        self.recorded = recorded
+        self.store = Journal(tmp_path / "state.sqlite")
+        self.store.create(recorded.config, None)
+        self.gateway = Backend(self.store, recorded)
+        self.service = GatewayService(
+            recorded.config, self.store.path, self.gateway, lease_seconds=2, operator_actions=True
+        )
+        self.journal = GatewayJournal(self.store, self.service)
+
+    def runtime(self, fault=None):
+        runtime = object.__new__(OperatorRuntime)
+        runtime.connector = connector_for(self.recorded.config)
+        runtime.journal = self.journal
+        runtime.gateway = self.gateway
+        runtime.closed = False
+        runtime.clock = lambda: START
+        runtime.fault = fault or (lambda *args: None)
+        runtime.poll = 0
+        return runtime
+
+    def intent(self, kind):
+        return next(o.decision.intent for o in self.recorded.outcomes if o.operation.kind == kind)
+
+    def kinds(self):
+        return [item.operation.kind for item in self.store.load().outcomes]
+
+
+@pytest.fixture
+def desk(tmp_path, recorded):
+    return Desk(tmp_path, recorded)
+
+
+def crash_at(expected, kind):
+    def fault(stage, attempt):
+        if stage == expected and getattr(attempt, "operation", None) is not None:
+            if attempt.operation.kind == kind:
+                raise Interrupted(stage)
+
+    return fault
+
+
+def test_operator_deployment_retains_no_strategy_and_declared_capabilities(desk, recorded):
+    state = desk.store.load()
+    codec = connector_for(recorded.config).codec
+    assert state.operator and state.strategy is None
+    assert state.capabilities == codec.capability.declared(recorded.config)
+    wire = state.model_dump(mode="json")
+    assert wire["operator"] is True
+    # A strategy deployment's checkpoint wire form is unchanged.
+    assert "operator" not in recorded.model_dump(mode="json")
+    with pytest.raises(ValueError, match="retains no strategy"):
+        changed = {**wire, "strategy": recorded.strategy.model_dump(mode="json")}
+        type(state).model_validate_json(json.dumps(changed))
+
+
+def test_supply_withdraw_and_close_without_a_strategy(desk, recorded):
+    runtime = desk.runtime()
+    record = runtime.submit(desk.intent("supply"), REQUEST)
+    admitted = desk.store.load()
+    assert admitted.decision == record and admitted.plan is None
+    assert record.trigger == OperatorEvent(started_at=START, request=REQUEST)
+    assert desk.gateway.broadcasts == []
+
+    plan = runtime.preview()
+    assert plan.operation.kind == "approve" and desk.store.load().pending is None
+    assert desk.gateway.broadcasts == []
+
+    outcomes = runtime.execute()
+    assert [item.operation.kind for item in outcomes] == ["approve", "supply"]
+    holding = desk.store.load()
+    assert holding.decision is None and holding.delivered == 2
+    assert holding.owned[0].shares == desk.gateway.outcome("supply").shares
+    assert holding.memory == type(holding.memory)()
+    assert holding.schedule == DecisionSchedule()
+
+    runtime.submit(desk.intent("withdraw"))
+    assert [item.operation.kind for item in runtime.execute()] == ["withdraw"]
+    closed = runtime.finish()
+    assert closed.mode == "closed" and closed.closure
+    assert closed.owned[0].shares == 0
+    assert desk.gateway.broadcasts == [item.tx_hash for item in recorded.outcomes]
+    assert [item.model_dump(exclude={"decision"}) for item in closed.outcomes] == [
+        item.model_dump(exclude={"decision"}) for item in recorded.outcomes
+    ]
+
+
+def test_declined_preview_leaves_no_effect(desk):
+    runtime = desk.runtime()
+    runtime.submit(desk.intent("supply"), REQUEST)
+    assert runtime.preview() is not None
+    runtime.discard()
+    state = desk.store.load()
+    assert (state.decision, state.plan, state.pending, state.outcomes) == (None, None, None, ())
+    assert desk.gateway.broadcasts == []
+    # Nothing was executed, so the same request may be admitted again.
+    runtime.submit(desk.intent("supply"), REQUEST)
+
+
+def test_unconfirmed_request_is_never_executed_by_a_later_coordinator(desk):
+    desk.runtime().submit(desk.intent("supply"), REQUEST)
+    later = desk.runtime()
+    state = later.recover()
+    assert state.decision is not None and state.plan is None
+    assert desk.gateway.broadcasts == []
+    with pytest.raises(ValueError, match="unfinished"):
+        later.submit(desk.intent("supply"))
+    with pytest.raises(ValueError, match="unfinished"):
+        later.finish()
+
+
+@pytest.mark.parametrize("stage", ["signed", "prepared", "broadcast", "receipt", "commit"])
+def test_interrupted_signed_step_is_resolved_once_without_a_new_step(desk, stage):
+    interrupted = desk.runtime(crash_at(stage, "approve"))
+    interrupted.submit(desk.intent("supply"), REQUEST)
+    with pytest.raises(Interrupted, match=stage):
+        interrupted.execute()
+
+    resumed = desk.runtime()
+    state = resumed.recover()
+    approve = desk.gateway.outcome("approve").tx_hash
+    if stage == "signed":
+        # Signed bytes were never recorded, so nothing was broadcast or retained.
+        assert state.pending is None and desk.gateway.broadcasts == []
+    else:
+        assert desk.kinds() == ["approve"] and desk.gateway.broadcasts == [approve]
+    # Recovery neither plans nor signs the supply the operator has not resumed.
+    assert state.decision is not None and state.pending is None
+
+    resumed.execute()
+    assert desk.kinds() == ["approve", "supply"]
+    assert desk.gateway.broadcasts == [approve, desk.gateway.outcome("supply").tx_hash]
+
+
+def test_executed_request_identity_cannot_be_repeated(desk):
+    runtime = desk.runtime()
+    runtime.submit(desk.intent("supply"), REQUEST)
+    runtime.execute()
+    with pytest.raises(ValueError, match="already executed"):
+        runtime.submit(desk.intent("withdraw"), REQUEST)
+
+
+def test_a_request_has_no_capability_amount_ceiling(desk):
+    # Scope-only authority (blueprint 27): capabilities carry no amount, so admission
+    # takes any supply size; the gateway's balance check bounds it at planning.
+    supply = desk.intent("supply")
+    above = supply.amount.model_copy(update={"amount": supply.amount.amount * 1000})
+    desk.runtime().submit(supply.model_copy(update={"amount": above}), REQUEST)
+    assert desk.store.load().decision.intent.amount == above
+
+
+def test_execute_requires_an_admitted_request(desk):
+    runtime = desk.runtime()
+    runtime.recover()
+    with pytest.raises(ValueError, match="no operator request"):
+        runtime.execute()
+    with pytest.raises(ValueError, match="preview requires"):
+        runtime.preview()
+
+
+def admitted(desk):
+    runtime = desk.runtime()
+    before = runtime.recover()
+    runtime.submit(desk.intent("supply"), REQUEST)
+    return before, desk.store.load()
+
+
+def test_gateway_refuses_operator_requests_on_a_strategy_deployment(
+    tmp_path, recorded, reference_strategy, desk
+):
+    before, after = admitted(desk)
+    journal = Journal(tmp_path / "strategy.sqlite")
+    journal.create(recorded.config, reference_strategy)
+    service = GatewayService(recorded.config, journal.path, desk.gateway, lease_seconds=2)
+    strategy = journal.load().model_copy(update={"initialized": True, "baseline": before.baseline})
+    with pytest.raises(ValueError, match="admit only each other"):
+        service.validate_update(strategy, strategy.model_copy(update={"decision": after.decision}))
+
+
+def test_gateway_refuses_scheduled_decisions_on_an_operator_deployment(desk):
+    before, after = admitted(desk)
+    event = IntervalEvent(started_at=START, due_at=START)
+    interval = after.decision.model_copy(update={"trigger": event})
+    with pytest.raises(ValueError, match="admit only each other"):
+        desk.service.validate_update(before, before.model_copy(update={"decision": interval}))
+    schedule = DecisionSchedule().after(before.config.decision_trigger, event)
+    with pytest.raises(ValueError, match="no decision schedule"):
+        desk.service.validate_update(before, before.model_copy(update={"schedule": schedule}))
+
+
+def test_gateway_refuses_memory_and_kind_changes(desk, recorded):
+    before, _ = admitted(desk)
+    with pytest.raises(ValueError, match="no strategy memory"):
+        desk.service.validate_update(before, before.model_copy(update={"memory": recorded.memory}))
+    with pytest.raises(ValueError, match="immutable deployment identity"):
+        desk.service.validate_update(before, before.model_copy(update={"operator": False}))
+
+
+def test_gateway_admits_requests_only_when_idle_and_not_increasing_teardown(desk):
+    before, after = admitted(desk)
+    uninitialized = before.model_copy(update={"initialized": False, "baseline": ()})
+    with pytest.raises(ValueError, match="idle initialized"):
+        desk.service.validate_operator_admission(uninitialized, after)
+    teardown = before.model_copy(update={"mode": "teardown"})
+    with pytest.raises(ValueError, match="reduce exposure"):
+        desk.service.validate_operator_admission(teardown, after)
+
+
+def with_outcome(desk, before, **changes):
+    outcome = desk.recorded.outcomes[0].model_copy(update=changes)
+    return before.model_copy(update={"outcomes": (outcome,), "delivered": 1})
+
+
+def test_unexplained_movements_block_new_exposure_in_gateway_and_runtime(desk):
+    before, after = admitted(desk)
+    tainted = with_outcome(desk, before, accounting_issues=("unexplained transfer",))
+    with pytest.raises(ValueError, match=r"issue \(unexplained transfer\) blocks new exposure"):
+        desk.service.validate_operator_admission(tainted, after)
+    withdraw = after.decision.model_copy(update={"intent": desk.intent("withdraw")})
+    desk.service.validate_operator_admission(
+        tainted, after.model_copy(update={"decision": withdraw})
+    )
+    desk.store.update(lambda _: tainted)
+    with pytest.raises(DataError, match=r"issue \(unexplained transfer\) blocks new exposure"):
+        desk.runtime().submit(desk.intent("supply"), "b2" * 16)
+
+
+def test_reverted_step_leaves_the_next_request_to_the_operator(desk):
+    before, after = admitted(desk)
+    reverted = with_outcome(desk, before, success=False)
+    desk.service.validate_operator_admission(reverted, after)
+
+
+def test_gateway_mode_must_match_the_durable_deployment(
+    tmp_path, recorded, reference_strategy, desk
+):
+    strategy_gateway = GatewayService.__new__(GatewayService)
+    strategy_gateway.__dict__.update(desk.service.__dict__, operator_actions=False)
+    with pytest.raises(ValueError, match="operator mode differs"):
+        strategy_gateway.check(desk.store.load())
+    journal = Journal(tmp_path / "strategy.sqlite")
+    journal.create(recorded.config, reference_strategy)
+    with pytest.raises(ValueError, match="operator mode differs"):
+        GatewayService(
+            recorded.config, journal.path, desk.gateway, lease_seconds=2, operator_actions=True
+        )
+
+
+def test_create_shape_follows_the_gateway_mode(desk):
+    assert desk.service.request_fields("create") == set()
+    assert desk.service.request_fields("state") == set()
+    strategy_gateway = GatewayService.__new__(GatewayService)
+    strategy_gateway.operator_actions = False
+    assert strategy_gateway.request_fields("create") == {"strategy"}
+
+
+def test_connectors_without_the_marker_refuse_operator_deployments(tmp_path):
+    from almanak.connectors.aave_v4.state import Checkpoint as AaveCheckpoint
+    from almanak.connectors.uniswap_v3.state import Checkpoint as UniswapCheckpoint
+
+    assert supports_operator(AaveCheckpoint)
+    assert not supports_operator(UniswapCheckpoint)

@@ -1,0 +1,58 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only, including the production gas policy. Providers, account
+# bindings and the fork fixture are operator inputs:
+# examples/operators/uniswap_v3_optimism_lp.fork.yaml and
+# examples/operators/uniswap_v3_optimism_lp.production.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    position:
+      market: pool
+      account: fund
+      range:
+        lower: 197650
+        upper: 198650
+      capital:
+        asset: eip155:10/erc20:0x0b2c639c533813f4aa9d7837caf62653d097ff85
+        quantity:
+          base_units: 100000000
+      entry_swap_bps: 5000
+      hold_seconds: 300s
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+  gas:
+    # OP Mainnet (OP Stack) values; gas ceilings are chain-specific, never copy them to another chain.
+    # Sized from measured bids (16 October 2026): the highest bid over 100 blocks at this
+    # policy's percentile and multiplier was about 0.0014 gwei at the median and the L1 data
+    # fee bound about 7e10 wei, so 4.5e6 wei covers 3x that bid. max_transaction_fee =
+    # max_gas_limit x max_gas_price_wei + 5e11 wei for the L1 data fee, about 3x the cost
+    # at that bid and well inside the 20x gas_ceiling_oversized factor;
+    # exit_reserve >= 5 exit fees; total_budget >= 4 entry fees + exit_reserve.
+    # Above max_gas_price_wei every transaction, exits included, waits for gas to fall;
+    # nothing is lost.
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:10
+      source: network_rpc_fee_history
+      reward_percentile: 50
+      base_fee_multiplier_bps: 20000
+      max_gas_price_wei: 4500000
+      max_gas_limit: 1000000
+      gas_limit_buffer_bps: 2500
+      max_transaction_fee:
+        base_units: 5000000000000
+      total_budget:
+        base_units: 55000000000000
+      exit_reserve:
+        base_units: 25000000000000
+markets:
+  pool:
+    connector: uniswap_v3
+    chain: eip155:10
+    pool: '0x1fb3cf6e48f1e7b10213e7b6d87d4c073c7fdb7b'
+accounts:
+  fund:
+    chain: eip155:10

@@ -1,1 +1,0 @@
-"""Pyth integration metadata."""

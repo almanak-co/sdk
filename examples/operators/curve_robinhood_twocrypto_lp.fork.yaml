@@ -1,0 +1,54 @@
+# Operator execution context for a fork run of strategies/curve_robinhood_twocrypto_lp. Provider
+# credentials stay in the selected --env-file. The account bindings are
+# placeholders: fork provisioning generates the actual fixture accounts, and a
+# production run requires reviewed bindings and signing files outside
+# strategy-readable paths.
+schema_version: operator-gateway-config-v1
+modes:
+- fork
+networks:
+- chain: eip155:4663
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: proportional
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:4663
+          environment: mainnet
+        address: '0x0000000000000000000000000000000000000001'
+  - name: single_coin
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:4663
+          environment: mainnet
+        address: '0x0000000000000000000000000000000000000002'
+fork:
+  anchors:
+  - chain: eip155:4663
+    height: 57446777
+    reference: '0x510483031ee8660f721d0020597e015985bda9cc6635ce1d8b1c707dd3be553b'
+  funds:
+  - kind: safe_roles
+    account: proportional
+    operator: operator
+    assets:
+    - asset: eip155:4663/erc20:0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec
+      amount: 100000000000000
+  - kind: safe_roles
+    account: single_coin
+    operator: operator
+    assets:
+    - asset: eip155:4663/erc20:0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec
+      amount: 100000000000000
+  operators:
+  - name: operator
+    native_balance:
+      asset: eip155:4663/slip44:60
+      amount: 1000000000000000000

@@ -1,0 +1,200 @@
+{
+  "eip155:1": {
+    "asset": "eip155:1/slip44:60",
+    "source": "network_rpc_fee_history",
+    "reward_percentile": 50,
+    "base_fee_multiplier_bps": 20000,
+    "max_gas_price_wei": 1000000000000,
+    "max_gas_limit": 2000000,
+    "max_transaction_fee": {
+      "asset": "eip155:1/slip44:60",
+      "amount": 200000000000000000
+    },
+    "total_budget": {
+      "asset": "eip155:1/slip44:60",
+      "amount": 1000000000000000000
+    },
+    "exit_reserve": {
+      "asset": "eip155:1/slip44:60",
+      "amount": 200000000000000000
+    },
+    "gas_limit_buffer_bps": 2500,
+    "base_fee_basis": "next_block"
+  },
+  "eip155:43114": {
+    "asset": "eip155:43114/slip44:9005",
+    "source": "network_rpc_fee_history",
+    "reward_percentile": 50,
+    "base_fee_multiplier_bps": 20000,
+    "max_gas_price_wei": 1000000000000,
+    "max_gas_limit": 2000000,
+    "max_transaction_fee": {
+      "asset": "eip155:43114/slip44:9005",
+      "amount": 200000000000000000
+    },
+    "total_budget": {
+      "asset": "eip155:43114/slip44:9005",
+      "amount": 1000000000000000000
+    },
+    "exit_reserve": {
+      "asset": "eip155:43114/slip44:9005",
+      "amount": 200000000000000000
+    },
+    "gas_limit_buffer_bps": 2500,
+    "base_fee_basis": "observed_block"
+  },
+  "eip155:42161": {
+    "asset": "eip155:42161/slip44:60",
+    "source": "network_rpc_fee_history",
+    "reward_percentile": 50,
+    "base_fee_multiplier_bps": 20000,
+    "max_gas_price_wei": 1000000000000,
+    "max_gas_limit": 2000000,
+    "max_transaction_fee": {
+      "asset": "eip155:42161/slip44:60",
+      "amount": 200000000000000000
+    },
+    "total_budget": {
+      "asset": "eip155:42161/slip44:60",
+      "amount": 1000000000000000000
+    },
+    "exit_reserve": {
+      "asset": "eip155:42161/slip44:60",
+      "amount": 200000000000000000
+    },
+    "gas_limit_buffer_bps": 2500,
+    "base_fee_basis": "observed_block"
+  },
+  "eip155:56": {
+    "asset": "eip155:56/slip44:714",
+    "source": "network_rpc_fee_history",
+    "reward_percentile": 50,
+    "base_fee_multiplier_bps": 20000,
+    "max_gas_price_wei": 1000000000000,
+    "max_gas_limit": 2000000,
+    "max_transaction_fee": {
+      "asset": "eip155:56/slip44:714",
+      "amount": 200000000000000000
+    },
+    "total_budget": {
+      "asset": "eip155:56/slip44:714",
+      "amount": 1000000000000000000
+    },
+    "exit_reserve": {
+      "asset": "eip155:56/slip44:714",
+      "amount": 200000000000000000
+    },
+    "gas_limit_buffer_bps": 2500,
+    "base_fee_basis": "observed_block"
+  },
+  "eip155:137": {
+    "asset": "eip155:137/slip44:966",
+    "source": "network_rpc_fee_history",
+    "reward_percentile": 50,
+    "base_fee_multiplier_bps": 20000,
+    "max_gas_price_wei": 5000000000000,
+    "max_gas_limit": 2000000,
+    "max_transaction_fee": {
+      "asset": "eip155:137/slip44:966",
+      "amount": 5000000000000000000
+    },
+    "total_budget": {
+      "asset": "eip155:137/slip44:966",
+      "amount": 9000000000000000000
+    },
+    "exit_reserve": {
+      "asset": "eip155:137/slip44:966",
+      "amount": 3000000000000000000
+    },
+    "gas_limit_buffer_bps": 2500,
+    "base_fee_basis": "observed_block"
+  },
+  "eip155:4663": {
+    "asset": "eip155:4663/slip44:60",
+    "source": "network_rpc_fee_history",
+    "reward_percentile": 50,
+    "base_fee_multiplier_bps": 20000,
+    "max_gas_price_wei": 1000000000000,
+    "max_gas_limit": 2000000,
+    "max_transaction_fee": {
+      "asset": "eip155:4663/slip44:60",
+      "amount": 200000000000000000
+    },
+    "total_budget": {
+      "asset": "eip155:4663/slip44:60",
+      "amount": 1000000000000000000
+    },
+    "exit_reserve": {
+      "asset": "eip155:4663/slip44:60",
+      "amount": 200000000000000000
+    },
+    "gas_limit_buffer_bps": 2500,
+    "base_fee_basis": "observed_block"
+  },
+  "eip155:999": {
+    "asset": "eip155:999/slip44:2457",
+    "source": "network_rpc_fee_history",
+    "reward_percentile": 50,
+    "base_fee_multiplier_bps": 20000,
+    "max_gas_price_wei": 50000000000,
+    "max_gas_limit": 2000000,
+    "max_transaction_fee": {
+      "asset": "eip155:999/slip44:2457",
+      "amount": 100000000000000000
+    },
+    "total_budget": {
+      "asset": "eip155:999/slip44:2457",
+      "amount": 1000000000000000000
+    },
+    "exit_reserve": {
+      "asset": "eip155:999/slip44:2457",
+      "amount": 200000000000000000
+    },
+    "gas_limit_buffer_bps": 2500,
+    "base_fee_basis": "next_block"
+  },
+  "eip155:8453": {
+    "asset": "eip155:8453/slip44:60",
+    "source": "network_rpc_fee_history",
+    "reward_percentile": 50,
+    "base_fee_multiplier_bps": 20000,
+    "max_gas_price_wei": 1000000000000,
+    "max_gas_limit": 2000000,
+    "max_transaction_fee": {
+      "asset": "eip155:8453/slip44:60",
+      "amount": 200000000000000000
+    },
+    "total_budget": {
+      "asset": "eip155:8453/slip44:60",
+      "amount": 1000000000000000000
+    },
+    "exit_reserve": {
+      "asset": "eip155:8453/slip44:60",
+      "amount": 200000000000000000
+    },
+    "gas_limit_buffer_bps": 2500,
+    "base_fee_basis": "next_block"
+  },
+  "eip155:10": {
+    "asset": "eip155:10/slip44:60",
+    "source": "network_rpc_fee_history",
+    "reward_percentile": 50,
+    "base_fee_multiplier_bps": 20000,
+    "max_gas_price_wei": 1000000000000,
+    "max_gas_limit": 2000000,
+    "max_transaction_fee": {
+      "asset": "eip155:10/slip44:60",
+      "amount": 200000000000000000
+    },
+    "total_budget": {
+      "asset": "eip155:10/slip44:60",
+      "amount": 1000000000000000000
+    },
+    "exit_reserve": {
+      "asset": "eip155:10/slip44:60",
+      "amount": 200000000000000000
+    },
+    "gas_limit_buffer_bps": 2500,
+    "base_fee_basis": "next_block"
+  }
+}

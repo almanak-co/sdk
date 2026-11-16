@@ -1,0 +1,147 @@
+{
+ "schema": "almanak-uniswap-v4-reviewed-hooks-v1",
+ "description": "Uniswap V4 hooks admitted by code after source review. Each pin is the full keccak of the runtime code, and for an ERC-1967 proxy of its implementation, observed at reviewed_at_block. Reviewed sources: FablesBaseHook with FablesRamp, FablesRampETH and FablesRWA; Uniswap Labs StablePairHook with BaseDynamicFeeHook; PonsV2MemeHook (identical Sourcify source for all three instances).",
+ "hooks": [
+  {
+   "chain": "eip155:1",
+   "profile": "uniswap-stable-pair",
+   "reviewed_at_block": 26154306,
+   "identity": {
+    "address": "0x0000113dcf4add69999fad8f20f2b63f979bfcc0",
+    "code_hash": "0xa5659fa6440c9830926d098ec347a558447bfd8e483643e0d02398dc4cff1685",
+    "implementation": "0x5f216d21b1c81346938eddc1df7e0111a0f64000",
+    "implementation_hash": "0x3d1bc5ca01e9acbf8b04adec8354b9c3a36df23d58f87050767ceff7bf43ae98",
+    "implementation_slot": 24440054405305269366569402256811496959409073762505157381672968839269610695612
+   }
+  },
+  {
+   "chain": "eip155:42161",
+   "profile": "uniswap-stable-pair",
+   "reviewed_at_block": 513171537,
+   "identity": {
+    "address": "0x630e9cac0fff557bd3a01daa111ed253c771bcc0",
+    "code_hash": "0xa5659fa6440c9830926d098ec347a558447bfd8e483643e0d02398dc4cff1685",
+    "implementation": "0x424e2f8d89eeab51af10669d149fbd4beb090000",
+    "implementation_hash": "0x782776e785e67c92389eacd2b79cfd763da9f69dfef2eccd8f413784235538fd",
+    "implementation_slot": 24440054405305269366569402256811496959409073762505157381672968839269610695612
+   }
+  },
+  {
+   "chain": "eip155:4663",
+   "profile": "fables-ramp-eth",
+   "reviewed_at_block": 84092173,
+   "identity": {
+    "address": "0x06a889870c8f83640d6816319f72e2aa579b6080",
+    "code_hash": "0x0430617b26dfc5c3f6be1e1733304c6050c6b6ba9d0fb950b57070b5b2a96db4"
+   }
+  },
+  {
+   "chain": "eip155:4663",
+   "profile": "fables-ramp",
+   "reviewed_at_block": 84092173,
+   "identity": {
+    "address": "0x08e52564bad99e05a694b4809f397edca417a080",
+    "code_hash": "0xbb52b2dc4a14fc6c3f90d0a268b51680d7adbdaa392b211bc524b6fd9368bb85"
+   }
+  },
+  {
+   "chain": "eip155:4663",
+   "profile": "fables-ramp-eth",
+   "reviewed_at_block": 84092173,
+   "identity": {
+    "address": "0x594e8e6281edf2d363a0293a50004cf868e7a080",
+    "code_hash": "0x4ef97bd8b342b9a23f1d29fbca064fb385bb089a503e4fdb1018f7970dc9e08e"
+   }
+  },
+  {
+   "chain": "eip155:4663",
+   "profile": "fables-rwa",
+   "reviewed_at_block": 84092173,
+   "identity": {
+    "address": "0x5eb87f69be00df39981622fd60a8de4b7837e080",
+    "code_hash": "0x577978ad29223268205cb40a5215c46839f5c27a1218beac7d4a0f7cd0aaa341"
+   }
+  },
+  {
+   "chain": "eip155:4663",
+   "profile": "fables-rwa",
+   "reviewed_at_block": 84092173,
+   "identity": {
+    "address": "0x66622f77b797d506e5376f7798b67ab288966080",
+    "code_hash": "0xe23b7cfc414c8f3e7405696db74100672a43a707d7156fcf6c4b0ba1a126d36a"
+   }
+  },
+  {
+   "chain": "eip155:4663",
+   "profile": "fables-rwa",
+   "reviewed_at_block": 84092173,
+   "identity": {
+    "address": "0x67d86050d22d574df046f3d90f722045f714e080",
+    "code_hash": "0xa40a02521b3a20e56851d833baf5baf0ee258e954c0f4e3f96e1bd30c8681db3"
+   }
+  },
+  {
+   "chain": "eip155:4663",
+   "profile": "fables-rwa",
+   "reviewed_at_block": 84092173,
+   "identity": {
+    "address": "0x70a9a88402989226847ec122043ce5e7ff462080",
+    "code_hash": "0x165ccaced1f37263fd1a36b051c43d1759bab3005c2f7083ab32ee2db3b217e3"
+   }
+  },
+  {
+   "chain": "eip155:4663",
+   "profile": "fables-rwa",
+   "reviewed_at_block": 84092173,
+   "identity": {
+    "address": "0x79576fbad6e83915630bbb5d5658483f05532080",
+    "code_hash": "0x165ccaced1f37263fd1a36b051c43d1759bab3005c2f7083ab32ee2db3b217e3"
+   }
+  },
+  {
+   "chain": "eip155:4663",
+   "profile": "fables-rwa",
+   "reviewed_at_block": 84092173,
+   "identity": {
+    "address": "0xa0e8fbff13e24af2b5e61a72800e08a161bde080",
+    "code_hash": "0x336405ef8a51dd6b02b53eb46fccddc87bf15dbd0a16b3d86fccc3e0298eca73"
+   }
+  },
+  {
+   "chain": "eip155:4663",
+   "profile": "fables-rwa",
+   "reviewed_at_block": 84092173,
+   "identity": {
+    "address": "0xb608a78761f179f7c56f15e7d13921b92f00a080",
+    "code_hash": "0x514b632f9bb987403ca7a3fb35780b2c092726a437c1efbb4479fd612549d25b"
+   }
+  },
+  {
+   "chain": "eip155:4663",
+   "profile": "pons-v2-meme",
+   "reviewed_at_block": 84092173,
+   "identity": {
+    "address": "0x332f85e7e323214b2d55286414b059ebb1f2a044",
+    "code_hash": "0x614fe1da4a767f591482fb8e263e5aed54f6e91ac4985f394e1272dd211e6492"
+   }
+  },
+  {
+   "chain": "eip155:4663",
+   "profile": "pons-v2-meme",
+   "reviewed_at_block": 84092173,
+   "identity": {
+    "address": "0x57387759ea3a3116330f4bd2cae48b03091a2044",
+    "code_hash": "0x220c0308bd843aae9034c93e2b9f18b3298265248277a2d9e6355e3ecdc168b7"
+   }
+  },
+  {
+   "chain": "eip155:4663",
+   "profile": "pons-v2-meme",
+   "reviewed_at_block": 84092173,
+   "identity": {
+    "address": "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044",
+    "code_hash": "0xc21b1e6c1b45403e81a581f22ed6d9c747997af1cfdac1b1dc9f4b1d346a10db"
+   }
+  }
+ ]
+}

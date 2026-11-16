@@ -1,0 +1,78 @@
+{
+  "source": {
+    "kind": "rpc_url",
+    "url_env": "AVALANCHE_RPC_URL"
+  },
+  "block": {
+    "chain": {
+      "chain_id": "eip155:43114",
+      "environment": "mainnet"
+    },
+    "number": 94587865,
+    "hash": "0xb201e3722ca722f94d2b37d45c0ed9b7906e3d862de9bbe3183ce8cb1507d780",
+    "timestamp": 1788674252
+  },
+  "transaction": {
+    "from": "0x1212121212121212121212121212121212121212",
+    "to": "0x1212121212121212121212121212121212121212",
+    "value": "0x0"
+  },
+  "history": {
+    "oldestBlock": "0x5a34bd9",
+    "reward": [
+      [
+        "0x0"
+      ]
+    ],
+    "baseFeePerGas": [
+      "0x5f5b761"
+    ],
+    "gasUsedRatio": [
+      0.058032725
+    ]
+  },
+  "policy": {
+    "accounts": [
+      "avalanche_fund"
+    ],
+    "asset": "eip155:43114/slip44:9005",
+    "source": "network_rpc_fee_history",
+    "base_fee_basis": "observed_block",
+    "reward_percentile": 50,
+    "base_fee_multiplier_bps": 20000,
+    "max_gas_price_wei": 1000000000000,
+    "max_gas_limit": 2000000,
+    "max_transaction_fee": {
+      "asset": "eip155:43114/slip44:9005",
+      "amount": 200000000000000000
+    },
+    "total_budget": {
+      "asset": "eip155:43114/slip44:9005",
+      "amount": 1000000000000000000
+    },
+    "exit_reserve": {
+      "asset": "eip155:43114/slip44:9005",
+      "amount": 200000000000000000
+    },
+    "gas_limit_buffer_bps": 2500
+  },
+  "quote": {
+    "gas_estimate": 21000,
+    "gas": 26250,
+    "gas_price": 199978690,
+    "fee_quote": {
+      "block": {
+        "chain": {
+          "chain_id": "eip155:43114",
+          "environment": "mainnet"
+        },
+        "number": 94587865,
+        "hash": "0xb201e3722ca722f94d2b37d45c0ed9b7906e3d862de9bbe3183ce8cb1507d780",
+        "timestamp": 1788674252
+      },
+      "priority_fee": 0,
+      "observed_base_fee": 99989345
+    }
+  },
+  "verification": "Read-only RPC fee history and eth_estimateGas; no signing or submission."
+}

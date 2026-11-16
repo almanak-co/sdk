@@ -1,0 +1,101 @@
+name: PR
+
+on:
+  # Stacked PRs target their preceding branch and need the same gates.
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# github.ref is refs/pull/<n>/merge here, so the group is per PR and a newer
+# push cancels the superseded run. Branch protection evaluates the head commit.
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    uses: ./.github/workflows/template_lint.yml
+
+  typecheck:
+    uses: ./.github/workflows/template_typecheck.yml
+
+  changes:
+    name: "Detect relevant changes"
+    runs-on: ubuntu-22.04
+    outputs:
+      code_relevant: ${{ steps.filter.outputs.code_relevant }}
+      docs_relevant: ${{ steps.filter.outputs.docs_relevant }}
+    steps:
+      # Credentials stay on this checkout: paths-filter's git fallback fetches
+      # the base commit from origin.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          # The checked-out repository is used for change detection; the PR
+          # files API can reject a scoped GITHUB_TOKEN.
+          token: ""
+          filters: |
+            code_relevant:
+              - '**'
+              - '!docs/**'
+              - '!**/*.md'
+              - '!mkdocs.yml'
+              - '!mkdocs-llms.yml'
+              - '!.github/**/*.md'
+              - '!CHANGELOG.md'
+            # mkdocstrings renders src/**, and the CLI and support pages are
+            # generated from the package, so code changes can break the site.
+            docs_relevant:
+              - '**'
+              - '!tests/**'
+              - '!.github/**'
+              - '!CHANGELOG.md'
+
+  # test_pytest / test, test_linux / smoke, test_macos / smoke, test_strat / test
+  # and docs / docs are the required status checks. They are gated through the
+  # template `skip` input, never a job-level `if:`, so they always report.
+  test_pytest:
+    needs: changes
+    uses: ./.github/workflows/template_pytest.yml
+    with:
+      skip: ${{ needs.changes.outputs.code_relevant != 'true' }}
+
+  # Diff-scoped: fails when the PR changes an executable line inside a function
+  # whose CRAP score exceeds the limit under the hosted-CI coverage scope, and
+  # when src/ statement coverage falls below its `[tool.crap]` floor.
+  crap_gate:
+    needs: [changes, test_pytest]
+    uses: ./.github/workflows/template_crap.yml
+    with:
+      skip: ${{ needs.changes.outputs.code_relevant != 'true' }}
+      base_ref: ${{ github.base_ref }}
+
+  test_linux:
+    needs: changes
+    uses: ./.github/workflows/template_platform_test.yml
+    with:
+      os: ubuntu-22.04
+      skip: ${{ needs.changes.outputs.code_relevant != 'true' }}
+
+  test_macos:
+    needs: changes
+    uses: ./.github/workflows/template_platform_test.yml
+    with:
+      os: macos-15
+      advisory: true
+      skip: ${{ needs.changes.outputs.code_relevant != 'true' }}
+
+  test_strat:
+    needs: changes
+    uses: ./.github/workflows/template_strat_test.yml
+    with:
+      skip: ${{ needs.changes.outputs.code_relevant != 'true' }}
+
+  docs:
+    needs: changes
+    uses: ./.github/workflows/template_docs.yml
+    with:
+      skip: ${{ needs.changes.outputs.docs_relevant != 'true' }}

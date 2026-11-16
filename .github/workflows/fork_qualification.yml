@@ -1,0 +1,269 @@
+name: Fork Qualification
+
+# Runs the discovered fork lifecycle and the production EOA rehearsal for named
+# references on hosted runners, against identified Anvil forks of the
+# repository's Alchemy provider. The default selection is the authoring
+# references still listed in tests/strategy_fork/rehearsal.py::UNREHEARSED:
+# this run is the fork qualification that lets one leave that set. It spends
+# no funds and installs no production permissions: fixture accounts are public
+# Foundry test keys on loopback forks.
+#
+# The weekly schedule runs on main (scheduled runs use the default branch) and
+# selects every reference with a market on a connector/chain cell the checked-out
+# connectors declare for production, with the lifecycle and the rehearsal.
+# Keeper-settled GMX references replay retained signed oracle reports from the
+# pinned evidence copies (tests/fixtures/evidence.json). A scheduled failure opens or updates one GitHub issue; a failed
+# run is not proof of support, and a passing run is not a complete per-cell
+# evidence package.
+on:
+  schedule:
+    # Sundays 03:17 UTC, outside working hours for the shared larger runners.
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      references:
+        description: "Comma-separated strategy directory names under strategies/ to qualify."
+        required: true
+        type: string
+        default: "aerodrome_slipstream_base_lp_band,pancakeswap_v3_bnb_lp_band,uniswap_v3_robinhood_lp_band,uniswap_v4_robinhood_lp_band"
+      lifecycle:
+        description: "Run the Safe/Roles fork lifecycle (configured and distinct operator variants)."
+        required: false
+        type: boolean
+        default: true
+      rehearsal:
+        description: "Run the production EOA rehearsal on an identified fork."
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# One weekly run at a time; a dispatched run is never queued behind it.
+concurrency:
+  group: fork-qualification-${{ github.event_name == 'schedule' && 'weekly' || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  select:
+    runs-on: ubuntu-22.04
+    outputs:
+      references: ${{ steps.matrix.outputs.references }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-repo
+
+      # The rehearsal applies only where the checked-out connectors declare
+      # production EOA support for the reference's chains; other references
+      # qualify through the fork lifecycle alone, and the script says which.
+      # Each entry carries the exact pytest node IDs its job runs. A scheduled
+      # run has no inputs: it derives its references from the connector support
+      # declarations and refuses an empty or partial selection.
+      - name: Build the reference matrix
+        id: matrix
+        env:
+          EVENT: ${{ github.event_name }}
+          REFERENCES: ${{ inputs.references }}
+          LIFECYCLE: ${{ inputs.lifecycle }}
+          REHEARSAL: ${{ inputs.rehearsal }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "schedule" ]; then
+            uv run --locked python -m scripts.ci.fork_qualification_matrix \
+              --lifecycle --rehearsal --production-cells --summary "$GITHUB_STEP_SUMMARY" > matrix.json
+          else
+            flags=()
+            [ "$LIFECYCLE" = "true" ] && flags+=(--lifecycle)
+            [ "$REHEARSAL" = "true" ] && flags+=(--rehearsal)
+            uv run --locked python -m scripts.ci.fork_qualification_matrix "${flags[@]}" -- "$REFERENCES" > matrix.json
+          fi
+          echo "references=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "Selected references: $(cat matrix.json)"
+
+  qualify:
+    name: "qualify ${{ matrix.reference }}"
+    needs: [select]
+    runs-on: ubuntu-latest-l
+    permissions:
+      contents: read
+    # Band lifecycles allow up to ten minutes for entry and ten for teardown per
+    # case, and one reference runs three cases; the budget keeps twice that headroom.
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      # Each job is a separate provider client on the shared larger runners. The
+      # bound is static (GitHub drops a matrix whose max-parallel is an input
+      # expression) and covers every dispatched selection so far in one wave.
+      max-parallel: 24
+      matrix:
+        include: ${{ fromJSON(needs.select.outputs.references) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-repo
+        with:
+          install-bwrap: "true"
+
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1
+        with:
+          version: stable
+          cache: false
+
+      - name: Verify Anvil
+        run: anvil --version
+
+      # Keeper-settled GMX lifecycles replay retained signed oracle reports. They
+      # read the copies committed under tests/fixtures/evidence/, pinned in
+      # tests/fixtures/evidence.json; a missing or changed copy fails the job
+      # instead of skipping its cases.
+      - name: Verify pinned evidence copies
+        run: make fixtures
+
+      # The provider key reaches the suite only through the selected env file,
+      # which the fork proxy reads; Anvil forks the loopback proxy, so no
+      # process argument or retained artifact carries the upstream endpoint.
+      - name: Write the provider env file
+        env:
+          ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ALCHEMY_API_KEY" ]; then
+            echo "::error::the ALCHEMY_API_KEY secret is not available to this run"
+            exit 1
+          fi
+          install -m 600 /dev/null "$RUNNER_TEMP/fork.env"
+          printf 'ALCHEMY_API_KEY=%s\n' "$ALCHEMY_API_KEY" >> "$RUNNER_TEMP/fork.env"
+
+      - name: Run the fork qualification
+        env:
+          REFERENCE: ${{ matrix.reference }}
+          # Reference names are [a-z0-9_]+, so node IDs contain no spaces.
+          NODES: ${{ join(matrix.nodes, ' ') }}
+          # Only a reference still listed in UNREHEARSED needs the override; an
+          # already rehearsed one is in the default selection, which refuses the name.
+          ALMANAK_REHEARSAL_QUALIFY: ${{ matrix.qualify && matrix.reference || '' }}
+        run: |
+          set -euo pipefail
+          read -ra nodes <<< "$NODES"
+          # Without node IDs pytest would run its whole default test path.
+          if [ "${#nodes[@]}" -eq 0 ]; then
+            echo "::error::nothing to run: the lifecycle is off and the rehearsal does not apply to $REFERENCE"
+            exit 1
+          fi
+          # Explicit node IDs select exactly this reference's cases. A `-k`
+          # expression matches substrings, so `base_borrow_and_trade]` would
+          # also select `ethereum_base_borrow_and_trade`. Pytest exits nonzero
+          # for a node ID it does not collect. Cases run serially.
+          set +e
+          uv run --locked pytest "${nodes[@]}" -p no:cacheprovider \
+            --fork-env="$RUNNER_TEMP/fork.env" \
+            -rfEs -v \
+            --junitxml=fork-qualification.xml 2>&1 | tee fork-qualification.log
+          status=${PIPESTATUS[0]}
+          set -e
+          test -f fork-qualification.xml || { echo "::error::no junit report"; exit 1; }
+          if grep -q '<skipped' fork-qualification.xml; then
+            echo "::error::a selected qualification case was skipped; skips are not passes"
+            exit 1
+          fi
+          exit "$status"
+
+      # Retained evidence must never carry the provider key. The check compares
+      # file contents against the secret without printing either.
+      - name: Refuse evidence that carries the provider key
+        if: always()
+        env:
+          ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -d artifacts ] && grep -rqF -- "$ALCHEMY_API_KEY" artifacts fork-qualification.log fork-qualification.xml 2>/dev/null; then
+            echo "::error::retained evidence contains the provider key; nothing is uploaded"
+            rm -rf artifacts fork-qualification.log fork-qualification.xml
+            exit 1
+          fi
+
+      - name: Report qualification results
+        if: always()
+        env:
+          REFERENCE: ${{ matrix.reference }}
+        run: |
+          {
+            echo "## Fork qualification: \`$REFERENCE\`"
+            echo
+            echo "Commit \`${GITHUB_SHA}\`; cases run serially on identified Anvil forks; no funds spent."
+            echo
+            echo '```'
+            grep -E '^(tests/.* (PASSED|FAILED|ERROR|SKIPPED))|^(FAILED|ERROR) |^=+ .*(passed|failed|error|skipped).* =+$' fork-qualification.log || echo "no pytest results recorded"
+            echo '```'
+            echo
+            echo 'Evidence: the `fork-qualification-<reference>` artifact holds each case directory from `artifacts/strategy-fork/` (result.json, checkpoint, report, permission manifests, dashboard) plus the pytest log and junit.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fork-qualification-${{ matrix.reference }}
+          path: |
+            artifacts/strategy-fork/
+            fork-qualification.log
+            fork-qualification.xml
+          if-no-files-found: warn
+          retention-days: 90
+
+  # A scheduled failure must be seen without anyone opening the Actions tab. The
+  # repository has no chat notification, so one open issue carries every failed
+  # weekly run as a comment until a passing run closes it.
+  report:
+    needs: [select, qualify]
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - name: Open, update or close the weekly failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECT: ${{ needs.select.result }}
+          QUALIFY: ${{ needs.qualify.result }}
+          TITLE: "Weekly Fork Qualification failed on main"
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 \
+            --json number,title | jq -r --arg title "$TITLE" '[.[] | select(.title == $title)][0].number // empty')
+          if [ "$SELECT" = "success" ] && [ "$QUALIFY" = "success" ]; then
+            echo "## Weekly fork qualification passed on \`$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+            if [ -n "$open" ]; then
+              gh issue close "$open" --repo "$GITHUB_REPOSITORY" \
+                --comment "The weekly run $RUN_URL on \`$GITHUB_SHA\` passed every selected reference."
+            fi
+            exit 0
+          fi
+          failed=$(gh run view "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --json jobs \
+            --jq '.jobs[] | select(.conclusion != "success" and .conclusion != "skipped" and .name != "report") | "- `\(.name)`: \(.conclusion // "unfinished")"')
+          body=$(printf '%s\n\n%s\n\n%s\n%s\n' \
+            "The weekly Fork Qualification run $RUN_URL on \`$GITHUB_SHA\` failed (select: $SELECT, qualify: $QUALIFY)." \
+            "A failed scheduled run is not proof of support. Fixture accounts are public Foundry test keys on identified forks; no funds were spent and no production permissions were installed." \
+            "Jobs that did not pass:" \
+            "${failed:-- none recorded; see the run}")
+          {
+            echo "## Weekly fork qualification failed"
+            echo
+            echo "$body"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$body"
+          fi
+          echo "::error::the weekly fork qualification failed; see $RUN_URL"
+          exit 1

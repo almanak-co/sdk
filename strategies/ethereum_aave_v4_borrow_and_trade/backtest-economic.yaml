@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+mode: economic
+window:
+  start: '2026-09-05T00:00:00Z'
+  end: '2026-09-05T00:00:30Z'
+  end_policy: teardown
+  cleanup: 60s
+inventory:
+  funds:
+    fund:
+      balances:
+      - asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+        quantity: '0.01'
+      - asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+        quantity: '1'
+      - asset: eip155:1/slip44:60
+        quantity: '5'
+execution:
+  latency: 1s
+  models:
+    aave_v4: {}
+    uniswap_v4:
+      swap_model: prepared_integer_pool
+      liquidity_model: null
+data:
+  connectors:
+    aave_v4:
+      source: aave_v4_archive
+      rate_sample_seconds: 60s
+      risk_prices: spoke_oracle_events
+    uniswap_v4:
+      sample_seconds: 60s
+      max_age_seconds: 72s
+      max_samples: 10
+      max_bitmap_words: 16
+      max_initialized_ticks: 2048
+      coverage:
+      - allocation: trade
+        lower: 190000
+        upper: 210000
+costs:
+  aave_v4:
+    kind: excluded
+  uniswap_v4:
+    kind: excluded

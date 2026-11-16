@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Curve pool position",
+  "description": "Capital names every resolved pool coin in its verified order. An absent single_coin_exit withdraws proportionally.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "market",
+    "account",
+    "funding_asset",
+    "trading_asset",
+    "liquidity_enabled",
+    "capital",
+    "entry_swap_bps",
+    "slippage_bps",
+    "deadline_seconds",
+    "minimum_native_balance"
+  ],
+  "properties": {
+    "market": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "account": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "funding_asset": {
+      "$ref": "#/$defs/AssetType"
+    },
+    "trading_asset": {
+      "$ref": "#/$defs/AssetType"
+    },
+    "liquidity_enabled": {
+      "type": "boolean"
+    },
+    "single_coin_exit": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AssetType"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "capital": {
+      "$ref": "#/$defs/Amounts"
+    },
+    "entry_swap_bps": {
+      "description": "Share of capital each entry quote offers from the funding asset, capped by the funding inventory held; entries repeat while funding remains. 0 offers no entry quote: use it for a liquidity allocation that deposits without an entry swap. A trading allocation requires at least 1.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "hold_seconds": {
+      "anyOf": [
+        {
+          "$ref": "../strategy.schema.json#/$defs/PositiveDuration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional. Read only by strategy code for its own timed exit; connectors never act on it. Omit to hold until teardown."
+    },
+    "slippage_bps": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9999
+    },
+    "deadline_seconds": {
+      "$ref": "../strategy.schema.json#/$defs/PositiveDuration"
+    },
+    "minimum_native_balance": {
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    }
+  },
+  "$defs": {
+    "AssetType": {
+      "type": "string",
+      "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+    },
+    "Amounts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "asset",
+          "quantity"
+        ],
+        "properties": {
+          "asset": {
+            "$ref": "#/$defs/AssetType"
+          },
+          "quantity": {
+            "$ref": "../strategy.schema.json#/$defs/Quantity"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "liquidity_enabled": {
+            "const": false
+          }
+        },
+        "required": [
+          "liquidity_enabled"
+        ]
+      },
+      "then": {
+        "properties": {
+          "entry_swap_bps": {
+            "minimum": 1
+          }
+        }
+      }
+    }
+  ]
+}

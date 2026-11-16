@@ -1,0 +1,11 @@
+{
+  "kind": "aave_v4",
+  "chain": {
+    "chain_id": "eip155:1",
+    "environment": "mainnet"
+  },
+  "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+  "reserve_id": 0,
+  "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+  "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+}

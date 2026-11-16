@@ -1,1 +1,0 @@
-"""Almanak standalone services."""

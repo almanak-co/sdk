@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+mode: economic
+window:
+  start: '2026-10-12T00:00:00Z'
+  end: '2026-10-13T00:00:00Z'
+  end_policy: teardown
+  cleanup: 3600s
+inventory:
+  funds:
+    trading:
+      balances:
+      - asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+        quantity: '0.05'
+      - asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+        quantity: '0'
+execution:
+  latency: 30s
+  decision_interval: 3600s
+  models:
+    swap_model: prepared_integer_pool
+data:
+  sample_seconds: 3600s
+  max_age_seconds: 3660s
+  max_samples: 26
+  max_bitmap_words: 16
+  max_initialized_ticks: 2048
+  coverage:
+  - allocation: trading
+    lower: -201000
+    upper: -195000
+costs:
+  kind: excluded

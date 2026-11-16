@@ -1,0 +1,363 @@
+{
+  "pool": {
+    "runtime_length": 22142,
+    "normalized_code_hash": "0x625b6d8f5997d0c283ff977419660c618cb36c48553129d0ecbb8c7bcde0c9ca",
+    "immutables": {
+      "factory": [
+        {
+          "length": 32,
+          "start": 8315
+        },
+        {
+          "length": 32,
+          "start": 8829
+        },
+        {
+          "length": 32,
+          "start": 10457
+        }
+      ],
+      "token0": [
+        {
+          "length": 32,
+          "start": 2258
+        },
+        {
+          "length": 32,
+          "start": 4853
+        },
+        {
+          "length": 32,
+          "start": 6740
+        },
+        {
+          "length": 32,
+          "start": 7822
+        },
+        {
+          "length": 32,
+          "start": 9150
+        },
+        {
+          "length": 32,
+          "start": 15650
+        }
+      ],
+      "token1": [
+        {
+          "length": 32,
+          "start": 4551
+        },
+        {
+          "length": 32,
+          "start": 6789
+        },
+        {
+          "length": 32,
+          "start": 7924
+        },
+        {
+          "length": 32,
+          "start": 9284
+        },
+        {
+          "length": 32,
+          "start": 10529
+        },
+        {
+          "length": 32,
+          "start": 15979
+        }
+      ],
+      "fee": [
+        {
+          "length": 32,
+          "start": 3311
+        },
+        {
+          "length": 32,
+          "start": 6603
+        },
+        {
+          "length": 32,
+          "start": 6658
+        },
+        {
+          "length": 32,
+          "start": 10565
+        }
+      ],
+      "tickSpacing": [
+        {
+          "length": 32,
+          "start": 3072
+        },
+        {
+          "length": 32,
+          "start": 10493
+        },
+        {
+          "length": 32,
+          "start": 19402
+        },
+        {
+          "length": 32,
+          "start": 19452
+        }
+      ],
+      "maxLiquidityPerTick": [
+        {
+          "length": 32,
+          "start": 8174
+        },
+        {
+          "length": 32,
+          "start": 19295
+        },
+        {
+          "length": 32,
+          "start": 19350
+        }
+      ],
+      "original": [
+        {
+          "length": 32,
+          "start": 11259
+        }
+      ]
+    },
+    "compiler_input_sha256": "f87cda6bc62703e31dea3ac8929b38867e1c07c23eaf138abf222ff6ab4d4716"
+  },
+  "position_manager": {
+    "runtime_length": 24384,
+    "normalized_code_hash": "0x3247cdc75425fff3d9842c11743e686e336762388649ab50eeb22e9365616463",
+    "immutables": {
+      "_tokenDescriptor": [
+        {
+          "length": 32,
+          "start": 10883
+        }
+      ],
+      "nameHash": [
+        {
+          "length": 32,
+          "start": 5342
+        }
+      ],
+      "versionHash": [
+        {
+          "length": 32,
+          "start": 5375
+        }
+      ],
+      "factory": [
+        {
+          "length": 32,
+          "start": 2727
+        },
+        {
+          "length": 32,
+          "start": 3550
+        },
+        {
+          "length": 32,
+          "start": 3749
+        },
+        {
+          "length": 32,
+          "start": 10781
+        },
+        {
+          "length": 32,
+          "start": 11043
+        },
+        {
+          "length": 32,
+          "start": 11844
+        },
+        {
+          "length": 32,
+          "start": 14049
+        }
+      ],
+      "WETH9": [
+        {
+          "length": 32,
+          "start": 665
+        },
+        {
+          "length": 32,
+          "start": 5912
+        },
+        {
+          "length": 32,
+          "start": 6158
+        },
+        {
+          "length": 32,
+          "start": 6294
+        },
+        {
+          "length": 32,
+          "start": 15965
+        },
+        {
+          "length": 32,
+          "start": 16035
+        },
+        {
+          "length": 32,
+          "start": 16151
+        }
+      ]
+    },
+    "compiler_input_sha256": "f516447ca081c59d8a11e82fceab9e035f0a37e778eb4a548775aadf76af29da"
+  },
+  "router": {
+    "runtime_length": 24497,
+    "normalized_code_hash": "0xe9acc1f5b963bf7640c14bb9547d82f5bf3b6f6cc82fb30189767a973fbd34b1",
+    "immutables": {
+      "factory": [
+        {
+          "length": 32,
+          "start": 7756
+        },
+        {
+          "length": 32,
+          "start": 9439
+        },
+        {
+          "length": 32,
+          "start": 15579
+        }
+      ],
+      "WETH9": [
+        {
+          "length": 32,
+          "start": 705
+        },
+        {
+          "length": 32,
+          "start": 2876
+        },
+        {
+          "length": 32,
+          "start": 4781
+        },
+        {
+          "length": 32,
+          "start": 5079
+        },
+        {
+          "length": 32,
+          "start": 5246
+        },
+        {
+          "length": 32,
+          "start": 5807
+        },
+        {
+          "length": 32,
+          "start": 6105
+        },
+        {
+          "length": 32,
+          "start": 11663
+        },
+        {
+          "length": 32,
+          "start": 11759
+        },
+        {
+          "length": 32,
+          "start": 11888
+        }
+      ],
+      "factoryV2": [
+        {
+          "length": 32,
+          "start": 3170
+        },
+        {
+          "length": 32,
+          "start": 3382
+        },
+        {
+          "length": 32,
+          "start": 4066
+        },
+        {
+          "length": 32,
+          "start": 5707
+        },
+        {
+          "length": 32,
+          "start": 12226
+        },
+        {
+          "length": 32,
+          "start": 12677
+        }
+      ],
+      "positionManager": [
+        {
+          "length": 32,
+          "start": 5743
+        },
+        {
+          "length": 32,
+          "start": 6938
+        },
+        {
+          "length": 32,
+          "start": 7836
+        },
+        {
+          "length": 32,
+          "start": 12966
+        }
+      ]
+    },
+    "compiler_input_sha256": "a861f70e9ff00fdafe46bc09b619e79fd1cefdce4343632e519dd5ec762e709a"
+  },
+  "quoter": {
+    "runtime_length": 8273,
+    "normalized_code_hash": "0x73ee33d5920e0ec67b414f5c03dedf3f0c53f835a343c278c409808d9776dd3c",
+    "immutables": {
+      "factory": [
+        {
+          "length": 32,
+          "start": 1399
+        },
+        {
+          "length": 32,
+          "start": 2397
+        },
+        {
+          "length": 32,
+          "start": 2962
+        }
+      ],
+      "WETH9": [
+        {
+          "length": 32,
+          "start": 801
+        }
+      ]
+    },
+    "compiler_input_sha256": "e80cb707906c72938374be40a1e857452c6c5b84756ff30b3a696bbbeddd9c8b"
+  },
+  "factory": {
+    "runtime_length": 24535,
+    "normalized_code_hash": "0xc66c27d7d60725224552811cfb0e8148a15e914e0e31720daed102e61a0118af",
+    "immutables": {
+      "original": [
+        {
+          "length": 32,
+          "start": 1361
+        }
+      ]
+    },
+    "compiler_input_sha256": "81c7916d4598b0e35510f8a284c766eace163e646cb819ef92a362653b3d6d77"
+  }
+}

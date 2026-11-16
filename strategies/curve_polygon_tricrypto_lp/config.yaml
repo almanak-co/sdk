@@ -1,0 +1,55 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/curve_polygon_tricrypto_lp.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    proportional:
+      market: crypto_pool
+      account: proportional
+      funding_asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+      trading_asset: eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722
+        quantity: '0'
+      - asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+        quantity: '0.02'
+      - asset: eip155:137/erc20:0xbbba073c31bf03b8acf7c28ef0738decf3695683
+        quantity: '0'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      minimum_native_balance:
+        base_units: 0
+    single_coin:
+      market: crypto_pool
+      account: single_coin
+      funding_asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+      trading_asset: eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722
+        quantity: '0'
+      - asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+        quantity: '0.02'
+      - asset: eip155:137/erc20:0xbbba073c31bf03b8acf7c28ef0738decf3695683
+        quantity: '0'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      minimum_native_balance:
+        base_units: 0
+      single_coin_exit: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+markets:
+  crypto_pool:
+    connector: curve
+    chain: eip155:137
+    pool: '0x559a3e77f94b0055a4b7f1acaaed893308115dab'
+accounts:
+  proportional:
+    chain: eip155:137
+  single_coin:
+    chain: eip155:137

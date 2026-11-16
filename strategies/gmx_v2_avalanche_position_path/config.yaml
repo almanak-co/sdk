@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/gmx_v2_avalanche_position_path.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    Main:
+      kind: gmx_position
+      market: wavax_usdc
+      account: fund
+      side: long
+      capital:
+        asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '50'
+      entry_collateral:
+        asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '20'
+      entry_size_usd_e30: 1000000000000000000000000000000000
+      execution_fee:
+        asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '1'
+      increase_acceptable_price: 1000000000000000000
+      decrease_acceptable_price: 0
+      hold_seconds: 2m
+      maximum_event_block_span: 2000
+      minimum_native_balance:
+        base_units: 0
+markets:
+  wavax_usdc:
+    connector: gmx_v2
+    chain: eip155:43114
+    market: eip155:43114/erc20:0x913c1f46b48b3ed35e7dc3cf754d4ae8499f31cf
+accounts:
+  fund:
+    chain: eip155:43114

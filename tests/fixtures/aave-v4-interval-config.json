@@ -1,0 +1,42 @@
+{
+  "decision_trigger": {
+    "kind": "interval",
+    "seconds": 5
+  },
+  "origin": {
+    "chain": {
+      "chain_id": "eip155:1",
+      "environment": "mainnet"
+    },
+    "number": 25908472,
+    "hash": "0xebd2f4a6612e094a8db8d1ab770970f7060bdaf3a18a49e4274f8935d5348ea0",
+    "timestamp": 1788579287
+  },
+  "funds": [
+    {
+      "allocation": {
+        "account": "lending_0",
+        "reserve": {
+          "kind": "aave_v4",
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "mainnet"
+          },
+          "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+          "reserve_id": 0,
+          "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+          "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+        },
+        "amount": 10000000000000000,
+        "native_asset": "eip155:1/slip44:60",
+        "minimum_native_balance": 1000000000000000
+      },
+      "foundry_account_index": 0,
+      "native_balance": {
+        "asset": "eip155:1/slip44:60",
+        "amount": 5000000000000000000
+      },
+      "token_balance": 40000000000000000
+    }
+  ]
+}

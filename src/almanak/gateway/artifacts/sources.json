@@ -1,0 +1,5 @@
+{
+  "roles": "https://github.com/gnosisguild/zodiac/tree/89352c4f05d4b223b9c555ca963a787fd930da2d/mastercopies/roles/2.1.0/Roles",
+  "safe": "https://github.com/safe-global/safe-smart-account/tree/v1.4.1",
+  "aave": "https://github.com/aave/aave-v4/tree/4d86c2d391b039bf2d3909fb2299b69998d0b720"
+}
