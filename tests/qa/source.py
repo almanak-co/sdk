@@ -8,10 +8,15 @@ from tests.qa.catalog import ROOT
 from tests.qa.results import digest
 
 
-def source_bytes(name, expected, secrets):
+def reviewed_path(name):
     path = ROOT / name
     if path.is_symlink() or not path.resolve().is_relative_to(ROOT):
         raise ValueError("source snapshot refuses links outside the reviewed tree")
+    return path
+
+
+def source_bytes(name, expected, secrets):
+    path = reviewed_path(name)
     data = path.read_bytes()
     if digest(path) != expected:
         raise ValueError("source changed during snapshot")

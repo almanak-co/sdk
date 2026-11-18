@@ -37,20 +37,32 @@ def captured_target(reader, request):
     )
 
 
-def test_real_keeper_payment_is_distinct_from_position_collateral():
+def settled_request():
     reader = CapturedReader()
     request = accepted_request(reader)
     scope = captured_target(reader, request)
+    event = next_event(reader, request, reader.blocks[max(reader.blocks)], maximum_block_span=2)
+    return request, scope, event
+
+
+def test_real_keeper_payment_is_distinct_from_position_collateral():
+    request, scope, event = settled_request()
     accepted = request.events[0].receipt
     # The original direct EOA fixture wraps native value in the vault.
     assert token_movement(accepted, scope, request.execution_fee.asset) == 0
-    event = next_event(reader, request, reader.blocks[max(reader.blocks)], maximum_block_span=2)
     fee = execution_fee(event.receipt, scope, request.execution_fee.amount)
-    assert fee.paid == 5620218894242082
-    assert fee.refunded == 14379781105757918
-    assert fee.fund_received == fee.refunded
+    # The fund receives exactly the refund.
+    assert (fee.paid, fee.refunded, fee.fund_received) == (
+        5620218894242082,
+        14379781105757918,
+        14379781105757918,
+    )
     assert token_movement(event.receipt, scope, request.execution_fee.asset) == 0
     assert remaining_fee(request.append(event), scope) == 0
+
+
+def test_real_keeper_payment_refuses_another_escrow_or_fund():
+    request, scope, event = settled_request()
     with pytest.raises(DataError, match="retained escrow"):
         execution_fee(event.receipt, scope, request.execution_fee.amount + 1)
     foreign = scope.model_copy(update={"fund": target().fund})

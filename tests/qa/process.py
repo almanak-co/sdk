@@ -75,20 +75,24 @@ def run(command, directory: Path, name, timeout=1800, offline=False, grace=2):
         process = subprocess.Popen(
             actual, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT, start_new_session=True
         )
-        try:
-            record["exit_code"] = process.wait(timeout=timeout)
-            record["status"] = "passed" if process.returncode == 0 else "failed"
-        except subprocess.TimeoutExpired:
-            record["status"] = "blocked"
-            record["category"] = "timeout"
-        finally:
-            stop_group(process.pid, grace)
-            process.wait()
+        record.update(outcome(process, timeout, grace))
     record["wall_seconds"] = time.monotonic() - started
     write_json(directory / f"{name}.json", record)
     if record["status"] != "passed":
         raise RuntimeError(f"{name}: {record['status']}; inspect {name}.log")
     return record
+
+
+def outcome(process, timeout, grace):
+    """The record fields for one process; its whole group is stopped before returning."""
+    try:
+        code = process.wait(timeout=timeout)
+        return {"exit_code": code, "status": "passed" if code == 0 else "failed"}
+    except subprocess.TimeoutExpired:
+        return {"status": "blocked", "category": "timeout"}
+    finally:
+        stop_group(process.pid, grace)
+        process.wait()
 
 
 def cli(arguments):

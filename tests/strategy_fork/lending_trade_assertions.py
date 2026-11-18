@@ -73,15 +73,16 @@ def assert_measured_holding(node, state):
 def assert_fund_position(state, account, native):
     held = {p.target.allocation: p for p in state.owned}
     if native == ConnectorId("morpho_blue"):
-        assert account.position.borrow_shares == held["loan"].borrow_shares
-        assert account.position.collateral == held["collateral"].collateral
+        measured = (account.position.borrow_shares, account.position.collateral)
+        assert measured == (held["loan"].borrow_shares, held["collateral"].collateral)
     else:
-        assert account.principal == held["loan"].principal
-        collateral = state.config.target("collateral").asset
-        assert (
-            next(c.balance for c in account.collaterals if c.asset == collateral)
-            == held["collateral"].collateral
-        )
+        asset = state.config.target("collateral").asset
+        measured = (account.principal, collateral_balance(account, asset))
+        assert measured == (held["loan"].principal, held["collateral"].collateral)
+
+
+def collateral_balance(account, asset):
+    return next(c.balance for c in account.collaterals if c.asset == asset)
 
 
 def assert_operator_empty(account, native):

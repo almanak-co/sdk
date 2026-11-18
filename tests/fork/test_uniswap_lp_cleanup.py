@@ -116,27 +116,30 @@ def family_of(state):
 
 def assert_approval_committed(state):
     approval, _ = APPROVALS[family_of(state)]
-    assert len(state.outcomes) == 1 and state.delivered == 0
-    outcome = state.outcomes[0]
+    assert (len(state.outcomes), state.delivered, state.pending) == (1, 0, None)
+    assert_approval_outcome(state.outcomes[0], approval)
+    assert all(owned.position is None for owned in state.owned)
+
+
+def assert_approval_outcome(outcome, approval):
     assert outcome.success and outcome.operation.kind == approval
     assert outcome.operation.amount > 0 and outcome.after.needs_cleanup
-    assert state.pending is None
-    assert all(owned.position is None for owned in state.owned)
 
 
 def assert_closed_effects(before, closed):
     approval, revocation = APPROVALS[family_of(closed)]
-    assert closed.mode == "closed" and closed.pending is None
+    assert (closed.mode, closed.pending) == ("closed", None)
     assert closed.delivered == len(closed.outcomes) == 2
     assert closed.outcomes[0] == before.outcomes[0]
-    revoked = closed.outcomes[1]
-    assert revoked.success and revoked.operation.kind == revocation
-    assert revoked.operation.amount == 0
-    assert revoked.operation.target == before.outcomes[0].operation.target
-    assert revoked.operation.asset == before.outcomes[0].operation.asset
-    assert not revoked.after.needs_cleanup
+    assert_revocation(before.outcomes[0].operation, closed.outcomes[1], revocation)
     # No swap, mint, collect or burn was ever submitted: only the approval pair exists.
     assert {o.operation.kind for o in closed.outcomes} == {approval, revocation}
+
+
+def assert_revocation(approved, revoked, revocation):
+    assert revoked.success and not revoked.after.needs_cleanup
+    assert (revoked.operation.kind, revoked.operation.amount) == (revocation, 0)
+    assert (revoked.operation.target, revoked.operation.asset) == (approved.target, approved.asset)
 
 
 def assert_allocation_cleanup(owned, initial, final):
@@ -151,10 +154,14 @@ def assert_allocation_cleanup(owned, initial, final):
 def assert_observed_clear(observed, owned, family):
     assert (observed.wallet0, observed.wallet1) == (owned.inventory0, owned.inventory1)
     assert not observed.needs_cleanup
+    assert remaining_position(observed, family) == (None, 0)
+
+
+def remaining_position(observed, family):
+    """The position the venue still reports and its liquidity, which only V4 observes."""
     if family == "uniswap_v4":
-        assert observed.owned.position is None and observed.position_liquidity == 0
-    else:
-        assert observed.position is None
+        return observed.owned.position, observed.position_liquidity
+    return observed.position, 0
 
 
 def assert_cleanup(node, before, closed):

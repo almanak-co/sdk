@@ -75,16 +75,24 @@ def assert_wallet_balances(reader, state, block):
 def cash_delta(outcome, key):
     if outcome.operation.target.account != key.account:
         return 0
+    return asset_delta(outcome, key.asset)
+
+
+def asset_delta(outcome, asset):
     if hasattr(outcome, "assets"):
-        if outcome.operation.target.asset != key.asset:
-            return 0
-        signs = {"supply": -1, "withdraw": 1, "borrow": 1, "repay": -1}
-        return signs.get(outcome.operation.kind, 0) * outcome.assets
+        return lending_delta(outcome, asset)
     if hasattr(outcome, "asset_changes"):
-        return next((v.amount for v in outcome.asset_changes if v.key.asset == key.asset), 0)
+        return next((v.amount for v in outcome.asset_changes if v.key.asset == asset), 0)
     return dict(
         zip(outcome.operation.target.assets, (outcome.delta0, outcome.delta1), strict=True)
-    ).get(key.asset, 0)
+    ).get(asset, 0)
+
+
+def lending_delta(outcome, asset):
+    if outcome.operation.target.asset != asset:
+        return 0
+    signs = {"supply": -1, "withdraw": 1, "borrow": 1, "repay": -1}
+    return signs.get(outcome.operation.kind, 0) * outcome.assets
 
 
 def assert_inventory_movements(state):

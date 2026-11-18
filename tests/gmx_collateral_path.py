@@ -22,13 +22,16 @@ def assert_holding(node, state):
 def assert_collateral_changes(state):
     rows = [o for o in state.outcomes if o.kind == "gmx_request_outcome"]
     added, withdrawn = rows[2:4]
-    for outcome in (added, withdrawn):
-        assert outcome.operation.size_delta_usd_e30 == 0
-        assert outcome.operation.collateral_delta.amount > 0
-        assert outcome.before.position.size_usd_e30 == outcome.after.position.size_usd_e30
-    assert added.after.position.collateral.amount > added.before.position.collateral.amount
-    assert withdrawn.after.position.collateral.amount < withdrawn.before.position.collateral.amount
+    assert collateral_change(added) > 0 > collateral_change(withdrawn)
     assert withdrawn.assets[0].amount > 0
+
+
+def collateral_change(outcome):
+    """Position collateral gained by one request, which must leave the position size alone."""
+    assert outcome.operation.size_delta_usd_e30 == 0
+    assert outcome.operation.collateral_delta.amount > 0
+    assert outcome.before.position.size_usd_e30 == outcome.after.position.size_usd_e30
+    return outcome.after.position.collateral.amount - outcome.before.position.collateral.amount
 
 
 def assert_closed(node, state):
@@ -78,11 +81,12 @@ def advance_for_report(node, journal, chain):
 
 def next_fixture_timestamp(proof, current):
     adjustments = {b["asset"]: b["timestamp_adjustment"] for b in proof["bindings"]}
-    times = [
-        min(r["observed_at"] - adjustments[r["asset"]] for r in row["reports"])
-        for row in proof["selected"]
-    ]
+    times = [earliest_report(row, adjustments) for row in proof["selected"]]
     return next(value - 3 for value in times if value - 3 > current)
+
+
+def earliest_report(row, adjustments):
+    return min(r["observed_at"] - adjustments[r["asset"]] for r in row["reports"])
 
 
 def retain_permissions(node, journal):

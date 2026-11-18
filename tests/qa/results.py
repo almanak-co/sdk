@@ -27,13 +27,13 @@ def assert_junit(path):
     cases = root.findall(".//testcase")
     if not cases:
         raise ValueError("pytest produced no executed cases")
-    bad = [
-        c.attrib.get("name")
-        for c in cases
-        if any(c.find(tag) is not None for tag in ("skipped", "failure", "error"))
-    ]
+    bad = [c.attrib.get("name") for c in cases if not passed(c)]
     if bad:
         raise ValueError(f"required pytest cases did not pass: {bad}")
+
+
+def passed(case):
+    return all(case.find(tag) is None for tag in ("skipped", "failure", "error"))
 
 
 def secrets_for(env_file, directory):

@@ -111,24 +111,36 @@ def worker_command(case, directory, args, now):
 
 
 def prerequisites(case, result, args, failures):
+    blocked = blocked_case(case, args, failures)
+    if blocked is None:
+        return True
+    category, error = blocked
+    result.update(status="blocked", category=category, error=error)
+    return False
+
+
+def blocked_case(case, args, failures):
+    """The category and error that keep a case from running, or None when it may run."""
     if case.blocked_reason:
-        result.update(status="blocked", category="unproved_candidate", error=case.blocked_reason)
-        return False
-    if case.lane in ("fork", "faults", "backtest"):
-        try:
-            require_providers(case, args.env_file)
-        except ValueError as error:
-            result.update(status="blocked", category="missing_provider_env", error=str(error))
-            return False
-    if (case.input_policy, case.lane) == ("fresh", "fork"):
-        if any(c in failures for c in case.chains):
-            result.update(
-                status="blocked",
-                category="source_resolution",
-                error={str(c): failures[c] for c in case.chains if c in failures},
-            )
-            return False
-    return True
+        return "unproved_candidate", case.blocked_reason
+    return missing_providers(case, args) or failed_sources(case, failures)
+
+
+def missing_providers(case, args):
+    if case.lane not in ("fork", "faults", "backtest"):
+        return None
+    try:
+        require_providers(case, args.env_file)
+    except ValueError as error:
+        return "missing_provider_env", str(error)
+    return None
+
+
+def failed_sources(case, failures):
+    if (case.input_policy, case.lane) != ("fresh", "fork"):
+        return None
+    errors = {str(c): failures[c] for c in case.chains if c in failures}
+    return ("source_resolution", errors) if errors else None
 
 
 def retain_case(result, args, directory):

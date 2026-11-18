@@ -109,13 +109,15 @@ def assert_cleanup(node, before, closed):
 
 
 def assert_closed_effects(before, closed):
-    assert closed.pending is None and closed.delivered == len(closed.outcomes) == 2
+    assert (closed.pending, closed.delivered, len(closed.outcomes)) == (None, 2, 2)
     assert closed.outcomes[0] == before.outcomes[0]
-    revoked = closed.outcomes[1]
-    assert revoked.success and revoked.operation.kind == "approve"
-    assert revoked.operation.amount == 0
-    assert revoked.operation.target == before.outcomes[0].operation.target
-    assert not revoked.after.needs_cleanup
+    assert_revocation(before.outcomes[0].operation, closed.outcomes[1])
+
+
+def assert_revocation(approved, revoked):
+    assert revoked.success and not revoked.after.needs_cleanup
+    assert (revoked.operation.kind, revoked.operation.amount) == ("approve", 0)
+    assert revoked.operation.target == approved.target
 
 
 def assert_allocation_cleanup(owned, initial, final):

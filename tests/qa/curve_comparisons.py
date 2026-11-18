@@ -1,5 +1,7 @@
 """Compare sampled Curve pool math with archival contract quotes at the same block."""
 
+from itertools import permutations
+
 from almanak.backtest.cli import GatewayProcess
 from almanak.backtest.history import HistoricalReader
 from almanak.connectors.curve.abi import layout, signature
@@ -47,22 +49,13 @@ def compare_row(reader, target, row):
         else CryptoState(pool, block.timestamp)
     )
     records = []
-    for first, asset in enumerate(target.assets):
-        for second, output in enumerate(target.assets):
-            if first != second:
-                records.extend(
-                    compare_pair(
-                        reader,
-                        target,
-                        block,
-                        state,
-                        pool.balances[first],
-                        first,
-                        second,
-                        asset,
-                        output,
-                    )
-                )
+    # Every ordered pair of distinct assets, in the pool's own asset order.
+    for (first, asset), (second, output) in permutations(enumerate(target.assets), 2):
+        records.extend(
+            compare_pair(
+                reader, target, block, state, pool.balances[first], first, second, asset, output
+            )
+        )
     return records
 
 
