@@ -96,3 +96,19 @@ def test_a_fifo_password_file_is_refused_without_waiting_for_a_writer(tmp_path):
     os.mkfifo(fifo, 0o600)
     with pytest.raises(ValueError, match="private regular file"):
         create_wallet(tmp_path / "operator", "treasury", password_file=fifo)
+
+
+def test_a_failed_cleanup_names_the_partial_directory(tmp_path, monkeypatch):
+    def failing(path, contents):
+        raise OSError("disk went read-only")
+
+    def unremovable(path):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(credentials, "write_private", failing)
+    monkeypatch.setattr(credentials.shutil, "rmtree", unremovable)
+    with pytest.raises(OSError) as raised:
+        create_wallet(tmp_path / "operator", "treasury", generate_password=True)
+    message = str(raised.value)
+    assert str(tmp_path / "operator") in message and "could not be removed" in message
+    assert "disk went read-only" in message and "read-only file system" in message

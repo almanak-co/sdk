@@ -98,10 +98,16 @@ def create_wallet(
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
     try:
         return write_wallet(directory, account, signer.address, encrypted, generated)
-    except BaseException:
+    except BaseException as failure:
         # A partial directory would hold a keystore without its record or password, and
         # would refuse a retry at the same path.
-        shutil.rmtree(directory, ignore_errors=True)
+        try:
+            shutil.rmtree(directory)
+        except OSError as cleanup:
+            raise OSError(
+                f"wallet creation failed ({failure}) and its partial directory could not "
+                f"be removed: {directory} ({cleanup})"
+            ) from failure
         raise
 
 

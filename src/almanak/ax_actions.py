@@ -212,49 +212,71 @@ class Terminated(SystemExit):
 def terminable():
     """Turn SIGTERM into an exception for the duration of one action.
 
-    The default action would end the process without reporting a retained record.
+    The default action would end the process without reporting a retained record. The
+    yielded function defers the signal instead: after it is called, a SIGTERM is only
+    recorded and is raised once the block ends, so cleanup and reporting finish.
     """
     if threading.current_thread() is not threading.main_thread():
-        yield
+        yield lambda: None
         return
+    deferring = False
+    received = None
 
     def stop(signum, frame):
-        raise Terminated(128 + signum)
+        nonlocal received
+        if not deferring:
+            raise Terminated(128 + signum)
+        received = signum
+
+    def defer():
+        nonlocal deferring
+        deferring = True
 
     previous = signal.signal(signal.SIGTERM, stop)
     try:
-        yield
+        yield defer
     finally:
         signal.signal(signal.SIGTERM, previous)
+    if received is not None:
+        raise Terminated(128 + received)
 
 
 def run(config, backend, action: str, amount: int | None, *, execute: bool) -> dict:
     """Plan one action against the account's current position, and execute it when asked."""
     from almanak.gateway.service import GatewayService
-    from almanak.state import release_claims
 
     directory = Path(tempfile.mkdtemp(prefix="almanak-ax-"))
     service = GatewayService(
         config, directory / "state.sqlite", backend, lease_seconds=30, operator_actions=True
     )
-    kept = True
-    try:
-        with terminable():
+    with terminable() as defer:
+        try:
             result = perform(service, action, amount, execute=execute, create=config)
-        kept = False
+        except BaseException:
+            # A signed step may be in flight; its record is the only evidence of it.
+            # From here a SIGTERM waits until the record has been inspected and reported.
+            defer()
+            settle(directory, kept=in_flight(service))
+            raise
+        defer()
+        settle(directory, kept=False)
         return result
-    except BaseException:
-        # A signed step may be in flight; its record is the only evidence of it.
-        kept = service.journal.path.exists() and service.journal.load().pending is not None
-        raise
-    finally:
-        if kept:
-            # The fund stays claimed by this record, so no later command can act on the
-            # account until the operator has looked at the signed step.
-            print(json.dumps({"event": "record_kept", "path": str(directory)}), flush=True)
-        else:
-            release_claims(directory / "state.sqlite")
-            shutil.rmtree(directory, ignore_errors=True)
+
+
+def in_flight(service) -> bool:
+    return service.journal.path.exists() and service.journal.load().pending is not None
+
+
+def settle(directory: Path, *, kept: bool) -> None:
+    from almanak.state import release_claims
+
+    if kept:
+        # The fund stays claimed by this record, so no later command can act on the
+        # account until the operator has looked at the signed step.
+        print(json.dumps({"event": "record_kept", "path": str(directory)}), flush=True)
+    else:
+        release_claims(directory / "state.sqlite")
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def perform(service, action: str, amount: int | None, *, execute: bool, create=None) -> dict:

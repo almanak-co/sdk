@@ -322,6 +322,46 @@ def test_sigterm_unwinds_the_action_like_an_interrupt():
     assert signal.getsignal(signal.SIGTERM) is previous
 
 
+def test_a_deferred_sigterm_waits_for_the_block_to_finish():
+    import os
+    import signal
+
+    finished = []
+    with pytest.raises(ax_actions.Terminated), ax_actions.terminable() as defer:
+        defer()
+        os.kill(os.getpid(), signal.SIGTERM)
+        finished.append("reported")
+    assert finished == ["reported"]
+
+
+def test_sigterm_during_record_inspection_still_reports_the_kept_record(
+    monkeypatch, tmp_path, capsys
+):
+    import os
+    import signal
+
+    record = tmp_path / "record"
+    record.mkdir()
+    (record / "state.sqlite").touch()
+
+    def inspected():
+        os.kill(os.getpid(), signal.SIGTERM)
+        return SimpleNamespace(pending=object())
+
+    class Pending(Service):
+        def __init__(self, *arguments, **options):
+            super().__init__(*arguments, **options)
+            self.journal.load = inspected
+
+    monkeypatch.setattr("almanak.gateway.service.GatewayService", Pending)
+    monkeypatch.setattr(ax_actions.tempfile, "mkdtemp", lambda prefix: str(record))
+    monkeypatch.setattr(ax_actions, "perform", lambda *a, **k: (_ for _ in ()).throw(OSError))
+    with pytest.raises(OSError):
+        ax_actions.run("config", None, "supply", 5, execute=True)
+    assert json.loads(capsys.readouterr().out) == {"event": "record_kept", "path": str(record)}
+    assert record.exists()
+
+
 def test_sigterm_handling_is_left_alone_off_the_main_thread():
     import signal
     import threading
@@ -329,7 +369,8 @@ def test_sigterm_handling_is_left_alone_off_the_main_thread():
     seen = []
 
     def body():
-        with ax_actions.terminable():
+        with ax_actions.terminable() as defer:
+            defer()
             seen.append(signal.getsignal(signal.SIGTERM))
 
     worker = threading.Thread(target=body)
