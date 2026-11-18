@@ -390,20 +390,40 @@ def test_a_signal_between_steps_stops_the_action_and_reports_its_kept_record(
     assert record.exists()
 
 
-def test_execution_checks_for_an_interrupt_between_steps(desk):
+def test_a_stop_requested_while_waiting_is_honoured_before_the_next_step(desk):
     runtime = desk.runtime()
     runtime.submit(desk.intent("supply"))
-    calls = []
+    requested = []
+    sent_at_request = []
+
+    def wait(state):
+        # The stop arrives during the wait that follows the first broadcast.
+        if desk.gateway.broadcasts and not requested:
+            requested.append(True)
+            sent_at_request.append(list(desk.gateway.broadcasts))
 
     def interrupt():
-        calls.append(len(desk.kinds()))
-        if len(calls) == 3:
+        if requested:
             raise ax_actions.Terminated(143)
+
+    runtime.wait = wait
+    with pytest.raises(ax_actions.Terminated):
+        runtime.execute(interrupt)
+    # Nothing was sent after the stop was requested, and the request stays recorded.
+    assert sent_at_request and desk.gateway.broadcasts == sent_at_request[0]
+    assert desk.store.load().decision is not None
+
+
+def test_execution_checks_for_an_interrupt_before_its_first_step(desk):
+    runtime = desk.runtime()
+    runtime.submit(desk.intent("supply"))
+
+    def interrupt():
+        raise ax_actions.Terminated(143)
 
     with pytest.raises(ax_actions.Terminated):
         runtime.execute(interrupt)
-    # Stopped part way: what was recorded before the check stays recorded.
-    assert calls and desk.store.load().decision is not None
+    assert desk.gateway.broadcasts == [] and desk.store.load().plan is None
 
 
 def test_sigterm_handling_is_left_alone_off_the_main_thread():
