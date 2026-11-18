@@ -203,7 +203,7 @@ def test_the_private_record_is_removed_when_nothing_is_in_flight(monkeypatch, tm
     monkeypatch.setattr(ax_actions.tempfile, "mkdtemp", lambda prefix: str(tmp_path / "record"))
     (tmp_path / "record").mkdir()
 
-    def perform(service, action, amount, *, execute, create):
+    def perform(service, action, amount, *, execute, create, interrupt):
         seen.update(service.options, create=create)
         return {"action": action}
 
@@ -311,30 +311,52 @@ def test_a_plan_refused_in_preview_names_its_refusal(desk):
     assert unnamed.value.kind == "plan_refused"
 
 
-def test_sigterm_unwinds_the_action_like_an_interrupt():
+def raised_by(number):
     import os
     import signal
 
-    previous = signal.getsignal(signal.SIGTERM)
-    with pytest.raises(ax_actions.Terminated) as stopped, ax_actions.terminable():
-        os.kill(os.getpid(), signal.SIGTERM)
-    assert stopped.value.code == 128 + signal.SIGTERM
-    assert signal.getsignal(signal.SIGTERM) is previous
+    previous = {n: signal.getsignal(n) for n in (signal.SIGINT, signal.SIGTERM)}
+    steps = []
+    with ax_actions.interruptible() as check:
+        check()
+        os.kill(os.getpid(), number)
+        # The signal is only recorded: the step it arrived in runs to its end.
+        steps.append("finished")
+        with pytest.raises(BaseException) as raised:
+            check()
+    assert steps == ["finished"]
+    assert {n: signal.getsignal(n) for n in previous} == previous
+    return raised.value
 
 
-def test_a_deferred_sigterm_waits_for_the_block_to_finish():
+def test_signals_are_recorded_and_raised_only_at_a_check():
+    import signal
+
+    stopped = raised_by(signal.SIGTERM)
+    assert isinstance(stopped, ax_actions.Terminated)
+    assert stopped.code == 128 + signal.SIGTERM
+    assert isinstance(raised_by(signal.SIGINT), KeyboardInterrupt)
+
+
+def test_a_signal_after_the_last_check_does_not_discard_the_result(monkeypatch, tmp_path):
     import os
     import signal
 
-    finished = []
-    with pytest.raises(ax_actions.Terminated), ax_actions.terminable() as defer:
-        defer()
+    monkeypatch.setattr("almanak.gateway.service.GatewayService", Service)
+    monkeypatch.setattr(ax_actions.tempfile, "mkdtemp", lambda prefix: str(tmp_path / "record"))
+    (tmp_path / "record").mkdir()
+
+    def perform(service, action, amount, **options):
         os.kill(os.getpid(), signal.SIGTERM)
-        finished.append("reported")
-    assert finished == ["reported"]
+        return {"action": action, "completed": True}
+
+    monkeypatch.setattr(ax_actions, "perform", perform)
+    result = ax_actions.run("config", None, "withdraw", None, execute=True)
+    assert result == {"action": "withdraw", "completed": True}
+    assert not (tmp_path / "record").exists()
 
 
-def test_sigterm_during_record_inspection_still_reports_the_kept_record(
+def test_a_signal_between_steps_stops_the_action_and_reports_its_kept_record(
     monkeypatch, tmp_path, capsys
 ):
     import os
@@ -345,6 +367,7 @@ def test_sigterm_during_record_inspection_still_reports_the_kept_record(
     (record / "state.sqlite").touch()
 
     def inspected():
+        # A second signal while the record is inspected cannot skip the report either.
         os.kill(os.getpid(), signal.SIGTERM)
         return SimpleNamespace(pending=object())
 
@@ -353,13 +376,34 @@ def test_sigterm_during_record_inspection_still_reports_the_kept_record(
             super().__init__(*arguments, **options)
             self.journal.load = inspected
 
+    def perform(service, action, amount, *, interrupt, **options):
+        os.kill(os.getpid(), signal.SIGTERM)
+        interrupt()
+        raise AssertionError("the check did not stop the action")
+
     monkeypatch.setattr("almanak.gateway.service.GatewayService", Pending)
     monkeypatch.setattr(ax_actions.tempfile, "mkdtemp", lambda prefix: str(record))
-    monkeypatch.setattr(ax_actions, "perform", lambda *a, **k: (_ for _ in ()).throw(OSError))
-    with pytest.raises(OSError):
+    monkeypatch.setattr(ax_actions, "perform", perform)
+    with pytest.raises(ax_actions.Terminated):
         ax_actions.run("config", None, "supply", 5, execute=True)
     assert json.loads(capsys.readouterr().out) == {"event": "record_kept", "path": str(record)}
     assert record.exists()
+
+
+def test_execution_checks_for_an_interrupt_between_steps(desk):
+    runtime = desk.runtime()
+    runtime.submit(desk.intent("supply"))
+    calls = []
+
+    def interrupt():
+        calls.append(len(desk.kinds()))
+        if len(calls) == 3:
+            raise ax_actions.Terminated(143)
+
+    with pytest.raises(ax_actions.Terminated):
+        runtime.execute(interrupt)
+    # Stopped part way: what was recorded before the check stays recorded.
+    assert calls and desk.store.load().decision is not None
 
 
 def test_sigterm_handling_is_left_alone_off_the_main_thread():
@@ -369,8 +413,8 @@ def test_sigterm_handling_is_left_alone_off_the_main_thread():
     seen = []
 
     def body():
-        with ax_actions.terminable() as defer:
-            defer()
+        with ax_actions.interruptible() as check:
+            check()
             seen.append(signal.getsignal(signal.SIGTERM))
 
     worker = threading.Thread(target=body)

@@ -165,13 +165,18 @@ class OperatorRuntime(Runtime):
             )
         )
 
-    def execute(self):
-        """Run the admitted request to its outcome; returns the outcomes it produced."""
+    def execute(self, interrupt=lambda: None):
+        """Run the admitted request to its outcome; returns the outcomes it produced.
+
+        `interrupt` is called between steps and may raise to stop; the journal keeps
+        whatever was signed.
+        """
         state = self.journal.load()
         if state.decision is None and not self.retained(state):
             raise ValueError("no operator request is admitted")
         before = len(state.outcomes)
         while not self.tick():
+            interrupt()
             self.wait(self.journal.load())
         return self.journal.load().outcomes[before:]
 

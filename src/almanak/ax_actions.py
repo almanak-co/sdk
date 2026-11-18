@@ -209,36 +209,35 @@ class Terminated(SystemExit):
 
 
 @contextmanager
-def terminable():
-    """Turn SIGTERM into an exception for the duration of one action.
+def interruptible():
+    """Record SIGINT and SIGTERM during one action instead of acting on them at once.
 
-    The default action would end the process without reporting a retained record. The
-    yielded function defers the signal instead: after it is called, a SIGTERM is only
-    recorded and is raised once the block ends, so cleanup and reporting finish.
+    Neither signal raises at an arbitrary instruction, so nothing can skip the report of
+    a retained record. The yielded check raises the recorded signal's exception; the
+    action calls it between its steps. A signal that arrives after the last check is
+    dropped: the command is already ending and still reports what it did.
     """
     if threading.current_thread() is not threading.main_thread():
         yield lambda: None
         return
-    deferring = False
     received = None
 
-    def stop(signum, frame):
+    def record(signum, frame):
         nonlocal received
-        if not deferring:
-            raise Terminated(128 + signum)
         received = signum
 
-    def defer():
-        nonlocal deferring
-        deferring = True
+    def check():
+        if received == signal.SIGINT:
+            raise KeyboardInterrupt
+        if received is not None:
+            raise Terminated(128 + received)
 
-    previous = signal.signal(signal.SIGTERM, stop)
+    previous = {number: signal.signal(number, record) for number in (signal.SIGINT, signal.SIGTERM)}
     try:
-        yield defer
+        yield check
     finally:
-        signal.signal(signal.SIGTERM, previous)
-    if received is not None:
-        raise Terminated(128 + received)
+        for number, handler in previous.items():
+            signal.signal(number, handler)
 
 
 def run(config, backend, action: str, amount: int | None, *, execute: bool) -> dict:
@@ -249,16 +248,15 @@ def run(config, backend, action: str, amount: int | None, *, execute: bool) -> d
     service = GatewayService(
         config, directory / "state.sqlite", backend, lease_seconds=30, operator_actions=True
     )
-    with terminable() as defer:
+    with interruptible() as check:
         try:
-            result = perform(service, action, amount, execute=execute, create=config)
+            result = perform(
+                service, action, amount, execute=execute, create=config, interrupt=check
+            )
         except BaseException:
             # A signed step may be in flight; its record is the only evidence of it.
-            # From here a SIGTERM waits until the record has been inspected and reported.
-            defer()
             settle(directory, kept=in_flight(service))
             raise
-        defer()
         settle(directory, kept=False)
         return result
 
@@ -279,12 +277,21 @@ def settle(directory: Path, *, kept: bool) -> None:
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def perform(service, action: str, amount: int | None, *, execute: bool, create=None) -> dict:
+def perform(
+    service,
+    action: str,
+    amount: int | None,
+    *,
+    execute: bool,
+    create=None,
+    interrupt=lambda: None,
+) -> dict:
     from almanak.operator_runtime import OperatorRuntime
 
     runtime = OperatorRuntime(gateway=LocalGateway(service), create=create)
     try:
         before = runtime.recover()
+        interrupt()
         runtime.submit(intent(before.config, action, amount))
         result = {
             "action": action,
@@ -292,8 +299,9 @@ def perform(service, action: str, amount: int | None, *, execute: bool, create=N
             "position_before": position(before),
             "first_step": step(runtime.preview()),
         }
+        interrupt()
         if execute:
-            result.update(executed_result(runtime, action, runtime.execute()))
+            result.update(executed_result(runtime, action, runtime.execute(interrupt)))
         return result
     finally:
         runtime.close()
