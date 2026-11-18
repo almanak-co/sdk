@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SparkLend reserve position",
+  "description": "Scoped supply, withdrawal and optional borrowing on one named reserve, with its own pinned oracle and price source. Grants carry no amount bound; repaying the fund's own debt needs no amount.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "market",
+    "account",
+    "collateral",
+    "oracle",
+    "price_source",
+    "minimum_native_balance"
+  ],
+  "properties": {
+    "market": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "account": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "capital": {
+      "description": "Optional amount of the market asset the allocation starts with. The funding statement requires it before the first entry. It is not a limit: how much to supply is the strategy's decision. Defaults to zero.",
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    },
+    "borrow": {
+      "description": "Grant borrowing and repayment of this market asset. Supply and withdrawal are always granted; how much to borrow is the strategy's decision. Defaults to false.",
+      "type": "boolean"
+    },
+    "collateral": {
+      "description": "Grant use of this reserve as collateral. On the ordinary-mode (non-eMode, non-isolated) reserves the SDK supports, the SparkLend Pool enables a first supply into an empty position as collateral automatically whenever the reserve's LTV is above zero, so supplying such a reserve requires true. False fits only a zero-LTV reserve or an allocation that borrows and repays without supplying; for a new run, an allocation with neither collateral nor borrow on a reserve with nonzero LTV is refused at the online check.",
+      "type": "boolean"
+    },
+    "minimum_health_factor": {
+      "description": "Minimum projected health factor for an action that adds risk. Required when borrow is true; every allocation sharing that fund and market then states the same value. Omit it on an allocation that cannot borrow in a scope where none borrows (lend- or supply-only): there is no debt for it to bound, and while the fund carries any debt in that market an action the connector risk-checks is refused.",
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    },
+    "oracle": {
+      "$ref": "../strategy.schema.json#/$defs/Address"
+    },
+    "price_source": {
+      "$ref": "../strategy.schema.json#/$defs/Address"
+    },
+    "minimum_native_balance": {
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "borrow": {
+            "const": true
+          }
+        },
+        "required": [
+          "borrow"
+        ]
+      },
+      "then": {
+        "required": [
+          "minimum_health_factor"
+        ]
+      }
+    }
+  ]
+}

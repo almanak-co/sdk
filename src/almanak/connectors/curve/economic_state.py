@@ -1,0 +1,103 @@
+"""Hypothetical pool shares remain explicit simulation state in the shared journal."""
+
+from datetime import UTC, datetime
+from typing import Annotated, Literal
+
+from pydantic import Field, model_validator
+
+from almanak.asset_amounts import AssetAmounts
+from almanak.backtest.dataset import InputGap
+from almanak.backtest.engine import RunState
+from almanak.backtest.types import UnixTime
+from almanak.connectors.curve.models import Intent, Parameters, Target
+from almanak.connectors.curve.observations import Snapshot
+from almanak.connectors.curve.positions import Ownership, Quote
+from almanak.connectors.curve.receipts import Effects
+from almanak.models import AssetAmount, Model
+from almanak.strategy_api import DecisionContext, OutcomeContext, SimulationEvidence
+from almanak.triggers import UtcInstant
+
+
+class EconomicSnapshot(Snapshot):
+    simulation_time: UnixTime
+    simulated: Literal[True] = True
+
+    @property
+    def effective_at(self):
+        return datetime.fromtimestamp(self.simulation_time, UTC)
+
+    @model_validator(mode="after")
+    def economic_scope(self):
+        if self.position != self.owned.position:
+            raise ValueError("simulated observations must retain hypothetical position ownership")
+        if self.block.timestamp > self.simulation_time:
+            raise ValueError("economic observations cannot use future pool state")
+        return self
+
+
+class EconomicPosition(Model):
+    target: Target
+    owned: Ownership
+    spent: AssetAmounts | None = None
+
+    @model_validator(mode="after")
+    def scope(self):
+        if self.target != self.owned.target:
+            raise ValueError("economic pool ownership requires its exact target")
+        if self.spent is None:
+            object.__setattr__(
+                self,
+                "spent",
+                AssetAmounts(
+                    tuple(AssetAmount(asset=asset, amount=0) for asset in self.target.assets)
+                ),
+            )
+        assert self.spent is not None
+        self.spent.in_order(self.target.assets)
+        return self
+
+
+class EconomicResult(Effects):
+    kind: Literal["action"] = "action"
+    intent: Intent
+    success: Literal[True] = True
+    complete: bool
+    effective_at: UtcInstant
+    simulation: SimulationEvidence
+    before: EconomicSnapshot
+    after: Ownership
+    gas_paid: AssetAmount
+    fill: Quote | None
+    steps: tuple[Literal["swap", "mint", "increase", "decrease", "close", "revoke"], ...]
+
+    @property
+    def status(self) -> Literal["completed", "intermediate", "failed"]:
+        return "completed" if self.complete else "intermediate"
+
+    @model_validator(mode="after")
+    def scope(self):
+        self.validate_target(self.intent.target)
+        if self.before.target != self.intent.target or self.after.target != self.intent.target:
+            raise ValueError("economic result requires its exact execution target")
+        return self
+
+
+class EconomicFailure(Model):
+    kind: Literal["failure"] = "failure"
+    intent: Intent
+    success: Literal[False] = False
+    complete: Literal[True] = True
+    effective_at: UtcInstant
+    simulation: SimulationEvidence
+    error: str
+    unavailable: InputGap | None = None
+
+    @property
+    def status(self) -> Literal["failed"]:
+        return "failed"
+
+
+Result = Annotated[EconomicResult | EconomicFailure, Field(discriminator="kind")]
+DecisionInput = DecisionContext[Parameters, Ownership, EconomicSnapshot]
+OutcomeInput = OutcomeContext[Parameters, Result]
+State = RunState[EconomicPosition, Intent, Result]

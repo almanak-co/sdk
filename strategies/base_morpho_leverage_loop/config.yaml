@@ -1,0 +1,92 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/base_morpho_leverage_loop.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # Borrow rounds. A round that would end below unwind_health_factor is refused and
+    # the loop holds there; the README's "Which rounds are reachable" has the bound.
+    loops: 2
+    # Share of the current collateral value borrowed each round.
+    borrow_fraction: '0.25'
+    # The unwind starts below this health factor. It must sit well above
+    # minimum_health_factor: the floor also refuses the unwind's own withdrawals,
+    # so the gap between them is how far a price may gap and still unwind.
+    unwind_health_factor: '1.8'
+    # Collateral released per unwind cycle beyond the remaining debt, so the pool
+    # fee, price impact and accrued interest leave no repay shortfall.
+    swap_headroom_bps: 100
+  test_parameters:
+    # Only almanak test run applies these (README, Fork tests): one round still
+    # supplies, borrows, swaps, resupplies and fully unwinds, in fewer decisions.
+    loops: 1
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.05'
+      # The gateway floor for every borrow and withdrawal, the unwind's included.
+      # Far below unwind_health_factor, so a price gap through the trigger still
+      # leaves collateral the unwind can withdraw and sell for the repay.
+      minimum_health_factor: '1.15'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      minimum_health_factor: '1.15'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      # A slice size, not prefunding: one swap sells min(owned USDC, capital), and
+      # owned USDC includes borrowed proceeds. Keep it above any single borrow so each
+      # round swaps in one step.
+      capital:
+        asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+        quantity: '1000'
+      entry_swap_bps: 10000
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+  gas:
+    # Example Base amounts for loops: 2; size them from the live gas price.
+    # exit_reserve = 12 fees, total_budget = exit_reserve + 12 entry fees (README).
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:8453
+      max_transaction_fee:
+        base_units: 160000000000000
+      total_budget:
+        base_units: 3840000000000000
+      exit_reserve:
+        base_units: 1920000000000000
+markets:
+  collateral:
+    connector: morpho_blue
+    chain: eip155:8453
+    market_id: '0x8793cf302b8ffd655ab97bd1c695dbd967807e8367a65cb2f4edaf1380ba1bda'
+    leg: collateral
+  loan:
+    connector: morpho_blue
+    chain: eip155:8453
+    market_id: '0x8793cf302b8ffd655ab97bd1c695dbd967807e8367a65cb2f4edaf1380ba1bda'
+    leg: loan
+  pool:
+    connector: uniswap_v3
+    chain: eip155:8453
+    pool: '0xd0b53d9277642d899df5c87a3966a349a798f224'
+accounts:
+  fund:
+    chain: eip155:8453
+inventory:
+- account: fund
+  balance:
+    asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+    quantity: '0.05'
+- account: fund
+  balance:
+    asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+    quantity: '0'

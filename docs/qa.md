@@ -1,0 +1,311 @@
+# Daily SDK QA
+
+The bench runs the actual reference strategies through the existing fork harness
+and backtest CLI. It validates coverage against the trusted connector support
+contracts before starting any provider work.
+
+Candidate integrations are not supported capabilities. The QA plan derives support
+from trusted connector declarations. New pairs require actual reference outcomes and prepared offline
+backtests before support promotion.
+
+## Run locally
+
+Install the locked environment and hook, then inspect the complete matrix:
+
+```bash
+uv sync --locked
+uv run --locked pre-commit install
+uv run --locked python -m scripts.qa_bench --plan --output artifacts/qa-plan
+```
+
+Run all cases with explicit read-only provider bindings:
+
+```bash
+make fixtures
+uv run --locked python -m scripts.qa_bench \
+  --env-file .env --output artifacts/qa-daily
+```
+
+`make fixtures` places the pinned evidence copies under `tests/fixtures/evidence/`
+from the local evidence tree. The GMX keeper drivers read those copies, so run it
+before the bench or any manual `pytest --fork-env` run in a fresh checkout and after
+the manifest changes. `make qa-daily` runs it first.
+
+Use a new output directory for each invocation. Existing output is never reused
+as evidence for a new run. Plan mode performs no provider calls. Linux needs
+Anvil and working Bubblewrap/unprivileged namespaces. macOS uses sandbox-exec;
+Full QA runs locally with retained evidence. Hosted CI runs lint, types, the
+offline suite with evidence-dependent modules skipped, the CRAP gate over that
+reduced coverage scoped to the functions a pull request changed, the 87%
+statement coverage floor over the whole `src/` directory from that same reduced
+coverage, and CLI smoke
+checks on Linux and macOS; it does not run the full QA suite. The
+`Fork Qualification` workflow (`.github/workflows/fork_qualification.yml`) runs
+the discovered fork lifecycle and, where the checked-out connectors declare
+production EOA support, the production rehearsal for named references on hosted
+runners against the repository's provider key; it is the fork qualification a
+reference listed in `tests/strategy_fork/rehearsal.py::UNREHEARSED` needs before
+it joins the default rehearsal selection. It also runs
+[weekly](#hosted-weekly-fork-qualification) on `main`. Each run retains the case evidence as a
+workflow artifact and spends no funds. GMX keeper drivers settle requests with
+authentic signed reports read from the pinned evidence copies in
+`tests/fixtures/evidence.json`, which the workflow downloads from the staging evidence
+bucket before pytest. The manual `Cell QA Matrix` workflow runs one
+connector/chain cell's QA cases on hosted runners in parallel; see
+[Hosted cell matrix](#hosted-cell-matrix) for what it does and does not establish.
+
+For a focused diagnostic run, select exact case IDs from the plan:
+
+```bash
+uv run --locked python -m scripts.qa_bench \
+  --env-file .env --output artifacts/qa-focused \
+  --case backtest/pinned/uniswap_v4_trading/economic
+```
+
+`--lane` selects offline, pytest, fork, faults, backtest or blocked. Unselected cases remain
+visible as skipped, so a focused run is never displayed as a passing full bench.
+The exit code for an explicit selection describes its selected cases. The full
+run exits nonzero if any required case did not pass. Unexpected pytest skips and
+empty test collections fail the corresponding case.
+
+## Inputs and coverage
+
+The current plan validates 82 connector/chain/profile/model/action obligations
+in 93 cases, including eight explicit blockers for unregistered rollout references.
+The executable cases include seven references through both Safe/Roles operator variants
+and EOA on pinned and newly resolved forks; twelve backtest reference/model
+combinations with pinned, recent and short native-cadence variants; the full
+offline gate; focused fork faults and multi-chain outages; support refusals; and
+supplemental prepared-model action checks. Counts change with declared support
+and reviewed proof mappings, not by hiding failed cases.
+
+The catalog in `tests/qa/catalog.py` records exercised actions and model
+revisions. Backtest mode is an explicit field checked against the declared model,
+not inferred from its revision label. Required support comes from the existing
+connector composition.
+Adding a supported chain, profile, action or model without a proof fails plan
+validation. Every discovered strategy needs a catalog mapping. Supplemental
+model tests are labeled component proofs; they are not additional strategy
+lifecycles.
+
+An unregistered candidate reference has an explicit blocked case and contributes
+no supported-action claims. The case remains in the full result denominator;
+omitting it or clearing its blocker fails catalog validation. Candidate blockers
+prevent a passing full bench even when all executable cases pass. Promoting its
+chain support requires replacing the blocker with reviewed proof mappings.
+
+Author economic choices and named markets remain in each strategy's `config.yaml`.
+Backtests use a separate backtest configuration. Every reference keeps providers,
+account bindings and fork fixtures out of its author files: QA derives one operator
+file per case from
+`examples/operators/`, varying the pinned or fresh anchor, the Safe or EOA profile
+and the shared or distinct operator there, and drives its fork lifecycle through the
+public `almanak run`, `pause`, `resume`, `teardown` and `shutdown` commands.
+QA writes and validates full resolved configurations, preserving all changes as
+evidence:
+
+- Fresh forks resolve one block identity per chain before case execution.
+- Recent historical windows preserve the configured duration and cleanup period.
+  The explicit source lag in `tests/qa/policy.json` is currently two hours on
+  each chain, measured after the cleanup endpoint. Missing history is refused;
+  the bench does not shorten the window or choose another provider.
+- Native-cadence probes use a ten-minute window and ten-minute cleanup, with the
+  author interval and explicit 120-second hold / 60-second collection parameters
+  where those parameters apply. The ordinary pinned/recent variants retain
+  their authored holding parameters and explicit backtest cadence overrides.
+- Detailed Aave history uses an explicit debt-free author variant and an hourly
+  override in the long runs. Its native probe has no interval override.
+- The EOA rehearsal harness supplies the explicit Ethereum test gas policy in
+  `tests/strategy_fork/rehearsal-policy.json` when a reference has no production
+  policy. Provider selection still comes from that reference. Generated
+  production configurations run only against identified local forks with
+  Foundry test keys; this does not change author production authority.
+
+Prepared backtests use a new dataset directory for cold preparation, then repeat
+preparation and run execution/reproduction with OS network isolation. Local IPC
+and loopback gateway calls remain available. Detailed history captures online
+reads and reproduces them in the same network isolation. Successful cases must
+show closure, delivered outcomes and the expected economic actions on each chain.
+Uniswap prepared runs also compare integer calculations with independent Quoter
+reads at the same sampled blocks, in both directions and several sizes.
+
+Existing frozen fixture, recovery, integer boundary, vendor-source and model
+regressions run in the full offline gate. The online fault lane runs `tests/fork`
+and the multi-chain outage tests, including Aave liquidation/contract comparisons.
+
+## Results and limits
+
+`public/results.json` is the versioned complete matrix. `summary.md`, `index.html`
+and `junit.xml` present the same outcomes. `private/` holds working files and
+credentials generated by the harness. Both directories remain local. Evidence
+export preserves dataset bytes or refuses to export a file containing known
+credential material. Logs are redacted. A refused required artifact blocks the
+case. The source archive and hashes retain the tested implementation, including
+uncommitted changes; source changes during execution invalidate passing results.
+
+`public/proof-ledger.json` links every declared connector, chain, action, account
+profile, model and protocol variant obligation to its scheduled case IDs. An
+obligation passes only when every mapped case passes. Failed, skipped, unstarted
+or missing cases remain outstanding, including separate fresh-input and recovery
+cases. The ledger preserves the tested source identity. It does not turn an
+undeclared candidate into supported scope or replace the 96-cell rollout inventory.
+
+Each case has isolated journals, gateways, forks and retained evidence. Provider
+cases run serially initially; `--workers` controls only the offline pytest worker
+count and accepts `auto` (the default) or an explicit positive integer.
+The default runs the combined coverage/CRAP gate with `-n auto`. The fault lane
+uses one pytest worker. The runner does not automatically
+retry failures. Existing gateway collection limits retain their own explicit
+bounded provider retry behavior. This is deliberately conservative until measured
+complete daily runs establish useful concurrency and timeout settings.
+
+Per-command records measure cold preparation, cached preparation, execution and
+reproduction wall time independently. Quoter comparisons and source resolution
+remain separate activities. The SDK's retained dataset and progress reports
+provide provider activity, model and cadence detail. No throughput or ETA claim
+is inferred from test counts.
+
+The case timeout defaults to one hour. This is an operational bound, not a
+measured runtime target. A backtest case's execute and reproduce steps share
+that bound; dataset preparation keeps its own thirty minute bound. Timeouts, missing providers,
+unstarted cases and source-resolution failures remain visible. Unknown failures
+are labeled without guessing that the SDK or provider caused them.
+
+Pass `--previous path/to/results.json` to write `changes.json`, comparing case
+status/category with the previous run. Unchanged cases are absent from this file.
+Supply the preceding local result explicitly. The bench sends no Slack/email
+messages. An absent prior artifact is reported as a fresh comparison baseline.
+
+## Hosted cell matrix
+
+The manual `Cell QA Matrix` workflow (`.github/workflows/cell_qa_matrix.yml`)
+runs one connector/chain cell's QA matrix on hosted runners, one job per case,
+through the same `scripts.qa_bench --case` entry point as a local run. It spends
+no funds and installs no production permissions: fixture accounts are public
+Foundry test keys on identified Anvil forks of the repository's read-only
+Alchemy provider. Dispatch it with a connector ID and a CAIP-2 chain, or with
+explicit case IDs:
+
+```bash
+gh workflow run cell_qa_matrix.yml --ref <branch> \
+  -f connector=uniswap_v3 -f chain=eip155:56
+```
+
+Selection. `scripts/ci/cell_qa_matrix.py` selects every catalog case whose
+obligations name the connector on the chain, which are the cases the proof
+ledger maps to the cell. The `fork` and `backtest` lanes run by default and the
+`pytest` lane can be added. The `offline`, `faults` and `blocked` lanes are
+refused: the offline gate needs the retained evidence tree, `fork/faults` runs
+every connector's fault suite, and a candidate blocker cannot pass. A selected
+cell case outside the chosen lanes stays listed as not run. The reverse-fault
+entries are the reversal tests in `tests/fork/test_*reversal*.py` that are
+parametrized by one of the cell's references, or whose module declares it as
+`REFERENCE`. Each one runs as its own pytest job. When no such test exists, the
+run reports that gap and does not pass. The `nodes` input adds explicit
+`tests/fork` or `tests/strategy_fork` node IDs, for example a cell's
+recovery-foundation nodes. An unknown case, an empty cell and more than 256
+entries are refused.
+
+Execution. Each job runs on `ubuntu-latest-l` with Bubblewrap and Anvil and
+installs the locked environment on CPython 3.12.13. At most eight jobs run at
+once. Every job is a separate deployment with its
+own gateway, so the per-deployment provider caps apply to each job, and the
+Alchemy plan limit is the only ceiling they share. Nothing is retried.
+
+Source and input identity. Every job checks out the run's commit. Before and
+after its entry, each job records the commit, the bench's tree hash, the lock
+hash, the Python build and the tool versions. The aggregate job recomputes the
+tree hash from a clean checkout of the same commit. Any mismatch, or any change
+during a job, blocks that entry. The plan job resolves the fresh fork origins
+and the input time once and passes them to every job through
+`qa_bench --frozen-inputs`. All fresh forks in one run therefore start from the
+same block per chain, and all recent historical windows end at the same instant,
+as in one local run.
+
+Time budgets. Fork and pytest-lane cases keep the bench's one-hour case bound,
+in a 90-minute job. A backtest case gets its cold-preparation budget from
+`tests/qa/policy.json` plus 7200 seconds. The policy budget is 1800 seconds by
+default and 7200 seconds for the five composed references it lists; detailed
+historical cases prepare nothing. The extra 7200 seconds cover cached
+preparation, execution, reproduction and model comparisons, and match the bound
+the local runbook recommends for slow windows. The job timeout adds 30 minutes
+for setup and upload. The largest case, a 7200-second native preparation, gets
+14400 seconds in a 270-minute job, inside the six-hour hosted job limit. The
+planner refuses any case whose bound cannot fit. The preparation budgets are
+unchanged. Each job prepares its dataset cold from the provider, exactly as a
+local case does, so no retained dataset is needed or reused. These are
+operational bounds, not measured runtimes, and a timeout remains a blocked case.
+
+Evidence. Only the bench's sanitized `public/` tree leaves the runner. The
+bench's export boundary redacts logs, drops credential files and refuses any
+other file that contains a known secret. `private/` never leaves the runner.
+Reversal-node files pass through the same export. Before upload, each job scans
+file names and bytes, including gzip members, for the provider keys. The key
+values come from the environment only. On a match, the job uploads nothing but
+its record, and the entry is blocked as unsafe evidence. The per-case source
+snapshot is dropped from the job artifacts. The aggregate archives one
+`source.tar.gz` for the verified commit. All artifacts are retained for 90 days.
+
+Results. The `aggregate` job writes `results.json`, marked
+`"execution": "hosted_cell_matrix"`, and a job summary. The summary has one row
+per planned entry, the cell's cases that were not run and a cell-scoped proof
+ledger. The workflow fails unless every planned entry passed on one source. A
+skipped, missing, timed-out, unsafe or mixed-identity entry keeps the result
+`incomplete_or_failed`.
+
+### What a hosted cell run establishes
+
+It can satisfy the first item of the
+per-cell evidence package:
+the cell's fork and backtest cases and its reverse-fault node, passed on one
+commit. That commit must be the frozen integrated source, or the later changes
+must not touch the code paths the proof exercises. It is not the local
+retained-evidence gate and does not establish:
+
+- Pytest-lane component proofs that read retained evidence, such as
+  `model-actions/uniswap_v4/eip155:56`. They cannot pass on hosted runners;
+  run them locally with the evidence tree present.
+- The full offline suite with retained evidence, combined coverage, CRAP at most
+  30, Ruff, formatting and mypy (package item 2). Hosted CI's offline suite skips
+  the evidence modules and is not a substitute.
+- The recovery-foundation nodes (item 3), unless they were passed as `nodes`
+  and do not need retained evidence. Otherwise they remain local work.
+- Append-only sanitized evidence archival with checksum verification (item 4).
+  Download the artifacts, verify their digests and seal them locally. The
+  workflow writes nothing to the evidence bucket.
+- GMX cells. Their keeper drivers settle requests with signed reports read from the
+  pinned evidence copies, which this workflow does not fetch, so those cases fail here.
+  The `Fork Qualification` workflow fetches them.
+
+## Hosted weekly fork qualification
+
+The `Fork Qualification` workflow also runs every Sunday at 03:17 UTC on `main`.
+The scheduled run has no inputs: `scripts.ci.fork_qualification_matrix
+--production-cells` selects every converted reference with a market on a
+connector/chain cell that the checked-out connectors declare for production
+(`almanak support`), and runs the lifecycle and the rehearsal for each. It
+refuses an empty selection and a declared cell that no reference exercises.
+Keeper-settled GMX references are selected like any other and replay their
+signed reports from the pinned copies. At most 24 references run at once.
+
+The `select` job summary lists each cell with its references. When a scheduled
+run fails, the `report` job opens the issue "Weekly Fork Qualification failed on
+main", or comments on it if it is open, naming the jobs that did not pass; the
+next passing scheduled run closes it. A failed run is not proof of support, and
+a passing run is not a complete per-cell evidence package: it holds no
+reverse-fault case, recovery-foundation node, backtest or offline gate.
+
+## Local evidence and scheduling
+
+Generated captures under `docs/internal/reports/evidence/` and bench output under
+`artifacts/` are ignored by Git and remain local. Full offline QA requires the
+retained captures at their original paths. A fresh clone needs a local copy of
+those inputs; missing evidence must not be converted into passing or skipped
+required cases.
+
+Hosted daily QA and its GitHub watchdog have been removed. There is no hosted
+daily coverage or automatic replacement local schedule; the only hosted schedule
+is the [weekly fork qualification](#hosted-weekly-fork-qualification), which
+covers the fork lifecycle and the rehearsal only. Operators can invoke
+the commands above with explicit provider bindings and retained results. Hosted
+CI skips evidence-dependent tests and reports that scope in its job summary.

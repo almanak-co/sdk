@@ -1,0 +1,44 @@
+{
+  "0x8366a39cc670b4001a1121b8f6a443a643e40951": {
+    "address": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+    "code_hash": "0xbd3881180b547f5fe817545743cfb4343e96b1bc6640dcd70c106b0066e95626",
+    "implementation": null,
+    "implementation_hash": null,
+    "implementation_slot": null
+  },
+  "0x58daec3116aae6d93017baaea7749052e8a04fa7": {
+    "address": "0x58daec3116aae6d93017baaea7749052e8a04fa7",
+    "code_hash": "0xc873e135dc9aaec88489cfbad146b4cb49d6a32e0d80326377784b7ba17670b2",
+    "implementation": null,
+    "implementation_hash": null,
+    "implementation_slot": null
+  },
+  "0x8dc178efb8111bb0973dd9d722ebeff267c98f94": {
+    "address": "0x8dc178efb8111bb0973dd9d722ebeff267c98f94",
+    "code_hash": "0xd707b1da8cb165e5ea35a3b4450d971eb562ec171e23492aa117036b78a868f6",
+    "implementation": null,
+    "implementation_hash": null,
+    "implementation_slot": null
+  },
+  "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b": {
+    "address": "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b",
+    "code_hash": "0x7d9c591e0956fd89d98feb4ffcfe8bf1f7a62bd485edd979fa21d104b49878a6",
+    "implementation": null,
+    "implementation_hash": null,
+    "implementation_slot": null
+  },
+  "0x000000000022d473030f116ddee9f6b43ac78ba3": {
+    "address": "0x000000000022d473030f116ddee9f6b43ac78ba3",
+    "code_hash": "0x5208783f52488f7d3493e5e38311ab707c1d75457fe472a19b0b4d57d66a7fca",
+    "implementation": null,
+    "implementation_hash": null,
+    "implementation_slot": null
+  },
+  "0x8876789976decbfcbbbe364623c63652db8c0904": {
+    "address": "0x8876789976decbfcbbbe364623c63652db8c0904",
+    "code_hash": "0x2ce6aaaf9f4151f5e1cbf774668772f17f532ae11b15e9284fd0a072a8b0fbde",
+    "implementation": null,
+    "implementation_hash": null,
+    "implementation_slot": null
+  }
+}

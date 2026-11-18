@@ -1,0 +1,1317 @@
+{
+  "status": "candidate_process_evidence",
+  "scope": "Four references: EOA plus configured and distinct generated Safe operators; identified forks only. Failed initial zero-argument permission installation retained separately. Economic integration and promotion pending.",
+  "cases": [
+    {
+      "name": "aerodrome_base_stable_lp-eoa-eoa",
+      "reference": "aerodrome_base_stable_lp",
+      "profile": "eoa",
+      "operator_mode": "eoa",
+      "status": "passed",
+      "source": "eoa"
+    },
+    {
+      "name": "aerodrome_base_stable_trading-eoa-eoa",
+      "reference": "aerodrome_base_stable_trading",
+      "profile": "eoa",
+      "operator_mode": "eoa",
+      "status": "passed",
+      "source": "eoa"
+    },
+    {
+      "name": "aerodrome_base_volatile_lp-eoa-eoa",
+      "reference": "aerodrome_base_volatile_lp",
+      "profile": "eoa",
+      "operator_mode": "eoa",
+      "status": "passed",
+      "source": "eoa"
+    },
+    {
+      "name": "aerodrome_base_volatile_trading-eoa-eoa",
+      "reference": "aerodrome_base_volatile_trading",
+      "profile": "eoa",
+      "operator_mode": "eoa",
+      "status": "passed",
+      "source": "eoa"
+    },
+    {
+      "name": "aerodrome_base_stable_lp-safe-configured",
+      "reference": "aerodrome_base_stable_lp",
+      "profile": "safe_roles",
+      "operator_mode": "configured",
+      "status": "passed",
+      "source": "safe"
+    },
+    {
+      "name": "aerodrome_base_stable_lp-safe-distinct",
+      "reference": "aerodrome_base_stable_lp",
+      "profile": "safe_roles",
+      "operator_mode": "distinct",
+      "status": "passed",
+      "source": "safe"
+    },
+    {
+      "name": "aerodrome_base_stable_trading-safe-configured",
+      "reference": "aerodrome_base_stable_trading",
+      "profile": "safe_roles",
+      "operator_mode": "configured",
+      "status": "passed",
+      "source": "safe"
+    },
+    {
+      "name": "aerodrome_base_stable_trading-safe-distinct",
+      "reference": "aerodrome_base_stable_trading",
+      "profile": "safe_roles",
+      "operator_mode": "distinct",
+      "status": "passed",
+      "source": "safe"
+    },
+    {
+      "name": "aerodrome_base_volatile_lp-safe-distinct",
+      "reference": "aerodrome_base_volatile_lp",
+      "profile": "safe_roles",
+      "operator_mode": "distinct",
+      "status": "passed",
+      "source": "safe"
+    },
+    {
+      "name": "aerodrome_base_volatile_lp-safe-configured",
+      "reference": "aerodrome_base_volatile_lp",
+      "profile": "safe_roles",
+      "operator_mode": "configured",
+      "status": "passed",
+      "source": "safe"
+    },
+    {
+      "name": "aerodrome_base_volatile_trading-safe-distinct",
+      "reference": "aerodrome_base_volatile_trading",
+      "profile": "safe_roles",
+      "operator_mode": "distinct",
+      "status": "passed",
+      "source": "safe"
+    },
+    {
+      "name": "aerodrome_base_volatile_trading-safe-configured",
+      "reference": "aerodrome_base_volatile_trading",
+      "profile": "safe_roles",
+      "operator_mode": "configured",
+      "status": "passed",
+      "source": "safe"
+    },
+    {
+      "name": "aerodrome_base_volatile_lp-failed-installation-configured",
+      "reference": "aerodrome_base_volatile_lp",
+      "profile": "safe_roles",
+      "operator_mode": "configured",
+      "status": "failed",
+      "source": "failed-installation"
+    }
+  ],
+  "files": [
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/checkpoint.json.gz",
+      "sha256": "3ea8d9ea22acefd7a1b51fbec3f0bf7329248a956d5b43fd4be8b0cad2bf0059",
+      "bytes": 37721
+    },
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/deployment.json.gz",
+      "sha256": "b5854ba06a689dc6f021142003157f7fc7db5162233fd9a64fba736e6b1463fa",
+      "bytes": 886
+    },
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/fixture-installation.json.gz",
+      "sha256": "ed477a007a5d917b3232d74af96dff6a0884f87b0662d14d54e70c622d5e058b",
+      "bytes": 209
+    },
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/fork-routes.json.gz",
+      "sha256": "a1f846128dbffa35f4cc012124dd9757eab6bc29b93c1fc540bb9dbad37956d4",
+      "bytes": 168
+    },
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/process-0.log.gz",
+      "sha256": "b0745219752667db44c567bd7c4f6a3cb35e541b87c470b9bb5d4ce234d5ebcd",
+      "bytes": 202
+    },
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/process-2.log.gz",
+      "sha256": "4fa784aceef03d7706e8d8c74f303b3cdb717b02ee132182d0ed8838f1bda37f",
+      "bytes": 324
+    },
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/process-3.log.gz",
+      "sha256": "ae1feff77c7a7c1c54a75d220e626cb06aac6345af27d1afe1e05d2fe0076386",
+      "bytes": 137
+    },
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/process-4.log.gz",
+      "sha256": "ae1feff77c7a7c1c54a75d220e626cb06aac6345af27d1afe1e05d2fe0076386",
+      "bytes": 137
+    },
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/process-5.log.gz",
+      "sha256": "ad1432c0d2460fd1d3d19edbbe02877a81524d208cd7cdbd636586a72fb899ab",
+      "bytes": 259
+    },
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/process-6.log.gz",
+      "sha256": "aad938fb1a8827a1d7775804c9d1da9e1d11466d74290f53b08dd2e1043117ef",
+      "bytes": 3188
+    },
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/report.json.gz",
+      "sha256": "330e01f7c41989c29a235b32fc7912a74760a4de4d57bec39f90740c39e18e8f",
+      "bytes": 3171
+    },
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/result.json.gz",
+      "sha256": "577eee7a8f666e99e89da0a85e338f0a20ce979150372b37567edba5d45dc7d6",
+      "bytes": 365
+    },
+    {
+      "path": "aerodrome_base_stable_lp-eoa-eoa/state.sqlite.gz",
+      "sha256": "dd9def484c14c0681d3f1a2dfc470d2aa87cb849cdaf966545ed5a0e70625078",
+      "bytes": 30558
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/checkpoint.json.gz",
+      "sha256": "0713dc8654c9d4e908a60a9b1931c15c6b0d05598c0470603811e5f11adbf51e",
+      "bytes": 11329
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/deployment.json.gz",
+      "sha256": "d9c70113966369b2703f1a6934798842bb87a2a86ef9a45d652018f3725b922d",
+      "bytes": 887
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/fixture-installation.json.gz",
+      "sha256": "a2c7dbd91a69d074899aff762b7aabbe5ad52bd789372b49dac2e54a7c318b6b",
+      "bytes": 212
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/fork-routes.json.gz",
+      "sha256": "a34cc66f7642b22e8257816d5f200df4c633fba55ee2740108a9f16535f21ceb",
+      "bytes": 168
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/process-0.log.gz",
+      "sha256": "e33eaa37bfa59a85f2f2d3184a67eea9751e2837934530aa6c905824cc28ce8c",
+      "bytes": 201
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/process-2.log.gz",
+      "sha256": "6fe011682b95d4586f7334340ea8c712851e9471dc81ef815cdffc3403fb0c35",
+      "bytes": 180
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/process-3.log.gz",
+      "sha256": "7b5125ec5923cdbc418e0d6eed385dcdd905459a9f3ca4229b99ed2c7437df28",
+      "bytes": 138
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/process-4.log.gz",
+      "sha256": "7b5125ec5923cdbc418e0d6eed385dcdd905459a9f3ca4229b99ed2c7437df28",
+      "bytes": 138
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/process-5.log.gz",
+      "sha256": "16081995b4601f6f49e88218ac673addb106c9c00f0e231cef3de18ef2d89414",
+      "bytes": 222
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/process-6.log.gz",
+      "sha256": "cd8b65709c9f0df055fb9f1d14c8cbbd90b6fbef21b064066b61f4f9b9df7e73",
+      "bytes": 2458
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/report.json.gz",
+      "sha256": "e20d758f676060af048b2f4ca7ebd8023ec4b256f9a9eb2b19018262db588b19",
+      "bytes": 2442
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/result.json.gz",
+      "sha256": "aa43b2acdecacbbf92e10e7701e07d83f1b0f9a15d32cbf612a0eded9f196c33",
+      "bytes": 364
+    },
+    {
+      "path": "aerodrome_base_stable_trading-eoa-eoa/state.sqlite.gz",
+      "sha256": "1a2532e37dfa41e7790bff89d9183825b6b959226ac292f6705430de3a8a5156",
+      "bytes": 10166
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/checkpoint.json.gz",
+      "sha256": "36fa89d07fe1afd6cc2ad15a889c6096447605ce2d09dad37472713e52bb1894",
+      "bytes": 38494
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/deployment.json.gz",
+      "sha256": "621e30948e46d41969165b55923c05c6d3de1a827af8a2251bb9772d76f7e307",
+      "bytes": 873
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/fixture-installation.json.gz",
+      "sha256": "3bc0541f16966f03709a865fcac7b4d78ece2b46d61ed7d64485bb4b04d8bc54",
+      "bytes": 191
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/fork-routes.json.gz",
+      "sha256": "fe6935250df1066cbe64e2b5c3cb1c2c2616da8852114d9b40e0f98135e4eae0",
+      "bytes": 169
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/process-0.log.gz",
+      "sha256": "0f3052800201a238000996b102de20d8485136dae5bdd2c6c5a9c076fcc0c5a6",
+      "bytes": 201
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/process-2.log.gz",
+      "sha256": "5c22e9d52423bc95de05ae3fe2ae1e6d7e2d9a03ee57dd8f79977b4e3dc1f403",
+      "bytes": 326
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/process-3.log.gz",
+      "sha256": "58a8f05e5d0eb9bf788e1f14e8adce9c74c80318a56d4289876f22882211a37c",
+      "bytes": 135
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/process-4.log.gz",
+      "sha256": "58a8f05e5d0eb9bf788e1f14e8adce9c74c80318a56d4289876f22882211a37c",
+      "bytes": 135
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/process-5.log.gz",
+      "sha256": "5475f0c44d821c5d765a1184d8be2dab38489b2a6ec032f0eb55f0460e948846",
+      "bytes": 264
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/process-6.log.gz",
+      "sha256": "ec0b737af5a08f9d6f85a7bfdfeabc2bf5659e54a87f568820f62a7498e183bd",
+      "bytes": 3186
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/report.json.gz",
+      "sha256": "3f42812dd56f9e8d60905284f3d99bd3c1c08e7f95ed97209e7478bac8b9b051",
+      "bytes": 3168
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/result.json.gz",
+      "sha256": "ad4a099c7a73e193c3cd947b85525e67ba4e3376cb8ccc6e0fda0646bb52bc57",
+      "bytes": 365
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-eoa-eoa/state.sqlite.gz",
+      "sha256": "1219324d6384e4323c8984d64e5e2e04a0b8a41d27dc816dead92bc49ed83764",
+      "bytes": 32204
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/checkpoint.json.gz",
+      "sha256": "a8ea961a34180c92491e7df452525d160644322ed7573332fa3a6cecfdcbb10d",
+      "bytes": 11404
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/deployment.json.gz",
+      "sha256": "d1b8a10b4b9f9ab0626d9f027c5673a2f4d862a768d6207d350ee02bcbd1c122",
+      "bytes": 871
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/fixture-installation.json.gz",
+      "sha256": "d3ba19952a2e9818f7f6482adcb4e86ed54d6c869f789a48a4907020ecb91e0f",
+      "bytes": 190
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/fork-routes.json.gz",
+      "sha256": "c8fbbbb1b46e8720a369695c6b1c594453c657bf8ee2f35aac9504825ac323e3",
+      "bytes": 168
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/process-0.log.gz",
+      "sha256": "abcf1dbbdc76e0a88356e6c6cdd9d457d918aea6fca1b577014f1552135d38e1",
+      "bytes": 201
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/process-2.log.gz",
+      "sha256": "4d850b92d6a1d9fa4effa6c9c95e6aab349389b2879097cd68b416ad3212fa9d",
+      "bytes": 180
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/process-3.log.gz",
+      "sha256": "c5b5452dc0aa414d1fab2e525aee9b6f96363b151b93ef680a82dae14c42010d",
+      "bytes": 136
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/process-4.log.gz",
+      "sha256": "c5b5452dc0aa414d1fab2e525aee9b6f96363b151b93ef680a82dae14c42010d",
+      "bytes": 136
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/process-5.log.gz",
+      "sha256": "a625c169ccaa4bdc050f943f9d25f8977a9919e638ac3970013007a8ce97679c",
+      "bytes": 222
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/process-6.log.gz",
+      "sha256": "ca0ac8acaa268d187e0da65fd44049b53d00da4a23c4985e07571a3e993276f2",
+      "bytes": 2454
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/report.json.gz",
+      "sha256": "1b679b75f0006b917b49d2fb7259bb253f218f044e99f7d141734f28cd216f5a",
+      "bytes": 2436
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/result.json.gz",
+      "sha256": "951c110975d3315646f6aae862d0a7b41f820fff19aece2df879acb05b20e1de",
+      "bytes": 366
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-eoa-eoa/state.sqlite.gz",
+      "sha256": "89d5831cbfedd41f786728c7c7b6cba6d7e21144ab755048315ffb2424d60129",
+      "bytes": 10021
+    },
+    {
+      "path": "eoa-source-comparison.json.gz",
+      "sha256": "269c7165585f8325c1f15dda4f3ecfc5ea723d46bbd86cee930ddfe19f7f7269",
+      "bytes": 54419
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/checkpoint.json.gz",
+      "sha256": "ea68b90f8326855de0d9a80437e0f2c666e9389f897a32a603ee62e709bacca8",
+      "bytes": 48311
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/deployment.json.gz",
+      "sha256": "5b27b9569249844e8f87d808ecad2466f576656a5abe5362e0739117e16cd72a",
+      "bytes": 1038
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/fixture-installation.json.gz",
+      "sha256": "5df52edbe5698c2671f304ba099a6ce8f2f239c05dd1e3eaa8189299162ffae9",
+      "bytes": 1571
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/fork-routes.json.gz",
+      "sha256": "c54b9565bffe89d183bef13e3a4256dec7fe5e0a355c5a91e407faad2c9336fd",
+      "bytes": 168
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/permission-budget-observations.json.gz",
+      "sha256": "8c9271d23df76e1b2f3407d6d6fc7a50dbf9e99baf33120e4317823b7ba7cf71",
+      "bytes": 803
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/permission-generation.json.gz",
+      "sha256": "12ae0b03c238022961f860900ca0dd7412f25894c99e8335f890961d2c66eb58",
+      "bytes": 216
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/permission-installation.json.gz",
+      "sha256": "6fce2258a124d40af71e6a9083357170fd796dc5c7e3f7537e53c431de946fa7",
+      "bytes": 5181
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/permission-verification.json.gz",
+      "sha256": "a6e3d5589a0850d30097fef0f4d3c2f6cadd23245c42ecb06a37d2237aad1ce4",
+      "bytes": 587
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/permissions/manifest.json.gz",
+      "sha256": "d75bcb8888106b44485c727bed8da0c1a1104a35275a831c74978218243ddf37",
+      "bytes": 4430
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/permissions/permissions.txt",
+      "sha256": "36ae8a45c2d08d6b45c8653d1d8b54f1037e8a70eab615ba601e75d51d4a9914",
+      "bytes": 986
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/permissions/safe-0.json.gz",
+      "sha256": "916f421df9966b4d4a401ca7fdaad6e6bcca9e6bf48b671a0b003314768aec2b",
+      "bytes": 1639
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/process-0.log.gz",
+      "sha256": "bea1f4708d97b235e8eab8e76b036c707c5beab30338558462138ac3732bb26a",
+      "bytes": 226
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/process-2.log.gz",
+      "sha256": "4f42be15c6407d7376cdd44f8473e62d039f41ab4a000653c1fbebad1c599613",
+      "bytes": 359
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/process-3.log.gz",
+      "sha256": "e8e7a6c1978e02eb6d312d25039fbbf6523b0629fef0c1d0adbbe97cff485694",
+      "bytes": 136
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/process-4.log.gz",
+      "sha256": "e8e7a6c1978e02eb6d312d25039fbbf6523b0629fef0c1d0adbbe97cff485694",
+      "bytes": 136
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/process-5.log.gz",
+      "sha256": "8f6c09b3e040ae22ef6178e877365fc84e3bdd0f46bac4409a062d4103b350d0",
+      "bytes": 294
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/process-6.log.gz",
+      "sha256": "11caed195d3d1d3cc61aa77e5863f55dbdfd26746ef0f093bdd97d66c524d6da",
+      "bytes": 3224
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/report.json.gz",
+      "sha256": "a1287d71236b430a6d1431f1370de73a4bdb86ac79f1dd78cab96b9d96fc472f",
+      "bytes": 3206
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/result.json.gz",
+      "sha256": "b05fe73e9c83dedcddb9e76800a84dc196719e7e65883b9dfb13f6ed24551167",
+      "bytes": 1417
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-configured/state.sqlite.gz",
+      "sha256": "90b69ef762290a490d9d97b9315b1cdf1b44596f9c8765b69b4fe7dff6611986",
+      "bytes": 38674
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/checkpoint.json.gz",
+      "sha256": "d2169911f8158bff617121a7be4f42a6667fe9d7d45b4d5231fee70b85c39d3e",
+      "bytes": 48314
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/deployment.json.gz",
+      "sha256": "ec92a75f9dd9d2abc0990f0132da6069c8c3172a666138ea66f59982d3d64aef",
+      "bytes": 1040
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/fixture-installation.json.gz",
+      "sha256": "132f8d0272a4ddbcffbd758178244a788a55dc002a4598e0df8dd31db951018d",
+      "bytes": 1572
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/fork-routes.json.gz",
+      "sha256": "61fdcda26d10ebd3bab293602c657f844adc0a9e37d6967b42a5dec256dbea09",
+      "bytes": 169
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/permission-budget-observations.json.gz",
+      "sha256": "80a96db9090eab4e9f97481e90dd85eeef1c67d94eec2eefbaf98519b6c64a78",
+      "bytes": 808
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/permission-generation.json.gz",
+      "sha256": "5423e7f142024a33f076a6c5eedbb4096b97075bbe4f94a0f399a6bb9ac48047",
+      "bytes": 217
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/permission-installation.json.gz",
+      "sha256": "4be9c990a2d91f008eec4077b1e0013c2cf820428a3a38c206b06d96ec8829a0",
+      "bytes": 5174
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/permission-verification.json.gz",
+      "sha256": "4a023df87dee3a7afb5f71c07cd4abf89c959a000c364f59e6fdd94b483d423d",
+      "bytes": 589
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/permissions/manifest.json.gz",
+      "sha256": "8f13bbeefde7487d7106baa72da50fee3b9fec5aebcfcba3de4ca82f2ce4950f",
+      "bytes": 4437
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/permissions/permissions.txt",
+      "sha256": "36ae8a45c2d08d6b45c8653d1d8b54f1037e8a70eab615ba601e75d51d4a9914",
+      "bytes": 986
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/permissions/safe-0.json.gz",
+      "sha256": "05c851aa422e086741c72e41a843806edb33e4313917355fbb08e7fb23878a89",
+      "bytes": 1644
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/process-0.log.gz",
+      "sha256": "f3d1bb306b71b3b5f2c69f8ca1ce4bbaa6ce1940c3fc7e6719722af79a91e95e",
+      "bytes": 226
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/process-2.log.gz",
+      "sha256": "5ae623287a3ed873e2e968c2db04c3812d8d9ab9f2a2eda6f9daea5f9605f7f1",
+      "bytes": 358
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/process-3.log.gz",
+      "sha256": "62861be1b0b4d38c419eda83b28650fea8d8b87983e28bc678e85be0a5bc1b69",
+      "bytes": 137
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/process-4.log.gz",
+      "sha256": "62861be1b0b4d38c419eda83b28650fea8d8b87983e28bc678e85be0a5bc1b69",
+      "bytes": 137
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/process-5.log.gz",
+      "sha256": "094c1872dca22420de32b1266fb413c662dbb1ac61734eaa1bb9a382535e8541",
+      "bytes": 297
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/process-6.log.gz",
+      "sha256": "17e6007eef39e86a3a6a9276747344c334b91b10b07b9afaed6604e419157e0e",
+      "bytes": 3227
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/report.json.gz",
+      "sha256": "d4023a1fb9d230829bb6d6fffe1c6bc8b2809b8c81df166de3bb4f8b8e0fbce0",
+      "bytes": 3209
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/result.json.gz",
+      "sha256": "c0a8086123b7bbcc2fd82bb46c61a6b12ac6549ebc1619df95bfb1dba97e6f77",
+      "bytes": 1415
+    },
+    {
+      "path": "aerodrome_base_stable_lp-safe-distinct/state.sqlite.gz",
+      "sha256": "b260bf9eaa04c69b37be20f853af42cfa352b2a063e6b6465c353c6f832c4220",
+      "bytes": 38815
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/checkpoint.json.gz",
+      "sha256": "ced77825a60729f4d1f1fa66b69707a5428757be932d48ae8a40c57eaf5573fc",
+      "bytes": 15254
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/deployment.json.gz",
+      "sha256": "b8fddf74d2ebca81058e5b6d66957f88d216756d4b190f383d2d0cd57f3ee6e3",
+      "bytes": 1042
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/fixture-installation.json.gz",
+      "sha256": "132f8d0272a4ddbcffbd758178244a788a55dc002a4598e0df8dd31db951018d",
+      "bytes": 1572
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/fork-routes.json.gz",
+      "sha256": "48b78c2aa92d6cc2b7c833d19d17d781661b2483db5b9d0296bf46d424a34dc7",
+      "bytes": 167
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/permission-budget-observations.json.gz",
+      "sha256": "3c95b288ceeac99bac0896714d4a9c0f980f7bf5211a27f54e47cd7e7d88d932",
+      "bytes": 696
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/permission-generation.json.gz",
+      "sha256": "a11b8d80946019de92f90f8bd15f439604247a07b04a4104b4bea36d9cfda2e3",
+      "bytes": 219
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/permission-installation.json.gz",
+      "sha256": "3a44ab47057446546e92fef3eccbeef9b3f0c2280c6aa4e9806cbbabff51e0a0",
+      "bytes": 3168
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/permission-verification.json.gz",
+      "sha256": "e4e4e63b84c39b872de0d6d0dd8b700321aa105bdf5446ec27546537d763147b",
+      "bytes": 507
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/permissions/manifest.json.gz",
+      "sha256": "de074fa3ce6b8380ddf487c9a7df7d4f674704fca7f76d5a899ed83353dc103b",
+      "bytes": 3370
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/permissions/permissions.txt",
+      "sha256": "a45bf68503cb50a4e0dc748c061ea9c9c3cd32014989e5a6aceb24013e5280ce",
+      "bytes": 647
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/permissions/safe-0.json.gz",
+      "sha256": "825e529947dc36e859dd5cb904510590019b1c28aae1379d97597b68232a8dc4",
+      "bytes": 1078
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/process-0.log.gz",
+      "sha256": "939b706e14146f07de9b240223c71061cc1b362a0e7a19a1c77845142f073781",
+      "bytes": 226
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/process-2.log.gz",
+      "sha256": "226638bc05e986fc330df02406cfc5d3a5b36be9eb6c7a0f5b989975e8e66f4d",
+      "bytes": 213
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/process-3.log.gz",
+      "sha256": "e4a664511a617bb57f68962183330e70eaba59f35186b39ed2733054cfe2e71c",
+      "bytes": 136
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/process-4.log.gz",
+      "sha256": "e4a664511a617bb57f68962183330e70eaba59f35186b39ed2733054cfe2e71c",
+      "bytes": 136
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/process-5.log.gz",
+      "sha256": "839ab943d45b72c1cc38c44cf84d327eb5c9fba2f83e6df6324a71c1ee067325",
+      "bytes": 254
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/process-6.log.gz",
+      "sha256": "6a762884751f130a92048e4027af05c9afa24f1f9772675e44fe2132d96ccfef",
+      "bytes": 2491
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/report.json.gz",
+      "sha256": "49fcb536fb7d38b43bf07a347b1a7bed2824dc6ec09049ef3c2fda53b81504ba",
+      "bytes": 2474
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/result.json.gz",
+      "sha256": "33482e583a2c1f0ef7f05b6ed87e6c67cf9cd045d9f96d6b3502e9c8b8ff3627",
+      "bytes": 1189
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-configured/state.sqlite.gz",
+      "sha256": "d5724d48648e44d51d1d763769e50e01e8c0ca479417579bf91a995a4fdadf04",
+      "bytes": 14333
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/checkpoint.json.gz",
+      "sha256": "ee581c8d496849ed7859d5b8c5ae809900dbabb3b1fd5e2e6609a04c68d2d8d8",
+      "bytes": 15267
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/deployment.json.gz",
+      "sha256": "7a9c5f4f855bed9ca8e88363934a02fde0c502eacd747b0aefefc4865522c244",
+      "bytes": 1042
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/fixture-installation.json.gz",
+      "sha256": "5df52edbe5698c2671f304ba099a6ce8f2f239c05dd1e3eaa8189299162ffae9",
+      "bytes": 1571
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/fork-routes.json.gz",
+      "sha256": "a3fc249e7230542a93b58b478ff4db2b0a369a06395ed7b18dd636ec13db4af4",
+      "bytes": 169
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/permission-budget-observations.json.gz",
+      "sha256": "b97677d3d492969ba8286ca8e92fa9f5bfcd9bca1527b603bae20dc83b081c9e",
+      "bytes": 697
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/permission-generation.json.gz",
+      "sha256": "9e2712eb484a52602091fb5dfd6aac9c598862f5629ae27e7120270653f5b265",
+      "bytes": 220
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/permission-installation.json.gz",
+      "sha256": "7e489d2d1aa3a3e2faaaa77dd41fab97f88439d74af06646d6e5364b174db5c4",
+      "bytes": 3157
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/permission-verification.json.gz",
+      "sha256": "5c5fc34c3c973a5de1883f6b6494ab25ef2cc87430e86fdccec62ada0e9766c9",
+      "bytes": 502
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/permissions/manifest.json.gz",
+      "sha256": "ce705715608329658f18a92f63e2239a3912efb4561ebaeb6bfebc1c884dbd71",
+      "bytes": 3368
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/permissions/permissions.txt",
+      "sha256": "a45bf68503cb50a4e0dc748c061ea9c9c3cd32014989e5a6aceb24013e5280ce",
+      "bytes": 647
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/permissions/safe-0.json.gz",
+      "sha256": "3de844d3add737d26782e590da2c3a4d7fd4ab535d3255e1d45e723edd3c2174",
+      "bytes": 1075
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/process-0.log.gz",
+      "sha256": "1cf001a958c75085ea57f3a37106ca5791b4aa03cc87d50b6328c31e44a0e04b",
+      "bytes": 226
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/process-2.log.gz",
+      "sha256": "0a388686b55eeeabe03e5388012480c7c030f3bca5757b657f42ab9de98c4ceb",
+      "bytes": 213
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/process-3.log.gz",
+      "sha256": "82cf066aa5c183a30ab5ed8f7ce588c9ff55e9a9845c7b37a04407f1c4b5ac7b",
+      "bytes": 138
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/process-4.log.gz",
+      "sha256": "82cf066aa5c183a30ab5ed8f7ce588c9ff55e9a9845c7b37a04407f1c4b5ac7b",
+      "bytes": 138
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/process-5.log.gz",
+      "sha256": "e47f51f7338349cf0d56ea4de15e58470b34ff412623b453757b3bafcaf115bd",
+      "bytes": 255
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/process-6.log.gz",
+      "sha256": "88013de4c8bb529e82f3b77fdb81ac632b4fa4b1c0d730c250bafe085a0151c7",
+      "bytes": 2492
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/report.json.gz",
+      "sha256": "3953a75e6ad327dad7fbca24da3c495ac87500163270dc3d5cf3bda3db070962",
+      "bytes": 2476
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/result.json.gz",
+      "sha256": "4412efff734b4b83cbf9bad388be28723287d74bb46ce25e7d8c6e3d25cc16c5",
+      "bytes": 1185
+    },
+    {
+      "path": "aerodrome_base_stable_trading-safe-distinct/state.sqlite.gz",
+      "sha256": "b2e27d1cc2027e5d237617a187613aeb6ff6c8f8e1f3d30a54f5093a9d76975b",
+      "bytes": 14366
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/checkpoint.json.gz",
+      "sha256": "a4bdb3efe14035fff53056d8845f7c3944d171d60cc3c33f2b8b149cbb8a296c",
+      "bytes": 48461
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/deployment.json.gz",
+      "sha256": "56be021c3cb7a14105d4e3df4c002c2ee4fc791d11ecc7e39d9733783dfc08c8",
+      "bytes": 1027
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/fixture-installation.json.gz",
+      "sha256": "9d2564e3b692fd784882fcc27157d6d269922b05d82387b9ace792819ef55dee",
+      "bytes": 1550
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/fork-routes.json.gz",
+      "sha256": "313d9e33164b7494ef854d9572ebffb0eb95462b48014ca607aee8b619035ba1",
+      "bytes": 167
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/permission-budget-observations.json.gz",
+      "sha256": "a0210396b88ef34253cf48b07fd38d347ed30221aed6764639521b3f3817ecc8",
+      "bytes": 813
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/permission-generation.json.gz",
+      "sha256": "f5126547ae0519b43014da4e530f57bd7eed1e7e64b3e998c784180c53510ff7",
+      "bytes": 218
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/permission-installation.json.gz",
+      "sha256": "5f7e40f1e49a6dfb353ff4593c151c9a3051820d923db7f37511bd5fa982d030",
+      "bytes": 5093
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/permission-verification.json.gz",
+      "sha256": "de46e42d4b9e3865b711809e8acd33622d1255988ffc03dd24141206d121d72d",
+      "bytes": 592
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/permissions/manifest.json.gz",
+      "sha256": "1951f0c4e886e8fc21747e5bb54fef7fc3c328f7609efb40ab7e15199bc68e50",
+      "bytes": 4280
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/permissions/permissions.txt",
+      "sha256": "decf0e80cf5c4eac9a7cb8e74bd78cc413e3e643ac14bfb752a2ba9f134c5ea3",
+      "bytes": 986
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/permissions/safe-0.json.gz",
+      "sha256": "a1cf7b32cd6651af72085c8beba4a65a27c7308c086a3a748657dd7e57a88972",
+      "bytes": 1596
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/process-0.log.gz",
+      "sha256": "e363aa33af6e7edb83efa826616869d6d772965883062954df1d5f1a88484b1a",
+      "bytes": 226
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/process-2.log.gz",
+      "sha256": "f7999cebdcb4b7bf3373e87c4b25db17b949f5b21271e7361f417b8fede2e501",
+      "bytes": 348
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/process-3.log.gz",
+      "sha256": "67279c95de9f68b20d4ea0fb2eb70dba0788250bbffc33c36c032e40851bf01e",
+      "bytes": 137
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/process-4.log.gz",
+      "sha256": "67279c95de9f68b20d4ea0fb2eb70dba0788250bbffc33c36c032e40851bf01e",
+      "bytes": 137
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/process-5.log.gz",
+      "sha256": "3d3625e3368373eba6327867907b9539f6c3ed9a6d53bea43a1982b675982adc",
+      "bytes": 297
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/process-6.log.gz",
+      "sha256": "e7d782c30bbd9ea7166f17dda72448de27601d86620095216744c8ab7f03a58e",
+      "bytes": 3233
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/report.json.gz",
+      "sha256": "fba629e6ebe1374576f2f72fb00a42834ee1c91a3728ce6ed9a998b40ef71740",
+      "bytes": 3215
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/result.json.gz",
+      "sha256": "0d6e80e64ec43f1afd1c5020682c807f7fb852c79b2ecef464c2bce42ba9620d",
+      "bytes": 1396
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-distinct/state.sqlite.gz",
+      "sha256": "a7165a3c51593c12c53510a23200a8f2e6a51a089640ff7796e0caf7383c320b",
+      "bytes": 40716
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/checkpoint.json.gz",
+      "sha256": "0c3ab9f5070e6807fd9c76cae8215f6060c562dad30c474641165394230125f7",
+      "bytes": 48422
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/deployment.json.gz",
+      "sha256": "0e8592f4bae02aef012c472a24dc3355100157315660c3042241ea97626fda6c",
+      "bytes": 1026
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/fixture-installation.json.gz",
+      "sha256": "317e329416df45d0da021fb4379a4bcf4db056fab09bfd9ac6f02cd28e1530bd",
+      "bytes": 1551
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/fork-routes.json.gz",
+      "sha256": "f43af33dde7314c12258e4ce62d784856678d7d773173adec4df8d826baf29d0",
+      "bytes": 168
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/permission-budget-observations.json.gz",
+      "sha256": "ff47e4bec1cf3cd2145ae93eb9b414a63c74617a70b3be5879f86ca486f225ef",
+      "bytes": 815
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/permission-generation.json.gz",
+      "sha256": "a2f618a21ed4f9b7dccd3c908142f317c342c4931b6d9594054099b38d0b6950",
+      "bytes": 211
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/permission-installation.json.gz",
+      "sha256": "1960a55ae05719b837a876c218cc74add2598c21fe1fb49352a525adcf79526a",
+      "bytes": 5106
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/permission-verification.json.gz",
+      "sha256": "1584e22a7785a6599c2262c0a224e4d80c71c659be9303ac264b8108bebe2b41",
+      "bytes": 595
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/permissions/manifest.json.gz",
+      "sha256": "896e586e818da5e78bfbaf6167c218b101d5c3ed2f4d29d4e794171db85fee47",
+      "bytes": 4284
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/permissions/permissions.txt",
+      "sha256": "decf0e80cf5c4eac9a7cb8e74bd78cc413e3e643ac14bfb752a2ba9f134c5ea3",
+      "bytes": 986
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/permissions/safe-0.json.gz",
+      "sha256": "f4996643bf9678dcc0eaa0989c555fb005dba7dca91b5c38a44f2579de03ff01",
+      "bytes": 1594
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/process-0.log.gz",
+      "sha256": "628d8e1eaf34f2ec7873d12abe872a110652abc572290f01db84a78af1d3acb2",
+      "bytes": 226
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/process-2.log.gz",
+      "sha256": "829ea8586fb55aa4dee3f5381e2db8226523d40abe166c8a1221fd22f927a134",
+      "bytes": 357
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/process-3.log.gz",
+      "sha256": "518f35186f2261269735bd7f86837d655141c9057066aac49d452709afba4d27",
+      "bytes": 138
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/process-4.log.gz",
+      "sha256": "518f35186f2261269735bd7f86837d655141c9057066aac49d452709afba4d27",
+      "bytes": 138
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/process-5.log.gz",
+      "sha256": "9efa7de84e2b463bf5776109a395eb0935649c5b8a58d1491887013465f1dd7b",
+      "bytes": 297
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/process-6.log.gz",
+      "sha256": "0a93752e8c8692b9c1d36c945e5d05ca546fd26ffcba5bdf5cf59e3e7bfc3cdd",
+      "bytes": 3222
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/report.json.gz",
+      "sha256": "5b248398acff5272db4359e528d41596665959e455486ef13e6ecde82c8eef6b",
+      "bytes": 3204
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/result.json.gz",
+      "sha256": "e1b07c0f0fc84e7fc26c32e632bae8eb3a160019f87c88b847a336b2e102a5b2",
+      "bytes": 1397
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-safe-configured/state.sqlite.gz",
+      "sha256": "da54ae98ca46b182db7f02f3014ef5adf362f19f4183d18f1b5b7a0611b4ea6f",
+      "bytes": 40931
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/checkpoint.json.gz",
+      "sha256": "389a959dc7d201ddae9e8200c5bf01f6fc056552ad16c35694780988bc24262d",
+      "bytes": 15159
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/deployment.json.gz",
+      "sha256": "e94fba351e994b19da6738a1f8d8365e11a2acd0cc07d327d9bb0fe9dda9b2b9",
+      "bytes": 1022
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/fixture-installation.json.gz",
+      "sha256": "9d2564e3b692fd784882fcc27157d6d269922b05d82387b9ace792819ef55dee",
+      "bytes": 1550
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/fork-routes.json.gz",
+      "sha256": "d768b5c8f6f931935dcb3abeea36355ee7c9ff9d43889451e27e99f3750fbc9d",
+      "bytes": 167
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/permission-budget-observations.json.gz",
+      "sha256": "f31bf9ae3fc4171c7e3fac15453a9b4718574af1a60cdd7970e3ceb0a93b9e7b",
+      "bytes": 699
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/permission-generation.json.gz",
+      "sha256": "6c42d6e771ba593266d083520cf34be0cf5456eb70dd8ba5691f6af8d48dd9dc",
+      "bytes": 220
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/permission-installation.json.gz",
+      "sha256": "cdede99d624d7cf4185f7914b29286ae5ec3f0dcb96fd13492c300549e3c94d4",
+      "bytes": 3167
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/permission-verification.json.gz",
+      "sha256": "36d24036b1e1d6a3b99d86b39d87b6a360acaf672f997d62e4b8282182a19dd3",
+      "bytes": 507
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/permissions/manifest.json.gz",
+      "sha256": "dd4b6e6232061c0787d32b7bf5b57b5f46795666583d3c47016cd72ed7df8eec",
+      "bytes": 3235
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/permissions/permissions.txt",
+      "sha256": "995e1d03aedba6fb1565ce5f23f54b259a1bc66caa40f1f2f1ccb93c24c4ba6c",
+      "bytes": 647
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/permissions/safe-0.json.gz",
+      "sha256": "ab5ee9248cfeb3671de0a7e7974b89034c4e946471df09825f4be4858dc7b87d",
+      "bytes": 1064
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/process-0.log.gz",
+      "sha256": "da82c7fa1f33979cd9bdaf4e7a2ad2de2914d1678fee74e96429f9b1bd766532",
+      "bytes": 226
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/process-2.log.gz",
+      "sha256": "432c7c6cd028e9681c940a682c8d3cfbe6d897c06b7c4cfa808b54a29f717233",
+      "bytes": 213
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/process-3.log.gz",
+      "sha256": "30ec48f097f4942fb7b78b3b6e6c907767c115b04fb826d26eacad4cfed746bb",
+      "bytes": 138
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/process-4.log.gz",
+      "sha256": "30ec48f097f4942fb7b78b3b6e6c907767c115b04fb826d26eacad4cfed746bb",
+      "bytes": 138
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/process-5.log.gz",
+      "sha256": "00c304fa8b7d6d9d260d7d7edbb10b2f41381cf629beb0c28ac4a8612a2bb471",
+      "bytes": 255
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/process-6.log.gz",
+      "sha256": "7716ce527bc684c79919e41e05209483b2f63c8134f1a9bb2a3e07cbf29b97d2",
+      "bytes": 2495
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/report.json.gz",
+      "sha256": "2a72938f39404bf676d16583339ad60e1d7b323e96b07a1766388969b9274da8",
+      "bytes": 2477
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/result.json.gz",
+      "sha256": "19cf90805f13b4cb4885f0dd4af06df451238b19742214641fd5b5f964adf9f0",
+      "bytes": 1172
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-distinct/state.sqlite.gz",
+      "sha256": "4a004158a2849a82d36265dc3db7faf8c322bb6806fad99e193adf202714b37d",
+      "bytes": 14281
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/checkpoint.json.gz",
+      "sha256": "120110fc21a9c42bf75f131ec0f0266bc48f9a9baf90c74d5895f5bcd8429ac3",
+      "bytes": 15143
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/deployment.json.gz",
+      "sha256": "9d0cca1416512cfb7c79e2a79ef43380488d6412b2fb5983437c310abb711473",
+      "bytes": 1024
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/fixture-installation.json.gz",
+      "sha256": "96fc4e79061021d4d12bd96f1a4d5fc6f834d417efc9bc4e4ab214ae1fea11d7",
+      "bytes": 1549
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/fork-routes.json.gz",
+      "sha256": "880a4712e3193f98575c87f7455a45c15c91c4d03bc53267e00be54e1b263864",
+      "bytes": 169
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/permission-budget-observations.json.gz",
+      "sha256": "8c9b37c8673a92b1a91debf10e8d0f00a403b5f9056224d1afe933dac0bd8b07",
+      "bytes": 699
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/permission-generation.json.gz",
+      "sha256": "1d0567591bbbb1381bc1bced9f568a682e3c6e29a8032f989c38ed72c9655593",
+      "bytes": 220
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/permission-installation.json.gz",
+      "sha256": "5ea1f62d4f9fa4acf9cb81de7647f7209d0228f1403d9f2efc50b406b24b4d2b",
+      "bytes": 3170
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/permission-verification.json.gz",
+      "sha256": "f574bd6dd1e820de1687960bf9ea98eba4b47dda55ff1891ef847009e2ebb511",
+      "bytes": 512
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/permissions/manifest.json.gz",
+      "sha256": "ff001989aa288123dcb5553ade116bcb5551e7efbf8a9e90dec15a505cfbd2e5",
+      "bytes": 3232
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/permissions/permissions.txt",
+      "sha256": "995e1d03aedba6fb1565ce5f23f54b259a1bc66caa40f1f2f1ccb93c24c4ba6c",
+      "bytes": 647
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/permissions/safe-0.json.gz",
+      "sha256": "7d2499e438f1622f6ae91d728b44777a7fff2b09034b4f85a52be4ed88365961",
+      "bytes": 1063
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/process-0.log.gz",
+      "sha256": "6241979fc6c3c6b3a2ae65d02e51590034ffd42709c0348159267948fbd1f62b",
+      "bytes": 226
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/process-2.log.gz",
+      "sha256": "95998f7f1940bcc6aef8546a97b257d93dd2ea3981250a3236feff896fab574e",
+      "bytes": 213
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/process-3.log.gz",
+      "sha256": "cc3562439bc9329b3184269e9b665f38f0613adc6be5f6313c6b7613c72c3bdb",
+      "bytes": 138
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/process-4.log.gz",
+      "sha256": "cc3562439bc9329b3184269e9b665f38f0613adc6be5f6313c6b7613c72c3bdb",
+      "bytes": 138
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/process-5.log.gz",
+      "sha256": "74c844261985a1eb511f6ce1e6694dda7f5efc8bdf38a4bde1132beede4e61ed",
+      "bytes": 255
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/process-6.log.gz",
+      "sha256": "e5fb4e8ee4726bfdd24478c659b28f4edfdc0a7a60b5bcbcf667dfe42010eca0",
+      "bytes": 2490
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/report.json.gz",
+      "sha256": "b40401fd6b104f1f7db6758f9359dcd182441088b444bd0b8dd35f487d7effe0",
+      "bytes": 2473
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/result.json.gz",
+      "sha256": "93ea31f8978cefca79a08d4cc4b6dc287847025001950a9abd36b65b5546d5b8",
+      "bytes": 1176
+    },
+    {
+      "path": "aerodrome_base_volatile_trading-safe-configured/state.sqlite.gz",
+      "sha256": "7342f8f1925e4aa6d706627ebe3d267655957d02412e1a94b951dff9a23f09da",
+      "bytes": 14254
+    },
+    {
+      "path": "safe-source-comparison.json.gz",
+      "sha256": "bc172eecb67686cf38fab1605a640048def26443417d1f115493e9e593e207fc",
+      "bytes": 54540
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-failed-installation-configured/deployment.json.gz",
+      "sha256": "40f0ce29deeb0074d158b87783cbb1303d722b9820d3d8f6550a27e31013ead2",
+      "bytes": 1027
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-failed-installation-configured/fixture-installation.json.gz",
+      "sha256": "3642e491fe4e3d15a7856e5d7b94c72e594fd104b1e30ff89a0c4a4310e87493",
+      "bytes": 1557
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-failed-installation-configured/fork-routes.json.gz",
+      "sha256": "488b330ab130590e93a904f715812d0f8696366556718b72967674652b6561f7",
+      "bytes": 167
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-failed-installation-configured/permission-generation.json.gz",
+      "sha256": "432777281bcfe476e664f8dbe2aa40d95ed07bedc3fbfc7a988772d2ac7e5e0a",
+      "bytes": 210
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-failed-installation-configured/permissions/manifest.json.gz",
+      "sha256": "4c509f64c5ac366b4597eb0247320c1239afec199818fa1686919940fd893638",
+      "bytes": 4316
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-failed-installation-configured/permissions/permissions.txt",
+      "sha256": "decf0e80cf5c4eac9a7cb8e74bd78cc413e3e643ac14bfb752a2ba9f134c5ea3",
+      "bytes": 986
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-failed-installation-configured/permissions/safe-0.json.gz",
+      "sha256": "7dc76969689dfd58cf5607e310d79572f0ac4d7499228977a39ef8876ae5d423",
+      "bytes": 1594
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-failed-installation-configured/process-0.log.gz",
+      "sha256": "7bea01c5f04f72db3ac2304058c890a9ba1e92219ab0e3ec7b4aff83dac008a4",
+      "bytes": 122
+    },
+    {
+      "path": "aerodrome_base_volatile_lp-failed-installation-configured/result.json.gz",
+      "sha256": "1f86583361e34eee0cfc77ec9640c2e769f0c782c7cd4318563cd27db134a623",
+      "bytes": 400
+    },
+    {
+      "path": "failed-installation-source-comparison.json.gz",
+      "sha256": "9d6125740f533d4cdd67f92525fda8954076ebb222b5e17d0a13572aac6bb4e7",
+      "bytes": 54469
+    },
+    {
+      "path": "first-eoa-pytest.txt",
+      "sha256": "423b1d0e014eb1eab96f4420f7b344c2615be505dd574b756ac884826ca74f2d",
+      "bytes": 80
+    },
+    {
+      "path": "remaining-eoa-pytest.txt",
+      "sha256": "cf426ab35f3b06fccef8290fde5325d90af130a79da1d1752031518df77c4236",
+      "bytes": 80
+    },
+    {
+      "path": "first-safe-pytest.txt",
+      "sha256": "03be74600e49a56d07de2f5d2f97ecdfee4359e3cb439468cf5b172b2063bb3c",
+      "bytes": 4312
+    },
+    {
+      "path": "first-safe-retry-pytest.txt",
+      "sha256": "423b1d0e014eb1eab96f4420f7b344c2615be505dd574b756ac884826ca74f2d",
+      "bytes": 80
+    },
+    {
+      "path": "remaining-safe-pytest.txt",
+      "sha256": "c3e773730bfbadca84cdbc0607343f2eac6a8c5c3201707d066be12e9985b945",
+      "bytes": 123
+    }
+  ]
+}

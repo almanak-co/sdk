@@ -1,0 +1,5 @@
+# Morpho Blue HyperEVM lending reference
+
+Separate named funds supply USDC and borrow it against WHYPE collateral, then partially repay and release supply before full cleanup. The configuration specifies the exact `eip155:999` Morpho market (USDC loan, WHYPE collateral, 77% LLTV), whose non-vault oracle prices HYPE from one RedStone push feed, with the adaptive IRM and CAIP assets. Protocol positions, inventory and gas payers retain explicit scope. Gas is paid in HYPE (`eip155:999/slip44:2457`).
+
+The local fixture funds WHYPE by wrapping native HYPE and USDC through the shared storage funding routes; no token policy is overridden. Its fork anchor is a 3,000,000-gas small block, so fixture and strategy transactions meet the limit that mainnet transactions face without HyperCore big-block opt-in. Generated Safe/Zodiac authority is installed only on identified forks. EOA proofs use the same gateway path. The separate economic backtest prepares explicit archival inputs before offline execution. No production authority is granted.

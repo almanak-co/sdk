@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+mode: economic
+window:
+  start: '2026-09-07T15:00:00Z'
+  end: '2026-09-07T15:00:30Z'
+  end_policy: teardown
+  cleanup: 60s
+inventory:
+  funds:
+    lender:
+      payer: operator
+      balances:
+      - asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+        quantity: '1000'
+    borrower:
+      payer: operator
+      balances:
+      - asset: eip155:137/erc20:0x7ceb23fd6bc0add59e62ac25578270cff1b9f619
+        quantity: '1'
+      - asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+        quantity: '20'
+  payers:
+    operator:
+      chain: eip155:137
+      balances:
+      - asset: eip155:137/slip44:966
+        quantity: '10'
+execution:
+  latency: 1s
+  models:
+    liquidation_model: immediate_morpho_liquidation
+data:
+  source: morpho_blue_archive
+  risk_model: morpho_oracle_each_block
+  sample_seconds: 30s
+  max_age_seconds: 60s
+  max_accounting_samples: 10
+  max_risk_blocks: 512
+  max_risk_samples: 512
+  max_liquidations_per_event: 8
+costs:
+  kind: excluded

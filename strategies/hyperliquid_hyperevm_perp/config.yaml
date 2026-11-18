@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. HyperCore runs in backtests and on identified HyperEVM forks
+# (blueprint 30, sections 12 and 13); production waits for D7. Providers, the account
+# binding and the fork fixture are operator inputs:
+# examples/operators/hyperliquid_hyperevm_perp.fork.yaml for fork runs and
+# examples/operators/backtest/eip155-999.yaml for backtests.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # The BTC position the strategy opens once, in coins, and its side.
+    size: '0.002'
+    side: long
+  allocations:
+    Main:
+      market: btc
+      account: trader
+      capital:
+        asset: eip155:999/erc20:0xb88339cb7199b77e23db6e890353e22632ba630f
+        quantity: '30'
+      leverage: 10
+      slippage_bps: 50
+      hold_seconds: 2h
+markets:
+  btc:
+    connector: hyperliquid
+    chain: eip155:999
+    market: BTC
+accounts:
+  trader:
+    chain: eip155:999

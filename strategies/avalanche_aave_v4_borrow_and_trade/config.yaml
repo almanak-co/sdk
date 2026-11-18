@@ -1,0 +1,85 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/avalanche_aave_v4_borrow_and_trade.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What each debt borrows, in its asset's units.
+    borrow_quantity: '5'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.01'
+      minimum_native_balance: '0.001'
+    trade:
+      market: pool
+      account: fund
+      capital:
+        asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '2.5'
+      slippage_bps: 100
+      deadline_seconds: 300s
+      minimum_native_balance: '0.001'
+      kind: trading
+  debts:
+    loan:
+      market: loan
+      account: fund
+      minimum_native_balance: '0.001'
+      minimum_health_factor: '2'
+      collateral:
+      - collateral
+      oracle: '0x84b50b131a82da689c0205c00d603c1c92a5f8a4'
+      collateral_price_sources:
+      - '0x976b3d034e162d8bd72d6b9c989d545b839003b0'
+      debt_price_source: '0xb0d7a8bbdcdb1203850b742bb4d7f57a1f1c8483'
+  gas:
+    # Example Avalanche amounts; size them from the live gas price.
+    # Entry takes 3 transactions and exit 9 (almanak check --production):
+    # exit_reserve = 9 fees, total_budget = exit_reserve + 3 entry + 20 later fees.
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:43114
+      max_transaction_fee:
+        base_units: 170000000000000000
+      total_budget:
+        base_units: 5440000000000000000
+      exit_reserve:
+        base_units: 1530000000000000000
+markets:
+  collateral:
+    connector: aave_v4
+    chain: eip155:43114
+    spoke: '0x435272ceff93a1e657e8abfdf0a13e95900a3a56'
+    reserve_id: 4
+  loan:
+    connector: aave_v4
+    chain: eip155:43114
+    spoke: '0x435272ceff93a1e657e8abfdf0a13e95900a3a56'
+    reserve_id: 2
+  pool:
+    connector: uniswap_v4
+    chain: eip155:43114
+    currency0: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+    currency1: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+    fee: 500
+    tick_spacing: 10
+    hooks: '0x0000000000000000000000000000000000000000'
+accounts:
+  fund:
+    chain: eip155:43114
+inventory:
+- account: fund
+  balance:
+    asset: eip155:43114/erc20:0x49d5c2bdffac6ce2bfdb6640f4f80f226bc10bab
+    quantity: '0.01'
+- account: fund
+  balance:
+    asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+    quantity: '1'
+- account: fund
+  balance:
+    asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+    quantity: '0'

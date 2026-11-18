@@ -1,0 +1,67 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/arbitrum_aave_borrow_and_trade_v4.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '5'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.01'
+      collateral: true
+      minimum_health_factor: '2'
+      oracle: '0xb56c2f0b653b2e0b10c9b928c8580ac5df02c7c7'
+      price_source: '0xbd41b1548a5a06544cbcf87c0c54864312842c00'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      collateral: false
+      minimum_health_factor: '2'
+      oracle: '0xb56c2f0b653b2e0b10c9b928c8580ac5df02c7c7'
+      price_source: '0xb0c9a7122aab68f75cffd9851e867144dbff113b'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      capital:
+        asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+        quantity: '2.5'
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+      kind: trading
+markets:
+  collateral:
+    connector: aave_v3
+    chain: eip155:42161
+    asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+  loan:
+    connector: aave_v3
+    chain: eip155:42161
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+  pool:
+    connector: uniswap_v4
+    chain: eip155:42161
+    currency0: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+    currency1: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+    fee: 500
+    tick_spacing: 10
+    hooks: '0x0000000000000000000000000000000000000000'
+accounts:
+  fund:
+    chain: eip155:42161
+inventory:
+- account: fund
+  balance:
+    asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+    quantity: '0.01'
+- account: fund
+  balance:
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+    quantity: '1'

@@ -1,0 +1,21 @@
+{
+  "block": {
+    "chain": {
+      "chain_id": "eip155:42161",
+      "environment": "mainnet"
+    },
+    "number": 502893237,
+    "hash": "0x76975c5580d4d6d006d0eeabc1b9957e790c1361989ceb355d3442ca66853491",
+    "timestamp": 1788838252
+  },
+  "contracts": [
+    {
+      "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "code_hash": "0xad30d819dbc47814b7e6cb837fd7cc57fcb591479a38596ee93de4fc52e8c435",
+      "implementation": "0x86e721b43d4ecfa71119dd38c0f938a75fdb57b3",
+      "implementation_hash": "0xda0578bf7fe0d04e320e166ab8f98061328fda8ae0a299882aeb38f1543c6a9d",
+      "implementation_slot": 50801780122331352337026042894847907698553222651959119521779622085092237899971
+    }
+  ],
+  "proof": "Arbitrum USDC proxy and implementation match captured compiled Circle source. FiatTokenV2_2 storage layout has balanceAndBlacklistStates at slot 9; the high bit records blacklist status. Source and bytecode evidence: docs/internal/reports/evidence/2026-09-07-rollout/curve-arbitrum-token-discovery/manifest.json"
+}

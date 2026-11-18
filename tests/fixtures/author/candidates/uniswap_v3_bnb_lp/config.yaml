@@ -1,0 +1,80 @@
+strategy:
+  connector: uniswap_v3
+  decision_interval: 5s
+  allocations:
+    position:
+      market: pool
+      account: fund
+      range:
+        lower: -66760
+        upper: -65760
+      capital:
+        asset: eip155:56/erc20:0x55d398326f99059ff775485246999027b3197955
+        quantity: '5'
+      entry_swap_bps: 5000
+      hold_seconds: 300s
+      slippage_bps: 100
+      deadline_seconds: 300
+      native_asset: eip155:56/slip44:714
+      minimum_native_balance:
+        base_units: 0
+assets:
+  eip155:56/erc20:0x55d398326f99059ff775485246999027b3197955:
+    decimals: 18
+  eip155:56/erc20:0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c:
+    decimals: 18
+  eip155:56/slip44:714:
+    decimals: 18
+markets:
+  pool:
+    pool:
+      kind: uniswap_v3
+      chain:
+        chain_id: eip155:56
+        environment: mainnet
+      factory: '0xdb1d10011ad0ff90774d0c6bb92e5c5c8b4461f7'
+      pool: '0x6fe9e9de56356f7edbfcbb29fab7cd69471a4869'
+      currency0: eip155:56/erc20:0x55d398326f99059ff775485246999027b3197955
+      currency1: eip155:56/erc20:0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c
+      fee: 500
+      tick_spacing: 10
+    contracts:
+      router: '0xb971ef87ede563556b2ed4b1c0b0019111dd85d2'
+      position_manager: '0x7b8a01b39d58278b5de7e48c8449c9f4f5170613'
+      quoter: '0x78d78e420da98ad378d7799be8f4af69033eb077'
+accounts:
+  fund:
+    chain:
+      chain_id: eip155:56
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:56
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: bnb-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      block:
+        chain:
+          chain_id: eip155:56
+          environment: mainnet
+        number: 120731934
+        hash: '0x6bc824dac9297bb99554705432714097773e76d0865f43adf04bbf29439a02a5'
+        timestamp: 1788891037
+    funds:
+    - account: fund
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:56/erc20:0x55d398326f99059ff775485246999027b3197955
+          quantity: '5'
+        method: local_storage
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:56/slip44:714
+        quantity: '10'
+      foundry_account_index: 851

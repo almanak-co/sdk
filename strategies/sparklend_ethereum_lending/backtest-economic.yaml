@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+mode: economic
+window:
+  start: '2026-09-07T05:33:47Z'
+  end: '2026-09-07T05:35:47Z'
+  end_policy: teardown
+  cleanup: 120s
+inventory:
+  funds:
+    fund:
+      balances:
+      - asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+        quantity: '0.01'
+      - asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+        quantity: '1'
+      - asset: eip155:1/slip44:60
+        quantity: '5'
+execution:
+  latency: 1s
+  models:
+    liquidation_model: immediate_underlying_sparklend_revision4
+data:
+  source: sparklend_archive
+  risk_model: pool_oracle_each_block
+  sample_seconds: 60s
+  max_age_seconds: 120s
+  max_accounting_samples: 10
+  max_risk_blocks: 30
+  max_risk_samples: 60
+  max_liquidations_per_event: 8
+costs:
+  kind: excluded

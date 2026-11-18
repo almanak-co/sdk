@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/uniswap_v4_ethereum_native_trading.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    trading:
+      market: trading_market
+      account: trading
+      capital:
+        asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+        quantity: '0.05'
+      hold_seconds: 43200s
+      slippage_bps: 100
+      deadline_seconds: 300s
+      minimum_native_balance: '0.001'
+      kind: trading
+  gas:
+    # Example Ethereum amounts; size them from the live gas price.
+    # Entry takes 1 transaction and exit 4 (almanak check --production):
+    # exit_reserve = 4 fees, total_budget = exit_reserve + 1 entry + 20 later fees.
+    gas_payer:
+      accounts:
+      - trading
+      chain: eip155:1
+      max_transaction_fee:
+        base_units: 4100000000000000
+      total_budget:
+        base_units: 102500000000000000
+      exit_reserve:
+        base_units: 16400000000000000
+markets:
+  trading_market:
+    connector: uniswap_v4
+    chain: eip155:1
+    currency0: eip155:1/slip44:60
+    currency1: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+    fee: 3000
+    tick_spacing: 60
+    hooks: '0x0000000000000000000000000000000000000000'
+accounts:
+  trading:
+    chain: eip155:1

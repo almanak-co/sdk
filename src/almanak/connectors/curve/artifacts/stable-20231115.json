@@ -1,0 +1,113 @@
+{
+  "factory": {
+    "runtime_length": 13722,
+    "normalized_code_hash": "0xb78c1b32cd364260f3fa497ccc7e98c73cdc26bdae2d3635e763ee8b59a1d6fd",
+    "immutables": {}
+  },
+  "views": {
+    "runtime_length": 12282,
+    "normalized_code_hash": "0x978cd7754947f9c66e1cbb95ae13d3d82e14954463daae02d162315f1dee3429",
+    "immutables": {}
+  },
+  "pool": {
+    "runtime_length": 23509,
+    "normalized_code_hash": "0x7382dff2dde24f545e05e3ababe2a5148dab264751fcd298a047e29b83643f93",
+    "immutables": {
+      "N_COINS": [
+        {
+          "start": 21685,
+          "length": 32
+        }
+      ],
+      "N_COINS_128": [
+        {
+          "start": 21717,
+          "length": 32
+        }
+      ],
+      "factory": [
+        {
+          "start": 21749,
+          "length": 32
+        }
+      ],
+      "coins": [
+        {
+          "start": 21781,
+          "length": 288
+        }
+      ],
+      "asset_types": [
+        {
+          "start": 22069,
+          "length": 288
+        }
+      ],
+      "rate_multipliers": [
+        {
+          "start": 22357,
+          "length": 288
+        }
+      ],
+      "call_amount": [
+        {
+          "start": 22645,
+          "length": 288
+        }
+      ],
+      "scale_factor": [
+        {
+          "start": 22933,
+          "length": 288
+        }
+      ],
+      "name": [
+        {
+          "start": 23221,
+          "length": 96
+        }
+      ],
+      "symbol": [
+        {
+          "start": 23317,
+          "length": 64
+        }
+      ],
+      "NAME_HASH": [
+        {
+          "start": 23381,
+          "length": 32
+        }
+      ],
+      "CACHED_CHAIN_ID": [
+        {
+          "start": 23413,
+          "length": 32
+        }
+      ],
+      "salt": [
+        {
+          "start": 23445,
+          "length": 32
+        }
+      ],
+      "CACHED_DOMAIN_SEPARATOR": [
+        {
+          "start": 23477,
+          "length": 32
+        }
+      ]
+    }
+  },
+  "blueprint": {
+    "runtime_length": 24079,
+    "normalized_code_hash": "0x24dd2bc52f39e1fbdcd32a8569a0cd1833f8cdf7f8f9046cee94d975fe153e5e",
+    "immutables": {}
+  },
+  "sources": {
+    "pool_factory": "https://github.com/curvefi/stableswap-ng/tree/9228406a8ca0cee11fbe0510b269354767599e07",
+    "views": "https://github.com/curvefi/stableswap-ng/tree/11c152d388662917c0ed810f31783ce86c850896",
+    "compiler": "vyper 0.3.10",
+    "views_evm_version": "shanghai, as selected by the official deployment script"
+  }
+}

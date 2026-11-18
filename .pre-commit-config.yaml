@@ -1,0 +1,24 @@
+default_stages: [pre-commit]
+fail_fast: true
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: Ruff lint
+        entry: uv run --locked ruff check src tests strategies scripts
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: ruff-format
+        name: Ruff format check
+        entry: uv run --locked ruff format --check src tests strategies scripts
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: mypy
+        name: Mypy type checks
+        entry: uv run --locked mypy
+        language: system
+        pass_filenames: false
+        always_run: true

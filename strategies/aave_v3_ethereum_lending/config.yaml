@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/aave_v3_ethereum_lending.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '5'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.01'
+      collateral: true
+      minimum_health_factor: '2'
+      oracle: '0x54586be62e3c3580375ae3723c145253060ca0c2'
+      price_source: '0x5424384b256154046e9667ddfaaa5e550145215e'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      collateral: false
+      minimum_health_factor: '2'
+      oracle: '0x54586be62e3c3580375ae3723c145253060ca0c2'
+      price_source: '0x3f73f03aa83b2a48ed27e964ed0fdb590332095b'
+      minimum_native_balance: '0'
+markets:
+  collateral:
+    connector: aave_v3
+    chain: eip155:1
+    asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+  loan:
+    connector: aave_v3
+    chain: eip155:1
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+accounts:
+  fund:
+    chain: eip155:1

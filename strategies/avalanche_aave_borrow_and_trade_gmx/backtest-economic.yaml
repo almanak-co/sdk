@@ -1,0 +1,79 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+mode: economic
+window:
+  start: '2026-09-08T00:39:34+00:00'
+  end: '2026-09-08T00:40:24+00:00'
+  end_policy: teardown
+  cleanup: 250s
+inventory:
+  funds:
+    fund:
+      payer: operator
+      balances:
+      - asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '2.1'
+      - asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '100'
+      - asset: eip155:43114/erc20:0x913c1f46b48b3ed35e7dc3cf754d4ae8499f31cf
+        quantity: '0'
+      - asset: eip155:43114/slip44:9005
+        quantity: '0'
+  payers:
+    operator:
+      chain: eip155:43114
+      balances:
+      - asset: eip155:43114/slip44:9005
+        quantity: '1'
+execution:
+  latency: 1s
+  models:
+    aave_v3:
+      liquidation_model: immediate_underlying_v3_revision11
+    gmx_v2:
+      swap_model: prepared_integer_market
+      liquidity_model: null
+      position_model: null
+      keeper:
+        model: published_opportunity_fixed_native_payment
+        minimum_latency_seconds: 1
+        payments:
+        - chain: eip155:43114
+          payment:
+            asset: eip155:43114/slip44:9005
+            amount: 100000000000000
+data:
+  connectors:
+    aave_v3:
+      source: aave_v3_archive
+      risk_model: pool_oracle_each_block
+      sample_seconds: 60s
+      max_age_seconds: 120s
+      max_accounting_samples: 12
+      max_risk_blocks: 1500
+      max_risk_samples: 3000
+      max_liquidations_per_event: 8
+    gmx_v2:
+      source: gmx_published_signed_reports
+      publications:
+      - allocation: trade
+        source:
+          handler: '0xc993ef170859dae0241a3c12b8186e456fa1c1b0'
+          oracle: '0x29220fa3b24279279c211701de4a7b035122b911'
+          request_kind: order
+          calldata_suffix:
+            prefix: 0x
+            length: 0
+      max_age_seconds: 60
+      maximum_risk_blocks: 500
+      maximum_report_age_seconds: 60
+      publication_limits:
+        page_blocks: 500
+        maximum_blocks: 500
+        maximum_pages: 1
+        maximum_logs: 10000
+        maximum_transactions: 500
+costs:
+  aave_v3:
+    kind: excluded
+  gmx_v2:
+    kind: excluded

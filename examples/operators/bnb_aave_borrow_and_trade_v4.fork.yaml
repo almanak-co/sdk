@@ -1,0 +1,42 @@
+# Operator execution context for a fork run of strategies/bnb_aave_borrow_and_trade_v4. Provider
+# credentials stay in the selected --env-file. The account bindings are
+# placeholders: fork provisioning generates the actual fixture accounts, and a
+# production run requires reviewed bindings and signing files outside
+# strategy-readable paths.
+schema_version: operator-gateway-config-v1
+modes:
+- fork
+networks:
+- chain: eip155:56
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: fund
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:56
+          environment: mainnet
+        address: '0x0000000000000000000000000000000000000001'
+fork:
+  anchors:
+  - chain: eip155:56
+    height: 120855642
+    reference: '0x7d0364b2fea93c6437e037967d4fb9cb42303172400ac1f6ebd736a0c4ef7f12'
+  funds:
+  - kind: safe_roles
+    account: fund
+    operator: operator
+    assets:
+    - asset: eip155:56/erc20:0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c
+      amount: 100000000000000000
+    - asset: eip155:56/erc20:0x55d398326f99059ff775485246999027b3197955
+      amount: 1000000000000000000
+  operators:
+  - name: operator
+    native_balance:
+      asset: eip155:56/slip44:714
+      amount: 5000000000000000000

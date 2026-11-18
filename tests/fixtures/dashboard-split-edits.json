@@ -1,0 +1,99 @@
+{
+ "base": "6d0a4f00a54c210659a532365a3fd2925e8d4481",
+ "pairs": [
+  [
+   "from typing import cast\n\nfrom almanak import dashboard as ui\n",
+   "from typing import cast\n\n"
+  ],
+  [
+   "    return state(context).updated(exiting=True)\n\n\ndef dashboard(context: ui.Context) -> ui.Dashboard:\n    return ui.Dashboard(\n        title=\"Aave V3 lending\",\n        description=\"Fund-owned collateral and variable debt, with separate submitter costs.\",\n        blocks=(\n            ui.Table(\n                id=\"positions\",\n                title=\"Reserve positions\",\n                data=context.datasets[\"lending_positions\"],\n            ),\n            ui.Table(id=\"costs\", title=\"Fund and gas payer\", data=context.datasets[\"fund_costs\"]),\n            ui.Text(\n                id=\"policy\",\n                text=\"The strategy holds borrowed proceeds against its collateral until teardown. \"\n                \"Cleanup reduces debt before partial collateral release, then repays the \"\n                \"remaining debt before full withdrawal. Balances come from retained transaction \"\n                \"observations. Missing measurements remain unavailable; fiat PnL is not measured.\",\n            ),\n        ),\n    )\n",
+   "    return state(context).updated(exiting=True)\n"
+  ],
+  [
+   "from pydantic import Field\n\nfrom almanak import dashboard as ui\n",
+   "from pydantic import Field\n\n"
+  ],
+  [
+   "    return state(context).updated(**{field: timestamps})\n\n\ndef dashboard(ctx: ui.Context) -> ui.Dashboard:\n    return ui.Dashboard(\n        title=\"Aave WETH positions\",\n        description=\"Safe-owned collateral, optional USDC debt and recorded execution costs.\",\n        blocks=(\n            ui.Group(\n                id=\"overview\",\n                title=\"Position overview\",\n                blocks=(\n                    ui.Metric(\n                        id=\"open-positions\",\n                        label=\"Positions with owned shares\",\n                        value=ctx.values[\"position-count\"],\n                    ),\n                    *tuple(\n                        ui.Metric(\n                            id=f\"{p.allocation}-balance\",\n                            label=p.allocation.replace(\"_\", \" \"),\n                            value=ctx.values[f\"{p.allocation}-observed\"],\n                        )\n                        for p in ctx.positions\n                    ),\n                ),\n            ),\n            ui.Table(\n                id=\"positions\", title=\"Supply positions\", data=ctx.datasets[\"supply_positions\"]\n            ),\n            *tuple(\n                allocation_dashboard(ctx, p) for p in ctx.positions if isinstance(p, ui.Position)\n            ),\n            *(\n                (\n                    ui.Table(\n                        id=\"debt\", title=\"Debt and collateral\", data=ctx.datasets[\"debt_positions\"]\n                    ),\n                )\n                if \"debt_positions\" in ctx.datasets\n                else ()\n            ),\n            ui.Table(id=\"gas\", title=\"Fund costs\", data=ctx.datasets[\"fund_costs\"]),\n            ui.Table(id=\"activity\", title=\"Transaction history\", data=ctx.datasets[\"transactions\"]),\n            ui.Text(\n                id=\"policy\",\n                text=\"Each allocation supplies once. Its holding period starts at \"\n                \"the confirmed supply block recorded in strategy memory. Teardown closes the \"\n                \"remaining debt before releasing collateral and clears allowances. \"\n                \"Borrowed cash is matched by a liability. Borrowing costs and operator gas \"\n                \"are reported in their respective assets.\",\n            ),\n        ),\n    )\n\n\ndef allocation_dashboard(ctx: ui.Context, position: ui.Position) -> ui.Group:\n    name = position.allocation\n    return ui.Group(\n        id=f\"allocation-{name}\",\n        title=name.replace(\"_\", \" \"),\n        blocks=(\n            ui.BarChart(\n                id=f\"flows-{name}\",\n                title=\"Recorded capital movements\",\n                points=(\n                    ui.Point(label=\"Supplied\", value=ctx.values[f\"{name}-supplied\"]),\n                    ui.Point(label=\"Withdrawn\", value=ctx.values[f\"{name}-withdrawn\"]),\n                ),\n                caption=\"Confirmed asset effects in this allocation. \"\n                \"Withdrawals include any realized accrual.\",\n            ),\n            ui.Metric(id=f\"owned-{name}\", label=\"Owned supply shares\", value=position.owned_shares),\n            ui.Metric(\n                id=f\"delta-{name}\", label=\"Closed token delta\", value=ctx.values[f\"{name}-delta\"]\n            ),\n        ),\n    )\n",
+   "    return state(context).updated(**{field: timestamps})\n"
+  ],
+  [
+   "    return state(context).updated(unwinding=True)\n\n\ndef dashboard(context: ui.Context) -> ui.Dashboard:\n    return ui.Dashboard(\n        title=\"Aave V3 leverage loop\",\n        description=\"One fund supplies collateral, borrows, buys more collateral and resupplies.\",\n        blocks=(\n            ui.Table(\n                id=\"inventory\", title=\"Shared fund cash\", data=context.datasets[\"fund_inventory\"]\n            ),\n            ui.Table(id=\"gas\", title=\"Submitter costs\", data=context.datasets[\"payer_costs\"]),\n            ui.Text(\n                id=\"policy\",\n                text=\"Each round borrows a share of the collateral value, swaps it into \"\n                \"collateral and supplies it. The unwind repeats withdraw, swap and repay \"\n                \"until the debt is zero, then withdraws the rest.\",\n            ),\n            ui.Text(id=\"rounds\", text=rounds_text(context.memory.values)),\n            ui.Text(\n                id=\"shortfall\",\n                text=str(context.memory.values.get(\"shortfall\") or \"No repay shortfall.\"),\n            ),\n        ),\n    )\n\n\ndef rounds_text(values) -> str:\n    reason = values.get(\"capped_reason\")\n    if reason:\n        return str(reason)\n    return f\"Completed borrow rounds: {values.get('rounds', 0)}. No round has been refused.\"\n",
+   "    return state(context).updated(unwinding=True)\n"
+  ],
+  [
+   "    return state(context).updated(exiting=True)\n\n\ndef dashboard(context: ui.Context) -> ui.Dashboard:\n    return ui.Dashboard(\n        title=\"Compound V3 lending\",\n        description=\"Separate earning and borrowing funds, with signed base principal \"\n        \"and collateral ownership.\",\n        blocks=(\n            ui.Table(\n                id=\"positions\", title=\"Comet positions\", data=context.datasets[\"lending_positions\"]\n            ),\n            ui.Table(id=\"gas\", title=\"Fund execution costs\", data=context.datasets[\"fund_costs\"]),\n            ui.Text(\n                id=\"policy\",\n                text=\"The earning fund supplies base assets. The borrower holds proceeds \"\n                \"against its own collateral until teardown. Cleanup partially repays and releases \"\n                \"collateral and earning supply, then repays remaining debt and withdraws both \"\n                \"positions. Values come from retained observations; fiat PnL is unavailable.\",\n            ),\n        ),\n    )\n",
+   "    return state(context).updated(exiting=True)\n"
+  ],
+  [
+   "    return state(context).updated(exiting=True)\n\n\ndef dashboard(context: ui.Context) -> ui.Dashboard:\n    return ui.Dashboard(\n        title=\"Morpho Blue lending\",\n        description=\"Separate earning and borrowing funds, with separate lender and debt shares \"\n        \"and collateral ownership.\",\n        blocks=(\n            ui.Table(\n                id=\"positions\", title=\"Morpho positions\", data=context.datasets[\"lending_positions\"]\n            ),\n            ui.Table(id=\"gas\", title=\"Fund execution costs\", data=context.datasets[\"fund_costs\"]),\n            ui.Text(\n                id=\"policy\",\n                text=\"The earning fund supplies loan assets. The borrower holds proceeds \"\n                \"against its own collateral until teardown. Cleanup partially repays and releases \"\n                \"collateral and earning supply, then repays remaining debt and withdraws both \"\n                \"positions. Values come from retained observations; fiat PnL is unavailable.\",\n            ),\n        ),\n    )\n",
+   "    return state(context).updated(exiting=True)\n"
+  ],
+  [
+   "\nfrom almanak import dashboard as ui\nfrom almanak.api import StrategyState, TypedParameters, UnitFraction, declared\n",
+   "\nfrom almanak.api import StrategyState, TypedParameters, UnitFraction, declared\n"
+  ],
+  [
+   "def on_event(context):\n    return state(context).updated(unwinding=True)\n\n\ndef dashboard(context: ui.Context) -> ui.Dashboard:\n    return ui.Dashboard(\n        title=\"Aave V3 borrow and Uniswap V3 liquidity\",\n        description=\"One fund supplies WETH, borrows USDC and provides it as banded liquidity.\",\n        blocks=(\n            ui.Table(\n                id=\"inventory\", title=\"Shared fund cash\", data=context.datasets[\"fund_inventory\"]\n            ),\n            ui.Table(id=\"gas\", title=\"Submitter costs\", data=context.datasets[\"payer_costs\"]),\n            ui.Text(\n                id=\"policy\",\n                text=\"The position is funded in the borrowed asset, so closing it and selling \"\n                \"its other asset yields the asset the repay needs. With cover_shortfall, \"\n                \"collateral covers any shortfall; otherwise the fund's own assets do.\",\n            ),\n            ui.Text(\n                id=\"shortfall\",\n                text=str(context.memory.values.get(\"shortfall\") or \"No repay shortfall.\"),\n            ),\n        ),\n    )\n",
+   "def on_event(context):\n    return state(context).updated(unwinding=True)\n"
+  ]
+ ],
+ "references": {
+  "aave_v3_arbitrum_lending": {
+   "from": "5396fd6e39d4a374b5a177c4a714910098a6b2809adf492bd5d3b287d5f1a4b9",
+   "pairs": [
+    0,
+    1
+   ]
+  },
+  "aave_v4_weth_supply": {
+   "from": "3e43401ae812f09ffb4be4e3ff6cd4df79e0a30b62a8fc85084fa4263285882c",
+   "pairs": [
+    2,
+    3
+   ]
+  },
+  "arbitrum_aave_leverage_loop": {
+   "from": "dabf72838b747cbbd8ddd0b604fc90aebb516876b6e00559fa7aa59e4c2fc17f",
+   "pairs": [
+    2,
+    4
+   ]
+  },
+  "compound_v3_ethereum_lending": {
+   "from": "78b19d0be85dd73ef7880605dbc34e824f4a234bd68e0e77946ad8a6840b96e1",
+   "pairs": [
+    0,
+    5
+   ]
+  },
+  "morpho_blue_ethereum_lending": {
+   "from": "78093a693956c10ec252dd57f10b1e1fb80021b597dca1233bc459d54a56ca06",
+   "pairs": [
+    0,
+    6
+   ]
+  },
+  "compound_v3_base_lending": {
+   "from": "78b19d0be85dd73ef7880605dbc34e824f4a234bd68e0e77946ad8a6840b96e1",
+   "pairs": [
+    0,
+    5
+   ]
+  },
+  "morpho_blue_base_lending": {
+   "from": "78093a693956c10ec252dd57f10b1e1fb80021b597dca1233bc459d54a56ca06",
+   "pairs": [
+    0,
+    6
+   ]
+  },
+  "arbitrum_aave_borrow_lp": {
+   "from": "3e115f5c86fb5f850bf5846ca7400c5dd17263f04329aada1671a8314922b523",
+   "pairs": [
+    7,
+    8
+   ]
+  }
+ }
+}

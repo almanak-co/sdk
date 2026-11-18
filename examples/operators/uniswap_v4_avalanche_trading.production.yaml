@@ -1,0 +1,42 @@
+# Operator execution context for a production run of strategies/uniswap_v4_avalanche_trading. Provider
+# credentials stay in the selected --env-file. The account bindings are
+# placeholders: fork provisioning generates the actual fixture accounts, and a
+# production run requires reviewed bindings and signing files outside
+# strategy-readable paths.
+schema_version: operator-gateway-config-v1
+modes:
+- production
+networks:
+- chain: eip155:43114
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: trading
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:43114
+          environment: mainnet
+        address: '0x1111111111111111111111111111111111111111'
+production:
+  networks:
+  - chain: eip155:43114
+    max_observation_age_seconds: 180
+  payers:
+  - accounts:
+    - trading
+    max_gas_price_wei: 1000000000000
+    max_gas_limit: 2000000
+    max_transaction_fee:
+      asset: eip155:43114/slip44:9005
+      amount: 200000000000000000
+    total_budget:
+      asset: eip155:43114/slip44:9005
+      amount: 1000000000000000000
+    allow_replacement: false
+  signing:
+    key_file: /private/operator/keystores.json
+    password_file: /private/operator/keystore-password

@@ -1,0 +1,214 @@
+{
+  "cancelled_steps": 0,
+  "captured_rpc_requests": 750,
+  "closed": true,
+  "completed_steps": 12,
+  "costs": "excluded",
+  "decision_interval": {
+    "cadence_fidelity": "reduced",
+    "configured_seconds": 5,
+    "decision_interval_override_seconds": 60,
+    "effective_seconds": 60
+  },
+  "decision_schedule": {
+    "last_evaluation": {
+      "due_at": "2026-08-20T00:14:00Z",
+      "kind": "interval",
+      "started_at": "2026-08-20T00:14:00Z"
+    },
+    "next_due_at": "2026-08-20T00:15:00Z"
+  },
+  "delivered_outcomes": 12,
+  "elapsed_seconds": 3.5,
+  "end_to_end_seconds": 10.0,
+  "evaluations": 18,
+  "evidence": "simulated_outcomes_with_captured_historical_market_inputs",
+  "mode": "finished",
+  "model": "historical_path",
+  "net_quote_return": null,
+  "pending": false,
+  "positions": [
+    {
+      "allowance": 0,
+      "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "gross_yield": "-1",
+      "marked_assets": "0",
+      "owned_shares": 0,
+      "supplied": "10000000000000000",
+      "target": {
+        "account": "lending_0",
+        "allocation": "main_weth",
+        "fund": {
+          "address": "0xd150b03f51825d8c0da4488b98e965c6123e4bf3",
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "mainnet"
+          }
+        },
+        "reserve": {
+          "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "mainnet"
+          },
+          "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+          "kind": "aave_v4",
+          "reserve_id": 0,
+          "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+        }
+      },
+      "withdrawn": "9999999999999999"
+    },
+    {
+      "allowance": 0,
+      "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "gross_yield": "0",
+      "marked_assets": "0",
+      "owned_shares": 0,
+      "supplied": "10000000000000000",
+      "target": {
+        "account": "lending_0",
+        "allocation": "bluechip_weth",
+        "fund": {
+          "address": "0xd150b03f51825d8c0da4488b98e965c6123e4bf3",
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "mainnet"
+          }
+        },
+        "reserve": {
+          "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "mainnet"
+          },
+          "hub": "0x943827dca022d0f354a8a8c332da1e5eb9f9f931",
+          "kind": "aave_v4",
+          "reserve_id": 0,
+          "spoke": "0x973a023a77420ba610f06b3858ad991df6d85a08"
+        }
+      },
+      "withdrawn": "10000000000000000"
+    },
+    {
+      "allowance": 0,
+      "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "gross_yield": "-1",
+      "marked_assets": "0",
+      "owned_shares": 0,
+      "supplied": "10000000000000000",
+      "target": {
+        "account": "lending_1",
+        "allocation": "main_weth_1",
+        "fund": {
+          "address": "0x713f3f4f10e8566200e084494343c6ab852bb57b",
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "mainnet"
+          }
+        },
+        "reserve": {
+          "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "mainnet"
+          },
+          "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+          "kind": "aave_v4",
+          "reserve_id": 0,
+          "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+        }
+      },
+      "withdrawn": "9999999999999999"
+    },
+    {
+      "allowance": 0,
+      "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "gross_yield": "0",
+      "marked_assets": "0",
+      "owned_shares": 0,
+      "supplied": "10000000000000000",
+      "target": {
+        "account": "lending_1",
+        "allocation": "bluechip_weth_1",
+        "fund": {
+          "address": "0x713f3f4f10e8566200e084494343c6ab852bb57b",
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "mainnet"
+          }
+        },
+        "reserve": {
+          "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "mainnet"
+          },
+          "hub": "0x943827dca022d0f354a8a8c332da1e5eb9f9f931",
+          "kind": "aave_v4",
+          "reserve_id": 0,
+          "spoke": "0x973a023a77420ba610f06b3858ad991df6d85a08"
+        }
+      },
+      "withdrawn": "10000000000000000"
+    }
+  ],
+  "run_id": "00000000000000000000000000000000",
+  "simulation_time": 1787184923,
+  "strategy_sha256": "c711751baf302b2046f7390334e86c9122eafdebea89b27086b3a0c87d6f8e6b",
+  "valuation": "asset_units_only",
+  "wallets": [
+    {
+      "amount": 5000000000000000000,
+      "key": {
+        "account": "lending_0",
+        "asset": "eip155:1/slip44:60",
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        }
+      }
+    },
+    {
+      "amount": 39999999999999999,
+      "key": {
+        "account": "lending_0",
+        "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        }
+      }
+    },
+    {
+      "amount": 5000000000000000000,
+      "key": {
+        "account": "lending_1",
+        "asset": "eip155:1/slip44:60",
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        }
+      }
+    },
+    {
+      "amount": 39999999999999999,
+      "key": {
+        "account": "lending_1",
+        "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        }
+      }
+    }
+  ],
+  "window": {
+    "cleanup_seconds": 3600,
+    "decision_interval_override_seconds": 60,
+    "end": 1787184900,
+    "end_policy": "teardown",
+    "latency_seconds": 0,
+    "start": 1787184000
+  }
+}

@@ -1,0 +1,156 @@
+{
+  "schedule": {
+    "start": 1787184000,
+    "end": 1787187600,
+    "latency_seconds": 0,
+    "end_policy": "teardown",
+    "cleanup_seconds": 300
+  },
+  "history": [
+    {
+      "chain": {
+        "chain_id": "eip155:1",
+        "environment": "mainnet"
+      },
+      "provider": {
+        "kind": "alchemy",
+        "network": "eth-mainnet",
+        "api_key_env": "ALCHEMY_API_KEY"
+      }
+    }
+  ],
+  "funds": [
+    {
+      "name": "lending_0",
+      "fund": {
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        },
+        "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+      },
+      "balances": [
+        {
+          "asset": "eip155:1/slip44:60",
+          "amount": 5000000000000000000
+        },
+        {
+          "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "amount": 40000000000000000
+        },
+        {
+          "asset": "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "amount": 1000000
+        }
+      ]
+    },
+    {
+      "name": "lending_1",
+      "fund": {
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        },
+        "address": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
+      },
+      "balances": [
+        {
+          "asset": "eip155:1/slip44:60",
+          "amount": 5000000000000000000
+        },
+        {
+          "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "amount": 40000000000000000
+        },
+        {
+          "asset": "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          "amount": 1000000
+        }
+      ]
+    }
+  ],
+  "market_model": "economic",
+  "costs": {
+    "kind": "excluded"
+  },
+  "data": {
+    "source": "aave_v4_archive",
+    "rate_sample_seconds": 300,
+    "risk_prices": "spoke_oracle_events",
+    "vendors": [
+      {
+        "name": "market_prices",
+        "provider": {
+          "kind": "coingecko",
+          "api": "pro",
+          "api_key_env": "COINGECKO_API_KEY",
+          "collection": {
+            "max_in_flight": 4,
+            "batch_size": 1,
+            "requests_per_second": null,
+            "max_retries": 3
+          }
+        }
+      }
+    ],
+    "prices": [
+      {
+        "purpose": "valuation",
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        },
+        "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "market": null,
+        "source": {
+          "kind": "coingecko",
+          "provider": "market_prices",
+          "coin_id": "weth",
+          "quote": "USD",
+          "interval": "hourly",
+          "max_age_seconds": 3720,
+          "availability": "retrospective_timestamp",
+          "availability_lag_seconds": 0
+        }
+      },
+      {
+        "purpose": "valuation",
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        },
+        "asset": "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "market": null,
+        "source": {
+          "kind": "coingecko",
+          "provider": "market_prices",
+          "coin_id": "usd-coin",
+          "quote": "USD",
+          "interval": "hourly",
+          "max_age_seconds": 3720,
+          "availability": "retrospective_timestamp",
+          "availability_lag_seconds": 0
+        }
+      },
+      {
+        "purpose": "valuation",
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        },
+        "asset": "eip155:1/slip44:60",
+        "market": null,
+        "source": {
+          "kind": "coingecko",
+          "provider": "market_prices",
+          "coin_id": "ethereum",
+          "quote": "USD",
+          "interval": "hourly",
+          "max_age_seconds": 3720,
+          "availability": "retrospective_timestamp",
+          "availability_lag_seconds": 0
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,131 @@
+[
+  {
+    "file": "tests/fixtures/aave_v4_avalanche_borrowing-lifecycle.json.gz",
+    "sha256": "6d6d74ee9370fab62ef8da9949745f17eb9411c31483517ffd83733f19110b7d",
+    "deployment_id": "3cd83d41f6124362bec1be163ddf92fd",
+    "strategy_source_sha256": "27ae90c7c143bb2429b1d7922b94ebf50e45a610c24864ba87fc08ed9ff369fd",
+    "outcomes": 9,
+    "mode": "closed",
+    "fork_origins": [
+      {
+        "chain": {
+          "chain_id": "eip155:43114",
+          "environment": "anvil:0x02f17504ca2dc781ba223b78dd205e90ec5df2248b354af4c515dc263b568512"
+        },
+        "origin": {
+          "chain": {
+            "chain_id": "eip155:43114",
+            "environment": "mainnet"
+          },
+          "number": 94581397,
+          "hash": "0xabb1529862e4b99fdbd08e9c056edc97b00441407043ba18d45b0d1cb7c6297a",
+          "timestamp": 1788667442
+        },
+        "instance": "0x02f17504ca2dc781ba223b78dd205e90ec5df2248b354af4c515dc263b568512",
+        "signing_chain": "eip155:31337"
+      }
+    ],
+    "purpose": "Captured actual Safe fork effects replayed against the current author source; no historical model or provider access."
+  },
+  {
+    "file": "tests/fixtures/uniswap_v4_avalanche_lp-lifecycle.json.gz",
+    "sha256": "0e19161f9849acc2c644d1dad14b8f41db8272a84fcd409772ba48015c276de9",
+    "deployment_id": "adba316dfe514c77bb94a0c5d09932ff",
+    "strategy_source_sha256": "ea602fb56fc0712131f4f4fd25c4c1f63f4fe83863ed4371fee94aa21d1443db",
+    "outcomes": 15,
+    "mode": "closed",
+    "fork_origins": [
+      {
+        "chain": {
+          "chain_id": "eip155:43114",
+          "environment": "anvil:0x9bed229697ab451341fc549288a64f6c7a6c5129c5b38b51ec1a44c2bde23f70"
+        },
+        "origin": {
+          "chain": {
+            "chain_id": "eip155:43114",
+            "environment": "mainnet"
+          },
+          "number": 94581397,
+          "hash": "0xabb1529862e4b99fdbd08e9c056edc97b00441407043ba18d45b0d1cb7c6297a",
+          "timestamp": 1788667442
+        },
+        "instance": "0x9bed229697ab451341fc549288a64f6c7a6c5129c5b38b51ec1a44c2bde23f70",
+        "signing_chain": "eip155:31337"
+      }
+    ],
+    "purpose": "Captured actual Safe fork effects replayed against the current author source; no historical model or provider access."
+  },
+  {
+    "file": "tests/fixtures/uniswap_v4_avalanche_trading-lifecycle.json.gz",
+    "sha256": "17bb68335db3f5a056dca1bea1466d72b31cf10c1eab399d39702c4a1154a08a",
+    "deployment_id": "7da2bedc1bed4333bb185aea7e2baa0e",
+    "strategy_source_sha256": "bed5fdb98f01c709e8fc3980fd5629d9660c942975d59a3f6f4ce67a01c3ce95",
+    "outcomes": 7,
+    "mode": "closed",
+    "fork_origins": [
+      {
+        "chain": {
+          "chain_id": "eip155:43114",
+          "environment": "anvil:0x8372a48bb5776982974f1ae9e400e806c79f1af740bf6ec0566d442bb3e262db"
+        },
+        "origin": {
+          "chain": {
+            "chain_id": "eip155:43114",
+            "environment": "mainnet"
+          },
+          "number": 94581397,
+          "hash": "0xabb1529862e4b99fdbd08e9c056edc97b00441407043ba18d45b0d1cb7c6297a",
+          "timestamp": 1788667442
+        },
+        "instance": "0x8372a48bb5776982974f1ae9e400e806c79f1af740bf6ec0566d442bb3e262db",
+        "signing_chain": "eip155:31337"
+      }
+    ],
+    "purpose": "Captured actual Safe fork effects replayed against the current author source; no historical model or provider access."
+  },
+  {
+    "file": "tests/fixtures/aave_v4_multichain_borrowing-lifecycle.json.gz",
+    "sha256": "8caeb6268fb9909caebf22b11d38805c2bc50fc068e81c58db3d787b1c908f4f",
+    "deployment_id": "40e6b894bff24a3b84757251726de78c",
+    "strategy_source_sha256": "4a924e0b2a8a0f12120126a456ac5a7286fa6195e67abce1cb81c6f77f404ad2",
+    "outcomes": 18,
+    "mode": "closed",
+    "fork_origins": [
+      {
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "anvil:0x0c2ce608ee4f8f1ca1dd39fd1a94926f2e8e3e0e8cc988064685307bf40c7e56"
+        },
+        "origin": {
+          "chain": {
+            "chain_id": "eip155:1",
+            "environment": "mainnet"
+          },
+          "number": 25908472,
+          "hash": "0xebd2f4a6612e094a8db8d1ab770970f7060bdaf3a18a49e4274f8935d5348ea0",
+          "timestamp": 1788579287
+        },
+        "instance": "0x0c2ce608ee4f8f1ca1dd39fd1a94926f2e8e3e0e8cc988064685307bf40c7e56",
+        "signing_chain": "eip155:31337"
+      },
+      {
+        "chain": {
+          "chain_id": "eip155:43114",
+          "environment": "anvil:0x30256018f77fe7e5a9bde5a1e3aecc856d88a39b796180184d9a7ad2465a4905"
+        },
+        "origin": {
+          "chain": {
+            "chain_id": "eip155:43114",
+            "environment": "mainnet"
+          },
+          "number": 94581397,
+          "hash": "0xabb1529862e4b99fdbd08e9c056edc97b00441407043ba18d45b0d1cb7c6297a",
+          "timestamp": 1788667442
+        },
+        "instance": "0x30256018f77fe7e5a9bde5a1e3aecc856d88a39b796180184d9a7ad2465a4905",
+        "signing_chain": "eip155:31337"
+      }
+    ],
+    "purpose": "Captured actual two-chain Safe fork effects replayed against the current author source; no historical borrowing model."
+  }
+]

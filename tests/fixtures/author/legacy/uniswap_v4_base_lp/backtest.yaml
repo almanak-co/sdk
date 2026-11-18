@@ -1,0 +1,51 @@
+mode: historical_path
+window:
+  start: '2026-08-20T00:00:00Z'
+  end: '2026-08-21T00:00:00Z'
+  end_policy: teardown
+  cleanup: 3600s
+inventory:
+  funds:
+    lp:
+      balances:
+      - asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+        quantity: '100'
+      - asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+        quantity: '0'
+      payer: operator
+  payers:
+    operator:
+      chain:
+        chain_id: eip155:8453
+        environment: mainnet
+      balances:
+      - asset: eip155:8453/slip44:60
+        quantity: '1'
+execution:
+  latency: 30s
+  decision_interval: 3600s
+  models:
+    swap_model: historical_quoter
+    approval_model: at_intent_eligibility
+    liquidity_model: fixed_historical_fee_growth
+data:
+  history:
+  - chain:
+      chain_id: eip155:8453
+      environment: mainnet
+    provider:
+      kind: alchemy
+      network: base-mainnet
+      api_key_env: ALCHEMY_API_KEY
+costs:
+  kind: fixed_native
+  calibration_sha256: '0xafc70459eea437c6491f11d535d65031e391de234e98132df624049f6f483130'
+  per_operation:
+    approve_erc20: 127143366794384
+    approve_permit2: 262137833005530
+    burn: 643849170330647
+    collect: 604288470826469
+    mint: 793289062398475
+    revoke_erc20: 101766668439193
+    revoke_permit2: 232829673931062
+    swap: 619309869907057

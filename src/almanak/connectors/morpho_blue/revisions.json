@@ -1,0 +1,1147 @@
+{
+  "eip155:1": {
+    "morpho": {
+      "runtime_length": 15623,
+      "normalized_code_hash": "0x4b0f275432c47adf8919d6d66d85e5fd6e98107aa1646b0f5e7931c6c8ee91d9",
+      "immutables": {
+        "DOMAIN_SEPARATOR": [
+          {
+            "length": 32,
+            "start": 6282
+          },
+          {
+            "length": 32,
+            "start": 9401
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "src/Morpho.sol:Morpho"
+    },
+    "irm": {
+      "runtime_length": 2717,
+      "normalized_code_hash": "0x3e8ec7f5caaea056ba34418903cfece772f85217b82760adf0a35b54de91dd12",
+      "immutables": {
+        "MORPHO": [
+          {
+            "length": 32,
+            "start": 137
+          },
+          {
+            "length": 32,
+            "start": 359
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "src/AdaptiveCurveIrm.sol:AdaptiveCurveIrm"
+    },
+    "oracle": {
+      "runtime_length": 2598,
+      "normalized_code_hash": "0x482baf51dbc8f6c45b8eadd6a72a1a76a6a3bb92c7514130c789169716efe8c4",
+      "immutables": {
+        "BASE_VAULT": [
+          {
+            "length": 32,
+            "start": 331
+          },
+          {
+            "length": 32,
+            "start": 772
+          }
+        ],
+        "BASE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 739
+          },
+          {
+            "length": 32,
+            "start": 1465
+          }
+        ],
+        "QUOTE_VAULT": [
+          {
+            "length": 32,
+            "start": 940
+          },
+          {
+            "length": 32,
+            "start": 1376
+          }
+        ],
+        "QUOTE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 907
+          },
+          {
+            "length": 32,
+            "start": 1267
+          }
+        ],
+        "BASE_FEED_1": [
+          {
+            "length": 32,
+            "start": 217
+          },
+          {
+            "length": 32,
+            "start": 813
+          }
+        ],
+        "BASE_FEED_2": [
+          {
+            "length": 32,
+            "start": 441
+          },
+          {
+            "length": 32,
+            "start": 860
+          }
+        ],
+        "QUOTE_FEED_1": [
+          {
+            "length": 32,
+            "start": 981
+          },
+          {
+            "length": 32,
+            "start": 1178
+          }
+        ],
+        "QUOTE_FEED_2": [
+          {
+            "length": 32,
+            "start": 639
+          },
+          {
+            "length": 32,
+            "start": 1022
+          }
+        ],
+        "SCALE_FACTOR": [
+          {
+            "length": 32,
+            "start": 530
+          },
+          {
+            "length": 32,
+            "start": 1061
+          }
+        ]
+      },
+      "compiler": "0.8.21+commit.d9974bed",
+      "contract": "src/morpho-chainlink/MorphoChainlinkOracleV2.sol:MorphoChainlinkOracleV2"
+    }
+  },
+  "eip155:8453": {
+    "morpho": {
+      "runtime_length": 15623,
+      "normalized_code_hash": "0x4b0f275432c47adf8919d6d66d85e5fd6e98107aa1646b0f5e7931c6c8ee91d9",
+      "immutables": {
+        "DOMAIN_SEPARATOR": [
+          {
+            "length": 32,
+            "start": 6282
+          },
+          {
+            "length": 32,
+            "start": 9401
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "src/Morpho.sol:Morpho"
+    },
+    "irm": {
+      "runtime_length": 2323,
+      "normalized_code_hash": "0x346a15b061e47336c06d03fa9f692ec1ae8819796abf7557f67932304e4ffd06",
+      "immutables": {
+        "MORPHO": [
+          {
+            "length": 32,
+            "start": 188
+          },
+          {
+            "length": 32,
+            "start": 619
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "src/AdaptiveCurveIrm.sol:AdaptiveCurveIrm"
+    },
+    "oracle": {
+      "runtime_length": 2598,
+      "normalized_code_hash": "0x482baf51dbc8f6c45b8eadd6a72a1a76a6a3bb92c7514130c789169716efe8c4",
+      "immutables": {
+        "BASE_VAULT": [
+          {
+            "length": 32,
+            "start": 331
+          },
+          {
+            "length": 32,
+            "start": 772
+          }
+        ],
+        "BASE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 739
+          },
+          {
+            "length": 32,
+            "start": 1465
+          }
+        ],
+        "QUOTE_VAULT": [
+          {
+            "length": 32,
+            "start": 940
+          },
+          {
+            "length": 32,
+            "start": 1376
+          }
+        ],
+        "QUOTE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 907
+          },
+          {
+            "length": 32,
+            "start": 1267
+          }
+        ],
+        "BASE_FEED_1": [
+          {
+            "length": 32,
+            "start": 217
+          },
+          {
+            "length": 32,
+            "start": 813
+          }
+        ],
+        "BASE_FEED_2": [
+          {
+            "length": 32,
+            "start": 441
+          },
+          {
+            "length": 32,
+            "start": 860
+          }
+        ],
+        "QUOTE_FEED_1": [
+          {
+            "length": 32,
+            "start": 981
+          },
+          {
+            "length": 32,
+            "start": 1178
+          }
+        ],
+        "QUOTE_FEED_2": [
+          {
+            "length": 32,
+            "start": 639
+          },
+          {
+            "length": 32,
+            "start": 1022
+          }
+        ],
+        "SCALE_FACTOR": [
+          {
+            "length": 32,
+            "start": 530
+          },
+          {
+            "length": 32,
+            "start": 1061
+          }
+        ]
+      },
+      "compiler": "0.8.21+commit.d9974bed",
+      "contract": "src/morpho-chainlink/MorphoChainlinkOracleV2.sol:MorphoChainlinkOracleV2"
+    }
+  },
+  "eip155:42161": {
+    "morpho": {
+      "runtime_length": 15582,
+      "normalized_code_hash": "0xf5d5c8341ec99b87f3e615bec5924a0d8fa7d3f073470a386e9c36822af3151c",
+      "immutables": {
+        "DOMAIN_SEPARATOR": [
+          {
+            "length": 32,
+            "start": 6282
+          },
+          {
+            "length": 32,
+            "start": 9401
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue/src/Morpho.sol:Morpho"
+    },
+    "irm": {
+      "runtime_length": 2282,
+      "normalized_code_hash": "0xe62e02bfb7730ec5569aec0b25eeabcfc529ed980e7cf968831bc2c85b200a4c",
+      "immutables": {
+        "MORPHO": [
+          {
+            "length": 32,
+            "start": 188
+          },
+          {
+            "length": 32,
+            "start": 619
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue-irm/src/adaptive-curve-irm/AdaptiveCurveIrm.sol:AdaptiveCurveIrm"
+    },
+    "oracle": {
+      "runtime_length": 2557,
+      "normalized_code_hash": "0x1922b3641fa9ff36292642c30201b1bfc739955c77887fcab52c37e6a49af680",
+      "immutables": {
+        "BASE_VAULT": [
+          {
+            "length": 32,
+            "start": 331
+          },
+          {
+            "length": 32,
+            "start": 772
+          }
+        ],
+        "BASE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 739
+          },
+          {
+            "length": 32,
+            "start": 1465
+          }
+        ],
+        "QUOTE_VAULT": [
+          {
+            "length": 32,
+            "start": 940
+          },
+          {
+            "length": 32,
+            "start": 1376
+          }
+        ],
+        "QUOTE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 907
+          },
+          {
+            "length": 32,
+            "start": 1267
+          }
+        ],
+        "BASE_FEED_1": [
+          {
+            "length": 32,
+            "start": 217
+          },
+          {
+            "length": 32,
+            "start": 813
+          }
+        ],
+        "BASE_FEED_2": [
+          {
+            "length": 32,
+            "start": 441
+          },
+          {
+            "length": 32,
+            "start": 860
+          }
+        ],
+        "QUOTE_FEED_1": [
+          {
+            "length": 32,
+            "start": 981
+          },
+          {
+            "length": 32,
+            "start": 1178
+          }
+        ],
+        "QUOTE_FEED_2": [
+          {
+            "length": 32,
+            "start": 639
+          },
+          {
+            "length": 32,
+            "start": 1022
+          }
+        ],
+        "SCALE_FACTOR": [
+          {
+            "length": 32,
+            "start": 530
+          },
+          {
+            "length": 32,
+            "start": 1061
+          }
+        ]
+      },
+      "compiler": "0.8.21+commit.d9974bed",
+      "contract": "src/morpho-chainlink/MorphoChainlinkOracleV2.sol:MorphoChainlinkOracleV2"
+    }
+  },
+  "eip155:10": {
+    "morpho": {
+      "runtime_length": 15582,
+      "normalized_code_hash": "0xf5d5c8341ec99b87f3e615bec5924a0d8fa7d3f073470a386e9c36822af3151c",
+      "immutables": {
+        "DOMAIN_SEPARATOR": [
+          {
+            "length": 32,
+            "start": 6282
+          },
+          {
+            "length": 32,
+            "start": 9401
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue/src/Morpho.sol:Morpho"
+    },
+    "irm": {
+      "runtime_length": 2282,
+      "normalized_code_hash": "0xe62e02bfb7730ec5569aec0b25eeabcfc529ed980e7cf968831bc2c85b200a4c",
+      "immutables": {
+        "MORPHO": [
+          {
+            "length": 32,
+            "start": 188
+          },
+          {
+            "length": 32,
+            "start": 619
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue-irm/src/adaptive-curve-irm/AdaptiveCurveIrm.sol:AdaptiveCurveIrm"
+    },
+    "oracle": {
+      "runtime_length": 2557,
+      "normalized_code_hash": "0x1922b3641fa9ff36292642c30201b1bfc739955c77887fcab52c37e6a49af680",
+      "immutables": {
+        "BASE_VAULT": [
+          {
+            "length": 32,
+            "start": 331
+          },
+          {
+            "length": 32,
+            "start": 772
+          }
+        ],
+        "BASE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 739
+          },
+          {
+            "length": 32,
+            "start": 1465
+          }
+        ],
+        "QUOTE_VAULT": [
+          {
+            "length": 32,
+            "start": 940
+          },
+          {
+            "length": 32,
+            "start": 1376
+          }
+        ],
+        "QUOTE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 907
+          },
+          {
+            "length": 32,
+            "start": 1267
+          }
+        ],
+        "BASE_FEED_1": [
+          {
+            "length": 32,
+            "start": 217
+          },
+          {
+            "length": 32,
+            "start": 813
+          }
+        ],
+        "BASE_FEED_2": [
+          {
+            "length": 32,
+            "start": 441
+          },
+          {
+            "length": 32,
+            "start": 860
+          }
+        ],
+        "QUOTE_FEED_1": [
+          {
+            "length": 32,
+            "start": 981
+          },
+          {
+            "length": 32,
+            "start": 1178
+          }
+        ],
+        "QUOTE_FEED_2": [
+          {
+            "length": 32,
+            "start": 639
+          },
+          {
+            "length": 32,
+            "start": 1022
+          }
+        ],
+        "SCALE_FACTOR": [
+          {
+            "length": 32,
+            "start": 530
+          },
+          {
+            "length": 32,
+            "start": 1061
+          }
+        ]
+      },
+      "compiler": "0.8.21+commit.d9974bed",
+      "contract": "src/morpho-chainlink/MorphoChainlinkOracleV2.sol:MorphoChainlinkOracleV2"
+    }
+  },
+  "eip155:137": {
+    "morpho": {
+      "runtime_length": 15582,
+      "normalized_code_hash": "0xf5d5c8341ec99b87f3e615bec5924a0d8fa7d3f073470a386e9c36822af3151c",
+      "immutables": {
+        "DOMAIN_SEPARATOR": [
+          {
+            "length": 32,
+            "start": 6282
+          },
+          {
+            "length": 32,
+            "start": 9401
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue/src/Morpho.sol:Morpho"
+    },
+    "irm": {
+      "runtime_length": 2282,
+      "normalized_code_hash": "0xe62e02bfb7730ec5569aec0b25eeabcfc529ed980e7cf968831bc2c85b200a4c",
+      "immutables": {
+        "MORPHO": [
+          {
+            "length": 32,
+            "start": 188
+          },
+          {
+            "length": 32,
+            "start": 619
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue-irm/src/adaptive-curve-irm/AdaptiveCurveIrm.sol:AdaptiveCurveIrm"
+    },
+    "oracle": {
+      "runtime_length": 2557,
+      "normalized_code_hash": "0x1922b3641fa9ff36292642c30201b1bfc739955c77887fcab52c37e6a49af680",
+      "immutables": {
+        "BASE_VAULT": [
+          {
+            "length": 32,
+            "start": 331
+          },
+          {
+            "length": 32,
+            "start": 772
+          }
+        ],
+        "BASE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 739
+          },
+          {
+            "length": 32,
+            "start": 1465
+          }
+        ],
+        "QUOTE_VAULT": [
+          {
+            "length": 32,
+            "start": 940
+          },
+          {
+            "length": 32,
+            "start": 1376
+          }
+        ],
+        "QUOTE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 907
+          },
+          {
+            "length": 32,
+            "start": 1267
+          }
+        ],
+        "BASE_FEED_1": [
+          {
+            "length": 32,
+            "start": 217
+          },
+          {
+            "length": 32,
+            "start": 813
+          }
+        ],
+        "BASE_FEED_2": [
+          {
+            "length": 32,
+            "start": 441
+          },
+          {
+            "length": 32,
+            "start": 860
+          }
+        ],
+        "QUOTE_FEED_1": [
+          {
+            "length": 32,
+            "start": 981
+          },
+          {
+            "length": 32,
+            "start": 1178
+          }
+        ],
+        "QUOTE_FEED_2": [
+          {
+            "length": 32,
+            "start": 639
+          },
+          {
+            "length": 32,
+            "start": 1022
+          }
+        ],
+        "SCALE_FACTOR": [
+          {
+            "length": 32,
+            "start": 530
+          },
+          {
+            "length": 32,
+            "start": 1061
+          }
+        ]
+      },
+      "compiler": "0.8.21+commit.d9974bed",
+      "contract": "src/morpho-chainlink/MorphoChainlinkOracleV2.sol:MorphoChainlinkOracleV2"
+    }
+  },
+  "eip155:4663": {
+    "morpho": {
+      "runtime_length": 15582,
+      "normalized_code_hash": "0xf5d5c8341ec99b87f3e615bec5924a0d8fa7d3f073470a386e9c36822af3151c",
+      "immutables": {
+        "DOMAIN_SEPARATOR": [
+          {
+            "length": 32,
+            "start": 6282
+          },
+          {
+            "length": 32,
+            "start": 9401
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue/src/Morpho.sol:Morpho"
+    },
+    "irm": {
+      "runtime_length": 2282,
+      "normalized_code_hash": "0xe62e02bfb7730ec5569aec0b25eeabcfc529ed980e7cf968831bc2c85b200a4c",
+      "immutables": {
+        "MORPHO": [
+          {
+            "length": 32,
+            "start": 188
+          },
+          {
+            "length": 32,
+            "start": 619
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue-irm/src/adaptive-curve-irm/AdaptiveCurveIrm.sol:AdaptiveCurveIrm"
+    },
+    "oracle": {
+      "runtime_length": 2557,
+      "normalized_code_hash": "0x1922b3641fa9ff36292642c30201b1bfc739955c77887fcab52c37e6a49af680",
+      "immutables": {
+        "BASE_VAULT": [
+          {
+            "length": 32,
+            "start": 331
+          },
+          {
+            "length": 32,
+            "start": 772
+          }
+        ],
+        "BASE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 739
+          },
+          {
+            "length": 32,
+            "start": 1465
+          }
+        ],
+        "QUOTE_VAULT": [
+          {
+            "length": 32,
+            "start": 940
+          },
+          {
+            "length": 32,
+            "start": 1376
+          }
+        ],
+        "QUOTE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 907
+          },
+          {
+            "length": 32,
+            "start": 1267
+          }
+        ],
+        "BASE_FEED_1": [
+          {
+            "length": 32,
+            "start": 217
+          },
+          {
+            "length": 32,
+            "start": 813
+          }
+        ],
+        "BASE_FEED_2": [
+          {
+            "length": 32,
+            "start": 441
+          },
+          {
+            "length": 32,
+            "start": 860
+          }
+        ],
+        "QUOTE_FEED_1": [
+          {
+            "length": 32,
+            "start": 981
+          },
+          {
+            "length": 32,
+            "start": 1178
+          }
+        ],
+        "QUOTE_FEED_2": [
+          {
+            "length": 32,
+            "start": 639
+          },
+          {
+            "length": 32,
+            "start": 1022
+          }
+        ],
+        "SCALE_FACTOR": [
+          {
+            "length": 32,
+            "start": 530
+          },
+          {
+            "length": 32,
+            "start": 1061
+          }
+        ]
+      },
+      "compiler": "0.8.21+commit.d9974bed",
+      "contract": "src/morpho-chainlink/MorphoChainlinkOracleV2.sol:MorphoChainlinkOracleV2"
+    }
+  },
+  "eip155:56": {
+    "morpho": {
+      "runtime_length": 15582,
+      "normalized_code_hash": "0xf5d5c8341ec99b87f3e615bec5924a0d8fa7d3f073470a386e9c36822af3151c",
+      "immutables": {
+        "DOMAIN_SEPARATOR": [
+          {
+            "length": 32,
+            "start": 6282
+          },
+          {
+            "length": 32,
+            "start": 9401
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue/src/Morpho.sol:Morpho"
+    },
+    "irm": {
+      "runtime_length": 2282,
+      "normalized_code_hash": "0xe62e02bfb7730ec5569aec0b25eeabcfc529ed980e7cf968831bc2c85b200a4c",
+      "immutables": {
+        "MORPHO": [
+          {
+            "length": 32,
+            "start": 188
+          },
+          {
+            "length": 32,
+            "start": 619
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue-irm/src/adaptive-curve-irm/AdaptiveCurveIrm.sol:AdaptiveCurveIrm"
+    },
+    "oracle": {
+      "runtime_length": 2557,
+      "normalized_code_hash": "0x1922b3641fa9ff36292642c30201b1bfc739955c77887fcab52c37e6a49af680",
+      "immutables": {
+        "BASE_VAULT": [
+          {
+            "length": 32,
+            "start": 331
+          },
+          {
+            "length": 32,
+            "start": 772
+          }
+        ],
+        "BASE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 739
+          },
+          {
+            "length": 32,
+            "start": 1465
+          }
+        ],
+        "QUOTE_VAULT": [
+          {
+            "length": 32,
+            "start": 940
+          },
+          {
+            "length": 32,
+            "start": 1376
+          }
+        ],
+        "QUOTE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 907
+          },
+          {
+            "length": 32,
+            "start": 1267
+          }
+        ],
+        "BASE_FEED_1": [
+          {
+            "length": 32,
+            "start": 217
+          },
+          {
+            "length": 32,
+            "start": 813
+          }
+        ],
+        "BASE_FEED_2": [
+          {
+            "length": 32,
+            "start": 441
+          },
+          {
+            "length": 32,
+            "start": 860
+          }
+        ],
+        "QUOTE_FEED_1": [
+          {
+            "length": 32,
+            "start": 981
+          },
+          {
+            "length": 32,
+            "start": 1178
+          }
+        ],
+        "QUOTE_FEED_2": [
+          {
+            "length": 32,
+            "start": 639
+          },
+          {
+            "length": 32,
+            "start": 1022
+          }
+        ],
+        "SCALE_FACTOR": [
+          {
+            "length": 32,
+            "start": 530
+          },
+          {
+            "length": 32,
+            "start": 1061
+          }
+        ]
+      },
+      "compiler": "0.8.21+commit.d9974bed",
+      "contract": "src/morpho-chainlink/MorphoChainlinkOracleV2.sol:MorphoChainlinkOracleV2"
+    }
+  },
+  "eip155:43114": {
+    "morpho": {
+      "runtime_length": 15582,
+      "normalized_code_hash": "0xf5d5c8341ec99b87f3e615bec5924a0d8fa7d3f073470a386e9c36822af3151c",
+      "immutables": {
+        "DOMAIN_SEPARATOR": [
+          {
+            "length": 32,
+            "start": 6282
+          },
+          {
+            "length": 32,
+            "start": 9401
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue/src/Morpho.sol:Morpho"
+    },
+    "irm": {
+      "runtime_length": 2282,
+      "normalized_code_hash": "0xe62e02bfb7730ec5569aec0b25eeabcfc529ed980e7cf968831bc2c85b200a4c",
+      "immutables": {
+        "MORPHO": [
+          {
+            "length": 32,
+            "start": 188
+          },
+          {
+            "length": 32,
+            "start": 619
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue-irm/src/adaptive-curve-irm/AdaptiveCurveIrm.sol:AdaptiveCurveIrm"
+    },
+    "oracle": {
+      "runtime_length": 666,
+      "normalized_code_hash": "0xe984f0fa099cc9a943e0dd9c15f0d34edf0064ada27b7c9c81381f18a53b359e",
+      "immutables": {
+        "STAVAX": [
+          {
+            "length": 32,
+            "start": 210
+          },
+          {
+            "length": 32,
+            "start": 370
+          }
+        ]
+      },
+      "compiler": "0.8.33+commit.64118f21",
+      "contract": "contracts/oracle.sol:StAvaxWavaxOracle"
+    },
+    "oracle_kind": "erc4626_conversion"
+  },
+  "eip155:999": {
+    "morpho": {
+      "runtime_length": 15582,
+      "normalized_code_hash": "0xf5d5c8341ec99b87f3e615bec5924a0d8fa7d3f073470a386e9c36822af3151c",
+      "immutables": {
+        "DOMAIN_SEPARATOR": [
+          {
+            "length": 32,
+            "start": 6282
+          },
+          {
+            "length": 32,
+            "start": 9401
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue/src/Morpho.sol:Morpho"
+    },
+    "irm": {
+      "runtime_length": 2282,
+      "normalized_code_hash": "0xe62e02bfb7730ec5569aec0b25eeabcfc529ed980e7cf968831bc2c85b200a4c",
+      "immutables": {
+        "MORPHO": [
+          {
+            "length": 32,
+            "start": 188
+          },
+          {
+            "length": 32,
+            "start": 619
+          }
+        ]
+      },
+      "compiler": "0.8.19+commit.7dd6d404",
+      "contract": "lib/morpho-blue-irm/src/adaptive-curve-irm/AdaptiveCurveIrm.sol:AdaptiveCurveIrm"
+    },
+    "oracle": {
+      "runtime_length": 2557,
+      "normalized_code_hash": "0x1922b3641fa9ff36292642c30201b1bfc739955c77887fcab52c37e6a49af680",
+      "immutables": {
+        "BASE_VAULT": [
+          {
+            "length": 32,
+            "start": 331
+          },
+          {
+            "length": 32,
+            "start": 772
+          }
+        ],
+        "BASE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 739
+          },
+          {
+            "length": 32,
+            "start": 1465
+          }
+        ],
+        "QUOTE_VAULT": [
+          {
+            "length": 32,
+            "start": 940
+          },
+          {
+            "length": 32,
+            "start": 1376
+          }
+        ],
+        "QUOTE_VAULT_CONVERSION_SAMPLE": [
+          {
+            "length": 32,
+            "start": 907
+          },
+          {
+            "length": 32,
+            "start": 1267
+          }
+        ],
+        "BASE_FEED_1": [
+          {
+            "length": 32,
+            "start": 217
+          },
+          {
+            "length": 32,
+            "start": 813
+          }
+        ],
+        "BASE_FEED_2": [
+          {
+            "length": 32,
+            "start": 441
+          },
+          {
+            "length": 32,
+            "start": 860
+          }
+        ],
+        "QUOTE_FEED_1": [
+          {
+            "length": 32,
+            "start": 981
+          },
+          {
+            "length": 32,
+            "start": 1178
+          }
+        ],
+        "QUOTE_FEED_2": [
+          {
+            "length": 32,
+            "start": 639
+          },
+          {
+            "length": 32,
+            "start": 1022
+          }
+        ],
+        "SCALE_FACTOR": [
+          {
+            "length": 32,
+            "start": 530
+          },
+          {
+            "length": 32,
+            "start": 1061
+          }
+        ]
+      },
+      "compiler": "0.8.21+commit.d9974bed",
+      "contract": "src/morpho-chainlink/MorphoChainlinkOracleV2.sol:MorphoChainlinkOracleV2"
+    }
+  }
+}

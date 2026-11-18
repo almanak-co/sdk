@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Morpho Blue market leg selection",
+  "description": "One market id on the reviewed core of its chain, on the loan or the collateral side. An omitted core accepts the reviewed deployment; a named one must be it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "connector",
+    "chain",
+    "market_id",
+    "leg"
+  ],
+  "properties": {
+    "connector": {
+      "const": "morpho_blue"
+    },
+    "chain": {
+      "type": "string",
+      "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$"
+    },
+    "market_id": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{64}$"
+    },
+    "leg": {
+      "enum": [
+        "loan",
+        "collateral"
+      ]
+    },
+    "core": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^0x[0-9a-fA-F]{40}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "assertions": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "loan_asset": {
+              "type": "string",
+              "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+            },
+            "collateral_asset": {
+              "type": "string",
+              "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+            },
+            "oracle": {
+              "type": "string",
+              "pattern": "^0x[0-9a-fA-F]{40}$"
+            },
+            "irm": {
+              "type": "string",
+              "pattern": "^0x[0-9a-fA-F]{40}$"
+            },
+            "lltv": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 999999999999999999
+            },
+            "decimals": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

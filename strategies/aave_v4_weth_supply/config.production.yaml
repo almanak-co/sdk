@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Explicit production example. The operator context is
+# examples/operators/aave_v4_weth_supply.production.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What each debt borrows, in its asset's units.
+    borrow_quantity: '5'
+    # The debt unwinds below minimum_health_factor plus this margin.
+    unwind_margin: '0.25'
+  allocations:
+    main_weth:
+      market: main_weth_market
+      account: treasury
+      capital: '0.001'
+      minimum_native_balance: '0.001'
+    bluechip_weth:
+      market: bluechip_weth_market
+      account: treasury
+      capital: '0.001'
+      minimum_native_balance: '0.001'
+  gas:
+    treasury_payer:
+      accounts:
+      - treasury
+      chain: eip155:1
+      source: network_rpc_fee_history
+      reward_percentile: 50
+      base_fee_multiplier_bps: 20000
+      max_gas_price_wei: 5000000000
+      max_gas_limit: 1000000
+      max_transaction_fee:
+        base_units: 5000000000000000
+      total_budget:
+        base_units: 30000000000000000
+      exit_reserve:
+        base_units: 10000000000000000
+      gas_limit_buffer_bps: 2500
+markets:
+  main_weth_market:
+    connector: aave_v4
+    chain: eip155:1
+    spoke: '0x94e7a5dcbe816e498b89ab752661904e2f56c485'
+    reserve_id: 0
+  bluechip_weth_market:
+    connector: aave_v4
+    chain: eip155:1
+    spoke: '0x973a023a77420ba610f06b3858ad991df6d85a08'
+    reserve_id: 0
+accounts:
+  treasury:
+    chain: eip155:1

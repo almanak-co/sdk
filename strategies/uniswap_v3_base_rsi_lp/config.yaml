@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/uniswap_v3_base_rsi_lp.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # RSI lookback, in hourly closes, and the closes each decision reads.
+    period: 14
+    window: 120
+    # Open while RSI is inside ranging; close once it leaves trending.
+    ranging: [35, 65]
+    trending: [25, 75]
+  allocations:
+    position:
+      market: pool
+      account: fund
+      band:
+        lower: -200500
+        upper: -195500
+        width_bps: 500
+      capital:
+        asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+        quantity:
+          base_units: 100000000
+      entry_swap_bps: 5000
+      hold_seconds: 7d
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+  gas:
+    # Example Base amounts; size them from the live gas price.
+    # Entry takes 4 transactions and exit 5 (almanak check --production):
+    # exit_reserve = 5 fees, total_budget = exit_reserve + 4 entry + 20 later fees.
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:8453
+      max_transaction_fee:
+        base_units: 75000000000000
+      total_budget:
+        base_units: 2175000000000000
+      exit_reserve:
+        base_units: 375000000000000
+markets:
+  pool:
+    connector: uniswap_v3
+    chain: eip155:8453
+    pool: '0xd0b53d9277642d899df5c87a3966a349a798f224'
+accounts:
+  fund:
+    chain: eip155:8453

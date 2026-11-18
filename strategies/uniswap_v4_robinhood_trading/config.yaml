@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/uniswap_v4_robinhood_trading.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    position:
+      market: pool
+      account: fund
+      capital:
+        asset: eip155:4663/erc20:0x5fc5360d0400a0fd4f2af552add042d716f1d168
+        quantity: '5'
+      hold_seconds: 300s
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+      kind: trading
+markets:
+  pool:
+    connector: uniswap_v4
+    chain: eip155:4663
+    currency0: eip155:4663/erc20:0x0bd7d308f8e1639fab988df18a8011f41eacad73
+    currency1: eip155:4663/erc20:0x5fc5360d0400a0fd4f2af552add042d716f1d168
+    fee: 500
+    tick_spacing: 10
+    hooks: '0x0000000000000000000000000000000000000000'
+accounts:
+  fund:
+    chain: eip155:4663

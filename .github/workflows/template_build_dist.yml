@@ -1,0 +1,90 @@
+name: Build release distributions
+
+# Builds the sdist and the five platform wheels, verifies them and keeps them as
+# the run's `sdk-dist` artifact. Nothing is published here: the stable release
+# uploads these exact files to PyPI (template_publish_pypi.yml), so the hashes
+# recorded in release-sha256.txt are the hashes PyPI serves.
+
+on:
+  workflow_call:
+    inputs:
+      version_override:
+        description: "Package version to build (overrides pyproject.toml)"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      ALMANAK_CODE_TOKEN:
+        description: "Read access to the Almanak Code release repository"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-repo
+
+      - name: Override package version
+        if: inputs.version_override != ''
+        env:
+          VERSION: ${{ inputs.version_override }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9A-Za-z._+-]+$ ]] || { echo "::error::invalid version: $VERSION"; exit 1; }
+          uv version --no-sync "$VERSION"
+          uv lock --check
+
+      - name: Run security checks
+        run: make security
+
+      - name: Download Almanak Code binaries
+        env:
+          GH_TOKEN: ${{ secrets.ALMANAK_CODE_TOKEN }}
+        run: make binaries
+
+      - name: Bundle LLM docs
+        run: |
+          make docs-llms
+          mkdir -p src/almanak/llms
+          cp site/llms-full.txt src/almanak/llms/llms-full.txt
+
+      - name: Build package
+        run: make build-platform-wheels
+
+      - name: Verify release distributions
+        run: |
+          uv run --locked python -m scripts.ci.verify_sdk_distribution
+          sha256sum dist/* > release-sha256.txt
+          VERSION=$(uv version --short)
+          uv venv /tmp/almanak-wheel-smoke
+          uv pip install --python /tmp/almanak-wheel-smoke/bin/python dist/*manylinux_2_17_x86_64.whl
+          uv run --locked python -m scripts.ci.smoke_sdk_distribution \
+            --python /tmp/almanak-wheel-smoke/bin/python --expected-version "$VERSION"
+          uv venv /tmp/almanak-sdist-smoke
+          uv pip install --python /tmp/almanak-sdist-smoke/bin/python dist/*.tar.gz
+          uv run --locked python -m scripts.ci.smoke_sdk_distribution \
+            --python /tmp/almanak-sdist-smoke/bin/python --expected-version "$VERSION"
+
+      - name: Retain release hashes
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-sha256
+          path: |
+            release-sha256.txt
+            release-manifest.json
+
+      - name: Retain release distributions
+        uses: actions/upload-artifact@v7
+        with:
+          name: sdk-dist
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            dist/*
+            release-sha256.txt

@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/aave_v3_arbitrum_lending.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '5'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.01'
+      collateral: true
+      minimum_health_factor: '2'
+      oracle: '0xb56c2f0b653b2e0b10c9b928c8580ac5df02c7c7'
+      price_source: '0xbd41b1548a5a06544cbcf87c0c54864312842c00'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      collateral: false
+      minimum_health_factor: '2'
+      oracle: '0xb56c2f0b653b2e0b10c9b928c8580ac5df02c7c7'
+      price_source: '0xb0c9a7122aab68f75cffd9851e867144dbff113b'
+      minimum_native_balance: '0'
+  gas:
+    # Example Arbitrum amounts; size them from the live gas price.
+    # Entry takes 2 transactions and exit 4 (almanak check --production):
+    # exit_reserve = 4 fees, total_budget = exit_reserve + 2 entry + 20 later fees.
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:42161
+      max_transaction_fee:
+        base_units: 160000000000000
+      total_budget:
+        base_units: 4160000000000000
+      exit_reserve:
+        base_units: 640000000000000
+markets:
+  collateral:
+    connector: aave_v3
+    chain: eip155:42161
+    asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+  loan:
+    connector: aave_v3
+    chain: eip155:42161
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+accounts:
+  fund:
+    chain: eip155:42161

@@ -1,0 +1,50 @@
+[
+  {
+    "case": "cleanup/pinned/gmx_v2_arbitrum_position/eoa/configured",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-rollout/gmx-approval-cleanup-qa/gmx_v2_arbitrum_position-pinned-eoa-configured/checkpoint.json.gz"
+  },
+  {
+    "case": "cleanup/pinned/gmx_v2_arbitrum_position/safe_roles/configured",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-rollout/gmx-approval-cleanup-qa/gmx_v2_arbitrum_position-pinned-safe_roles-configured/checkpoint.json.gz"
+  },
+  {
+    "case": "cleanup/pinned/gmx_v2_arbitrum_position/safe_roles/distinct",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-rollout/gmx-approval-cleanup-qa/gmx_v2_arbitrum_position-pinned-safe_roles-distinct/checkpoint.json.gz"
+  },
+  {
+    "case": "cleanup/fresh/gmx_v2_arbitrum_position/eoa/configured",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-rollout/gmx-approval-cleanup-qa/gmx_v2_arbitrum_position-fresh-eoa-configured/checkpoint.json.gz"
+  },
+  {
+    "case": "cleanup/fresh/gmx_v2_arbitrum_position/safe_roles/configured",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-rollout/gmx-approval-cleanup-qa/gmx_v2_arbitrum_position-fresh-safe_roles-configured/checkpoint.json.gz"
+  },
+  {
+    "case": "cleanup/fresh/gmx_v2_arbitrum_position/safe_roles/distinct",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-rollout/gmx-approval-cleanup-qa/gmx_v2_arbitrum_position-fresh-safe_roles-distinct/checkpoint.json.gz"
+  },
+  {
+    "case": "cleanup/pinned/gmx_v2_avalanche_position/eoa/configured",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-rollout/gmx-approval-cleanup-qa/gmx_v2_avalanche_position-pinned-eoa-configured/checkpoint.json.gz"
+  },
+  {
+    "case": "cleanup/pinned/gmx_v2_avalanche_position/safe_roles/configured",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-rollout/gmx-approval-cleanup-qa/gmx_v2_avalanche_position-pinned-safe_roles-configured/checkpoint.json.gz"
+  },
+  {
+    "case": "cleanup/pinned/gmx_v2_avalanche_position/safe_roles/distinct",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-rollout/gmx-approval-cleanup-qa/gmx_v2_avalanche_position-pinned-safe_roles-distinct/checkpoint.json.gz"
+  },
+  {
+    "case": "cleanup/fresh/gmx_v2_avalanche_position/eoa/configured",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-rollout/gmx-approval-cleanup-qa/gmx_v2_avalanche_position-fresh-eoa-configured/checkpoint.json.gz"
+  },
+  {
+    "case": "cleanup/fresh/gmx_v2_avalanche_position/safe_roles/configured",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-rollout/gmx-approval-cleanup-qa/gmx_v2_avalanche_position-fresh-safe_roles-configured/checkpoint.json.gz"
+  },
+  {
+    "case": "cleanup/fresh/gmx_v2_avalanche_position/safe_roles/distinct",
+    "checkpoint": "docs/internal/reports/evidence/2026-09-09-rollout/gmx-approval-cleanup-qa/gmx_v2_avalanche_position-fresh-safe_roles-distinct/checkpoint.json.gz"
+  }
+]

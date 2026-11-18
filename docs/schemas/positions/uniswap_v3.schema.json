@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Uniswap V3 pool position",
+  "description": "An absent range and band is a trading allocation; liquidity requires explicit tick bounds or an owner-approved band.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "market",
+    "account",
+    "capital",
+    "entry_swap_bps",
+    "slippage_bps",
+    "deadline_seconds",
+    "minimum_native_balance"
+  ],
+  "properties": {
+    "market": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "account": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "range": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "lower",
+            "upper"
+          ],
+          "properties": {
+            "lower": {
+              "$ref": "#/$defs/Tick"
+            },
+            "upper": {
+              "$ref": "#/$defs/Tick"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "band": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Band"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "capital": {
+      "$ref": "#/$defs/Amount"
+    },
+    "entry_swap_bps": {
+      "description": "Share of capital each entry swaps from the funding asset into the counter asset, capped by the funding inventory held; entries repeat while funding remains. A liquidity mint then offers all inventory held, not only the swapped share, so 5000 suits a position centred on the price. A banded allocation that enters through rebalance_quote does not use it: that quote sizes itself from the centred position. 0 offers no entry quote: use it for a liquidity allocation that deposits without an entry swap. A trading allocation requires at least 1.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "hold_seconds": {
+      "anyOf": [
+        {
+          "$ref": "../strategy.schema.json#/$defs/PositiveDuration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional. Read only by strategy code for its own timed exit; connectors never act on it. Omit to hold until teardown."
+    },
+    "slippage_bps": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9999
+    },
+    "deadline_seconds": {
+      "$ref": "../strategy.schema.json#/$defs/PositiveDuration"
+    },
+    "minimum_native_balance": {
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    }
+  },
+  "$defs": {
+    "Tick": {
+      "type": "integer",
+      "minimum": -887272,
+      "maximum": 887272
+    },
+    "Band": {
+      "description": "Width of each position, centred on the observed tick: width ticks, or width_bps either side of the price. Optional lower and upper ticks form an envelope the gateway enforces; without one the band recentres around the price indefinitely.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "lower": {
+          "$ref": "#/$defs/Tick"
+        },
+        "upper": {
+          "$ref": "#/$defs/Tick"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "width_bps": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "dependentRequired": {
+        "lower": [
+          "upper"
+        ],
+        "upper": [
+          "lower"
+        ]
+      },
+      "oneOf": [
+        {
+          "required": [
+            "width"
+          ]
+        },
+        {
+          "required": [
+            "width_bps"
+          ]
+        }
+      ]
+    },
+    "Amount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset",
+        "quantity"
+      ],
+      "properties": {
+        "asset": {
+          "type": "string",
+          "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+        },
+        "quantity": {
+          "$ref": "../strategy.schema.json#/$defs/Quantity"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "range"
+              ],
+              "properties": {
+                "range": {
+                  "type": "object"
+                }
+              }
+            },
+            {
+              "required": [
+                "band"
+              ],
+              "properties": {
+                "band": {
+                  "type": "object"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "then": {
+        "properties": {
+          "entry_swap_bps": {
+            "minimum": 1
+          }
+        }
+      }
+    }
+  ]
+}

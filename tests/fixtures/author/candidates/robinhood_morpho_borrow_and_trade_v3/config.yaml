@@ -1,0 +1,140 @@
+strategy:
+  decision_interval: 5s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '0.1'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.01'
+      minimum_health_factor: '2'
+      native_asset: eip155:4663/slip44:60
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      minimum_health_factor: '2'
+      native_asset: eip155:4663/slip44:60
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      range: null
+      capital:
+        asset: eip155:4663/erc20:0x5fc5360d0400a0fd4f2af552add042d716f1d168
+        quantity: '0.05'
+      entry_swap_bps: 10000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 300
+      native_asset: eip155:4663/slip44:60
+      minimum_native_balance:
+        base_units: 0
+assets:
+  eip155:4663/erc20:0x0bd7d308f8e1639fab988df18a8011f41eacad73:
+    decimals: 18
+  eip155:4663/erc20:0x5fc5360d0400a0fd4f2af552add042d716f1d168:
+    decimals: 6
+  eip155:4663/slip44:60:
+    decimals: 18
+markets:
+  collateral:
+    connector: morpho_blue
+    reserve:
+      kind: morpho_blue
+      market:
+        chain:
+          chain_id: eip155:4663
+          environment: mainnet
+        core: '0x9d53d5e3bd5e8d4cbfa6db1ca238aea02e651010'
+        market_id: '0x127353ba63e08f74d8e9ce8a1c2b41b5f89c7167135b1c09fbed34a71b4cb06b'
+        loan_asset: eip155:4663/erc20:0x5fc5360d0400a0fd4f2af552add042d716f1d168
+        collateral_asset: eip155:4663/erc20:0x0bd7d308f8e1639fab988df18a8011f41eacad73
+        oracle: '0x5e3645ed6ace5b212ad7cf51c75154897e2f80ad'
+        irm: '0x2bd3d5965b26b51814ac95127b2b80dd6ccc0fa1'
+        lltv: 860000000000000000
+      asset: eip155:4663/erc20:0x0bd7d308f8e1639fab988df18a8011f41eacad73
+  loan:
+    connector: morpho_blue
+    reserve:
+      kind: morpho_blue
+      market:
+        chain:
+          chain_id: eip155:4663
+          environment: mainnet
+        core: '0x9d53d5e3bd5e8d4cbfa6db1ca238aea02e651010'
+        market_id: '0x127353ba63e08f74d8e9ce8a1c2b41b5f89c7167135b1c09fbed34a71b4cb06b'
+        loan_asset: eip155:4663/erc20:0x5fc5360d0400a0fd4f2af552add042d716f1d168
+        collateral_asset: eip155:4663/erc20:0x0bd7d308f8e1639fab988df18a8011f41eacad73
+        oracle: '0x5e3645ed6ace5b212ad7cf51c75154897e2f80ad'
+        irm: '0x2bd3d5965b26b51814ac95127b2b80dd6ccc0fa1'
+        lltv: 860000000000000000
+      asset: eip155:4663/erc20:0x5fc5360d0400a0fd4f2af552add042d716f1d168
+  pool:
+    pool:
+      kind: uniswap_v3
+      chain:
+        chain_id: eip155:4663
+        environment: mainnet
+      factory: '0x1f7d7550b1b028f7571e69a784071f0205fd2efa'
+      pool: '0x69bfaf19c9f377bb306a89aed9f6b07e2c1a8d9a'
+      currency0: eip155:4663/erc20:0x0bd7d308f8e1639fab988df18a8011f41eacad73
+      currency1: eip155:4663/erc20:0x5fc5360d0400a0fd4f2af552add042d716f1d168
+      fee: 500
+      tick_spacing: 10
+    contracts:
+      router: '0xcaf681a66d020601342297493863e78c959e5cb2'
+      position_manager: '0x73991a25c818bf1f1128deaab1492d45638de0d3'
+      quoter: '0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7'
+    connector: uniswap_v3
+accounts:
+  fund:
+    chain:
+      chain_id: eip155:4663
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:4663
+        environment: mainnet
+      provider:
+        api_key_env: ALCHEMY_API_KEY
+        kind: alchemy
+        network: robinhood-mainnet
+      block:
+        chain:
+          chain_id: eip155:4663
+          environment: mainnet
+        number: 58238929
+        hash: '0x814d1db8d8b72f4d7a22acd369ee072101b8b4a5828dc6e620170f74ff67b639'
+        timestamp: 1788925845
+    funds:
+    - account: fund
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:4663/erc20:0x0bd7d308f8e1639fab988df18a8011f41eacad73
+          quantity: '0.01'
+        method: wrap_native
+      - balance:
+          asset: eip155:4663/erc20:0x5fc5360d0400a0fd4f2af552add042d716f1d168
+          quantity: '0.02'
+        method: local_storage
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:4663/slip44:60
+        quantity: '5'
+      foundry_account_index: 858
+inventory:
+- account: fund
+  balance:
+    asset: eip155:4663/erc20:0x0bd7d308f8e1639fab988df18a8011f41eacad73
+    quantity: '0.01'
+- account: fund
+  balance:
+    asset: eip155:4663/erc20:0x5fc5360d0400a0fd4f2af552add042d716f1d168
+    quantity: '0.02'

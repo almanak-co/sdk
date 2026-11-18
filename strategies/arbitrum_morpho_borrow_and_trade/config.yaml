@@ -1,0 +1,74 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/arbitrum_morpho_borrow_and_trade.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '5'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.01'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      capital:
+        asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+        quantity:
+          base_units: 2500000
+      entry_swap_bps: 10000
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+  gas:
+    # Example Arbitrum amounts; size them from the live gas price.
+    # Entry takes 4 transactions and exit 6 (almanak check --production):
+    # exit_reserve = 6 fees, total_budget = exit_reserve + 4 entry + 20 later fees.
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:42161
+      max_transaction_fee:
+        base_units: 160000000000000
+      total_budget:
+        base_units: 4800000000000000
+      exit_reserve:
+        base_units: 960000000000000
+markets:
+  collateral:
+    connector: morpho_blue
+    chain: eip155:42161
+    market_id: '0xca83d02be579485cc10945c9597a6141e772f1cf0e0aa28d09a327b6cbd8642c'
+    leg: collateral
+  loan:
+    connector: morpho_blue
+    chain: eip155:42161
+    market_id: '0xca83d02be579485cc10945c9597a6141e772f1cf0e0aa28d09a327b6cbd8642c'
+    leg: loan
+  pool:
+    connector: uniswap_v3
+    chain: eip155:42161
+    pool: '0xc6962004f452be9203591991d15f6b388e09e8d0'
+accounts:
+  fund:
+    chain: eip155:42161
+inventory:
+- account: fund
+  balance:
+    asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+    quantity: '0.01'
+- account: fund
+  balance:
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+    quantity: '2'

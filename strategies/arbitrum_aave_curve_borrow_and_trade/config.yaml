@@ -1,0 +1,72 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/arbitrum_aave_curve_borrow_and_trade.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '5'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.01'
+      collateral: true
+      minimum_health_factor: '2'
+      oracle: '0xb56c2f0b653b2e0b10c9b928c8580ac5df02c7c7'
+      price_source: '0xbd41b1548a5a06544cbcf87c0c54864312842c00'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      collateral: false
+      minimum_health_factor: '2'
+      oracle: '0xb56c2f0b653b2e0b10c9b928c8580ac5df02c7c7'
+      price_source: '0xb0c9a7122aab68f75cffd9851e867144dbff113b'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      funding_asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+      trading_asset: eip155:42161/erc20:0x498bf2b1e120fed3ad3d42ea2165e9b73f99c1e5
+      liquidity_enabled: false
+      capital:
+      - asset: eip155:42161/erc20:0x498bf2b1e120fed3ad3d42ea2165e9b73f99c1e5
+        quantity: '0'
+      - asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+        quantity: '2.5'
+      entry_swap_bps: 10000
+      slippage_bps: 100
+      deadline_seconds: 5m
+      minimum_native_balance:
+        base_units: 0
+markets:
+  collateral:
+    connector: aave_v3
+    chain: eip155:42161
+    asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+  loan:
+    connector: aave_v3
+    chain: eip155:42161
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+  pool:
+    connector: curve
+    chain: eip155:42161
+    pool: '0xec090cf6dd891d2d014bea6edada6e05e025d93d'
+accounts:
+  fund:
+    chain: eip155:42161
+inventory:
+- account: fund
+  balance:
+    asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+    quantity: '0.01'
+- account: fund
+  balance:
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+    quantity: '1'
+- account: fund
+  balance:
+    asset: eip155:42161/erc20:0x498bf2b1e120fed3ad3d42ea2165e9b73f99c1e5
+    quantity: '0'

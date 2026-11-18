@@ -1,0 +1,1356 @@
+{
+  "extended_asset_list": {
+    "implementation": {
+      "runtime_length": 18599,
+      "normalized_code_hash": "0x8d51c0070cd40c4d85b13545deaad8ff9f85df5c4992326ba91f24d2331369d8",
+      "immutables": {
+        "governor": [
+          {
+            "length": 32,
+            "start": 1592
+          },
+          {
+            "length": 32,
+            "start": 3441
+          },
+          {
+            "length": 32,
+            "start": 5137
+          },
+          {
+            "length": 32,
+            "start": 6161
+          }
+        ],
+        "pauseGuardian": [
+          {
+            "length": 32,
+            "start": 2168
+          },
+          {
+            "length": 32,
+            "start": 3703
+          }
+        ],
+        "baseToken": [
+          {
+            "length": 32,
+            "start": 2078
+          },
+          {
+            "length": 32,
+            "start": 5008
+          },
+          {
+            "length": 32,
+            "start": 5625
+          },
+          {
+            "length": 32,
+            "start": 6266
+          },
+          {
+            "length": 32,
+            "start": 6450
+          },
+          {
+            "length": 32,
+            "start": 9907
+          },
+          {
+            "length": 32,
+            "start": 12117
+          },
+          {
+            "length": 32,
+            "start": 12429
+          },
+          {
+            "length": 32,
+            "start": 14552
+          },
+          {
+            "length": 32,
+            "start": 15644
+          },
+          {
+            "length": 32,
+            "start": 15869
+          }
+        ],
+        "baseTokenPriceFeed": [
+          {
+            "length": 32,
+            "start": 6768
+          },
+          {
+            "length": 32,
+            "start": 10264
+          },
+          {
+            "length": 32,
+            "start": 17068
+          },
+          {
+            "length": 32,
+            "start": 18119
+          }
+        ],
+        "extensionDelegate": [
+          {
+            "length": 32,
+            "start": 3767
+          },
+          {
+            "length": 32,
+            "start": 18431
+          }
+        ],
+        "supplyKink": [
+          {
+            "length": 32,
+            "start": 4926
+          },
+          {
+            "length": 32,
+            "start": 8616
+          }
+        ],
+        "supplyPerSecondInterestRateSlopeLow": [
+          {
+            "length": 32,
+            "start": 3925
+          },
+          {
+            "length": 32,
+            "start": 8676
+          },
+          {
+            "length": 32,
+            "start": 8782
+          }
+        ],
+        "supplyPerSecondInterestRateSlopeHigh": [
+          {
+            "length": 32,
+            "start": 4196
+          },
+          {
+            "length": 32,
+            "start": 8830
+          }
+        ],
+        "supplyPerSecondInterestRateBase": [
+          {
+            "length": 32,
+            "start": 4550
+          },
+          {
+            "length": 32,
+            "start": 8715
+          }
+        ],
+        "borrowKink": [
+          {
+            "length": 32,
+            "start": 4430
+          },
+          {
+            "length": 32,
+            "start": 8888
+          }
+        ],
+        "borrowPerSecondInterestRateSlopeLow": [
+          {
+            "length": 32,
+            "start": 2599
+          },
+          {
+            "length": 32,
+            "start": 8948
+          },
+          {
+            "length": 32,
+            "start": 9054
+          }
+        ],
+        "borrowPerSecondInterestRateSlopeHigh": [
+          {
+            "length": 32,
+            "start": 2353
+          },
+          {
+            "length": 32,
+            "start": 9102
+          }
+        ],
+        "borrowPerSecondInterestRateBase": [
+          {
+            "length": 32,
+            "start": 4064
+          },
+          {
+            "length": 32,
+            "start": 8987
+          }
+        ],
+        "storeFrontPriceFactor": [
+          {
+            "length": 32,
+            "start": 1966
+          },
+          {
+            "length": 32,
+            "start": 18059
+          }
+        ],
+        "baseScale": [
+          {
+            "length": 32,
+            "start": 3313
+          },
+          {
+            "length": 32,
+            "start": 10302
+          },
+          {
+            "length": 32,
+            "start": 11157
+          },
+          {
+            "length": 32,
+            "start": 17180
+          },
+          {
+            "length": 32,
+            "start": 18175
+          }
+        ],
+        "trackingIndexScale": [
+          {
+            "length": 32,
+            "start": 5072
+          },
+          {
+            "length": 32,
+            "start": 11824
+          }
+        ],
+        "baseTrackingSupplySpeed": [
+          {
+            "length": 32,
+            "start": 1772
+          },
+          {
+            "length": 32,
+            "start": 8308
+          }
+        ],
+        "baseTrackingBorrowSpeed": [
+          {
+            "length": 32,
+            "start": 4610
+          },
+          {
+            "length": 32,
+            "start": 8188
+          }
+        ],
+        "baseMinForRewards": [
+          {
+            "length": 32,
+            "start": 4490
+          },
+          {
+            "length": 32,
+            "start": 8046
+          }
+        ],
+        "baseBorrowMin": [
+          {
+            "length": 32,
+            "start": 2721
+          },
+          {
+            "length": 32,
+            "start": 15134
+          },
+          {
+            "length": 32,
+            "start": 16028
+          }
+        ],
+        "targetReserves": [
+          {
+            "length": 32,
+            "start": 2844
+          },
+          {
+            "length": 32,
+            "start": 6688
+          }
+        ],
+        "decimals": [
+          {
+            "length": 32,
+            "start": 2783
+          }
+        ],
+        "numAssets": [
+          {
+            "length": 32,
+            "start": 4865
+          },
+          {
+            "length": 32,
+            "start": 7501
+          },
+          {
+            "length": 32,
+            "start": 10357
+          },
+          {
+            "length": 32,
+            "start": 10878
+          },
+          {
+            "length": 32,
+            "start": 17114
+          }
+        ],
+        "accrualDescaleFactor": [
+          {
+            "length": 32,
+            "start": 11863
+          }
+        ],
+        "assetList": [
+          {
+            "length": 32,
+            "start": 6070
+          },
+          {
+            "length": 32,
+            "start": 7222
+          }
+        ]
+      }
+    },
+    "proxy": {
+      "runtime_length": 1878,
+      "normalized_code_hash": "0x64952234eab8f3aed74355c49119f627965640b1efeb6b28430b5a31b0d3b192",
+      "immutables": {}
+    },
+    "extension": {
+      "runtime_length": 3513,
+      "normalized_code_hash": "0x97df66b4712a2151248e3c735348cca5c2f8c4dc26b0d1d13d2517f5bfe0a07a",
+      "immutables": {
+        "name32": [
+          {
+            "length": 32,
+            "start": 3142
+          }
+        ],
+        "symbol32": [
+          {
+            "length": 32,
+            "start": 1861
+          }
+        ],
+        "assetListFactory": [
+          {
+            "length": 32,
+            "start": 2107
+          }
+        ]
+      }
+    },
+    "asset_list": {
+      "runtime_length": 2887,
+      "normalized_code_hash": "0xc3cba4ba8055bb88b07fd18917198b197c9e1e1aeaaa923ed623f903569ae0a2",
+      "immutables": {
+        "asset20_a": [
+          {
+            "length": 32,
+            "start": 1074
+          }
+        ],
+        "asset20_b": [
+          {
+            "length": 32,
+            "start": 1109
+          }
+        ],
+        "asset21_a": [
+          {
+            "length": 32,
+            "start": 999
+          }
+        ],
+        "asset21_b": [
+          {
+            "length": 32,
+            "start": 1034
+          }
+        ],
+        "asset22_a": [
+          {
+            "length": 32,
+            "start": 924
+          }
+        ],
+        "asset22_b": [
+          {
+            "length": 32,
+            "start": 959
+          }
+        ],
+        "asset23_a": [
+          {
+            "length": 32,
+            "start": 849
+          }
+        ],
+        "asset23_b": [
+          {
+            "length": 32,
+            "start": 884
+          }
+        ],
+        "numAssets": [
+          {
+            "length": 32,
+            "start": 146
+          },
+          {
+            "length": 32,
+            "start": 2697
+          }
+        ],
+        "asset00_a": [
+          {
+            "length": 32,
+            "start": 2574
+          }
+        ],
+        "asset00_b": [
+          {
+            "length": 32,
+            "start": 2609
+          }
+        ],
+        "asset01_a": [
+          {
+            "length": 32,
+            "start": 2499
+          }
+        ],
+        "asset01_b": [
+          {
+            "length": 32,
+            "start": 2534
+          }
+        ],
+        "asset02_a": [
+          {
+            "length": 32,
+            "start": 2424
+          }
+        ],
+        "asset02_b": [
+          {
+            "length": 32,
+            "start": 2459
+          }
+        ],
+        "asset03_a": [
+          {
+            "length": 32,
+            "start": 2349
+          }
+        ],
+        "asset03_b": [
+          {
+            "length": 32,
+            "start": 2384
+          }
+        ],
+        "asset04_a": [
+          {
+            "length": 32,
+            "start": 2274
+          }
+        ],
+        "asset04_b": [
+          {
+            "length": 32,
+            "start": 2309
+          }
+        ],
+        "asset05_a": [
+          {
+            "length": 32,
+            "start": 2199
+          }
+        ],
+        "asset05_b": [
+          {
+            "length": 32,
+            "start": 2234
+          }
+        ],
+        "asset06_a": [
+          {
+            "length": 32,
+            "start": 2124
+          }
+        ],
+        "asset06_b": [
+          {
+            "length": 32,
+            "start": 2159
+          }
+        ],
+        "asset07_a": [
+          {
+            "length": 32,
+            "start": 2049
+          }
+        ],
+        "asset07_b": [
+          {
+            "length": 32,
+            "start": 2084
+          }
+        ],
+        "asset08_a": [
+          {
+            "length": 32,
+            "start": 1974
+          }
+        ],
+        "asset08_b": [
+          {
+            "length": 32,
+            "start": 2009
+          }
+        ],
+        "asset09_a": [
+          {
+            "length": 32,
+            "start": 1899
+          }
+        ],
+        "asset09_b": [
+          {
+            "length": 32,
+            "start": 1934
+          }
+        ],
+        "asset10_a": [
+          {
+            "length": 32,
+            "start": 1824
+          }
+        ],
+        "asset10_b": [
+          {
+            "length": 32,
+            "start": 1859
+          }
+        ],
+        "asset11_a": [
+          {
+            "length": 32,
+            "start": 1749
+          }
+        ],
+        "asset11_b": [
+          {
+            "length": 32,
+            "start": 1784
+          }
+        ],
+        "asset12_a": [
+          {
+            "length": 32,
+            "start": 1674
+          }
+        ],
+        "asset12_b": [
+          {
+            "length": 32,
+            "start": 1709
+          }
+        ],
+        "asset13_a": [
+          {
+            "length": 32,
+            "start": 1599
+          }
+        ],
+        "asset13_b": [
+          {
+            "length": 32,
+            "start": 1634
+          }
+        ],
+        "asset14_a": [
+          {
+            "length": 32,
+            "start": 1524
+          }
+        ],
+        "asset14_b": [
+          {
+            "length": 32,
+            "start": 1559
+          }
+        ],
+        "asset15_a": [
+          {
+            "length": 32,
+            "start": 1449
+          }
+        ],
+        "asset15_b": [
+          {
+            "length": 32,
+            "start": 1484
+          }
+        ],
+        "asset16_a": [
+          {
+            "length": 32,
+            "start": 1374
+          }
+        ],
+        "asset16_b": [
+          {
+            "length": 32,
+            "start": 1409
+          }
+        ],
+        "asset17_a": [
+          {
+            "length": 32,
+            "start": 1299
+          }
+        ],
+        "asset17_b": [
+          {
+            "length": 32,
+            "start": 1334
+          }
+        ],
+        "asset18_a": [
+          {
+            "length": 32,
+            "start": 1224
+          }
+        ],
+        "asset18_b": [
+          {
+            "length": 32,
+            "start": 1259
+          }
+        ],
+        "asset19_a": [
+          {
+            "length": 32,
+            "start": 1149
+          }
+        ],
+        "asset19_b": [
+          {
+            "length": 32,
+            "start": 1184
+          }
+        ]
+      }
+    }
+  },
+  "extended_asset_list_with_controls": {
+    "implementation": {
+      "runtime_length": 20948,
+      "normalized_code_hash": "0x69fa986efe107484817848d6285e15d03c00bed1e7a8bf7a989aeb44adfb7211",
+      "immutables": {
+        "governor": [
+          {
+            "length": 32,
+            "start": 1990
+          },
+          {
+            "length": 32,
+            "start": 3969
+          },
+          {
+            "length": 32,
+            "start": 5864
+          },
+          {
+            "length": 32,
+            "start": 7023
+          }
+        ],
+        "pauseGuardian": [
+          {
+            "length": 32,
+            "start": 2602
+          },
+          {
+            "length": 32,
+            "start": 4231
+          }
+        ],
+        "baseToken": [
+          {
+            "length": 32,
+            "start": 2512
+          },
+          {
+            "length": 32,
+            "start": 5735
+          },
+          {
+            "length": 32,
+            "start": 6313
+          },
+          {
+            "length": 32,
+            "start": 7128
+          },
+          {
+            "length": 32,
+            "start": 7312
+          },
+          {
+            "length": 32,
+            "start": 10038
+          },
+          {
+            "length": 32,
+            "start": 11212
+          },
+          {
+            "length": 32,
+            "start": 13978
+          },
+          {
+            "length": 32,
+            "start": 14346
+          },
+          {
+            "length": 32,
+            "start": 16522
+          },
+          {
+            "length": 32,
+            "start": 17885
+          },
+          {
+            "length": 32,
+            "start": 18234
+          }
+        ],
+        "baseTokenPriceFeed": [
+          {
+            "length": 32,
+            "start": 7665
+          },
+          {
+            "length": 32,
+            "start": 11585
+          },
+          {
+            "length": 32,
+            "start": 12504
+          },
+          {
+            "length": 32,
+            "start": 20375
+          }
+        ],
+        "extensionDelegate": [
+          {
+            "length": 32,
+            "start": 4295
+          },
+          {
+            "length": 32,
+            "start": 20780
+          }
+        ],
+        "supplyKink": [
+          {
+            "length": 32,
+            "start": 5653
+          },
+          {
+            "length": 32,
+            "start": 9730
+          }
+        ],
+        "supplyPerSecondInterestRateSlopeLow": [
+          {
+            "length": 32,
+            "start": 4528
+          },
+          {
+            "length": 32,
+            "start": 9790
+          },
+          {
+            "length": 32,
+            "start": 9897
+          }
+        ],
+        "supplyPerSecondInterestRateSlopeHigh": [
+          {
+            "length": 32,
+            "start": 4835
+          },
+          {
+            "length": 32,
+            "start": 9941
+          }
+        ],
+        "supplyPerSecondInterestRateBase": [
+          {
+            "length": 32,
+            "start": 5223
+          },
+          {
+            "length": 32,
+            "start": 9829
+          },
+          {
+            "length": 32,
+            "start": 10179
+          }
+        ],
+        "borrowKink": [
+          {
+            "length": 32,
+            "start": 5103
+          },
+          {
+            "length": 32,
+            "start": 10328
+          }
+        ],
+        "borrowPerSecondInterestRateSlopeLow": [
+          {
+            "length": 32,
+            "start": 3128
+          },
+          {
+            "length": 32,
+            "start": 10388
+          },
+          {
+            "length": 32,
+            "start": 10495
+          }
+        ],
+        "borrowPerSecondInterestRateSlopeHigh": [
+          {
+            "length": 32,
+            "start": 2869
+          },
+          {
+            "length": 32,
+            "start": 10533
+          }
+        ],
+        "borrowPerSecondInterestRateBase": [
+          {
+            "length": 32,
+            "start": 4703
+          },
+          {
+            "length": 32,
+            "start": 10427
+          }
+        ],
+        "storeFrontPriceFactor": [
+          {
+            "length": 32,
+            "start": 2364
+          },
+          {
+            "length": 32,
+            "start": 20512
+          }
+        ],
+        "baseScale": [
+          {
+            "length": 32,
+            "start": 3841
+          },
+          {
+            "length": 32,
+            "start": 11632
+          },
+          {
+            "length": 32,
+            "start": 12562
+          },
+          {
+            "length": 32,
+            "start": 13028
+          },
+          {
+            "length": 32,
+            "start": 19470
+          },
+          {
+            "length": 32,
+            "start": 20427
+          }
+        ],
+        "trackingIndexScale": [
+          {
+            "length": 32,
+            "start": 5799
+          },
+          {
+            "length": 32,
+            "start": 13687
+          }
+        ],
+        "baseTrackingSupplySpeed": [
+          {
+            "length": 32,
+            "start": 2170
+          },
+          {
+            "length": 32,
+            "start": 9367
+          }
+        ],
+        "baseTrackingBorrowSpeed": [
+          {
+            "length": 32,
+            "start": 5337
+          },
+          {
+            "length": 32,
+            "start": 9247
+          }
+        ],
+        "baseMinForRewards": [
+          {
+            "length": 32,
+            "start": 5163
+          },
+          {
+            "length": 32,
+            "start": 9105
+          }
+        ],
+        "baseBorrowMin": [
+          {
+            "length": 32,
+            "start": 3250
+          },
+          {
+            "length": 32,
+            "start": 16981
+          },
+          {
+            "length": 32,
+            "start": 18152
+          }
+        ],
+        "targetReserves": [
+          {
+            "length": 32,
+            "start": 3373
+          },
+          {
+            "length": 32,
+            "start": 7550
+          }
+        ],
+        "decimals": [
+          {
+            "length": 32,
+            "start": 3312
+          }
+        ],
+        "numAssets": [
+          {
+            "length": 32,
+            "start": 5592
+          },
+          {
+            "length": 32,
+            "start": 8447
+          },
+          {
+            "length": 32,
+            "start": 11687
+          },
+          {
+            "length": 32,
+            "start": 12423
+          },
+          {
+            "length": 32,
+            "start": 19403
+          }
+        ],
+        "accrualDescaleFactor": [
+          {
+            "length": 32,
+            "start": 13726
+          }
+        ],
+        "assetList": [
+          {
+            "length": 32,
+            "start": 6932
+          },
+          {
+            "length": 32,
+            "start": 8168
+          }
+        ]
+      }
+    },
+    "proxy": {
+      "runtime_length": 1878,
+      "normalized_code_hash": "0x64952234eab8f3aed74355c49119f627965640b1efeb6b28430b5a31b0d3b192",
+      "immutables": {}
+    },
+    "extension": {
+      "runtime_length": 9185,
+      "normalized_code_hash": "0x167221ec1831bfc8f49a1f582da246076861d3de50981075283fd6327a68b175",
+      "immutables": {
+        "assetListFactory": [
+          {
+            "length": 32,
+            "start": 5028
+          }
+        ],
+        "name32": [
+          {
+            "length": 32,
+            "start": 8536
+          }
+        ],
+        "symbol32": [
+          {
+            "length": 32,
+            "start": 3735
+          }
+        ]
+      }
+    },
+    "asset_list": {
+      "runtime_length": 2887,
+      "normalized_code_hash": "0x9b6bc886d79773352d42a2ac1c6d4019b9c5a736febc46dadedcddc78b19dd92",
+      "immutables": {
+        "asset20_a": [
+          {
+            "length": 32,
+            "start": 1074
+          }
+        ],
+        "asset20_b": [
+          {
+            "length": 32,
+            "start": 1109
+          }
+        ],
+        "asset21_a": [
+          {
+            "length": 32,
+            "start": 999
+          }
+        ],
+        "asset21_b": [
+          {
+            "length": 32,
+            "start": 1034
+          }
+        ],
+        "asset22_a": [
+          {
+            "length": 32,
+            "start": 924
+          }
+        ],
+        "asset22_b": [
+          {
+            "length": 32,
+            "start": 959
+          }
+        ],
+        "asset23_a": [
+          {
+            "length": 32,
+            "start": 849
+          }
+        ],
+        "asset23_b": [
+          {
+            "length": 32,
+            "start": 884
+          }
+        ],
+        "numAssets": [
+          {
+            "length": 32,
+            "start": 146
+          },
+          {
+            "length": 32,
+            "start": 2697
+          }
+        ],
+        "asset00_a": [
+          {
+            "length": 32,
+            "start": 2574
+          }
+        ],
+        "asset00_b": [
+          {
+            "length": 32,
+            "start": 2609
+          }
+        ],
+        "asset01_a": [
+          {
+            "length": 32,
+            "start": 2499
+          }
+        ],
+        "asset01_b": [
+          {
+            "length": 32,
+            "start": 2534
+          }
+        ],
+        "asset02_a": [
+          {
+            "length": 32,
+            "start": 2424
+          }
+        ],
+        "asset02_b": [
+          {
+            "length": 32,
+            "start": 2459
+          }
+        ],
+        "asset03_a": [
+          {
+            "length": 32,
+            "start": 2349
+          }
+        ],
+        "asset03_b": [
+          {
+            "length": 32,
+            "start": 2384
+          }
+        ],
+        "asset04_a": [
+          {
+            "length": 32,
+            "start": 2274
+          }
+        ],
+        "asset04_b": [
+          {
+            "length": 32,
+            "start": 2309
+          }
+        ],
+        "asset05_a": [
+          {
+            "length": 32,
+            "start": 2199
+          }
+        ],
+        "asset05_b": [
+          {
+            "length": 32,
+            "start": 2234
+          }
+        ],
+        "asset06_a": [
+          {
+            "length": 32,
+            "start": 2124
+          }
+        ],
+        "asset06_b": [
+          {
+            "length": 32,
+            "start": 2159
+          }
+        ],
+        "asset07_a": [
+          {
+            "length": 32,
+            "start": 2049
+          }
+        ],
+        "asset07_b": [
+          {
+            "length": 32,
+            "start": 2084
+          }
+        ],
+        "asset08_a": [
+          {
+            "length": 32,
+            "start": 1974
+          }
+        ],
+        "asset08_b": [
+          {
+            "length": 32,
+            "start": 2009
+          }
+        ],
+        "asset09_a": [
+          {
+            "length": 32,
+            "start": 1899
+          }
+        ],
+        "asset09_b": [
+          {
+            "length": 32,
+            "start": 1934
+          }
+        ],
+        "asset10_a": [
+          {
+            "length": 32,
+            "start": 1824
+          }
+        ],
+        "asset10_b": [
+          {
+            "length": 32,
+            "start": 1859
+          }
+        ],
+        "asset11_a": [
+          {
+            "length": 32,
+            "start": 1749
+          }
+        ],
+        "asset11_b": [
+          {
+            "length": 32,
+            "start": 1784
+          }
+        ],
+        "asset12_a": [
+          {
+            "length": 32,
+            "start": 1674
+          }
+        ],
+        "asset12_b": [
+          {
+            "length": 32,
+            "start": 1709
+          }
+        ],
+        "asset13_a": [
+          {
+            "length": 32,
+            "start": 1599
+          }
+        ],
+        "asset13_b": [
+          {
+            "length": 32,
+            "start": 1634
+          }
+        ],
+        "asset14_a": [
+          {
+            "length": 32,
+            "start": 1524
+          }
+        ],
+        "asset14_b": [
+          {
+            "length": 32,
+            "start": 1559
+          }
+        ],
+        "asset15_a": [
+          {
+            "length": 32,
+            "start": 1449
+          }
+        ],
+        "asset15_b": [
+          {
+            "length": 32,
+            "start": 1484
+          }
+        ],
+        "asset16_a": [
+          {
+            "length": 32,
+            "start": 1374
+          }
+        ],
+        "asset16_b": [
+          {
+            "length": 32,
+            "start": 1409
+          }
+        ],
+        "asset17_a": [
+          {
+            "length": 32,
+            "start": 1299
+          }
+        ],
+        "asset17_b": [
+          {
+            "length": 32,
+            "start": 1334
+          }
+        ],
+        "asset18_a": [
+          {
+            "length": 32,
+            "start": 1224
+          }
+        ],
+        "asset18_b": [
+          {
+            "length": 32,
+            "start": 1259
+          }
+        ],
+        "asset19_a": [
+          {
+            "length": 32,
+            "start": 1149
+          }
+        ],
+        "asset19_b": [
+          {
+            "length": 32,
+            "start": 1184
+          }
+        ]
+      }
+    }
+  }
+}

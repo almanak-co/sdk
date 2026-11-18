@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Almanak explicit backtest configuration",
+  "anyOf": [
+    {
+      "$ref": "aave-backtest.schema.json"
+    },
+    {
+      "$ref": "uniswap-economic.schema.json"
+    },
+    {
+      "$ref": "uniswap-historical.schema.json"
+    },
+    {
+      "$ref": "aave-v3-economic.schema.json"
+    },
+    {
+      "$ref": "uniswap-v3-economic.schema.json"
+    },
+    {
+      "$ref": "sparklend-economic.schema.json"
+    },
+    {
+      "$ref": "composed-economic.schema.json"
+    },
+    {
+      "$ref": "pancakeswap-v3-economic.schema.json"
+    },
+    {
+      "$ref": "aerodrome-slipstream-economic.schema.json"
+    },
+    {
+      "$ref": "aerodrome-economic.schema.json"
+    },
+    {
+      "$ref": "compound-v3-economic.schema.json"
+    },
+    {
+      "$ref": "morpho-blue-economic.schema.json"
+    },
+    {
+      "$ref": "curve-economic.schema.json"
+    },
+    {
+      "$ref": "gmx-v2-economic.schema.json"
+    },
+    {
+      "$ref": "hyperliquid-economic.schema.json"
+    }
+  ]
+}

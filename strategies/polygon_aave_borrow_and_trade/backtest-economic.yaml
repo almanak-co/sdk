@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+mode: economic
+window:
+  start: '2026-09-08T19:29:13+00:00'
+  end: '2026-09-08T19:29:43+00:00'
+  end_policy: teardown
+  cleanup: 60s
+inventory:
+  funds:
+    fund:
+      balances:
+      - asset: eip155:137/erc20:0x7ceb23fd6bc0add59e62ac25578270cff1b9f619
+        quantity: '0.01'
+      - asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+        quantity: '1'
+      - asset: eip155:137/erc20:0xc4ce1d6f5d98d65ee25cf85e9f2e9dcfee6cb5d6
+        quantity: '0'
+      - asset: eip155:137/slip44:966
+        quantity: '5'
+execution:
+  latency: 1s
+  models:
+    aave_v3:
+      liquidation_model: immediate_underlying_v3_revision11
+    curve:
+      swap_model: prepared_integer_pool
+      liquidity_model: null
+data:
+  connectors:
+    aave_v3:
+      source: aave_v3_archive
+      risk_model: pool_oracle_each_block
+      sample_seconds: 60s
+      max_age_seconds: 120s
+      max_accounting_samples: 10
+      max_risk_blocks: 64
+      max_risk_samples: 128
+      max_liquidations_per_event: 8
+    curve:
+      source: curve_archive
+      sample_seconds: 60s
+      max_age_seconds: 120s
+      max_samples: 100
+      max_parameter_events: 100
+      max_parameter_log_requests: 10
+costs:
+  aave_v3:
+    kind: excluded
+  curve:
+    kind: excluded

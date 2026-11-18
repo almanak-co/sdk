@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+mode: economic
+window:
+  start: '2026-09-08T18:10:37+00:00'
+  end: '2026-09-08T18:18:37+00:00'
+  end_policy: teardown
+  cleanup: 60s
+inventory:
+  funds:
+    fund:
+      balances:
+      - asset: eip155:56/erc20:0x55d398326f99059ff775485246999027b3197955
+        quantity: '5'
+      - asset: eip155:56/erc20:0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c
+        quantity: '0'
+      - asset: eip155:56/slip44:714
+        quantity: '10'
+execution:
+  latency: 5s
+  models:
+    swap_model: prepared_integer_pool
+    liquidity_model: null
+data:
+  source: uniswap_v3_archive
+  sample_seconds: 60s
+  max_age_seconds: 72s
+  max_samples: 20
+  max_bitmap_words: 100
+  max_initialized_ticks: 10000
+  max_liquidity_events: 10000
+  max_liquidity_log_requests: 1000
+  coverage:
+  - allocation: position
+    lower: -68760
+    upper: -63760
+costs:
+  kind: excluded

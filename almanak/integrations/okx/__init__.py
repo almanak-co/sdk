@@ -1,1 +1,0 @@
-"""OKX integration metadata."""

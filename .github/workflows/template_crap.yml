@@ -1,0 +1,80 @@
+name: CRAP Gate
+
+on:
+  workflow_call:
+    inputs:
+      skip:
+        description: "Skip the CRAP gate (no-op success, used by path-based filtering)."
+        type: boolean
+        required: false
+        default: false
+      base_ref:
+        description: "Base branch: gate only functions with executable lines changed since it."
+        type: string
+        required: true
+
+# Scores the coverage the sharded pytest job combined, so the suite runs once.
+# Functions exercised only by evidence-dependent tests have no coverage in
+# hosted CI, so the gate is scoped to the lines the PR changed, as the v2
+# crap-diff gate was; the full gate over every function runs locally with the
+# retained evidence (`make crap`). The coverage floors in `[tool.crap]` are not
+# diff-scoped: the same step fails when a floor's directory falls below it under
+# this reduced coverage.
+jobs:
+  crap:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Skip notice
+        if: ${{ inputs.skip }}
+        run: echo "Skipping CRAP gate; no relevant file changes detected by the path filter."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: ${{ !inputs.skip }}
+        with:
+          persist-credentials: false
+          # The diff scope needs the merge base with origin/<base_ref>; a full
+          # checkout carries every branch, so no credentialed fetch is needed.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-repo
+        if: ${{ !inputs.skip }}
+
+      - name: Download combined coverage from the test job
+        if: ${{ !inputs.skip }}
+        uses: actions/download-artifact@v8
+        with:
+          name: pytest-coverage
+
+      - name: Score combined coverage over the changed lines and the floors
+        if: ${{ !inputs.skip }}
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+        run: |
+          set -o pipefail
+          test -s .coverage || { echo "::error::no combined coverage data from test_pytest"; exit 1; }
+          ls coverage.shard-*.sources.json
+          make crap-from-coverage BASE="origin/$BASE_REF" 2>&1 | tee crap.log
+
+      - name: Report verification scope
+        if: ${{ !inputs.skip && always() }}
+        run: |
+          {
+            echo '## CRAP gate over the changed lines and coverage floors'
+            echo
+            grep -h '^CRAP:\|^Coverage:\|^Excluded ' crap.log || echo 'CRAP summary line not found; measurement failed.'
+            echo
+            echo 'Only functions with an executable line changed since the base branch gate this PR; the coverage floors apply to every file in their directory. Coverage excludes tests that need locally retained evidence; the full gate over every function is the local `make crap` run.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload CRAP report
+        if: ${{ !inputs.skip && always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: crap-report
+          path: |
+            artifacts/crap/scores.json
+            artifacts/crap/coverage.json
+            crap.log
+          if-no-files-found: warn
+          retention-days: 30

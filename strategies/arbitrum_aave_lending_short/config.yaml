@@ -1,0 +1,90 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/arbitrum_aave_lending_short.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # Share of the USDC collateral value borrowed as WETH and sold, once.
+    borrow_fraction: '0.3'
+    # Buy back and repay once the oracle WETH price rises this far above the sale price.
+    stop_loss_bps: 500
+    # Buy back and repay once it falls this far below.
+    take_profit_bps: 1000
+    # The unwind also starts below this health factor. It must sit above
+    # minimum_health_factor: the floor also refuses the unwind's own withdrawals.
+    unwind_health_factor: '1.8'
+    # The discount on the quoted buy-back when checking it covers the debt, and the
+    # margin collateral released for a shortfall adds beyond it, so the pool fee, price
+    # impact and interest leave no repay shortfall.
+    swap_headroom_bps: 100
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '200'
+      collateral: true
+      # The gateway floor for every borrow and withdrawal, the unwind's included.
+      minimum_health_factor: '1.6'
+      oracle: '0xb56c2f0b653b2e0b10c9b928c8580ac5df02c7c7'
+      price_source: '0xb0c9a7122aab68f75cffd9851e867144dbff113b'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      collateral: false
+      minimum_health_factor: '1.6'
+      oracle: '0xb56c2f0b653b2e0b10c9b928c8580ac5df02c7c7'
+      price_source: '0xbd41b1548a5a06544cbcf87c0c54864312842c00'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      # A slice size, not prefunding: one swap sells min(owned WETH, capital), and owned
+      # WETH is the borrow. Keep it above the borrow so the short sells in one step.
+      capital:
+        asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+        quantity: '1'
+      entry_swap_bps: 10000
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+  gas:
+    # Example Arbitrum amounts; size them from the live gas price.
+    # exit_reserve = 8 fees, total_budget = exit_reserve + 6 entry fees (README).
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:42161
+      max_transaction_fee:
+        base_units: 150000000000000
+      total_budget:
+        base_units: 2100000000000000
+      exit_reserve:
+        base_units: 1200000000000000
+markets:
+  collateral:
+    connector: aave_v3
+    chain: eip155:42161
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+  loan:
+    connector: aave_v3
+    chain: eip155:42161
+    asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+  pool:
+    connector: uniswap_v3
+    chain: eip155:42161
+    pool: '0xc6962004f452be9203591991d15f6b388e09e8d0'
+accounts:
+  fund:
+    chain: eip155:42161
+inventory:
+- account: fund
+  balance:
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+    quantity: '200'
+- account: fund
+  balance:
+    asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+    quantity: '0'

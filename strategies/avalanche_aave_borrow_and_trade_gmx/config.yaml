@@ -1,0 +1,85 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/avalanche_aave_borrow_and_trade_gmx.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '1'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '100'
+      collateral: true
+      minimum_health_factor: '2'
+      oracle: '0xebd36016b3ed09d4693ed4251c67bd858c3c7c9c'
+      price_source: '0xb0d7a8bbdcdb1203850b742bb4d7f57a1f1c8483'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      collateral: false
+      minimum_health_factor: '2'
+      oracle: '0xebd36016b3ed09d4693ed4251c67bd858c3c7c9c'
+      price_source: '0x0a77230d17318075983913bc2145db16c7366156'
+      minimum_native_balance: '0'
+    trade:
+      kind: gmx_swap
+      market: gmx_market
+      account: fund
+      initial_inventory:
+      - asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '2.1'
+      - asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '100'
+      execution_fee:
+        asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '1'
+      entry_amount:
+        asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '0.5'
+      entry_minimum_output:
+        asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '1'
+      exit_minimum_output:
+        asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '0.1'
+      deadline_seconds: 5m
+      maximum_event_block_span: 2000
+      minimum_native_balance:
+        base_units: 0
+markets:
+  collateral:
+    connector: aave_v3
+    chain: eip155:43114
+    asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+  loan:
+    connector: aave_v3
+    chain: eip155:43114
+    asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+  gmx_market:
+    connector: gmx_v2
+    chain: eip155:43114
+    market: eip155:43114/erc20:0x913c1f46b48b3ed35e7dc3cf754d4ae8499f31cf
+accounts:
+  fund:
+    chain: eip155:43114
+inventory:
+- account: fund
+  balance:
+    asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+    quantity: '2.1'
+- account: fund
+  balance:
+    asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+    quantity: '100'
+- account: fund
+  balance:
+    asset: eip155:43114/erc20:0x913c1f46b48b3ed35e7dc3cf754d4ae8499f31cf
+    quantity: '0'
+- account: fund
+  balance:
+    asset: eip155:43114/slip44:9005
+    quantity: '0'

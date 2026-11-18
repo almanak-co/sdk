@@ -1,0 +1,46 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/pancakeswap_v3_bnb_lp_band.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    position:
+      market: pool
+      account: fund
+      band:
+        lower: -68750
+        upper: -63750
+        width_bps: 500
+      capital:
+        asset: eip155:56/erc20:0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c
+        quantity: '0.1'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 300
+      # 0 only because both pool currencies are ERC-20; a native-coin pool needs gas
+      # headroom here (README).
+      minimum_native_balance:
+        base_units: 0
+  gas:
+    # Example BNB Chain amounts; size them from the live gas price.
+    # Entry takes 4 transactions and exit 5 (almanak check --production):
+    # exit_reserve = 5 fees, total_budget = exit_reserve + 4 entry + 20 later fees.
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:56
+      max_transaction_fee:
+        base_units: 1200000000000000
+      total_budget:
+        base_units: 34800000000000000
+      exit_reserve:
+        base_units: 6000000000000000
+markets:
+  pool:
+    connector: pancakeswap_v3
+    chain: eip155:56
+    pool: '0xc721deccd986d54b39e8c29428a1f06155c3671e'
+accounts:
+  fund:
+    chain: eip155:56

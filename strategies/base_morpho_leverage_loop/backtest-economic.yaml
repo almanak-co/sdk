@@ -1,0 +1,54 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+mode: economic
+window:
+  start: '2026-09-07T15:00:00Z'
+  end: '2026-09-07T15:00:30Z'
+  end_policy: teardown
+  cleanup: 60s
+inventory:
+  funds:
+    fund:
+      balances:
+      - asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+        quantity: '0.05'
+      - asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+        quantity: '0'
+      - asset: eip155:8453/slip44:60
+        quantity: '5'
+execution:
+  latency: 1s
+  models:
+    uniswap_v3:
+      swap_model: prepared_integer_pool
+      liquidity_model: null
+    morpho_blue:
+      liquidation_model: immediate_morpho_liquidation
+data:
+  connectors:
+    uniswap_v3:
+      source: uniswap_v3_archive
+      sample_seconds: 60s
+      max_age_seconds: 72s
+      max_samples: 10
+      max_bitmap_words: 100
+      max_initialized_ticks: 10000
+      max_liquidity_events: 10000
+      max_liquidity_log_requests: 1000
+      coverage:
+      - allocation: trade
+        lower: -202000
+        upper: -195000
+    morpho_blue:
+      source: morpho_blue_archive
+      risk_model: morpho_oracle_each_block
+      sample_seconds: 30s
+      max_age_seconds: 60s
+      max_accounting_samples: 10
+      max_risk_blocks: 128
+      max_risk_samples: 128
+      max_liquidations_per_event: 8
+costs:
+  uniswap_v3:
+    kind: excluded
+  morpho_blue:
+    kind: excluded

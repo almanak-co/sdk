@@ -1,0 +1,234 @@
+{
+  "factory": {
+    "runtime_length": 5311,
+    "normalized_code_hash": "0xd783a1089b563db02319a770842b684b7f80afb3af8e03235121a3321fbe2c4b",
+    "immutables": {
+      "deployer": [
+        {
+          "start": 5279,
+          "length": 32
+        }
+      ]
+    }
+  },
+  "pool": {
+    "runtime_length": 18095,
+    "normalized_code_hash": "0xcefe5c3bb8d230264d9f69d5d4b9cb5ae4ac5296515962cf9a118e07803535cb",
+    "immutables": {
+      "PRECISIONS": [
+        {
+          "start": 17615,
+          "length": 64
+        }
+      ],
+      "MATH": [
+        {
+          "start": 17679,
+          "length": 32
+        }
+      ],
+      "coins": [
+        {
+          "start": 17711,
+          "length": 64
+        }
+      ],
+      "factory": [
+        {
+          "start": 17775,
+          "length": 32
+        }
+      ],
+      "name": [
+        {
+          "start": 17807,
+          "length": 96
+        }
+      ],
+      "symbol": [
+        {
+          "start": 17903,
+          "length": 64
+        }
+      ],
+      "NAME_HASH": [
+        {
+          "start": 17967,
+          "length": 32
+        }
+      ],
+      "CACHED_CHAIN_ID": [
+        {
+          "start": 17999,
+          "length": 32
+        }
+      ],
+      "salt": [
+        {
+          "start": 18031,
+          "length": 32
+        }
+      ],
+      "CACHED_DOMAIN_SEPARATOR": [
+        {
+          "start": 18063,
+          "length": 32
+        }
+      ]
+    }
+  },
+  "math": {
+    "runtime_length": 10057,
+    "normalized_code_hash": "0x5100f1f0a511a9608ba24b4e02f3e5145905964943fc2b73489938ffa6213fe1",
+    "immutables": {}
+  },
+  "views": {
+    "runtime_length": 7182,
+    "normalized_code_hash": "0x229328ef9f4aac5b4720f8e212b58fdb5b0fdd23896ee3bbcdcfa3e57b6dce3c",
+    "immutables": {}
+  },
+  "blueprint": {
+    "runtime_length": 18537,
+    "normalized_code_hash": "0x21ffc81849dc77cb6bfbadc3242fc43360c8c7a92a7a71dac8af075e88c32b1a",
+    "immutables": {}
+  },
+  "pool_storage_layout": {
+    "nonreentrant.lock": {
+      "type": "nonreentrant lock",
+      "slot": 0
+    },
+    "cached_price_scale": {
+      "type": "uint256",
+      "slot": 1
+    },
+    "cached_price_oracle": {
+      "type": "uint256",
+      "slot": 2
+    },
+    "last_prices": {
+      "type": "uint256",
+      "slot": 3
+    },
+    "last_timestamp": {
+      "type": "uint256",
+      "slot": 4
+    },
+    "initial_A_gamma": {
+      "type": "uint256",
+      "slot": 5
+    },
+    "initial_A_gamma_time": {
+      "type": "uint256",
+      "slot": 6
+    },
+    "future_A_gamma": {
+      "type": "uint256",
+      "slot": 7
+    },
+    "future_A_gamma_time": {
+      "type": "uint256",
+      "slot": 8
+    },
+    "balances": {
+      "type": "uint256[2]",
+      "slot": 9
+    },
+    "D": {
+      "type": "uint256",
+      "slot": 11
+    },
+    "xcp_profit": {
+      "type": "uint256",
+      "slot": 12
+    },
+    "xcp_profit_a": {
+      "type": "uint256",
+      "slot": 13
+    },
+    "virtual_price": {
+      "type": "uint256",
+      "slot": 14
+    },
+    "packed_rebalancing_params": {
+      "type": "uint256",
+      "slot": 15
+    },
+    "packed_fee_params": {
+      "type": "uint256",
+      "slot": 16
+    },
+    "last_admin_fee_claim_timestamp": {
+      "type": "uint256",
+      "slot": 17
+    },
+    "admin_lp_virtual_balance": {
+      "type": "uint256",
+      "slot": 18
+    },
+    "balanceOf": {
+      "type": "HashMap[address, uint256]",
+      "slot": 19
+    },
+    "allowance": {
+      "type": "HashMap[address, HashMap[address, uint256]]",
+      "slot": 20
+    },
+    "totalSupply": {
+      "type": "uint256",
+      "slot": 21
+    },
+    "nonces": {
+      "type": "HashMap[address, uint256]",
+      "slot": 22
+    }
+  },
+  "factory_storage_layout": {
+    "admin": {
+      "type": "address",
+      "slot": 0
+    },
+    "future_admin": {
+      "type": "address",
+      "slot": 1
+    },
+    "fee_receiver": {
+      "type": "address",
+      "slot": 2
+    },
+    "pool_implementations": {
+      "type": "HashMap[uint256, address]",
+      "slot": 3
+    },
+    "gauge_implementation": {
+      "type": "address",
+      "slot": 4
+    },
+    "views_implementation": {
+      "type": "address",
+      "slot": 5
+    },
+    "math_implementation": {
+      "type": "address",
+      "slot": 6
+    },
+    "markets": {
+      "type": "HashMap[uint256, DynArray[address, 4294967296]]",
+      "slot": 7
+    },
+    "pool_data": {
+      "type": "HashMap[address, PoolArray declaration object]",
+      "slot": 8
+    },
+    "pool_list": {
+      "type": "DynArray[address, 4294967296]",
+      "slot": 9
+    }
+  },
+  "sources": {
+    "repository": "https://github.com/curvefi/curve-core",
+    "revision": "5a9e1ab34c1319de69b987900d859ad2e965d0e2",
+    "compiler": "vyper 0.3.10",
+    "evm_version": "shanghai",
+    "model_lineage": "twocrypto-ng-v2.1.0"
+  }
+}

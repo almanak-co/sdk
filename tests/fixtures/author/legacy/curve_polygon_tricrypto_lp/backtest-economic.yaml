@@ -1,0 +1,50 @@
+mode: economic
+window:
+  start: '2026-09-07T20:00:00+00:00'
+  end: '2026-09-07T20:08:00+00:00'
+  end_policy: teardown
+  cleanup: 60s
+execution:
+  latency: 1s
+  models:
+    swap_model: prepared_integer_pool
+    liquidity_model: fixed_external_unit_balances
+inventory:
+  funds:
+    proportional:
+      balances:
+      - asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+        quantity: '0.02'
+      - asset: eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722
+        quantity: '0'
+      - asset: eip155:137/erc20:0xbbba073c31bf03b8acf7c28ef0738decf3695683
+        quantity: '0'
+      - asset: eip155:137/slip44:966
+        quantity: '0'
+    single_coin:
+      balances:
+      - asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+        quantity: '0.02'
+      - asset: eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722
+        quantity: '0'
+      - asset: eip155:137/erc20:0xbbba073c31bf03b8acf7c28ef0738decf3695683
+        quantity: '0'
+      - asset: eip155:137/slip44:966
+        quantity: '0'
+costs:
+  kind: excluded
+data:
+  source: curve_archive
+  sample_seconds: 60s
+  max_age_seconds: 120s
+  max_samples: 100
+  max_parameter_events: 100
+  max_parameter_log_requests: 10
+  history:
+  - chain:
+      chain_id: eip155:137
+      environment: mainnet
+    provider:
+      kind: alchemy
+      network: polygon-mainnet
+      api_key_env: ALCHEMY_API_KEY

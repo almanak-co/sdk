@@ -1,0 +1,51 @@
+mode: economic
+window:
+  start: '2026-09-07T15:00:00Z'
+  end: '2026-09-07T15:00:30Z'
+  end_policy: teardown
+  cleanup: 60s
+inventory:
+  funds:
+    lender:
+      payer: operator
+      balances:
+      - asset: eip155:10/erc20:0x0b2c639c533813f4aa9d7837caf62653d097ff85
+        quantity: '1000'
+    borrower:
+      payer: operator
+      balances:
+      - asset: eip155:10/erc20:0x4200000000000000000000000000000000000006
+        quantity: '1'
+      - asset: eip155:10/erc20:0x0b2c639c533813f4aa9d7837caf62653d097ff85
+        quantity: '20'
+  payers:
+    operator:
+      chain:
+        chain_id: eip155:10
+        environment: mainnet
+      balances:
+      - asset: eip155:10/slip44:60
+        quantity: '5'
+execution:
+  latency: 1s
+  models:
+    liquidation_model: immediate_comet_absorb
+data:
+  history:
+  - chain:
+      chain_id: eip155:10
+      environment: mainnet
+    provider:
+      kind: alchemy
+      network: opt-mainnet
+      api_key_env: ALCHEMY_API_KEY
+  source: compound_v3_archive
+  risk_model: comet_oracle_each_block
+  sample_seconds: 30s
+  max_age_seconds: 60s
+  max_accounting_samples: 10
+  max_risk_blocks: 512
+  max_risk_samples: 512
+  max_liquidations_per_event: 8
+costs:
+  kind: excluded

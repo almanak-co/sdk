@@ -1,0 +1,90 @@
+# yaml-language-server: $schema=../../docs/schemas/harness.schema.json
+strategy:
+  connector: uniswap_v3
+  decision_interval: 5s
+  allocations:
+    position:
+      market: pool
+      account: fund
+      range:
+        lower: 197520
+        upper: 198520
+      capital:
+        asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+        quantity:
+          base_units: 100000000
+      entry_swap_bps: 5000
+      maximum0:
+        asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+        quantity:
+          base_units: 1000000000
+      maximum1:
+        asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+        quantity:
+          base_units: 1000000000000000000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 300
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance:
+        base_units: 0
+assets:
+  eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48:
+    decimals: 6
+  eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2:
+    decimals: 18
+  eip155:1/slip44:60:
+    decimals: 18
+markets:
+  pool:
+    pool:
+      kind: uniswap_v3
+      chain:
+        chain_id: eip155:1
+        environment: mainnet
+      factory: '0x1f98431c8ad98523631ae4a59f267346ea31f984'
+      pool: '0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640'
+      currency0: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+      currency1: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+      fee: 500
+      tick_spacing: 10
+    contracts:
+      router: '0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45'
+      position_manager: '0xc36442b4a4522e871399cd717abdd847ab11fe88'
+      quoter: '0x61ffe014ba17989e743c5f6cb21bf9697530b21e'
+accounts:
+  fund:
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:1
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: eth-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      block:
+        chain:
+          chain_id: eip155:1
+          environment: mainnet
+        number: 25921740
+        hash: '0x94911cef83d652f8015893479847b8bbd6ec3aecfb4ce3ca0ca55b45d9a86253'
+        timestamp: 1788739043
+    funds:
+    - account: fund
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+          quantity: '100'
+        method: local_storage
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:1/slip44:60
+        quantity: '1'
+      foundry_account_index: 81

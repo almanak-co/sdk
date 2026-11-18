@@ -1,0 +1,75 @@
+name: Docs drift check
+
+# The generated pages (docs/cli/, docs/support.md) are gitignored, so these
+# jobs prove the generators run cleanly and the hand-written pages agree with
+# the package; they never diff against committed copies.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - 'mkdocs.yml'
+      - 'mkdocs-llms.yml'
+      - 'README.md'
+      - 'scripts/docs/**'
+      - '.github/workflows/docs-drift-check.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'src/**'
+      - 'mkdocs.yml'
+      - 'mkdocs-llms.yml'
+      - 'README.md'
+      - 'scripts/docs/**'
+      - '.github/workflows/docs-drift-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  support-matrix:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-repo
+      - name: Generate support matrix
+        run: make docs-support
+      - name: Verify generated support page
+        run: |
+          test -s docs/support.md
+          grep -q '^# Supported connectors and chains' docs/support.md
+          grep -q 'aave_v4' docs/support.md
+          grep -q '^## Strategy actions' docs/support.md
+          grep -q '^### composed actions' docs/support.md
+
+  mkdocstrings-paths:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-repo
+      - run: uv run --locked python scripts/docs/check_mkdocstrings_paths.py
+
+  mkdocs-nav:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-repo
+      - run: make docs-generated
+      - run: uv run --locked python scripts/docs/check_mkdocs_nav.py
+
+  i18n-structure:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-repo
+      - run: uv run --locked python scripts/docs/check_i18n_structure.py

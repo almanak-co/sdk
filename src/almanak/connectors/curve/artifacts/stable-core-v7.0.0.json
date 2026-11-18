@@ -1,0 +1,286 @@
+{
+  "factory": {
+    "runtime_length": 13996,
+    "normalized_code_hash": "0x2389805b85f6cc0cf42d381abfb2c56342c19f90908aa36fe99b070fdb5b324c",
+    "immutables": {
+      "deployer": [
+        {
+          "start": 13964,
+          "length": 32
+        }
+      ]
+    }
+  },
+  "pool": {
+    "runtime_length": 23635,
+    "normalized_code_hash": "0x28b9d1361cbda18147180de0367c4400b0bfa9360e49233b043b1c69ed73eb85",
+    "immutables": {
+      "N_COINS": [
+        {
+          "start": 21491,
+          "length": 32
+        }
+      ],
+      "N_COINS_128": [
+        {
+          "start": 21523,
+          "length": 32
+        }
+      ],
+      "factory": [
+        {
+          "start": 21555,
+          "length": 32
+        }
+      ],
+      "coins": [
+        {
+          "start": 21587,
+          "length": 288
+        }
+      ],
+      "asset_types": [
+        {
+          "start": 21875,
+          "length": 288
+        }
+      ],
+      "pool_contains_rebasing_tokens": [
+        {
+          "start": 22163,
+          "length": 32
+        }
+      ],
+      "rate_multipliers": [
+        {
+          "start": 22195,
+          "length": 288
+        }
+      ],
+      "rate_oracles": [
+        {
+          "start": 22483,
+          "length": 288
+        }
+      ],
+      "call_amount": [
+        {
+          "start": 22771,
+          "length": 288
+        }
+      ],
+      "scale_factor": [
+        {
+          "start": 23059,
+          "length": 288
+        }
+      ],
+      "name": [
+        {
+          "start": 23347,
+          "length": 96
+        }
+      ],
+      "symbol": [
+        {
+          "start": 23443,
+          "length": 64
+        }
+      ],
+      "NAME_HASH": [
+        {
+          "start": 23507,
+          "length": 32
+        }
+      ],
+      "CACHED_CHAIN_ID": [
+        {
+          "start": 23539,
+          "length": 32
+        }
+      ],
+      "salt": [
+        {
+          "start": 23571,
+          "length": 32
+        }
+      ],
+      "CACHED_DOMAIN_SEPARATOR": [
+        {
+          "start": 23603,
+          "length": 32
+        }
+      ]
+    }
+  },
+  "math": {
+    "runtime_length": 3034,
+    "normalized_code_hash": "0x596f972ae77f049a858ec202ddcf1601d30aede8474bf980a602ecd4e9613b50",
+    "immutables": {}
+  },
+  "views": {
+    "runtime_length": 12408,
+    "normalized_code_hash": "0x95a8c200e6f5ea7b30d181272d30d36e5e8fae59bf431a2983b5419a9c63d857",
+    "immutables": {}
+  },
+  "blueprint": {
+    "runtime_length": 24031,
+    "normalized_code_hash": "0x620bf33fca9d3555fa15de7b13cdbc279dcaf2c55844df479781f86425895a17",
+    "immutables": {}
+  },
+  "pool_storage_layout": {
+    "nonreentrant.lock": {
+      "type": "nonreentrant lock",
+      "slot": 0
+    },
+    "stored_balances": {
+      "type": "DynArray[uint256, 8]",
+      "slot": 1
+    },
+    "fee": {
+      "type": "uint256",
+      "slot": 10
+    },
+    "offpeg_fee_multiplier": {
+      "type": "uint256",
+      "slot": 11
+    },
+    "initial_A": {
+      "type": "uint256",
+      "slot": 12
+    },
+    "future_A": {
+      "type": "uint256",
+      "slot": 13
+    },
+    "initial_A_time": {
+      "type": "uint256",
+      "slot": 14
+    },
+    "future_A_time": {
+      "type": "uint256",
+      "slot": 15
+    },
+    "admin_balances": {
+      "type": "DynArray[uint256, 8]",
+      "slot": 16
+    },
+    "last_prices_packed": {
+      "type": "DynArray[uint256, 8]",
+      "slot": 25
+    },
+    "last_D_packed": {
+      "type": "uint256",
+      "slot": 34
+    },
+    "ma_exp_time": {
+      "type": "uint256",
+      "slot": 35
+    },
+    "D_ma_time": {
+      "type": "uint256",
+      "slot": 36
+    },
+    "ma_last_time": {
+      "type": "uint256",
+      "slot": 37
+    },
+    "balanceOf": {
+      "type": "HashMap[address, uint256]",
+      "slot": 38
+    },
+    "allowance": {
+      "type": "HashMap[address, HashMap[address, uint256]]",
+      "slot": 39
+    },
+    "total_supply": {
+      "type": "uint256",
+      "slot": 40
+    },
+    "nonces": {
+      "type": "HashMap[address, uint256]",
+      "slot": 41
+    }
+  },
+  "factory_storage_layout": {
+    "admin": {
+      "type": "address",
+      "slot": 0
+    },
+    "future_admin": {
+      "type": "address",
+      "slot": 1
+    },
+    "asset_types": {
+      "type": "HashMap[uint8, String[20]]",
+      "slot": 2
+    },
+    "pool_list": {
+      "type": "address[4294967296]",
+      "slot": 3
+    },
+    "pool_count": {
+      "type": "uint256",
+      "slot": 4294967299
+    },
+    "pool_data": {
+      "type": "HashMap[address, PoolArray declaration object]",
+      "slot": 4294967300
+    },
+    "base_pool_list": {
+      "type": "address[4294967296]",
+      "slot": 4294967301
+    },
+    "base_pool_count": {
+      "type": "uint256",
+      "slot": 8589934597
+    },
+    "base_pool_data": {
+      "type": "HashMap[address, BasePoolArray declaration object]",
+      "slot": 8589934598
+    },
+    "base_pool_assets": {
+      "type": "HashMap[address, bool]",
+      "slot": 8589934599
+    },
+    "pool_implementations": {
+      "type": "HashMap[uint256, address]",
+      "slot": 8589934600
+    },
+    "metapool_implementations": {
+      "type": "HashMap[uint256, address]",
+      "slot": 8589934601
+    },
+    "math_implementation": {
+      "type": "address",
+      "slot": 8589934602
+    },
+    "gauge_implementation": {
+      "type": "address",
+      "slot": 8589934603
+    },
+    "views_implementation": {
+      "type": "address",
+      "slot": 8589934604
+    },
+    "fee_receiver": {
+      "type": "address",
+      "slot": 8589934605
+    },
+    "markets": {
+      "type": "HashMap[uint256, address[4294967296]]",
+      "slot": 8589934606
+    },
+    "market_counts": {
+      "type": "HashMap[uint256, uint256]",
+      "slot": 8589934607
+    }
+  },
+  "sources": {
+    "repository": "https://github.com/curvefi/curve-core",
+    "revision": "5a9e1ab34c1319de69b987900d859ad2e965d0e2",
+    "compiler": "vyper 0.3.10",
+    "evm_version": "shanghai",
+    "model_lineage": "stableswap-ng-2023-12-12"
+  }
+}

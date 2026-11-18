@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+# HyperCore history comes from the venue's own /info API (D4): trade candles stand in for
+# the book, the mark and the oracle. The API keeps only its latest 5000 candles of an
+# interval, so a one-minute window must lie within about the last 3.5 days when it is
+# prepared; `almanak backtest recent` is not supported for HyperCore.
+mode: economic
+window:
+  start: '2026-11-04T00:00:00+00:00'
+  end: '2026-11-04T06:00:00+00:00'
+  end_policy: teardown
+  cleanup: 10m
+inventory:
+  funds:
+    trader:
+      balances:
+      - asset: eip155:999/erc20:0xb88339cb7199b77e23db6e890353e22632ba630f
+        quantity: '30'
+execution:
+  latency: 1s
+  models:
+    position_model: hypercore_trade_candles
+data:
+  source: hyperliquid_info
+  candles: 1m
+  max_age_seconds: 2m
+  fills:
+    # What the missing book would have cost: the fill is the latest trade close moved
+    # this far against the order.
+    slippage_bps: '2'
+    taker_fee_bps: '4.5'
+costs:
+  kind: excluded

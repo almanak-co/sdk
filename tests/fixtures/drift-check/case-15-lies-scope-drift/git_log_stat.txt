@@ -1,4 +1,0 @@
-framework/connectors/uniswap_v3/sdk.py
-framework/accounting/writer.py
-framework/execution/orchestrator.py
-strategies/lp/strategy.py

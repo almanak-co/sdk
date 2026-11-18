@@ -1,0 +1,90 @@
+strategy:
+  connector: aave_v3
+  decision_interval: 5s
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      supply_limit: '0.01'
+      borrow_limit:
+        base_units: 0
+      collateral: true
+      minimum_health_factor: '2'
+      oracle: '0x2cc0fc26ed4563a5ce5e8bdcfe1a2878676ae156'
+      price_source: '0x9da00d23465282005db222a441a663ee7b9dfcc8'
+      native_asset: eip155:8453/slip44:60
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      supply_limit:
+        base_units: 0
+      borrow_limit: '5'
+      collateral: false
+      minimum_health_factor: '2'
+      oracle: '0x2cc0fc26ed4563a5ce5e8bdcfe1a2878676ae156'
+      price_source: '0xf52d010c7d4ecbfda92c2509900593ce34535d86'
+      native_asset: eip155:8453/slip44:60
+      minimum_native_balance: '0'
+assets:
+  eip155:8453/slip44:60:
+    decimals: 18
+  eip155:8453/erc20:0x4200000000000000000000000000000000000006:
+    decimals: 18
+  eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913:
+    decimals: 6
+markets:
+  collateral:
+    kind: aave_v3
+    chain:
+      chain_id: eip155:8453
+      environment: mainnet
+    pool: '0xa238dd80c259a72e81d7e4664a9801593f98d1c5'
+    asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+  loan:
+    kind: aave_v3
+    chain:
+      chain_id: eip155:8453
+      environment: mainnet
+    pool: '0xa238dd80c259a72e81d7e4664a9801593f98d1c5'
+    asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+accounts:
+  fund:
+    chain:
+      chain_id: eip155:8453
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:8453
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: base-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      block:
+        chain:
+          chain_id: eip155:8453
+          environment: mainnet
+        number: 50972164
+        hash: '0x310ad4c1ad77e2a58315b1f78df17e01c0ff14fb7eba89868083830baefe2d61'
+        timestamp: 1788733675
+    funds:
+    - account: fund
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:8453/erc20:0x4200000000000000000000000000000000000006
+          quantity: '0.01'
+        method: wrap_native
+      - balance:
+          asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+          quantity: '1'
+        method: local_storage
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:8453/slip44:60
+        quantity: '5'
+      foundry_account_index: 0

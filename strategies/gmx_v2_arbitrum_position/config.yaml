@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/gmx_v2_arbitrum_position.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    Main:
+      kind: gmx_position
+      market: weth_usdc
+      account: fund
+      side: long
+      capital:
+        asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+        quantity: '0.5'
+      entry_collateral:
+        asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+        quantity: '0.1'
+      entry_size_usd_e30: 1000000000000000000000000000000000
+      execution_fee:
+        asset: eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1
+        quantity: '0.02'
+      increase_acceptable_price: 1000000000000000000
+      decrease_acceptable_price: 0
+      hold_seconds: 2m
+      maximum_event_block_span: 2000
+      minimum_native_balance:
+        base_units: 0
+  gas:
+    # Example Arbitrum amounts; size them from the live gas price.
+    # GMX requests need more than the 1.2M default gas limit through Safe/Roles,
+    # so this template states max_gas_limit; leave it, it is not a price.
+    # Entry takes 1 transaction and exit 3 (almanak check --production):
+    # exit_reserve = 3 fees, total_budget = exit_reserve + 1 entry + 20 later fees.
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:42161
+      max_gas_limit: 2300000
+      max_transaction_fee:
+        base_units: 300000000000000
+      total_budget:
+        base_units: 7200000000000000
+      exit_reserve:
+        base_units: 900000000000000
+markets:
+  weth_usdc:
+    connector: gmx_v2
+    chain: eip155:42161
+    market: eip155:42161/erc20:0x70d95587d40a2caf56bd97485ab3eec10bee6336
+accounts:
+  fund:
+    chain: eip155:42161

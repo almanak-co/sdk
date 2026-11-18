@@ -1,0 +1,89 @@
+name: Platform Smoke
+
+on:
+  workflow_call:
+    inputs:
+      os:
+        description: "Runner image (ubuntu-22.04 or macos-15; Windows is unsupported)."
+        required: true
+        type: string
+      skip:
+        description: "Skip the smoke test (no-op success, used by path-based filtering)."
+        type: boolean
+        required: false
+        default: false
+      advisory:
+        description: "Report the job green even when the smoke steps fail; the log still records the failure."
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  smoke:
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Skip notice
+        if: ${{ inputs.skip }}
+        shell: bash
+        run: echo "Skipping platform smoke test; no relevant code, CLI or packaging changes."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: ${{ !inputs.skip }}
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-repo
+        if: ${{ !inputs.skip }}
+        with:
+          install-bwrap: "true"
+
+      - name: CLI help and declared support
+        if: ${{ !inputs.skip }}
+        shell: bash
+        run: |
+          uv run --locked almanak --help | head -1 | grep -q '^usage: almanak '
+          uv run --locked almanak support --json > support.json
+          uv run --locked python -c "import json, sys; data = json.load(open('support.json')); sys.exit(0 if data else 1)"
+
+      - name: Report process resource limits
+        # The strategy worker lowers its own limits; a runner whose hard limits
+        # sit below the policy bounds shows up here before the check runs.
+        if: ${{ !inputs.skip }}
+        shell: bash
+        run: |
+          ulimit -a
+          uv run --locked python -c "import resource; print({n: resource.getrlimit(getattr(resource, n)) for n in ('RLIMIT_CPU', 'RLIMIT_AS', 'RLIMIT_FSIZE', 'RLIMIT_NOFILE', 'RLIMIT_NPROC')})"
+
+      - name: Offline check of the reference strategy
+        # Exercises configuration parsing, the sandbox, the strategy hooks and
+        # capability derivation without any provider access. macOS rejects
+        # lowering RLIMIT_AS, so the author worker refuses to start there (fail
+        # closed by design); an advisory caller keeps the check green and the
+        # step log records the platform state.
+        id: check
+        if: ${{ !inputs.skip }}
+        continue-on-error: ${{ inputs.advisory }}
+        shell: bash
+        run: |
+          uv run --locked almanak check strategies/aave_v4_weth_supply --json | tee check.json
+          uv run --locked python -c "import json; data = json.load(open('check.json')); assert data['valid'], data"
+
+      - name: Report advisory outcome
+        if: ${{ !inputs.skip && inputs.advisory && steps.check.outcome == 'failure' }}
+        shell: bash
+        run: |
+          echo "::warning::Offline strategy check failed on ${RUNNER_OS}; this platform job is advisory."
+          {
+            echo "## Advisory platform smoke on ${RUNNER_OS}"
+            echo
+            echo 'The offline strategy check failed. This job is advisory; see the step log for the refused stage.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build and install the wheel
+        if: ${{ !inputs.skip }}
+        shell: bash
+        run: |
+          make build
+          ls dist/almanak-*.whl
+          uv tool run --from dist/almanak-*.whl almanak --help | head -1 | grep -q '^usage: almanak '

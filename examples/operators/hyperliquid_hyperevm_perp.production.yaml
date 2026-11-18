@@ -1,0 +1,53 @@
+# Operator execution context for a production run of strategies/hyperliquid_hyperevm_perp
+# with its config.production.yaml, which adds the gas policy production requires. The
+# connector admits production only once D7 is accepted (blueprint 30, section 14.4).
+#
+# Replace the Safe, its operator, Roles module and role key with the dedicated Safe's, and
+# the signing references with reviewed operator files outside strategy-readable paths. The
+# gateway generates each D9 agent key itself and keeps it encrypted beside the keystores,
+# under the same password. `almanak check --production --online` never opens signing
+# files; `almanak run --production` refuses execution until they exist, the Safe's
+# generated grants are installed and the operator passes funding admission.
+#
+# The provider must serve HyperEVM's head exactly: the runtime reads at its head, and
+# Alchemy runs reads pinned near its head at head + 1, which the read-context probe
+# refuses (blueprint 29, "Pinned reads"). dRPC served them exactly when measured.
+schema_version: operator-gateway-config-v1
+modes:
+- production
+networks:
+- chain: eip155:999
+  provider:
+    kind: rpc_url
+    url_env: HYPEREVM_RPC_URL
+accounts:
+  bindings:
+  - name: trader
+    profile:
+      kind: safe_roles
+      fund:
+        chain: {chain_id: eip155:999, environment: mainnet}
+        address: '0x1111111111111111111111111111111111111111'
+      operator:
+        chain: {chain_id: eip155:999, environment: mainnet}
+        address: '0x2222222222222222222222222222222222222221'
+      roles_module: '0x3333333333333333333333333333333333333333'
+      role_key: '0x0000000000000000000000000000000000000000000000000000000000000001'
+production:
+  networks:
+  - chain: eip155:999
+    max_observation_age_seconds: 120
+  payers:
+  - accounts: [trader]
+    max_gas_price_wei: 5000000000
+    max_gas_limit: 1200000
+    max_transaction_fee:
+      asset: eip155:999/slip44:2457
+      amount: 2000000000000000
+    total_budget:
+      asset: eip155:999/slip44:2457
+      amount: 54000000000000000
+    allow_replacement: false
+  signing:
+    key_file: /private/operator/keystores.json
+    password_file: /private/operator/keystore-password

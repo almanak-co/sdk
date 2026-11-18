@@ -1,0 +1,42 @@
+# Operator execution context for a fork run of strategies/ethereum_spark_curve_borrow_and_trade. Provider
+# credentials stay in the selected --env-file. The account bindings are
+# placeholders: fork provisioning generates the actual fixture accounts, and a
+# production run requires reviewed bindings and signing files outside
+# strategy-readable paths.
+schema_version: operator-gateway-config-v1
+modes:
+- fork
+networks:
+- chain: eip155:1
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: fund
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:1
+          environment: mainnet
+        address: '0x0000000000000000000000000000000000000001'
+fork:
+  anchors:
+  - chain: eip155:1
+    height: 25927618
+    reference: '0x783313acbaec87be0f17b177869bda557bb634e4c810d17a072c55521937e6ad'
+  funds:
+  - kind: safe_roles
+    account: fund
+    operator: operator
+    assets:
+    - asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+      amount: 10000000000000000
+    - asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+      amount: 2000000
+  operators:
+  - name: operator
+    native_balance:
+      asset: eip155:1/slip44:60
+      amount: 1000000000000000000

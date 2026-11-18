@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/uniswap_v3_avalanche_trading.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    position:
+      market: pool
+      account: fund
+      capital:
+        asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '5'
+      entry_swap_bps: 10000
+      hold_seconds: 300s
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+markets:
+  pool:
+    connector: uniswap_v3
+    chain: eip155:43114
+    pool: '0xfae3f424a0a47706811521e3ee268f00cfb5c45e'
+accounts:
+  fund:
+    chain: eip155:43114

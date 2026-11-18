@@ -1,0 +1,118 @@
+{
+  "schema": "almanak-uniswap-v4-native-routes-v1",
+  "description": "Universal Routers admitted for native-currency V4 swaps. The router's WETH9 immutable (the chain's wrapped native: WETH, WPOL, WBNB or WAVAX) was read as the PUSH32 of the zero-padded address in its pinned runtime code, on 2026-10-13 for Ethereum, Base, Arbitrum, Optimism and Robinhood and on 2026-10-15 for Polygon, BNB and Avalanche (Ethereum, Base, Arbitrum, Optimism, Polygon, BNB and Avalanche share one 19,499-byte build; Robinhood's revision is 24,546 bytes). wrapped_native pins the token the router wraps and unwraps, with the implementation of an upgradeable proxy, at reviewed_at_block. Each PositionManager's WETH9 immutable, used by its WRAP, UNWRAP and SWEEP actions for native liquidity, was read the same way on 2026-10-15: all eight share one 23,877-byte build, embed the chain's wrapped native and held no native or wrapped balance.",
+  "chains": {
+    "eip155:1": {
+      "router": "0x66a9893cc07d91d95644aedd05d03f95e1dba8af",
+      "router_weth": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "reviewed_at_block": 26184459,
+      "wrapped_native": {
+        "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "code_hash": "0xd0a06b12ac47863b5c7be4185c2deaad1c61557033f56c7d4ea74429cbb25e23",
+        "implementation": null,
+        "implementation_hash": null,
+        "implementation_slot": null
+      },
+      "position_manager": "0xbd216513d74c8cf14cf4747e6aaa6420ff64ee9e",
+      "position_manager_weth": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    },
+    "eip155:8453": {
+      "router": "0x6ff5693b99212da76ad316178a184ab56d299b43",
+      "router_weth": "0x4200000000000000000000000000000000000006",
+      "reviewed_at_block": 52557925,
+      "wrapped_native": {
+        "address": "0x4200000000000000000000000000000000000006",
+        "code_hash": "0x8a3a1f6a9f9dce633117adee5b458245835a8645a8c8726a26382a4622508b1c",
+        "implementation": null,
+        "implementation_hash": null,
+        "implementation_slot": null
+      },
+      "position_manager": "0x7c5f5a4bbd8fd63184577525326123b519429bdc",
+      "position_manager_weth": "0x4200000000000000000000000000000000000006"
+    },
+    "eip155:42161": {
+      "router": "0xa51afafe0263b40edaef0df8781ea9aa03e381a3",
+      "router_weth": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "reviewed_at_block": 514470052,
+      "wrapped_native": {
+        "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+        "code_hash": "0x2d240bb4510ed1acfeaba905eb4bcc4524d63c8ae66e48fcccac55ea714db7a7",
+        "implementation": "0x8b194beae1d3e0788a1a35173978001acdfba668",
+        "implementation_hash": "0x0d1c20f9ed551efe8f402bc9aa1a9b5058f925ec615284c5b4a7a4623c3b2dcd",
+        "implementation_slot": 24440054405305269366569402256811496959409073762505157381672968839269610695612
+      },
+      "position_manager": "0xd88f38f930b7952f2db2432cb002e7abbf3dd869",
+      "position_manager_weth": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+    },
+    "eip155:10": {
+      "router": "0x851116d9223fabed8e56c0e6b8ad0c31d98b3507",
+      "router_weth": "0x4200000000000000000000000000000000000006",
+      "reviewed_at_block": 158153210,
+      "wrapped_native": {
+        "address": "0x4200000000000000000000000000000000000006",
+        "code_hash": "0x779bbf2a738ef09d961c945116197e2ac764c1b39304b2b4418cd4e42668b173",
+        "implementation": null,
+        "implementation_hash": null,
+        "implementation_slot": null
+      },
+      "position_manager": "0x3c3ea4b57a46241e54610e5f022e5c45859a1017",
+      "position_manager_weth": "0x4200000000000000000000000000000000000006"
+    },
+    "eip155:4663": {
+      "router": "0x8876789976decbfcbbbe364623c63652db8c0904",
+      "router_weth": "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+      "reviewed_at_block": 87617953,
+      "wrapped_native": {
+        "address": "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+        "code_hash": "0x5706be52f64875fee65a2cec0d80e47a23d8793cbe85d214b48445e2d05f5353",
+        "implementation": "0xc6b81b429797e0f555440b70cd99e032d7ae947e",
+        "implementation_hash": "0xbe1295f37be34ffe03ad779bda0ef278907e1856b51a3be2f35ee541d75d4650",
+        "implementation_slot": 24440054405305269366569402256811496959409073762505157381672968839269610695612
+      },
+      "position_manager": "0x58daec3116aae6d93017baaea7749052e8a04fa7",
+      "position_manager_weth": "0x0bd7d308f8e1639fab988df18a8011f41eacad73"
+    },
+    "eip155:137": {
+      "router": "0x1095692a6237d83c6a72f3f5efedb9a670c49223",
+      "router_weth": "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270",
+      "reviewed_at_block": 95562992,
+      "wrapped_native": {
+        "address": "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270",
+        "code_hash": "0xae820ea59b005f58a45eea35b374afbd5dc503d4f219a6b670cd3453f1142ed5",
+        "implementation": null,
+        "implementation_hash": null,
+        "implementation_slot": null
+      },
+      "position_manager": "0x1ec2ebf4f37e7363fdfe3551602425af0b3ceef9",
+      "position_manager_weth": "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270"
+    },
+    "eip155:56": {
+      "router": "0x1906c1d672b88cd1b9ac7593301ca990f94eae07",
+      "router_weth": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+      "reviewed_at_block": 127747770,
+      "wrapped_native": {
+        "address": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+        "code_hash": "0xb7d84205eaaf83ce7b3940c6beaad6d22790255e34a9a2b486aa8cdfff118fe6",
+        "implementation": null,
+        "implementation_hash": null,
+        "implementation_slot": null
+      },
+      "position_manager": "0x7a4a5c919ae2541aed11041a1aeee68f1287f95b",
+      "position_manager_weth": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"
+    },
+    "eip155:43114": {
+      "router": "0x94b75331ae8d42c1b61065089b7d48fe14aa73b7",
+      "router_weth": "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7",
+      "reviewed_at_block": 97597716,
+      "wrapped_native": {
+        "address": "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7",
+        "code_hash": "0xbe0979d9ff9e744b48d32e81fd67db0d32dfc74120989df9b7b1588e2aff8597",
+        "implementation": null,
+        "implementation_hash": null,
+        "implementation_slot": null
+      },
+      "position_manager": "0xb74b1f14d2754acfcbbe1a221023a5cf50ab8acd",
+      "position_manager_weth": "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7"
+    }
+  }
+}

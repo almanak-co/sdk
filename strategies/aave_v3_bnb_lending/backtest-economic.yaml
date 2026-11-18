@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+mode: economic
+window:
+  start: '2026-09-08T18:10:38Z'
+  end: '2026-09-08T18:11:08Z'
+  end_policy: teardown
+  cleanup: 60s
+inventory:
+  funds:
+    fund:
+      balances:
+      - asset: eip155:56/erc20:0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c
+        quantity: '0.1'
+      - asset: eip155:56/erc20:0x55d398326f99059ff775485246999027b3197955
+        quantity: '1'
+      - asset: eip155:56/slip44:714
+        quantity: '5'
+execution:
+  latency: 1s
+  models:
+    liquidation_model: immediate_underlying_v3_revision11
+data:
+  source: aave_v3_archive
+  risk_model: pool_oracle_each_block
+  sample_seconds: 60s
+  max_age_seconds: 120s
+  max_accounting_samples: 10
+  max_risk_blocks: 512
+  max_risk_samples: 1024
+  max_liquidations_per_event: 8
+costs:
+  kind: excluded

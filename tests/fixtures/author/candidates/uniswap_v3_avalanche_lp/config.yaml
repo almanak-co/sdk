@@ -1,0 +1,80 @@
+strategy:
+  connector: uniswap_v3
+  decision_interval: 5s
+  allocations:
+    position:
+      market: pool
+      account: fund
+      range:
+        lower: -256100
+        upper: -255090
+      capital:
+        asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '5'
+      entry_swap_bps: 5000
+      hold_seconds: 300s
+      slippage_bps: 100
+      deadline_seconds: 300
+      native_asset: eip155:43114/slip44:9005
+      minimum_native_balance:
+        base_units: 0
+assets:
+  eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7:
+    decimals: 18
+  eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e:
+    decimals: 6
+  eip155:43114/slip44:9005:
+    decimals: 18
+markets:
+  pool:
+    pool:
+      kind: uniswap_v3
+      chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      factory: '0x740b1c1de25031c31ff4fc9a62f554a55cdc1bad'
+      pool: '0xfae3f424a0a47706811521e3ee268f00cfb5c45e'
+      currency0: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+      currency1: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+      fee: 500
+      tick_spacing: 10
+    contracts:
+      router: '0xbb00ff08d01d300023c629e8ffffcb65a5a578ce'
+      position_manager: '0x655c406ebfa14ee2006250925e54ec43ad184f8b'
+      quoter: '0xbe0f5544ec67e9b3b2d979aaa43f18fd87e6257f'
+accounts:
+  fund:
+    chain:
+      chain_id: eip155:43114
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: avax-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      block:
+        chain:
+          chain_id: eip155:43114
+          environment: mainnet
+        number: 94824453
+        hash: '0x1528a4191f95303ad8fc7fe7f9a7b9c8e1e08ae8fa9474ac1262cb2351a50e45'
+        timestamp: 1788925347
+    funds:
+    - account: fund
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+          quantity: '5'
+        method: local_storage
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:43114/slip44:9005
+        quantity: '10'
+      foundry_account_index: 714

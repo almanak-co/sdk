@@ -1,0 +1,59 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/robinhood_morpho_borrow_and_trade_v3.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '0.1'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.01'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      capital:
+        asset: eip155:4663/erc20:0x5fc5360d0400a0fd4f2af552add042d716f1d168
+        quantity: '0.05'
+      entry_swap_bps: 10000
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+markets:
+  collateral:
+    connector: morpho_blue
+    chain: eip155:4663
+    market_id: '0x127353ba63e08f74d8e9ce8a1c2b41b5f89c7167135b1c09fbed34a71b4cb06b'
+    leg: collateral
+  loan:
+    connector: morpho_blue
+    chain: eip155:4663
+    market_id: '0x127353ba63e08f74d8e9ce8a1c2b41b5f89c7167135b1c09fbed34a71b4cb06b'
+    leg: loan
+  pool:
+    connector: uniswap_v3
+    chain: eip155:4663
+    pool: '0x69bfaf19c9f377bb306a89aed9f6b07e2c1a8d9a'
+accounts:
+  fund:
+    chain: eip155:4663
+inventory:
+- account: fund
+  balance:
+    asset: eip155:4663/erc20:0x0bd7d308f8e1639fab988df18a8011f41eacad73
+    quantity: '0.01'
+- account: fund
+  balance:
+    asset: eip155:4663/erc20:0x5fc5360d0400a0fd4f2af552add042d716f1d168
+    quantity: '0.02'

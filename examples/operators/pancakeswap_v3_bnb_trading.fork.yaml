@@ -1,0 +1,52 @@
+# Operator execution context for a fork run of strategies/pancakeswap_v3_bnb_trading. Provider
+# credentials stay in the selected --env-file. The account bindings are
+# placeholders: fork provisioning generates the actual fixture accounts, and a
+# production run requires reviewed bindings and signing files outside
+# strategy-readable paths.
+schema_version: operator-gateway-config-v1
+modes:
+- fork
+networks:
+- chain: eip155:56
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: fund
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:56
+          environment: mainnet
+        address: '0x0000000000000000000000000000000000000001'
+fork:
+  anchors:
+  - chain: eip155:56
+    height: 120455908
+    reference: '0x96c0b8486239872f1137e189e211c2deecf53c0ffcc61c1e189ed00ffa8c6c5b'
+  funds:
+  - kind: safe_roles
+    account: fund
+    operator: operator
+    assets:
+    - asset: eip155:56/erc20:0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c
+      amount: 100000000000000000
+  operators:
+  - name: operator
+    native_balance:
+      asset: eip155:56/slip44:714
+      amount: 1000000000000000000
+  gas:
+  - accounts:
+    - fund
+    max_gas_price_wei: 1000000000
+    max_gas_limit: 1200000
+    max_transaction_fee:
+      asset: eip155:56/slip44:714
+      amount: 1200000000000000
+    total_budget:
+      asset: eip155:56/slip44:714
+      amount: 28800000000000000
+    allow_replacement: false

@@ -1,0 +1,184 @@
+{
+  "pool": {
+    "runtime_length": 18355,
+    "normalized_code_hash": "0x478dff28c3e9b720c1b8e09c71c3e198e9bff5c6be93b6a7a8a3bb385a272862",
+    "immutables": {
+      "PRECISIONS": [
+        {
+          "start": 17875,
+          "length": 64
+        }
+      ],
+      "MATH": [
+        {
+          "start": 17939,
+          "length": 32
+        }
+      ],
+      "coins": [
+        {
+          "start": 17971,
+          "length": 64
+        }
+      ],
+      "factory": [
+        {
+          "start": 18035,
+          "length": 32
+        }
+      ],
+      "name": [
+        {
+          "start": 18067,
+          "length": 96
+        }
+      ],
+      "symbol": [
+        {
+          "start": 18163,
+          "length": 64
+        }
+      ],
+      "NAME_HASH": [
+        {
+          "start": 18227,
+          "length": 32
+        }
+      ],
+      "CACHED_CHAIN_ID": [
+        {
+          "start": 18259,
+          "length": 32
+        }
+      ],
+      "salt": [
+        {
+          "start": 18291,
+          "length": 32
+        }
+      ],
+      "CACHED_DOMAIN_SEPARATOR": [
+        {
+          "start": 18323,
+          "length": 32
+        }
+      ]
+    }
+  },
+  "pool_storage_layout": {
+    "nonreentrant.lock": {
+      "type": "nonreentrant lock",
+      "slot": 0
+    },
+    "cached_price_scale": {
+      "type": "uint256",
+      "slot": 1
+    },
+    "cached_price_oracle": {
+      "type": "uint256",
+      "slot": 2
+    },
+    "last_prices": {
+      "type": "uint256",
+      "slot": 3
+    },
+    "last_timestamp": {
+      "type": "uint256",
+      "slot": 4
+    },
+    "initial_A_gamma": {
+      "type": "uint256",
+      "slot": 5
+    },
+    "initial_A_gamma_time": {
+      "type": "uint256",
+      "slot": 6
+    },
+    "future_A_gamma": {
+      "type": "uint256",
+      "slot": 7
+    },
+    "future_A_gamma_time": {
+      "type": "uint256",
+      "slot": 8
+    },
+    "balances": {
+      "type": "uint256[2]",
+      "slot": 9
+    },
+    "D": {
+      "type": "uint256",
+      "slot": 11
+    },
+    "xcp_profit": {
+      "type": "uint256",
+      "slot": 12
+    },
+    "xcp_profit_a": {
+      "type": "uint256",
+      "slot": 13
+    },
+    "virtual_price": {
+      "type": "uint256",
+      "slot": 14
+    },
+    "packed_rebalancing_params": {
+      "type": "uint256",
+      "slot": 15
+    },
+    "packed_fee_params": {
+      "type": "uint256",
+      "slot": 16
+    },
+    "last_admin_fee_claim_timestamp": {
+      "type": "uint256",
+      "slot": 17
+    },
+    "admin_lp_virtual_balance": {
+      "type": "uint256",
+      "slot": 18
+    },
+    "balanceOf": {
+      "type": "HashMap[address, uint256]",
+      "slot": 19
+    },
+    "allowance": {
+      "type": "HashMap[address, HashMap[address, uint256]]",
+      "slot": 20
+    },
+    "totalSupply": {
+      "type": "uint256",
+      "slot": 21
+    },
+    "nonces": {
+      "type": "HashMap[address, uint256]",
+      "slot": 22
+    }
+  },
+  "factory": {
+    "runtime_length": 5327,
+    "normalized_code_hash": "0xbb7ab663bc3ea17b6e97e4fa41bc7b5912b49e8835cce4d9643b86ac5b29b986",
+    "immutables": {}
+  },
+  "math": {
+    "runtime_length": 10137,
+    "normalized_code_hash": "0x70d105ee0e9b857244d87521bbcef34cfb4cbd600592af61bbc7c76180648d61",
+    "immutables": {}
+  },
+  "views": {
+    "runtime_length": 7174,
+    "normalized_code_hash": "0x150bdfd73c90c22774ddcbf6672214afc6e2587afa27fb145576138382de7d9c",
+    "immutables": {}
+  },
+  "blueprint": {
+    "runtime_length": 18837,
+    "normalized_code_hash": "0xcb85feb205dc33b1704e8b492cb1d22c4b6728e23558123618b30216a15dea62",
+    "immutables": {}
+  },
+  "sources": {
+    "repository": "https://github.com/curvefi/twocrypto-ng",
+    "pool_revision": "65dd026f198b3a1b6d020d6b2407ff8a1e4f7360",
+    "math_revision": "65dd026f198b3a1b6d020d6b2407ff8a1e4f7360",
+    "compiler": "vyper 0.3.10"
+  }
+}

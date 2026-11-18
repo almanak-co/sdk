@@ -1,0 +1,53 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/sparklend_ethereum_lending.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '5'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.01'
+      collateral: true
+      minimum_health_factor: '2'
+      oracle: '0x8105f69d9c41644c6a0803fda7d03aa70996cfd9'
+      price_source: '0x2750e4cb635af1fccfb10c0ea54b5b5bfc2759b6'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      collateral: false
+      minimum_health_factor: '2'
+      oracle: '0x8105f69d9c41644c6a0803fda7d03aa70996cfd9'
+      price_source: '0x42a03f81dd8a1cecd746dc262e4d1cd9fd39f777'
+      minimum_native_balance: '0'
+  gas:
+    # Example Ethereum amounts; size them from the live gas price.
+    # Entry takes 2 transactions and exit 4 (almanak check --production):
+    # exit_reserve = 4 fees, total_budget = exit_reserve + 2 entry + 20 later fees.
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:1
+      max_transaction_fee:
+        base_units: 4100000000000000
+      total_budget:
+        base_units: 106600000000000000
+      exit_reserve:
+        base_units: 16400000000000000
+markets:
+  collateral:
+    connector: sparklend
+    chain: eip155:1
+    asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+  loan:
+    connector: sparklend
+    chain: eip155:1
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+accounts:
+  fund:
+    chain: eip155:1

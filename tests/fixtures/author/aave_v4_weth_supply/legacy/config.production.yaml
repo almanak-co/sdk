@@ -1,0 +1,95 @@
+# Frozen unconverted author input of strategies/aave_v4_weth_supply (harness root).
+# Explicit production example. Supply reviewed account bindings separately.
+strategy:
+  connector: aave_v4
+  decision_interval: 5s
+  allocations:
+    main_weth:
+      market: main_weth_market
+      account: treasury
+      amount: '0.001'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0.001'
+      hold_seconds: null
+    bluechip_weth:
+      market: bluechip_weth_market
+      account: treasury
+      amount: '0.001'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0.001'
+      hold_seconds: null
+  debts: {}
+assets:
+  eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48:
+    decimals: 6
+  eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2:
+    decimals: 18
+  eip155:1/slip44:60:
+    decimals: 18
+markets:
+  main_weth_market:
+    kind: aave_v4
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+    spoke: '0x94e7a5dcbe816e498b89ab752661904e2f56c485'
+    reserve_id: 0
+    hub: '0xcca852bc40e560adc3b1cc58ca5b55638ce826c9'
+    asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+  bluechip_weth_market:
+    kind: aave_v4
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+    spoke: '0x973a023a77420ba610f06b3858ad991df6d85a08'
+    reserve_id: 0
+    hub: '0x943827dca022d0f354a8a8c332da1e5eb9f9f931'
+    asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+  main_usdc_market:
+    kind: aave_v4
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+    spoke: '0x94e7a5dcbe816e498b89ab752661904e2f56c485'
+    reserve_id: 7
+    hub: '0xcca852bc40e560adc3b1cc58ca5b55638ce826c9'
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+accounts:
+  treasury:
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+execution:
+  production:
+    networks:
+    - chain:
+        chain_id: eip155:1
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: eth-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      max_observation_age_seconds: 120
+    payers:
+      treasury_payer:
+        accounts:
+        - treasury
+        asset: eip155:1/slip44:60
+        source: network_rpc_fee_history
+        reward_percentile: 50
+        base_fee_multiplier_bps: 20000
+        max_gas_price_wei: 5000000000
+        max_gas_limit: 1000000
+        max_transaction_fee:
+          asset: eip155:1/slip44:60
+          quantity:
+            base_units: 5000000000000000
+        total_budget:
+          asset: eip155:1/slip44:60
+          quantity:
+            base_units: 30000000000000000
+        exit_reserve:
+          asset: eip155:1/slip44:60
+          quantity:
+            base_units: 10000000000000000
+        gas_limit_buffer_bps: 2500

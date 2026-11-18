@@ -1,0 +1,68 @@
+{
+  "schedule": {
+    "start": 1787184000,
+    "end": 1787270400,
+    "latency_seconds": 0,
+    "end_policy": "teardown",
+    "cleanup_seconds": 3600
+  },
+  "history": [
+    {
+      "chain": {
+        "chain_id": "eip155:1",
+        "environment": "mainnet"
+      },
+      "provider": {
+        "kind": "alchemy",
+        "network": "eth-mainnet",
+        "api_key_env": "ALCHEMY_API_KEY"
+      }
+    }
+  ],
+  "funds": [
+    {
+      "name": "lending_0",
+      "fund": {
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        },
+        "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+      },
+      "balances": [
+        {
+          "asset": "eip155:1/slip44:60",
+          "amount": 5000000000000000000
+        },
+        {
+          "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "amount": 40000000000000000
+        }
+      ]
+    },
+    {
+      "name": "lending_1",
+      "fund": {
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        },
+        "address": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
+      },
+      "balances": [
+        {
+          "asset": "eip155:1/slip44:60",
+          "amount": 5000000000000000000
+        },
+        {
+          "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "amount": 40000000000000000
+        }
+      ]
+    }
+  ],
+  "market_model": "historical_path",
+  "costs": {
+    "kind": "excluded"
+  }
+}

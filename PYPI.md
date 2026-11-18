@@ -1,108 +1,51 @@
 # Almanak SDK
 
-[![PyPI version](https://badge.fury.io/py/almanak.svg)](https://badge.fury.io/py/almanak)
+Almanak is a Python SDK for writing, checking, backtesting and operating
+autonomous DeFi strategies. A strategy consists of two author-maintained files:
+`strategy.py`, which makes decisions, and `config.yaml`, which states the
+economic choices the strategy may use.
 
-The Almanak SDK is a powerful Python library for developing, testing, and deploying autonomous DeFi agents. Built on an intent-based architecture, it provides a comprehensive framework for creating sophisticated trading strategies with minimal boilerplate.
+The same strategy definition runs in historical evaluation, identified forks
+and supported production environments. The SDK keeps network access, secrets,
+signing, durable execution and protocol mechanics outside strategy code.
 
-## Features
-
-- **Intent-Based Architecture**: Express trading logic as high-level intents (Swap, LP, Borrow, etc.) - the framework handles compilation and execution
-- **Gateway Security**: All external access mediated through secure gRPC gateway
-- **Three-Tier State Management**: Automatic persistence with HOT/WARM/COLD tiers
-- **Comprehensive Backtesting**: PnL simulation, paper trading on Anvil forks, and parameter sweeps
-- **Multi-Chain Support**: Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Blast, Mantle, Berachain
-- **Protocol Integration**: Uniswap V3, Aave V3, Morpho Blue, GMX V2, Lido, Ethena, Kraken, and more
-- **Non-Custodial Design**: Full control over your funds through Safe smart accounts
+Version 3.0.0 is the first release of the rewritten SDK. Projects built on the
+2.x line should pin `almanak<3`.
 
 ## Installation
 
-```bash
-pipx install almanak
+Requires Python 3.12+.
+
+```sh
+uv add almanak            # as a project dependency
+uv tool install almanak   # the command-line tool only
 ```
 
-Optional features ship as extras:
-
-```bash
-pipx install 'almanak[dashboard,backtest]'   # web dashboard + backtest charts/optimization
-```
+Optional extras:
 
 | Extra | Enables |
 |---|---|
-| `dashboard` | `almanak dashboard` and the strategy/backtest web dashboards (streamlit, plotly) |
-| `backtest` | backtest chart export and `almanak strat backtest optimize` (matplotlib, plotly, optuna) |
-| `code` | Python LSP for `almanak code` (pyright) |
+| `ta` | Technical analysis over declared strategy price series (numpy, TA-Lib) |
+| `code` | Python LSP for the bundled Almanak Code agent (pyright) |
 
-**Using an AI coding agent?** Teach it the SDK in one command:
+Local strategy hook execution is verified on Linux and requires Bubblewrap
+(`sudo apt-get install bubblewrap libseccomp2` on Debian or Ubuntu). Fork runs
+also require Foundry's `anvil`.
 
-```bash
-almanak agent install
+## Usage
+
+```sh
+almanak check path/to/strategy
+almanak backtest run path/to/strategy --backtest-config backtest.yaml \
+  --gateway-config operator.yaml --env-file .env --output runs/test
+almanak run path/to/strategy --fork --gateway-config operator.fork.yaml \
+  --env-file .env --output runs/demo
 ```
 
-Auto-detects your platform (Claude Code, Codex, Cursor, Copilot, and 6 more) and installs the strategy builder skill.
-
-## Quick Start
-
-1. **Create a New Strategy** (scaffolds a self-contained Python project with `pyproject.toml`, `.venv/`, `uv.lock`)
-   ```bash
-   almanak strat new
-   ```
-
-2. **Test on a Local Anvil Fork**
-   ```bash
-   cd my_strategy
-   uv run almanak strat run --network anvil --once
-   ```
-
-## Writing a Strategy
-
-Strategies use an intent-based architecture. Implement the `decide()` method to return an intent:
-
-```python
-from almanak import IntentStrategy, SwapIntent, HoldIntent, MarketSnapshot
-
-class MyStrategy(IntentStrategy):
-    def decide(self, market: MarketSnapshot) -> Intent:
-        eth_price = market.prices.get("ETH")
-        usdc_balance = market.balances.get("USDC")
-
-        if eth_price < 2000 and usdc_balance > 1000:
-            return SwapIntent(
-                token_in="USDC",
-                token_out="ETH",
-                amount=1000,
-                slippage=0.005,
-            )
-        return HoldIntent(reason="Waiting for better conditions")
-```
-
-## Supported Networks
-
-Ethereum, Arbitrum, Optimism, Base, Avalanche, Polygon, BSC, Sonic, Plasma, Blast, Mantle, Berachain
-
-## Supported Protocols
-
-- **DEXs**: Uniswap V3, SushiSwap V3, PancakeSwap V3, TraderJoe V2, Aerodrome, Curve
-- **Lending**: Aave V3, Morpho Blue, Compound V3, Spark
-- **Liquid Staking**: Lido, Ethena
-- **Yield**: Pendle
-- **Perpetuals**: GMX V2, Hyperliquid
-- **CEX Integration**: Kraken
-- **Aggregators**: Enso, LiFi
-
-> **Pending testing:** Prediction Markets (Polymarket) and Flash loans are
-> undergoing further validation and are temporarily withheld from the
-> supported matrix (`almanak info matrix`). Treat them as experimental.
-
-## Contributing
-
-See the [Contributing Guide](https://github.com/almanak-co/almanak-sdk/blob/main/CONTRIBUTING.md) to get started.
+`almanak support` lists the connectors, chains, actions and run modes that
+admission accepts.
 
 ## Documentation
 
-For detailed documentation, visit [sdk.docs.almanak.co](https://sdk.docs.almanak.co/)
-
-## Support
-
-- [Discord](https://discord.gg/yuCMvQv3rN)
-- [Telegram](https://t.me/AlmanakAgents)
-- [Twitter](https://x.com/almanak)
+Guides, the CLI reference and the strategy API are at
+[docs.almanak.co](https://docs.almanak.co).

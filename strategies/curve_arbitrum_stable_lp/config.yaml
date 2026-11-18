@@ -1,0 +1,66 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/curve_arbitrum_stable_lp.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    proportional:
+      market: stable_pool
+      account: proportional
+      funding_asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+      trading_asset: eip155:42161/erc20:0x498bf2b1e120fed3ad3d42ea2165e9b73f99c1e5
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:42161/erc20:0x498bf2b1e120fed3ad3d42ea2165e9b73f99c1e5
+        quantity: '0'
+      - asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+        quantity: '10'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      minimum_native_balance:
+        base_units: 0
+    single_coin:
+      market: stable_pool
+      account: single_coin
+      funding_asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+      trading_asset: eip155:42161/erc20:0x498bf2b1e120fed3ad3d42ea2165e9b73f99c1e5
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:42161/erc20:0x498bf2b1e120fed3ad3d42ea2165e9b73f99c1e5
+        quantity: '0'
+      - asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+        quantity: '10'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      minimum_native_balance:
+        base_units: 0
+      single_coin_exit: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+  gas:
+    # Example Arbitrum amounts; size them from the live gas price.
+    # Entry takes 2 transactions and exit 6 (almanak check --production):
+    # exit_reserve = 6 fees, total_budget = exit_reserve + 2 entry + 20 later fees.
+    gas_payer:
+      accounts:
+      - proportional
+      - single_coin
+      chain: eip155:42161
+      max_transaction_fee:
+        base_units: 160000000000000
+      total_budget:
+        base_units: 4480000000000000
+      exit_reserve:
+        base_units: 960000000000000
+markets:
+  stable_pool:
+    connector: curve
+    chain: eip155:42161
+    pool: '0xec090cf6dd891d2d014bea6edada6e05e025d93d'
+accounts:
+  proportional:
+    chain: eip155:42161
+  single_coin:
+    chain: eip155:42161

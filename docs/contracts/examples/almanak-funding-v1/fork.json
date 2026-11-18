@@ -1,0 +1,65 @@
+{
+  "accounts": [
+    {
+      "account": "lending_0",
+      "assets": [
+        {
+          "amount_base_units": "20000000000000000",
+          "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "basis": "configured allocation capital",
+          "decimals": 18,
+          "symbol": null
+        }
+      ],
+      "chain": "eip155:1",
+      "fund": "0x521a5c391acc7cce5158c12997fb50b03e75143d",
+      "payer": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+    },
+    {
+      "account": "lending_1",
+      "assets": [
+        {
+          "amount_base_units": "20000000000000000",
+          "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+          "basis": "configured allocation capital",
+          "decimals": 18,
+          "symbol": null
+        }
+      ],
+      "chain": "eip155:1",
+      "fund": "0xec3227cc5934822b950000ef478b215864e98831",
+      "payer": "0xec3227cc5934822b950000ef478b215864e98831"
+    }
+  ],
+  "mode": "fork",
+  "parameters_digest": "db159160d4d70afa0c0fcbd6de810cc43559f5f2e23b06ed41b7a4be7e722f3b",
+  "payers": [
+    {
+      "accounts": [
+        "lending_0"
+      ],
+      "asset": "eip155:1/slip44:60",
+      "chain": "eip155:1",
+      "decimals": 18,
+      "entry_minimum_base_units": "1000000000000000",
+      "entry_transactions": 6,
+      "gas": null,
+      "minimum_native_balance_base_units": "1000000000000000",
+      "payer": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+    },
+    {
+      "accounts": [
+        "lending_1"
+      ],
+      "asset": "eip155:1/slip44:60",
+      "chain": "eip155:1",
+      "decimals": 18,
+      "entry_minimum_base_units": "1000000000000000",
+      "entry_transactions": 6,
+      "gas": null,
+      "minimum_native_balance_base_units": "1000000000000000",
+      "payer": "0xec3227cc5934822b950000ef478b215864e98831"
+    }
+  ],
+  "schema": "almanak-funding-v1"
+}

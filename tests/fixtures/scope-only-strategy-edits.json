@@ -1,0 +1,1703 @@
+{
+ "before": {
+  "aave_v3_arbitrum_lending": "850dcf961fcabd8475c8e15c17b28bae80d906b5939b639f59c1b015ad1cf6ed",
+  "aave_v3_avalanche_lending": "850dcf961fcabd8475c8e15c17b28bae80d906b5939b639f59c1b015ad1cf6ed",
+  "aave_v3_base_lending": "850dcf961fcabd8475c8e15c17b28bae80d906b5939b639f59c1b015ad1cf6ed",
+  "aave_v3_bnb_lending": "850dcf961fcabd8475c8e15c17b28bae80d906b5939b639f59c1b015ad1cf6ed",
+  "aave_v3_ethereum_lending": "850dcf961fcabd8475c8e15c17b28bae80d906b5939b639f59c1b015ad1cf6ed",
+  "aave_v3_optimism_lending": "850dcf961fcabd8475c8e15c17b28bae80d906b5939b639f59c1b015ad1cf6ed",
+  "aave_v3_polygon_lending": "850dcf961fcabd8475c8e15c17b28bae80d906b5939b639f59c1b015ad1cf6ed",
+  "aave_v4_avalanche_borrowing": "6cf221d98b8776bdb273efc35dedbc932ea3b49bf3d546aff94cd9b3fda395da",
+  "aave_v4_multichain_borrowing": "6cf221d98b8776bdb273efc35dedbc932ea3b49bf3d546aff94cd9b3fda395da",
+  "aave_v4_weth_supply": "cb77f016a0c8eeef052f1f3ca02c424728ba9afd0c5c7adcde0f8410ee66939d",
+  "arbitrum_aave_borrow_and_trade": "71dac4e004871e905f3fe160d0fb9cb272e249666b7c901e175badec4e1c730f",
+  "arbitrum_aave_borrow_and_trade_gmx": "14cf7849a989c628e4bb6c92d51dcb00189bd2efcc2ff6355b27578a86e4fab7",
+  "arbitrum_aave_borrow_and_trade_v4": "ab7b2e068007af782a9664ab67fa65b9194cabf00793b92dff603d7547495afe",
+  "arbitrum_aave_curve_borrow_and_trade": "2fff455821a93b602cc32837d3d40006c71d64a6c141779cf1680d6447099c5b",
+  "arbitrum_aave_pancake_borrow_and_trade": "01e27356270f275344f686b24225e98d78bedd3dfd4b235613ccb75c02e76b46",
+  "arbitrum_compound_borrow_and_trade": "4df0249cc82e6bf91fa1bcecba100d7ed7fca3d668e662a26bb647bcd5206ba7",
+  "arbitrum_morpho_borrow_and_trade": "4df0249cc82e6bf91fa1bcecba100d7ed7fca3d668e662a26bb647bcd5206ba7",
+  "avalanche_aave_borrow_and_trade": "2fff455821a93b602cc32837d3d40006c71d64a6c141779cf1680d6447099c5b",
+  "avalanche_aave_borrow_and_trade_gmx": "14cf7849a989c628e4bb6c92d51dcb00189bd2efcc2ff6355b27578a86e4fab7",
+  "avalanche_aave_borrow_and_trade_v3": "5e411fa938b9590d642305478383a30ea11a7cbd7e17aa99b175ad941c6555f7",
+  "avalanche_aave_v4_borrow_and_trade": "6e93d2b78690891cabd54a025d12e15c3c73d964a94611b421ffbe0334a13ac5",
+  "avalanche_morpho_borrow_and_trade_v4": "68f8d429328dd2f61c7c45f9d7baa97418960dcf8d866cac57e4c268e398da79",
+  "base_aave_aerodrome_stable_borrow_and_trade": "01e27356270f275344f686b24225e98d78bedd3dfd4b235613ccb75c02e76b46",
+  "base_aave_aerodrome_volatile_borrow_and_trade": "01e27356270f275344f686b24225e98d78bedd3dfd4b235613ccb75c02e76b46",
+  "base_aave_curve_borrow_and_trade": "2fff455821a93b602cc32837d3d40006c71d64a6c141779cf1680d6447099c5b",
+  "base_aave_pancake_borrow_and_trade": "42949ef1dca1bf22ea3f4d14b440b728e0f755a56d70199451571957933f2f32",
+  "base_aave_slipstream_borrow_and_trade": "01e27356270f275344f686b24225e98d78bedd3dfd4b235613ccb75c02e76b46",
+  "base_borrow_and_trade": "93f61d0f2c52b55e433b2da8f826dcc4055aecd1d23efb844400930dd12fbb5e",
+  "base_borrow_and_trade_v4": "93f61d0f2c52b55e433b2da8f826dcc4055aecd1d23efb844400930dd12fbb5e",
+  "base_compound_borrow_and_trade": "e2bf6176a3de212ada59dcf04fc0dbd43bee8a791db7518642ad27d6e443382b",
+  "base_morpho_borrow_and_trade": "e2bf6176a3de212ada59dcf04fc0dbd43bee8a791db7518642ad27d6e443382b",
+  "bnb_aave_borrow_and_trade": "2fff455821a93b602cc32837d3d40006c71d64a6c141779cf1680d6447099c5b",
+  "bnb_aave_borrow_and_trade_v3": "bd1ca9662b139d0f6b372274c9df2df16a5947e84a0cb5f237e6fdbee7ee9b66",
+  "bnb_aave_borrow_and_trade_v4": "42949ef1dca1bf22ea3f4d14b440b728e0f755a56d70199451571957933f2f32",
+  "bnb_aave_pancake_borrow_and_trade": "01e27356270f275344f686b24225e98d78bedd3dfd4b235613ccb75c02e76b46",
+  "bnb_morpho_curve_borrow_and_trade": "754e733c55f975a68c76bce0168cbcc0fbf437aecae24acd6dfdf9051ebec82c",
+  "compound_v3_arbitrum_lending": "153b0a529b3698714813b1a2e076caa8d33e55cd3d11592122ee0e96c16b839d",
+  "compound_v3_base_lending": "54f7fee670bc5a4fe9c4d5dd98ff7be08e196f5219dfcbb7921570e0844c8dfe",
+  "compound_v3_ethereum_lending": "54f7fee670bc5a4fe9c4d5dd98ff7be08e196f5219dfcbb7921570e0844c8dfe",
+  "compound_v3_optimism_lending": "153b0a529b3698714813b1a2e076caa8d33e55cd3d11592122ee0e96c16b839d",
+  "compound_v3_polygon_lending": "153b0a529b3698714813b1a2e076caa8d33e55cd3d11592122ee0e96c16b839d",
+  "ethereum_aave_pancake_borrow_and_trade": "01e27356270f275344f686b24225e98d78bedd3dfd4b235613ccb75c02e76b46",
+  "ethereum_aave_v4_borrow_and_trade": "97a927ec353ea7d40557e8f847b7fc717b2edc4e3dd6463078526870654c439d",
+  "ethereum_base_borrow_and_trade": "05793a7730c20a9b94ea8fed82eae72ff30a8fa2ed94d1957baf9a566e485605",
+  "ethereum_compound_curve_borrow_and_trade": "6ea6248d0beab706ad788228fcfe3fde7c04c90cb8fe35464af1f36e810b24fe",
+  "ethereum_morpho_curve_borrow_and_trade": "e74a79e3b1cecf9411aa876ce56a90cff7e437575fe9db0709f359fd04c56582",
+  "ethereum_spark_curve_borrow_and_trade": "7fb85a6753e19761eff959502ca1ae63fe2fb7aaa31f8f55bfde258d4e1dc42b",
+  "gmx_v2_arbitrum_collateral_path": "81d92cac31044a6f2d830f77f40f8ce5ba38aa2189d4e937009c37cac7a19e29",
+  "gmx_v2_avalanche_collateral_path": "81d92cac31044a6f2d830f77f40f8ce5ba38aa2189d4e937009c37cac7a19e29",
+  "morpho_blue_arbitrum_lending": "cd963ba1795d67da3dfdc07cda530b2a4563669bc35c2dc4a093b717c4769771",
+  "morpho_blue_avalanche_lending": "cd963ba1795d67da3dfdc07cda530b2a4563669bc35c2dc4a093b717c4769771",
+  "morpho_blue_base_lending": "9707843aae042a7ef33d909678543bdf31ceebea86dc363ba04c1bf717d1e011",
+  "morpho_blue_bnb_lending": "cd963ba1795d67da3dfdc07cda530b2a4563669bc35c2dc4a093b717c4769771",
+  "morpho_blue_ethereum_lending": "9707843aae042a7ef33d909678543bdf31ceebea86dc363ba04c1bf717d1e011",
+  "morpho_blue_optimism_lending": "cd963ba1795d67da3dfdc07cda530b2a4563669bc35c2dc4a093b717c4769771",
+  "morpho_blue_polygon_lending": "cd963ba1795d67da3dfdc07cda530b2a4563669bc35c2dc4a093b717c4769771",
+  "morpho_blue_robinhood_lending": "cd963ba1795d67da3dfdc07cda530b2a4563669bc35c2dc4a093b717c4769771",
+  "optimism_aave_borrow_and_trade": "71dac4e004871e905f3fe160d0fb9cb272e249666b7c901e175badec4e1c730f",
+  "optimism_aave_borrow_and_trade_v4": "ab7b2e068007af782a9664ab67fa65b9194cabf00793b92dff603d7547495afe",
+  "optimism_compound_curve_borrow_and_trade": "c15456ab9baf9d59e4fa834f049f82b55b34cf8431e9d7e9a775ee5983cdf7a6",
+  "optimism_morpho_curve_borrow_and_trade": "e74a79e3b1cecf9411aa876ce56a90cff7e437575fe9db0709f359fd04c56582",
+  "polygon_aave_borrow_and_trade": "2fff455821a93b602cc32837d3d40006c71d64a6c141779cf1680d6447099c5b",
+  "polygon_aave_borrow_and_trade_v3": "bd1ca9662b139d0f6b372274c9df2df16a5947e84a0cb5f237e6fdbee7ee9b66",
+  "polygon_aave_borrow_and_trade_v4": "1dd55b4ac61e21217c6e9d80eaef192c37277015e4d2495b9c8913b1faf8b8e9",
+  "polygon_morpho_curve_borrow_and_trade": "e74a79e3b1cecf9411aa876ce56a90cff7e437575fe9db0709f359fd04c56582",
+  "robinhood_morpho_borrow_and_trade_v3": "df62a79426db99a4551816220a9e57321d41e1ca85a5e16a9cfab7aa55795923",
+  "robinhood_morpho_borrow_and_trade_v4": "f6154a78ec6d5585996862ccdb41403b617b34d89666383d1225cee5ad77026a",
+  "robinhood_morpho_curve_borrow_and_trade": "e74a79e3b1cecf9411aa876ce56a90cff7e437575fe9db0709f359fd04c56582",
+  "sparklend_ethereum_lending": "9ec945377ba3f76dd70c23f675e186d41eee2a994cb09e0dff8d76240afbe71e"
+ },
+ "commit": "9db3d11f9dd35e1b811e701e5d8ac1ce57870c04",
+ "pairs": [
+  [
+   "\"\"\"Exercise bounded lending, partial exits, collateral control and durable cleanup.\"\"\"\n\nfrom typing import cast\n\n",
+   "\"\"\"Exercise lending, partial exits, collateral control and durable cleanup.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\n"
+  ],
+  [
+   "from almanak.connectors.aave_v3.models import Parameters\n\n\nclass State(StrategyState):\n",
+   "from almanak.connectors.aave_v3.models import Parameters\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"5\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "\ndef validate_collateral(collateral):\n    if not collateral.collateral or collateral.supply_limit < 10 or collateral.borrow_limit:\n        raise ValueError(\"collateral requires supply authority and no borrowing allocation\")\n\n\ndef validate_loan(loan):\n    if loan.supply_limit or loan.borrow_limit < 2:\n        raise ValueError(\"loan requires borrowing authority and no supply allocation\")\n\n\n",
+   "\ndef validate_collateral(collateral):\n    if not collateral.collateral or collateral.capital < 10 or collateral.borrow:\n        raise ValueError(\"collateral requires starting capital and no borrowing\")\n\n\ndef validate_loan(loan):\n    if loan.capital or not loan.borrow:\n        raise ValueError(\"loan requires borrowing and no starting capital\")\n\n\ndef borrow_amount(config, name: str) -> int:\n    \"\"\"`BORROW` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    return int(BORROW.scaleb(config.asset_metadata[asset].decimals))\n\n\n"
+  ],
+  [
+   "    phase = state(context).phase\n    if phase == 0:\n        return actions.supply(\"collateral\", config.allocation(\"collateral\").supply_limit)\n    if phase == 1:\n        return actions.set_collateral(\"collateral\", False)\n",
+   "    phase = state(context).phase\n    if phase == 0:\n        return actions.supply(\"collateral\", config.allocation(\"collateral\").capital)\n    if phase == 1:\n        return actions.set_collateral(\"collateral\", False)\n"
+  ],
+  [
+   "        return actions.set_collateral(\"collateral\", True)\n    if phase == 3:\n        return actions.borrow(\"loan\", config.allocation(\"loan\").borrow_limit)\n    return None\n\n",
+   "        return actions.set_collateral(\"collateral\", True)\n    if phase == 3:\n        return actions.borrow(\"loan\", borrow_amount(config, \"loan\"))\n    return None\n\n"
+  ],
+  [
+   "    phase = state(context).phase\n    if phase == 4:\n        return actions.repay_amount(\"loan\", config.allocation(\"loan\").borrow_limit // 2)\n    if phase == 5:\n        return actions.withdraw_amount(\n            \"collateral\", config.allocation(\"collateral\").supply_limit // 10\n        )\n    if phase == 6:\n        return actions.repay(\"loan\")\n",
+   "    phase = state(context).phase\n    if phase == 4:\n        return actions.repay_amount(\"loan\", borrow_amount(config, \"loan\") // 2)\n    if phase == 5:\n        return actions.withdraw_amount(\"collateral\", config.allocation(\"collateral\").capital // 10)\n    if phase == 6:\n        return actions.repay(\"loan\")\n"
+  ],
+  [
+   "\"\"\"Supply configured collateral, borrow, hold, repay and withdraw independently by chain.\"\"\"\n\nfrom typing import cast\n\n",
+   "\"\"\"Supply configured collateral, borrow, hold, repay and withdraw independently by chain.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\n"
+  ],
+  [
+   "from almanak.work import ObservationScope\n\n\nclass State(StrategyState):\n",
+   "from almanak.work import ObservationScope\n\n# What each debt borrows, in its asset's units. The configuration names the debt's\n# reserve only; the amount is this strategy's decision.\nBORROW = Decimal(\"5\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "\n\ndef validate_config(config: LendingParameters) -> None:\n    if not config.debts:\n        raise ValueError(\"this reference requires explicit collateral-backed debt allocations\")\n\n\n",
+   "\n\ndef borrow_amount(config, name: str) -> int:\n    \"\"\"`BORROW` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    return int(BORROW.scaleb(config.asset_metadata[asset].decimals))\n\n\ndef validate_config(config: LendingParameters) -> None:\n    if not config.debts:\n        raise ValueError(\"this reference requires explicit collateral-backed debt allocations\")\n    for allocation in config.allocations:\n        if allocation.capital <= 0:\n            raise ValueError(\n                f\"{allocation.name}: this strategy supplies its capital, set it above 0\"\n            )\n\n\n"
+  ],
+  [
+   "                context,\n                memory=context.memory,\n                intent=context.actions.borrow(debt.name, debt.amount),\n            )\n    return scoped_decision(context, memory=context.memory)\n",
+   "                context,\n                memory=context.memory,\n                intent=context.actions.borrow(debt.name, borrow_amount(context.config, debt.name)),\n            )\n    return scoped_decision(context, memory=context.memory)\n"
+  ],
+  [
+   "        return close_allocation(context, allocation, observed, owned[name])\n    if started is None:\n        return context.actions.supply(name, allocation.amount)\n    return None\n\n",
+   "        return close_allocation(context, allocation, observed, owned[name])\n    if started is None:\n        return context.actions.supply(name, allocation.capital)\n    return None\n\n"
+  ],
+  [
+   "\"\"\"Supply named WETH positions once, with optional timed withdrawal.\"\"\"\n\nfrom typing import cast\n\n",
+   "\"\"\"Supply named WETH positions once, with optional timed withdrawal.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\n"
+  ],
+  [
+   "from almanak.lending_intents import BorrowIntent, RepayIntent, SupplyIntent\n\n\nclass State(StrategyState):\n",
+   "from almanak.lending_intents import BorrowIntent, RepayIntent, SupplyIntent\n\n# What each debt borrows, in its asset's units. The configuration names the debt's\n# reserve only; the amount is this strategy's decision.\nBORROW = Decimal(\"5\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "\n\ndef validate_config(config: LendingParameters) -> None:\n    for allocation in config.allocations:\n",
+   "\n\ndef borrow_amount(config, name: str) -> int:\n    \"\"\"`BORROW` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    return int(BORROW.scaleb(config.asset_metadata[asset].decimals))\n\n\ndef validate_config(config: LendingParameters) -> None:\n    for allocation in config.allocations:\n"
+  ],
+  [
+   "        if allocation.reserve.asset != weth:\n            raise ValueError(f\"{allocation.name}: this strategy requires the WETH reserve\")\n    for debt in config.debts:\n        usdc = AssetType(\n",
+   "        if allocation.reserve.asset != weth:\n            raise ValueError(f\"{allocation.name}: this strategy requires the WETH reserve\")\n        if allocation.capital <= 0:\n            raise ValueError(\n                f\"{allocation.name}: this strategy supplies its capital, set it above 0\"\n            )\n    for debt in config.debts:\n        usdc = AssetType(\n"
+  ],
+  [
+   "    for debt in context.config.debts:\n        if debt.name in observations and borrowing_due(context, debt, observations, supplied_at):\n            return context.decision(intent=context.actions.borrow(debt.name, debt.amount))\n    return context.decision()\n\n",
+   "    for debt in context.config.debts:\n        if debt.name in observations and borrowing_due(context, debt, observations, supplied_at):\n            return context.decision(\n                intent=context.actions.borrow(debt.name, borrow_amount(context.config, debt.name))\n            )\n    return context.decision()\n\n"
+  ],
+  [
+   "\"\"\"Borrow against WETH, trade part of the proceeds, then reverse and repay.\"\"\"\n\nfrom typing import cast\n\n",
+   "\"\"\"Borrow against WETH, trade part of the proceeds, then reverse and repay.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\n"
+  ],
+  [
+   "from almanak.api import StrategyState, declared\n\n\nclass State(StrategyState):\n",
+   "from almanak.api import StrategyState, declared\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"5\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "\n\ndef validate_config(config):\n    if {a.name for a in config.positions} != {\"collateral\", \"loan\", \"trade\"}:\n",
+   "\n\ndef borrow_amount(config, name: str) -> int:\n    \"\"\"`BORROW` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    return int(BORROW.scaleb(config.asset_metadata[asset].decimals))\n\n\ndef validate_config(config):\n    if {a.name for a in config.positions} != {\"collateral\", \"loan\", \"trade\"}:\n"
+  ],
+  [
+   "        raise ValueError(\"borrowing and trading must use the same named fund\")\n    validate_lending_pair(collateral, loan)\n    validate_trade_pair(collateral, loan, trade)\n    validate_initial_cash(config, collateral)\n\n",
+   "        raise ValueError(\"borrowing and trading must use the same named fund\")\n    validate_lending_pair(collateral, loan)\n    validate_trade_pair(config, collateral, loan, trade)\n    validate_initial_cash(config, collateral)\n\n"
+  ],
+  [
+   "    if (collateral.chain, collateral.reserve.pool) != (loan.chain, loan.reserve.pool):\n        raise ValueError(\"collateral and debt must use the same chain and Pool\")\n    if not collateral.collateral or collateral.borrow_limit or loan.supply_limit:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(collateral, loan, trade):\n    validate_trade_scope(collateral, loan, trade)\n    if (\n        trade.capital.asset != loan.reserve.asset\n        or not 0 < trade.capital.amount < loan.borrow_limit\n    ):\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n",
+   "    if (collateral.chain, collateral.reserve.pool) != (loan.chain, loan.reserve.pool):\n        raise ValueError(\"collateral and debt must use the same chain and Pool\")\n    if not collateral.collateral or collateral.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(config, collateral, loan, trade):\n    validate_trade_scope(collateral, loan, trade)\n    if trade.capital.asset != loan.reserve.asset or not 0 < trade.capital.amount < borrow_amount(\n        config, loan.name\n    ):\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n"
+  ],
+  [
+   "        == (collateral.account, collateral.reserve.asset)\n    ]\n    if amounts != [collateral.supply_limit]:\n        raise ValueError(\"this reference supplies all initial collateral-asset cash before trading\")\n\n",
+   "        == (collateral.account, collateral.reserve.asset)\n    ]\n    if amounts != [collateral.capital]:\n        raise ValueError(\"this reference supplies all initial collateral-asset cash before trading\")\n\n"
+  ],
+  [
+   "    phase = state(context).phase\n    if phase == 0:\n        return context.actions.supply(\n            \"collateral\", context.config.allocation(\"collateral\").supply_limit\n        )\n    if phase == 1:\n        return context.actions.borrow(\"loan\", context.config.allocation(\"loan\").borrow_limit)\n    if phase == 2:\n        return context.actions.swap(\"trade\")\n",
+   "    phase = state(context).phase\n    if phase == 0:\n        return context.actions.supply(\"collateral\", context.config.allocation(\"collateral\").capital)\n    if phase == 1:\n        return context.actions.borrow(\"loan\", borrow_amount(context.config, \"loan\"))\n    if phase == 2:\n        return context.actions.swap(\"trade\")\n"
+  ],
+  [
+   "\"\"\"Supply collateral, borrow, trade through GMX, then return, repay and withdraw.\"\"\"\n\nfrom typing import cast\n\nfrom almanak.api import AssetAmount, StrategyState, declared\n\n\nclass State(StrategyState):\n",
+   "\"\"\"Supply collateral, borrow, trade through GMX, then return, repay and withdraw.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\nfrom almanak.api import AssetAmount, StrategyState, declared\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"0.001\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "\n\ndef validate_config(config):\n    if {value.name for value in config.positions} != {\"collateral\", \"loan\", \"trade\"}:\n",
+   "\n\ndef borrow_amount(config, name: str) -> int:\n    \"\"\"`BORROW` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    return int(BORROW.scaleb(config.asset_metadata[asset].decimals))\n\n\ndef validate_config(config):\n    if {value.name for value in config.positions} != {\"collateral\", \"loan\", \"trade\"}:\n"
+  ],
+  [
+   "    validate_scope(config, collateral, loan)\n    validate_lending(collateral, loan)\n    validate_trade(collateral, loan, trade)\n\n\n",
+   "    validate_scope(config, collateral, loan)\n    validate_lending(collateral, loan)\n    validate_trade(config, collateral, loan, trade)\n\n\n"
+  ],
+  [
+   "\ndef validate_lending(collateral, loan):\n    if not collateral.collateral or collateral.borrow_limit or loan.supply_limit:\n        raise ValueError(\"collateral supplies and enables collateral; the loan only borrows\")\n\n\ndef validate_trade(collateral, loan, trade):\n    if (\n        trade.entry_amount.asset != loan.reserve.asset\n        or not 0 < trade.entry_amount.amount < loan.borrow_limit\n    ):\n        raise ValueError(\"GMX entry must spend only part of the borrowed asset\")\n",
+   "\ndef validate_lending(collateral, loan):\n    if not collateral.collateral or collateral.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"collateral supplies and enables collateral; the loan only borrows\")\n\n\ndef validate_trade(config, collateral, loan, trade):\n    if (\n        trade.entry_amount.asset != loan.reserve.asset\n        or not 0 < trade.entry_amount.amount < borrow_amount(config, loan.name)\n    ):\n        raise ValueError(\"GMX entry must spend only part of the borrowed asset\")\n"
+  ],
+  [
+   "    phase = state(context).phase\n    if phase == 0:\n        return context.actions.supply(\n            \"collateral\", context.config.allocation(\"collateral\").supply_limit\n        )\n    if phase == 1:\n        return context.actions.borrow(\"loan\", context.config.allocation(\"loan\").borrow_limit)\n    if phase == 2:\n        trade = context.config.allocation(\"trade\")\n",
+   "    phase = state(context).phase\n    if phase == 0:\n        return context.actions.supply(\"collateral\", context.config.allocation(\"collateral\").capital)\n    if phase == 1:\n        return context.actions.borrow(\"loan\", borrow_amount(context.config, \"loan\"))\n    if phase == 2:\n        trade = context.config.allocation(\"trade\")\n"
+  ],
+  [
+   "\n\ndef validate_config(config):\n    validate_allocation_names(config)\n",
+   "\n\ndef borrow_amount(config, name: str) -> int:\n    \"\"\"`BORROW` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    return int(BORROW.scaleb(config.asset_metadata[asset].decimals))\n\n\ndef validate_config(config):\n    validate_allocation_names(config)\n"
+  ],
+  [
+   "    if (collateral.chain, collateral.reserve.pool) != (loan.chain, loan.reserve.pool):\n        raise ValueError(\"collateral and debt must use the same chain and Pool\")\n    if not collateral.collateral or collateral.borrow_limit or loan.supply_limit:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(collateral, loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    validate_trade_capital(loan, trade)\n    if {trade.pool.currency0, trade.pool.currency1} != {\n        collateral.reserve.asset,\n",
+   "    if (collateral.chain, collateral.reserve.pool) != (loan.chain, loan.reserve.pool):\n        raise ValueError(\"collateral and debt must use the same chain and Pool\")\n    if not collateral.collateral or collateral.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(config, collateral, loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    validate_trade_capital(config, loan, trade)\n    if {trade.pool.currency0, trade.pool.currency1} != {\n        collateral.reserve.asset,\n"
+  ],
+  [
+   "\n\ndef validate_trade_capital(loan, trade):\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= loan.borrow_limit:\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n\n",
+   "\n\ndef validate_trade_capital(config, loan, trade):\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= borrow_amount(\n        config, loan.name\n    ):\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n\n"
+  ],
+  [
+   "    if (collateral.chain, collateral.reserve.pool) != (loan.chain, loan.reserve.pool):\n        raise ValueError(\"collateral and debt must use the same chain and Pool\")\n    if not collateral.collateral or collateral.borrow_limit or loan.supply_limit:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(collateral, loan, trade):\n    validate_trade_scope(collateral, loan, trade)\n    capital = funding_capital(trade)\n    if trade.funding_asset != loan.reserve.asset or not 0 < capital < loan.borrow_limit:\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n\n",
+   "    if (collateral.chain, collateral.reserve.pool) != (loan.chain, loan.reserve.pool):\n        raise ValueError(\"collateral and debt must use the same chain and Pool\")\n    if not collateral.collateral or collateral.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(config, collateral, loan, trade):\n    validate_trade_scope(collateral, loan, trade)\n    capital = funding_capital(trade)\n    if trade.funding_asset != loan.reserve.asset or not 0 < capital < borrow_amount(\n        config, loan.name\n    ):\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n\n"
+  ],
+  [
+   "\n\ndef validate_config(config):\n    collateral, loan, trade = required_allocations(config)\n    validate_common_fund(config.positions)\n    validate_lending_pair(collateral, loan)\n    validate_trade_pair(collateral, loan, trade)\n    validate_initial_cash(config, collateral)\n\n",
+   "\n\ndef borrow_amount(config, name: str) -> int:\n    \"\"\"`BORROW` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    return int(BORROW.scaleb(config.asset_metadata[asset].decimals))\n\n\ndef validate_config(config):\n    collateral, loan, trade = required_allocations(config)\n    validate_common_fund(config.positions)\n    validate_lending_pair(collateral, loan)\n    validate_trade_pair(config, collateral, loan, trade)\n    validate_initial_cash(config, collateral)\n\n"
+  ],
+  [
+   "    if (collateral.chain, collateral.reserve.pool) != (loan.chain, loan.reserve.pool):\n        raise ValueError(\"collateral and debt must use the same chain and Pool\")\n    if not collateral.collateral or collateral.borrow_limit or loan.supply_limit:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(collateral, loan, trade):\n    validate_trade_scope(collateral, loan, trade)\n    validate_trade_capital(collateral, loan, trade)\n    validate_trade_assets(collateral, loan, trade)\n\n",
+   "    if (collateral.chain, collateral.reserve.pool) != (loan.chain, loan.reserve.pool):\n        raise ValueError(\"collateral and debt must use the same chain and Pool\")\n    if not collateral.collateral or collateral.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(config, collateral, loan, trade):\n    validate_trade_scope(collateral, loan, trade)\n    validate_trade_capital(config, collateral, loan, trade)\n    validate_trade_assets(collateral, loan, trade)\n\n"
+  ],
+  [
+   "\n\ndef validate_trade_capital(collateral, loan, trade):\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= loan.borrow_limit:\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n\n",
+   "\n\ndef validate_trade_capital(config, collateral, loan, trade):\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= borrow_amount(\n        config, loan.name\n    ):\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n\n"
+  ],
+  [
+   "from almanak.api import StrategyState, declared\n\n\nclass State(StrategyState):\n",
+   "from almanak.api import StrategyState, declared\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"200\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "    validate_fund(config)\n    validate_lending_pair(collateral, loan)\n    validate_trade_pair(collateral, loan, trade)\n    validate_initial_cash(config, collateral)\n\n",
+   "    validate_fund(config)\n    validate_lending_pair(collateral, loan)\n    validate_trade_pair(config, collateral, loan, trade)\n    validate_initial_cash(config, collateral)\n\n"
+  ],
+  [
+   "    if collateral.reserve.market != loan.reserve.market:\n        raise ValueError(\"collateral and debt must use the same explicit lending market\")\n    if collateral.borrow_limit or loan.supply_limit:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(collateral, loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= loan.borrow_limit:\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n    validate_trade_assets(collateral, loan, trade)\n",
+   "    if collateral.reserve.market != loan.reserve.market:\n        raise ValueError(\"collateral and debt must use the same explicit lending market\")\n    if collateral.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(config, collateral, loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= borrow_amount(\n        config, loan.name\n    ):\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n    validate_trade_assets(collateral, loan, trade)\n"
+  ],
+  [
+   "\"\"\"Supply collateral, borrow, trade through GMX, then return, repay and withdraw.\"\"\"\n\nfrom typing import cast\n\nfrom almanak.api import AssetAmount, StrategyState, declared\n\n\nclass State(StrategyState):\n",
+   "\"\"\"Supply collateral, borrow, trade through GMX, then return, repay and withdraw.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\nfrom almanak.api import AssetAmount, StrategyState, declared\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"1\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "\"\"\"Borrow against WAVAX, trade part of the proceeds, then reverse and repay.\"\"\"\n\nfrom typing import cast\n\n",
+   "\"\"\"Borrow against WAVAX, trade part of the proceeds, then reverse and repay.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\n"
+  ],
+  [
+   "from almanak.api import StrategyState, declared\n\n\nclass State(StrategyState):\n",
+   "from almanak.api import StrategyState, declared\n\n# What each debt borrows, in its asset's units. The configuration names the debt's\n# reserve only; the amount is this strategy's decision.\nBORROW = Decimal(\"5\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "        raise ValueError(\"borrowing and trading must use the same named fund\")\n    validate_lending_pair(collateral, loan)\n    validate_trade_pair(loan, trade)\n    validate_initial_cash(config, collateral)\n\n",
+   "        raise ValueError(\"borrowing and trading must use the same named fund\")\n    validate_lending_pair(collateral, loan)\n    validate_trade_pair(config, loan, trade)\n    validate_initial_cash(config, collateral)\n\n"
+  ],
+  [
+   "\n\ndef validate_trade_pair(loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= loan.amount:\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n    if loan.reserve.asset not in {trade.pool.currency0, trade.pool.currency1}:\n",
+   "\n\ndef validate_trade_pair(config, loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= borrow_amount(\n        config, loan.name\n    ):\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n    if loan.reserve.asset not in {trade.pool.currency0, trade.pool.currency1}:\n"
+  ],
+  [
+   "        == (collateral.account, collateral.reserve.asset)\n    ]\n    if amounts != [collateral.amount]:\n        raise ValueError(\"this reference supplies all initial collateral-asset cash before trading\")\n    trade = config.allocation(\"trade\")\n",
+   "        == (collateral.account, collateral.reserve.asset)\n    ]\n    if amounts != [collateral.capital]:\n        raise ValueError(\"this reference supplies all initial collateral-asset cash before trading\")\n    trade = config.allocation(\"trade\")\n"
+  ],
+  [
+   "    phase = state(context).phase\n    if phase == 0:\n        return context.actions.supply(\"collateral\", context.config.allocation(\"collateral\").amount)\n    if phase == 1:\n        return context.actions.borrow(\"loan\", context.config.allocation(\"loan\").amount)\n    if phase == 2:\n        return context.actions.swap(\"trade\")\n",
+   "    phase = state(context).phase\n    if phase == 0:\n        return context.actions.supply(\"collateral\", context.config.allocation(\"collateral\").capital)\n    if phase == 1:\n        return context.actions.borrow(\"loan\", borrow_amount(context.config, \"loan\"))\n    if phase == 2:\n        return context.actions.swap(\"trade\")\n"
+  ],
+  [
+   "\"\"\"Configured Morpho borrowing and V4 trading lifecycle on one Avalanche fund.\"\"\"\n\nfrom typing import cast\n\n",
+   "\"\"\"Configured Morpho borrowing and V4 trading lifecycle on one Avalanche fund.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\n"
+  ],
+  [
+   "from almanak.api import StrategyState, declared\n\n\nclass State(StrategyState):\n",
+   "from almanak.api import StrategyState, declared\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"0.1\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "        raise ValueError(\"borrowing and trading must use the same named fund\")\n    validate_lending_pair(collateral, loan)\n    validate_trade_pair(collateral, loan, trade)\n    validate_initial_cash(config, collateral, trade)\n\n",
+   "        raise ValueError(\"borrowing and trading must use the same named fund\")\n    validate_lending_pair(collateral, loan)\n    validate_trade_pair(config, collateral, loan, trade)\n    validate_initial_cash(config, collateral, trade)\n\n"
+  ],
+  [
+   "    if collateral.reserve.is_loan or not loan.reserve.is_loan:\n        raise ValueError(\"collateral uses the market collateral asset; debt uses its loan asset\")\n    if collateral.borrow_limit or loan.supply_limit:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(collateral, loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= loan.borrow_limit:\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n    currencies = {trade.pool.currency0, trade.pool.currency1}\n",
+   "    if collateral.reserve.is_loan or not loan.reserve.is_loan:\n        raise ValueError(\"collateral uses the market collateral asset; debt uses its loan asset\")\n    if collateral.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(config, collateral, loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= borrow_amount(\n        config, loan.name\n    ):\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n    currencies = {trade.pool.currency0, trade.pool.currency1}\n"
+  ],
+  [
+   "        == (collateral.account, collateral.reserve.asset)\n    ]\n    if amounts != [collateral.supply_limit]:\n        raise ValueError(\"this reference supplies all initial collateral-asset cash before trading\")\n    counter = [\n",
+   "        == (collateral.account, collateral.reserve.asset)\n    ]\n    if amounts != [collateral.capital]:\n        raise ValueError(\"this reference supplies all initial collateral-asset cash before trading\")\n    counter = [\n"
+  ],
+  [
+   "    if (collateral.chain, collateral.reserve.pool) != (loan.chain, loan.reserve.pool):\n        raise ValueError(\"collateral and debt must use the same chain and Pool\")\n    if not collateral.collateral or collateral.borrow_limit or loan.supply_limit:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(collateral, loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= loan.borrow_limit:\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n    if {trade.pool.currency0, trade.pool.currency1} != {\n",
+   "    if (collateral.chain, collateral.reserve.pool) != (loan.chain, loan.reserve.pool):\n        raise ValueError(\"collateral and debt must use the same chain and Pool\")\n    if not collateral.collateral or collateral.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(config, collateral, loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= borrow_amount(\n        config, loan.name\n    ):\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n    if {trade.pool.currency0, trade.pool.currency1} != {\n"
+  ],
+  [
+   "    if collateral.reserve.market != loan.reserve.market:\n        raise ValueError(\"collateral and debt must use the same explicit lending market\")\n    if collateral.borrow_limit or loan.supply_limit:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(collateral, loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= loan.borrow_limit:\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n    if {trade.pool.currency0, trade.pool.currency1} != {\n",
+   "    if collateral.reserve.market != loan.reserve.market:\n        raise ValueError(\"collateral and debt must use the same explicit lending market\")\n    if collateral.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(config, collateral, loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= borrow_amount(\n        config, loan.name\n    ):\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n    if {trade.pool.currency0, trade.pool.currency1} != {\n"
+  ],
+  [
+   "\"\"\"Borrow against configured collateral, trade part of the proceeds, then repay.\"\"\"\n\nfrom typing import cast\n\n",
+   "\"\"\"Borrow against configured collateral, trade part of the proceeds, then repay.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\n"
+  ],
+  [
+   "\"\"\"Supply lender liquidity, borrow against WBNB, trade proceeds, then close both funds.\"\"\"\n\nfrom typing import cast\n\n",
+   "\"\"\"Supply lender liquidity, borrow against WBNB, trade proceeds, then close both funds.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\n"
+  ],
+  [
+   "\n\ndef validate_config(config):\n    if {a.name for a in config.positions} != {\"earn\", \"collateral\", \"loan\", \"trade\"}:\n",
+   "\n\ndef borrow_amount(config, name: str) -> int:\n    \"\"\"`BORROW` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    return int(BORROW.scaleb(config.asset_metadata[asset].decimals))\n\n\ndef validate_config(config):\n    if {a.name for a in config.positions} != {\"earn\", \"collateral\", \"loan\", \"trade\"}:\n"
+  ],
+  [
+   "        raise ValueError(\"borrowing and trading must use the same named fund\")\n    validate_lending_pair(collateral, loan)\n    validate_trade_pair(collateral, loan, trade)\n    validate_initial_cash(config, collateral)\n    validate_lender(config, loan)\n",
+   "        raise ValueError(\"borrowing and trading must use the same named fund\")\n    validate_lending_pair(collateral, loan)\n    validate_trade_pair(config, collateral, loan, trade)\n    validate_initial_cash(config, collateral)\n    validate_lender(config, loan)\n"
+  ],
+  [
+   "    if collateral.reserve.market != loan.reserve.market:\n        raise ValueError(\"collateral and debt must use the same explicit lending market\")\n    if collateral.borrow_limit or loan.supply_limit:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(collateral, loan, trade):\n    validate_trade_scope(collateral, loan, trade)\n    capital = funding_capital(trade)\n    if trade.funding_asset != loan.reserve.asset or not 0 < capital < loan.borrow_limit:\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n\n",
+   "    if collateral.reserve.market != loan.reserve.market:\n        raise ValueError(\"collateral and debt must use the same explicit lending market\")\n    if collateral.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(config, collateral, loan, trade):\n    validate_trade_scope(collateral, loan, trade)\n    capital = funding_capital(trade)\n    if trade.funding_asset != loan.reserve.asset or not 0 < capital < borrow_amount(\n        config, loan.name\n    ):\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n\n"
+  ],
+  [
+   "    if earn.account == loan.account or earn.reserve != loan.reserve:\n        raise ValueError(\"the lender must use a separate fund in the same loan market\")\n    if earn.supply_limit <= loan.borrow_limit or earn.borrow_limit:\n        raise ValueError(\"explicit lender supply must cover the requested loan\")\n\n",
+   "    if earn.account == loan.account or earn.reserve != loan.reserve:\n        raise ValueError(\"the lender must use a separate fund in the same loan market\")\n    if earn.capital <= borrow_amount(config, loan.name) or earn.borrow:\n        raise ValueError(\"explicit lender supply must cover the requested loan\")\n\n"
+  ],
+  [
+   "    if phase < 2:\n        name = (\"earn\", \"collateral\")[phase]\n        return context.actions.supply(name, context.config.allocation(name).supply_limit)\n    if phase == 2:\n        return context.actions.borrow(\"loan\", context.config.allocation(\"loan\").borrow_limit)\n    if phase == 3:\n        return context.actions.swap(\"trade\")\n",
+   "    if phase < 2:\n        name = (\"earn\", \"collateral\")[phase]\n        return context.actions.supply(name, context.config.allocation(name).capital)\n    if phase == 2:\n        return context.actions.borrow(\"loan\", borrow_amount(context.config, \"loan\"))\n    if phase == 3:\n        return context.actions.swap(\"trade\")\n"
+  ],
+  [
+   "\"\"\"Earn base interest independently while borrowing against another fund's collateral.\"\"\"\n\nfrom typing import cast\n\n",
+   "\"\"\"Earn base interest independently while borrowing against another fund's collateral.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\n"
+  ],
+  [
+   "from almanak.connectors.compound_v3.observations import owned\n\n\nclass State(StrategyState):\n",
+   "from almanak.connectors.compound_v3.observations import owned\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"200\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "\ndef validate_limits(earn, collateral, loan):\n    if earn.borrow_limit or loan.supply_limit:\n        raise ValueError(\"reference branches require separate nonzero supply and borrowing limits\")\n    validate_minimum_limits(earn, collateral, loan)\n\n\ndef validate_minimum_limits(earn, collateral, loan):\n    if earn.supply_limit < 10 or collateral.supply_limit < 10 or loan.borrow_limit < 2:\n        raise ValueError(\"reference branches require separate nonzero supply and borrowing limits\")\n\n\n",
+   "\ndef validate_limits(earn, collateral, loan):\n    if earn.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"reference branches require separate supply and borrowing allocations\")\n    validate_minimum_limits(earn, collateral, loan)\n\n\ndef validate_minimum_limits(earn, collateral, loan):\n    if earn.capital < 10 or collateral.capital < 10:\n        raise ValueError(\"reference branches require nonzero starting capital to supply\")\n\n\ndef borrow_amount(config, name: str) -> int:\n    \"\"\"`BORROW` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    return int(BORROW.scaleb(config.asset_metadata[asset].decimals))\n\n\n"
+  ],
+  [
+   "    phase = state(context).phase\n    if phase == 0:\n        return actions.supply(\"earn\", config.allocation(\"earn\").supply_limit)\n    if phase == 1:\n        return actions.supply(\"collateral\", config.allocation(\"collateral\").supply_limit)\n    if phase == 2:\n        return actions.borrow(\"loan\", config.allocation(\"loan\").borrow_limit)\n    return exit_action(context)\n\n",
+   "    phase = state(context).phase\n    if phase == 0:\n        return actions.supply(\"earn\", config.allocation(\"earn\").capital)\n    if phase == 1:\n        return actions.supply(\"collateral\", config.allocation(\"collateral\").capital)\n    if phase == 2:\n        return actions.borrow(\"loan\", borrow_amount(config, \"loan\"))\n    return exit_action(context)\n\n"
+  ],
+  [
+   "    phase = state(context).phase\n    if phase == 3:\n        return actions.repay_amount(\"loan\", config.allocation(\"loan\").borrow_limit // 2)\n    if phase == 4:\n        return actions.withdraw_amount(\n            \"collateral\", config.allocation(\"collateral\").supply_limit // 10\n        )\n    if phase == 5:\n        return actions.withdraw_amount(\"earn\", config.allocation(\"earn\").supply_limit // 10)\n    return full_exit_action(context)\n\n",
+   "    phase = state(context).phase\n    if phase == 3:\n        return actions.repay_amount(\"loan\", borrow_amount(config, \"loan\") // 2)\n    if phase == 4:\n        return actions.withdraw_amount(\"collateral\", config.allocation(\"collateral\").capital // 10)\n    if phase == 5:\n        return actions.withdraw_amount(\"earn\", config.allocation(\"earn\").capital // 10)\n    return full_exit_action(context)\n\n"
+  ],
+  [
+   "        raise ValueError(\"this reference uses one explicitly configured Comet market\")\n    if (\n        earn.borrow_limit\n        or loan.supply_limit\n        or earn.supply_limit < 10\n        or collateral.supply_limit < 10\n        or loan.borrow_limit < 2\n    ):\n        raise ValueError(\"reference branches require separate nonzero supply and borrowing limits\")\n\n\n",
+   "        raise ValueError(\"this reference uses one explicitly configured Comet market\")\n    if (\n        earn.borrow\n        or not loan.borrow\n        or loan.capital\n        or earn.capital < 10\n        or collateral.capital < 10\n    ):\n        raise ValueError(\"reference branches require separate supply capital and borrowing\")\n\n\ndef borrow_amount(config, name: str) -> int:\n    \"\"\"`BORROW` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    return int(BORROW.scaleb(config.asset_metadata[asset].decimals))\n\n\n"
+  ],
+  [
+   "    phase = state(context).phase\n    if phase == 3:\n        return actions.repay_amount(\"loan\", config.allocation(\"loan\").borrow_limit // 2)\n    if phase == 4:\n        return actions.withdraw_amount(\n            \"collateral\", config.allocation(\"collateral\").supply_limit // 10\n        )\n    if phase == 5:\n        return actions.withdraw_amount(\"earn\", config.allocation(\"earn\").supply_limit // 10)\n    if phase == 6:\n        return actions.repay(\"loan\")\n",
+   "    phase = state(context).phase\n    if phase == 3:\n        return actions.repay_amount(\"loan\", borrow_amount(config, \"loan\") // 2)\n    if phase == 4:\n        return actions.withdraw_amount(\"collateral\", config.allocation(\"collateral\").capital // 10)\n    if phase == 5:\n        return actions.withdraw_amount(\"earn\", config.allocation(\"earn\").capital // 10)\n    if phase == 6:\n        return actions.repay(\"loan\")\n"
+  ],
+  [
+   "\n\ndef validate_trade_pair(collateral, loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= loan.amount:\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n    if {trade.pool.currency0, trade.pool.currency1} != {\n",
+   "\n\ndef validate_trade_pair(config, collateral, loan, trade):\n    if trade.chain != loan.chain or trade.range is not None:\n        raise ValueError(\"this reference trades on the lending chain without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= borrow_amount(\n        config, loan.name\n    ):\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n    if {trade.pool.currency0, trade.pool.currency1} != {\n"
+  ],
+  [
+   "        == (collateral.account, collateral.reserve.asset)\n    ]\n    if amounts != [collateral.amount]:\n        raise ValueError(\"this reference supplies all initial collateral-asset cash before trading\")\n\n",
+   "        == (collateral.account, collateral.reserve.asset)\n    ]\n    if amounts != [collateral.capital]:\n        raise ValueError(\"this reference supplies all initial collateral-asset cash before trading\")\n\n"
+  ],
+  [
+   "\"\"\"Borrow and trade independently in each explicitly configured fund and chain.\"\"\"\n\nfrom typing import cast\n\n",
+   "\"\"\"Borrow and trade independently in each explicitly configured fund and chain.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\n"
+  ],
+  [
+   "from almanak.connectors.uniswap_v3.models import Allocation as ExchangeAllocation\n\n\nclass State(StrategyState):\n",
+   "from almanak.connectors.uniswap_v3.models import Allocation as ExchangeAllocation\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"5\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "    if (len(lending), len(trading)) != (2, 1):\n        raise ValueError(\"each fund requires two lending allocations and one trading allocation\")\n    collateral = unique_lending_role(lending, \"supply_limit\")\n    loan = unique_lending_role(lending, \"borrow_limit\")\n    if collateral == loan:\n        raise ValueError(\"each fund requires distinct collateral and borrowed assets\")\n",
+   "    if (len(lending), len(trading)) != (2, 1):\n        raise ValueError(\"each fund requires two lending allocations and one trading allocation\")\n    collateral = unique_lending_role(lending, \"capital\")\n    loan = unique_lending_role(lending, \"borrow\")\n    if collateral == loan:\n        raise ValueError(\"each fund requires distinct collateral and borrowed assets\")\n"
+  ],
+  [
+   "\n\ndef validate_config(config):\n    if len({a.chain for a in config.positions}) < 2:\n",
+   "\n\ndef borrow_amount(config, name: str) -> int:\n    \"\"\"`BORROW` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    return int(BORROW.scaleb(config.asset_metadata[asset].decimals))\n\n\ndef validate_config(config):\n    if len({a.chain for a in config.positions}) < 2:\n"
+  ],
+  [
+   "    for account in accounts(config):\n        collateral, loan, trade = group(config, account)\n        validate_market_pair(collateral, loan, trade)\n        validate_author_cash(config, collateral)\n\n\ndef validate_market_pair(collateral, loan, trade):\n    if len({a.chain for a in (collateral, loan, trade)}) != 1:\n        raise ValueError(\"each fund's lending and trading must use its explicit chain\")\n",
+   "    for account in accounts(config):\n        collateral, loan, trade = group(config, account)\n        validate_market_pair(config, collateral, loan, trade)\n        validate_author_cash(config, collateral)\n\n\ndef validate_market_pair(config, collateral, loan, trade):\n    if len({a.chain for a in (collateral, loan, trade)}) != 1:\n        raise ValueError(\"each fund's lending and trading must use its explicit chain\")\n"
+  ],
+  [
+   "        raise ValueError(\"collateral and debt must share the configured Pool\")\n    validate_lending(collateral, loan)\n    validate_trade(collateral, loan, trade)\n\n\ndef validate_lending(collateral, loan):\n    if not collateral.collateral or collateral.borrow_limit or loan.supply_limit:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade(collateral, loan, trade):\n    if trade.range is not None:\n        raise ValueError(\"this reference trades without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= loan.borrow_limit:\n        raise ValueError(\"trade capital must consume only part of borrowed proceeds\")\n    if {trade.pool.currency0, trade.pool.currency1} != {\n",
+   "        raise ValueError(\"collateral and debt must share the configured Pool\")\n    validate_lending(collateral, loan)\n    validate_trade(config, collateral, loan, trade)\n\n\ndef validate_lending(collateral, loan):\n    if not collateral.collateral or collateral.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade(config, collateral, loan, trade):\n    if trade.range is not None:\n        raise ValueError(\"this reference trades without opening liquidity\")\n    if trade.capital.asset != loan.reserve.asset or trade.capital.amount >= borrow_amount(\n        config, loan.name\n    ):\n        raise ValueError(\"trade capital must consume only part of borrowed proceeds\")\n    if {trade.pool.currency0, trade.pool.currency1} != {\n"
+  ],
+  [
+   "        if (b.key.account, b.key.asset) == (collateral.account, collateral.reserve.asset)\n    ]\n    if amounts != [collateral.supply_limit]:\n        raise ValueError(\"each fund supplies all its initial collateral-asset cash before trading\")\n\n",
+   "        if (b.key.account, b.key.asset) == (collateral.account, collateral.reserve.asset)\n    ]\n    if amounts != [collateral.capital]:\n        raise ValueError(\"each fund supplies all its initial collateral-asset cash before trading\")\n\n"
+  ],
+  [
+   "    phase = state(context).phases.get(account, 0)\n    if phase == 0:\n        return context.actions.supply(collateral.name, collateral.supply_limit)\n    if phase == 1:\n        return context.actions.borrow(loan.name, loan.borrow_limit)\n    if phase == 2:\n        return context.actions.swap(trade.name)\n",
+   "    phase = state(context).phases.get(account, 0)\n    if phase == 0:\n        return context.actions.supply(collateral.name, collateral.capital)\n    if phase == 1:\n        return context.actions.borrow(loan.name, borrow_amount(context.config, loan.name))\n    if phase == 2:\n        return context.actions.swap(trade.name)\n"
+  ],
+  [
+   "\"\"\"Supply lender liquidity, borrow against WETH, trade proceeds, then close both funds.\"\"\"\n\nfrom typing import cast\n\n",
+   "\"\"\"Supply lender liquidity, borrow against WETH, trade proceeds, then close both funds.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\n"
+  ],
+  [
+   "    if collateral.reserve.pool != loan.reserve.pool:\n        raise ValueError(\"collateral and debt must use the same explicit lending market\")\n    if collateral.borrow_limit or loan.supply_limit:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(collateral, loan, trade):\n    validate_trade_scope(collateral, loan, trade)\n    capital = funding_capital(trade)\n    if trade.funding_asset != loan.reserve.asset or not 0 < capital < loan.borrow_limit:\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n\n",
+   "    if collateral.reserve.pool != loan.reserve.pool:\n        raise ValueError(\"collateral and debt must use the same explicit lending market\")\n    if collateral.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(config, collateral, loan, trade):\n    validate_trade_scope(collateral, loan, trade)\n    capital = funding_capital(trade)\n    if trade.funding_asset != loan.reserve.asset or not 0 < capital < borrow_amount(\n        config, loan.name\n    ):\n        raise ValueError(\"trade capital must consume only part of the borrowed asset\")\n\n"
+  ],
+  [
+   "        )\n    if completed == 3:\n        return context.actions.decrease(\n            name,\n            collateral_base_units=allocation.maximum_collateral_withdrawal_base_units,\n            size_delta_usd_e30=0,\n        )\n",
+   "        )\n    if completed == 3:\n        # Withdraw exactly the collateral the previous step added.\n        return context.actions.decrease(\n            name,\n            collateral_base_units=allocation.entry_collateral.amount // 10,\n            size_delta_usd_e30=0,\n        )\n"
+  ],
+  [
+   "\"\"\"Earn loan interest independently while borrowing against another fund's collateral.\"\"\"\n\nfrom typing import cast\n\n",
+   "\"\"\"Earn loan interest independently while borrowing against another fund's collateral.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\n"
+  ],
+  [
+   "from almanak.connectors.morpho_blue.observations import owned\n\n\nclass State(StrategyState):\n",
+   "from almanak.connectors.morpho_blue.observations import owned\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"200\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "from almanak.connectors.morpho_blue.observations import owned\n\n\nclass State(StrategyState):\n",
+   "from almanak.connectors.morpho_blue.observations import owned\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"0.1\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "        raise ValueError(\"this reference uses one explicitly configured Morpho market\")\n    if (\n        earn.borrow_limit\n        or loan.supply_limit\n        or earn.supply_limit < 10\n        or collateral.supply_limit < 10\n        or loan.borrow_limit < 2\n    ):\n        raise ValueError(\"reference branches require separate nonzero supply and borrowing limits\")\n\n\n",
+   "        raise ValueError(\"this reference uses one explicitly configured Morpho market\")\n    if (\n        earn.borrow\n        or not loan.borrow\n        or loan.capital\n        or earn.capital < 10\n        or collateral.capital < 10\n    ):\n        raise ValueError(\"reference branches require separate supply capital and borrowing\")\n\n\ndef borrow_amount(config, name: str) -> int:\n    \"\"\"`BORROW` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    return int(BORROW.scaleb(config.asset_metadata[asset].decimals))\n\n\n"
+  ],
+  [
+   "\"\"\"Configured lending and V4 trading lifecycle.\"\"\"\n\nfrom typing import cast\n\n",
+   "\"\"\"Configured lending and V4 trading lifecycle.\"\"\"\n\nfrom decimal import Decimal\nfrom typing import cast\n\n"
+  ],
+  [
+   "    if collateral.reserve.market != loan.reserve.market:\n        raise ValueError(\"collateral and debt must use the same explicit lending market\")\n    if collateral.borrow_limit or loan.supply_limit:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(collateral, loan, trade):\n    validate_trade_scope(collateral, loan, trade)\n    validate_trade_capital(collateral, loan, trade)\n    validate_trade_assets(collateral, loan, trade)\n\n",
+   "    if collateral.reserve.market != loan.reserve.market:\n        raise ValueError(\"collateral and debt must use the same explicit lending market\")\n    if collateral.borrow or loan.capital or not loan.borrow:\n        raise ValueError(\"collateral requires supply authority and the loan requires borrowing\")\n\n\ndef validate_trade_pair(config, collateral, loan, trade):\n    validate_trade_scope(collateral, loan, trade)\n    validate_trade_capital(config, collateral, loan, trade)\n    validate_trade_assets(collateral, loan, trade)\n\n"
+  ],
+  [
+   "from almanak.api import StrategyState, declared\n\n\nclass State(StrategyState):\n",
+   "from almanak.api import StrategyState, declared\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"0.05\")\n\n\nclass State(StrategyState):\n"
+  ],
+  [
+   "from almanak.connectors.sparklend.models import Parameters\n\n\nclass State(StrategyState):\n",
+   "from almanak.connectors.sparklend.models import Parameters\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"5\")\n\n\nclass State(StrategyState):\n"
+  ]
+ ],
+ "parameters": {
+  "base": "e29db4dabd9a80da6f45f589c584cdbcb26d490f",
+  "pairs": [
+   [
+    "\nfrom decimal import Decimal\nfrom typing import cast\n",
+    "\nfrom typing import cast\n"
+   ],
+   [
+    "from almanak import dashboard as ui\nfrom almanak.api import StrategyState, declared\nfrom almanak.connectors.aave_v3.models import Parameters\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"5\")\n\n",
+    "from almanak import dashboard as ui\nfrom almanak.api import (\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\nfrom almanak.connectors.aave_v3.models import Parameters\n\n\nclass StrategyParams(TypedParameters):\n    # Borrowed per action, in the loan asset's units.\n    borrow_quantity: PositiveDecimal\n\n"
+   ],
+   [
+    "    validate_loan(loan)\n\n",
+    "    validate_loan(loan)\n    borrow_amount(config, \"loan\")  # refuses a borrow_quantity finer than the loan asset\n\n"
+   ],
+   [
+    "def validate_loan(loan):\n    if loan.capital or not loan.borrow:\n        raise ValueError(\"loan requires borrowing and no starting capital\")\n\n",
+    "def validate_loan(loan):\n    # loan.capital is optional: a loan-asset reserve the strategy never supplies or\n    # spends, so the full repay can pay the interest accrued since the borrow.\n    if not loan.borrow:\n        raise ValueError(\"loan requires borrowing\")\n\n"
+   ],
+   [
+    "def borrow_amount(config, name: str) -> int:\n    \"\"\"`BORROW` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    return int(BORROW.scaleb(config.asset_metadata[asset].decimals))\n\n",
+    "def borrow_amount(config, name: str) -> int:\n    \"\"\"`borrow_quantity` in base units of the named allocation's reserve asset.\"\"\"\n    asset = config.allocation(name).reserve.asset\n    decimals = config.asset_metadata[asset].decimals\n    return parameter_base_units(config.parameters, \"borrow_quantity\", decimals)\n\n"
+   ],
+   [
+    "from almanak import dashboard as ui\nfrom almanak.api import StrategyState, declared\nfrom almanak.connectors.aave_v4.api import (\n",
+    "from almanak import dashboard as ui\nfrom almanak.api import (\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\nfrom almanak.connectors.aave_v4.api import (\n"
+   ],
+   [
+    "\n# What each debt borrows, in its asset's units. The configuration names the debt's\n# reserve only; the amount is this strategy's decision.\nBORROW = Decimal(\"5\")\n# The debt unwinds below minimum_health_factor plus this margin. The floor refuses any\n# action that would leave the health factor under it, the unwind's own withdrawals\n# included, so a trigger at the floor fires only once the unwind can be refused.\nUNWIND_MARGIN = Decimal(\"0.25\")\n\n",
+    "\n\nclass StrategyParams(TypedParameters):\n    # Borrowed per action by each debt, in its asset's units.\n    borrow_quantity: PositiveDecimal\n    # The debt unwinds below minimum_health_factor plus this margin. The floor refuses\n    # any action that would leave the health factor under it, the unwind's own\n    # withdrawals included, so a trigger at the floor fires only once the unwind can be\n    # refused.\n    unwind_margin: PositiveDecimal\n\n"
+   ],
+   [
+    "            )\n\n",
+    "            )\n    for debt in config.debts:\n        borrow_amount(config, debt.name)  # refuses a borrow_quantity finer than the asset\n\n"
+   ],
+   [
+    "    if context.teardown or (\n        observed.health_factor is not None and observed.health_factor < unwind_trigger(debt)\n    ):\n",
+    "    if context.teardown or (\n        observed.health_factor is not None\n        and observed.health_factor < unwind_trigger(context.config, debt)\n    ):\n"
+   ],
+   [
+    "\ndef unwind_trigger(debt) -> int:\n    \"\"\"`minimum_health_factor` plus `UNWIND_MARGIN`, both in 18-decimal fixed point.\"\"\"\n    return debt.minimum_health_factor + int(UNWIND_MARGIN.scaleb(18))\n\n",
+    "\ndef unwind_trigger(config, debt) -> int:\n    \"\"\"`minimum_health_factor` plus `unwind_margin`, both in 18-decimal fixed point.\"\"\"\n    return debt.minimum_health_factor + int(config.parameters.unwind_margin.scaleb(18))\n\n"
+   ],
+   [
+    "from almanak import dashboard as ui\nfrom almanak.api import StrategyState, declared\nfrom almanak.caip import AssetType\n",
+    "from almanak import dashboard as ui\nfrom almanak.api import (\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\nfrom almanak.caip import AssetType\n"
+   ],
+   [
+    "            raise ValueError(f\"{debt.name}: this strategy borrows only configured USDC\")\n\n",
+    "            raise ValueError(f\"{debt.name}: this strategy borrows only configured USDC\")\n        borrow_amount(config, debt.name)  # refuses a borrow_quantity finer than USDC\n\n"
+   ],
+   [
+    "from almanak import dashboard as ui\nfrom almanak.api import StrategyState, declared\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"5\")\n\n",
+    "from almanak import dashboard as ui\nfrom almanak.api import (\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\n\n\nclass StrategyParams(TypedParameters):\n    # Borrowed per action, in the loan asset's units.\n    borrow_quantity: PositiveDecimal\n\n"
+   ],
+   [
+    "\nfrom decimal import Decimal\nfrom typing import cast\n\nfrom almanak.api import AssetAmount, StrategyState, declared\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"0.001\")\n\n",
+    "\nfrom typing import cast\n\nfrom almanak.api import (\n    AssetAmount,\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\n\n\nclass StrategyParams(TypedParameters):\n    # Borrowed per action, in the loan asset's units.\n    borrow_quantity: PositiveDecimal\n\n"
+   ],
+   [
+    "from almanak import dashboard as ui\nfrom almanak.api import StrategyState, declared\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"200\")\n\n",
+    "from almanak import dashboard as ui\nfrom almanak.api import (\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\n\n\nclass StrategyParams(TypedParameters):\n    # Borrowed per action, in the loan asset's units.\n    borrow_quantity: PositiveDecimal\n\n"
+   ],
+   [
+    "\nfrom decimal import Decimal\nfrom typing import cast\n\nfrom almanak.api import AssetAmount, StrategyState, declared\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"1\")\n\n",
+    "\nfrom typing import cast\n\nfrom almanak.api import (\n    AssetAmount,\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\n\n\nclass StrategyParams(TypedParameters):\n    # Borrowed per action, in the loan asset's units.\n    borrow_quantity: PositiveDecimal\n\n"
+   ],
+   [
+    "from almanak import dashboard as ui\nfrom almanak.api import StrategyState, declared\n\n# What each debt borrows, in its asset's units. The configuration names the debt's\n# reserve only; the amount is this strategy's decision.\nBORROW = Decimal(\"5\")\n\n",
+    "from almanak import dashboard as ui\nfrom almanak.api import (\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\n\n\nclass StrategyParams(TypedParameters):\n    # Borrowed per action by each debt, in its asset's units.\n    borrow_quantity: PositiveDecimal\n\n"
+   ],
+   [
+    "from almanak import dashboard as ui\nfrom almanak.api import StrategyState, declared\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"0.1\")\n\n",
+    "from almanak import dashboard as ui\nfrom almanak.api import (\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\n\n\nclass StrategyParams(TypedParameters):\n    # Borrowed per action, in the loan asset's units.\n    borrow_quantity: PositiveDecimal\n\n"
+   ],
+   [
+    "from almanak import dashboard as ui\nfrom almanak.api import StrategyState, declared\nfrom almanak.connectors.compound_v3.models import Parameters\n",
+    "from almanak import dashboard as ui\nfrom almanak.api import (\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\nfrom almanak.connectors.compound_v3.models import Parameters\n"
+   ],
+   [
+    "\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"200\")\n\n",
+    "\n\nclass StrategyParams(TypedParameters):\n    # Borrowed per action, in the loan asset's units.\n    borrow_quantity: PositiveDecimal\n\n"
+   ],
+   [
+    "    validate_limits(earn, collateral, loan)\n\n",
+    "    validate_limits(earn, collateral, loan)\n    borrow_amount(config, \"loan\")  # refuses a borrow_quantity finer than the loan asset\n\n"
+   ],
+   [
+    "        raise ValueError(\"this reference uses one explicitly configured Comet market\")\n    if (\n        earn.borrow\n        or not loan.borrow\n        or loan.capital\n        or earn.capital < 10\n        or collateral.capital < 10\n    ):\n        raise ValueError(\"reference branches require separate supply capital and borrowing\")\n\n",
+    "        raise ValueError(\"this reference uses one explicitly configured Comet market\")\n    # loan.capital is optional: a loan-asset reserve the strategy never supplies or\n    # spends, so the full repay can pay the interest accrued since the borrow.\n    if earn.borrow or not loan.borrow or earn.capital < 10 or collateral.capital < 10:\n        raise ValueError(\"reference branches require separate supply capital and borrowing\")\n    borrow_amount(config, \"loan\")  # refuses a borrow_quantity finer than the loan asset\n\n"
+   ],
+   [
+    "from almanak import dashboard as ui\nfrom almanak.api import StrategyState, declared\nfrom almanak.connectors.aave_v3.models import Allocation as LendingAllocation\n",
+    "from almanak import dashboard as ui\nfrom almanak.api import (\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\nfrom almanak.connectors.aave_v3.models import Allocation as LendingAllocation\n"
+   ],
+   [
+    "\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"5\")\n\n",
+    "\n\nclass StrategyParams(TypedParameters):\n    # Borrowed per action, in the loan asset's units.\n    borrow_quantity: PositiveDecimal\n\n"
+   ],
+   [
+    "from almanak import dashboard as ui\nfrom almanak.api import StrategyState, declared\nfrom almanak.connectors.morpho_blue.models import Parameters\n",
+    "from almanak import dashboard as ui\nfrom almanak.api import (\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\nfrom almanak.connectors.morpho_blue.models import Parameters\n"
+   ],
+   [
+    "\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"0.1\")\n\n",
+    "\n\nclass StrategyParams(TypedParameters):\n    # Borrowed per action, in the loan asset's units.\n    borrow_quantity: PositiveDecimal\n\n"
+   ],
+   [
+    "        raise ValueError(\"this reference uses one explicitly configured Morpho market\")\n    if (\n        earn.borrow\n        or not loan.borrow\n        or loan.capital\n        or earn.capital < 10\n        or collateral.capital < 10\n    ):\n        raise ValueError(\"reference branches require separate supply capital and borrowing\")\n\n",
+    "        raise ValueError(\"this reference uses one explicitly configured Morpho market\")\n    # loan.capital is optional: a loan-asset reserve the strategy never supplies or\n    # spends, so the full repay can pay the interest accrued since the borrow.\n    if earn.borrow or not loan.borrow or earn.capital < 10 or collateral.capital < 10:\n        raise ValueError(\"reference branches require separate supply capital and borrowing\")\n    borrow_amount(config, \"loan\")  # refuses a borrow_quantity finer than the loan asset\n\n"
+   ],
+   [
+    "from almanak import dashboard as ui\nfrom almanak.api import StrategyState, declared\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"0.05\")\n\n",
+    "from almanak import dashboard as ui\nfrom almanak.api import (\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\n\n\nclass StrategyParams(TypedParameters):\n    # Borrowed per action, in the loan asset's units.\n    borrow_quantity: PositiveDecimal\n\n"
+   ],
+   [
+    "from almanak import dashboard as ui\nfrom almanak.api import StrategyState, declared\nfrom almanak.connectors.sparklend.models import Parameters\n\n# What the loan allocation borrows, in its asset's units. The configuration only grants\n# borrowing (`borrow: true`); the amount is this strategy's decision.\nBORROW = Decimal(\"5\")\n\n",
+    "from almanak import dashboard as ui\nfrom almanak.api import (\n    PositiveDecimal,\n    StrategyState,\n    TypedParameters,\n    declared,\n    parameter_base_units,\n)\nfrom almanak.connectors.sparklend.models import Parameters\n\n\nclass StrategyParams(TypedParameters):\n    # Borrowed per action, in the loan asset's units.\n    borrow_quantity: PositiveDecimal\n\n"
+   ]
+  ],
+  "references": {
+   "aave_v3_arbitrum_lending": {
+    "from": "e102a0367f7026c070d6546916adeff42de0e497f0af26b8732039ef6b614261",
+    "pairs": [
+     0,
+     1,
+     2,
+     3,
+     4
+    ]
+   },
+   "aave_v3_avalanche_lending": {
+    "from": "e102a0367f7026c070d6546916adeff42de0e497f0af26b8732039ef6b614261",
+    "pairs": [
+     0,
+     1,
+     2,
+     4
+    ]
+   },
+   "aave_v3_base_lending": {
+    "from": "e102a0367f7026c070d6546916adeff42de0e497f0af26b8732039ef6b614261",
+    "pairs": [
+     0,
+     1,
+     2,
+     4
+    ]
+   },
+   "aave_v3_bnb_lending": {
+    "from": "e102a0367f7026c070d6546916adeff42de0e497f0af26b8732039ef6b614261",
+    "pairs": [
+     0,
+     1,
+     2,
+     4
+    ]
+   },
+   "aave_v3_ethereum_lending": {
+    "from": "e102a0367f7026c070d6546916adeff42de0e497f0af26b8732039ef6b614261",
+    "pairs": [
+     0,
+     1,
+     2,
+     4
+    ]
+   },
+   "aave_v3_optimism_lending": {
+    "from": "e102a0367f7026c070d6546916adeff42de0e497f0af26b8732039ef6b614261",
+    "pairs": [
+     0,
+     1,
+     2,
+     4
+    ]
+   },
+   "aave_v3_polygon_lending": {
+    "from": "e102a0367f7026c070d6546916adeff42de0e497f0af26b8732039ef6b614261",
+    "pairs": [
+     0,
+     1,
+     2,
+     4
+    ]
+   },
+   "aave_v4_avalanche_borrowing": {
+    "from": "ba942c8e44b0a3bca4551e1fc3ee10bc3af21058b4d004c70798b08341a0e41e",
+    "pairs": [
+     0,
+     5,
+     6,
+     4,
+     7,
+     8,
+     9
+    ]
+   },
+   "aave_v4_multichain_borrowing": {
+    "from": "ba942c8e44b0a3bca4551e1fc3ee10bc3af21058b4d004c70798b08341a0e41e",
+    "pairs": [
+     0,
+     5,
+     6,
+     4,
+     7,
+     8,
+     9
+    ]
+   },
+   "aave_v4_weth_supply": {
+    "from": "21ab910ead86c5b8fd36ea252cd2e8abb304737a612cb8d2419702fa81ba5620",
+    "pairs": [
+     0,
+     10,
+     6,
+     4,
+     11,
+     8,
+     9
+    ]
+   },
+   "arbitrum_aave_borrow_and_trade": {
+    "from": "76881270e5cf358abf33fa936775fd8d203ab6b777244fb590d9ea5627b1420d",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "arbitrum_aave_borrow_and_trade_gmx": {
+    "from": "67739227d50d264090cf26d93d466126c6f10a66ff8177ef052007420a0bde2f",
+    "pairs": [
+     13,
+     4
+    ]
+   },
+   "arbitrum_aave_borrow_and_trade_v4": {
+    "from": "cb4f7b82d56523eae63833783a8d1c0b624a84dddb99b289e75ba26df857486f",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "arbitrum_aave_curve_borrow_and_trade": {
+    "from": "d249b0741aae2c8100a431aea8e7014b2d52c27ce7ecade986252b5d676e723a",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "arbitrum_aave_pancake_borrow_and_trade": {
+    "from": "57ccfa2b3aacd1696851cb60dd9ef047ff864eca6b5029b2430d58a850d26a02",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "arbitrum_compound_borrow_and_trade": {
+    "from": "c0f865d74638058d08a64469980cc84e578c6374b31f23e946362775cf41a081",
+    "pairs": [
+     0,
+     14,
+     4
+    ]
+   },
+   "arbitrum_morpho_borrow_and_trade": {
+    "from": "fcfb34f55a57425633936a1c1f0525abc9c2e9c995145695f5f2cee1527b601e",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "avalanche_aave_borrow_and_trade": {
+    "from": "87c5d7ab376af3507b3b1317d872768cc28cb40f59818239dbeaff92e17e48d3",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "avalanche_aave_borrow_and_trade_gmx": {
+    "from": "45ae35b93b3c2d7b995b8f2fd7a2175d8b67045df9858d974f5ff00775b65e5b",
+    "pairs": [
+     15,
+     4
+    ]
+   },
+   "avalanche_aave_borrow_and_trade_v3": {
+    "from": "92080bf91f9398f264f6932233c23757874b0d416cd9ac56e2c51e053b550d4e",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "avalanche_aave_v4_borrow_and_trade": {
+    "from": "37edc28332fcc7dc2ad6c604487f4f4dd3bd0799023a4b79cc5ab016a578273d",
+    "pairs": [
+     0,
+     16,
+     4
+    ]
+   },
+   "avalanche_morpho_borrow_and_trade_v4": {
+    "from": "b56a4181b9a8806e42d28733a4a50968ec8dc803e2264c8492000a545c8d9b48",
+    "pairs": [
+     0,
+     17,
+     4
+    ]
+   },
+   "base_aave_aerodrome_stable_borrow_and_trade": {
+    "from": "57ccfa2b3aacd1696851cb60dd9ef047ff864eca6b5029b2430d58a850d26a02",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "base_aave_aerodrome_volatile_borrow_and_trade": {
+    "from": "57ccfa2b3aacd1696851cb60dd9ef047ff864eca6b5029b2430d58a850d26a02",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "base_aave_curve_borrow_and_trade": {
+    "from": "d249b0741aae2c8100a431aea8e7014b2d52c27ce7ecade986252b5d676e723a",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "base_aave_pancake_borrow_and_trade": {
+    "from": "89590e5577f1323276bbc5f0e767f26716bfa8b57bd23a5f6d20e18deebf904d",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "base_aave_slipstream_borrow_and_trade": {
+    "from": "57ccfa2b3aacd1696851cb60dd9ef047ff864eca6b5029b2430d58a850d26a02",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "base_borrow_and_trade": {
+    "from": "c02c3bdf7e3e2961a24b8467d23dc76eec1f2738fe13d64c76ba0d181e15cf58",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "base_borrow_and_trade_v4": {
+    "from": "c02c3bdf7e3e2961a24b8467d23dc76eec1f2738fe13d64c76ba0d181e15cf58",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "base_compound_borrow_and_trade": {
+    "from": "9786cdb539ff3f1d761a658b78393eb8e87614443b8cc7e2364b169098335815",
+    "pairs": [
+     0,
+     14,
+     4
+    ]
+   },
+   "base_morpho_borrow_and_trade": {
+    "from": "c9d124c67f4040c7fa23a11b50dc09feeeec141afe978fb14674bd1b6af3cb92",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "bnb_aave_borrow_and_trade": {
+    "from": "d249b0741aae2c8100a431aea8e7014b2d52c27ce7ecade986252b5d676e723a",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "bnb_aave_borrow_and_trade_v3": {
+    "from": "fc31c96a90792b68b751515c712e714df7004677f7f5a045ee5632f8069afb74",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "bnb_aave_borrow_and_trade_v4": {
+    "from": "89590e5577f1323276bbc5f0e767f26716bfa8b57bd23a5f6d20e18deebf904d",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "bnb_aave_pancake_borrow_and_trade": {
+    "from": "57ccfa2b3aacd1696851cb60dd9ef047ff864eca6b5029b2430d58a850d26a02",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "bnb_morpho_curve_borrow_and_trade": {
+    "from": "b9f0276d5ea6868fec65bbea4f35552fcfa8d0e05745d7f8e979df1fc45c0af0",
+    "pairs": [
+     0,
+     14,
+     4
+    ]
+   },
+   "compound_v3_arbitrum_lending": {
+    "from": "1da1447e8dabb815acf122ad8a4b49f8882363502cdd437b4d71f911fbe75238",
+    "pairs": [
+     0,
+     18,
+     19,
+     20,
+     4
+    ]
+   },
+   "compound_v3_base_lending": {
+    "from": "53c3631e6ef0a5f42e8f27c53bbd64fffffaed0f59970c165d2211dc42124289",
+    "pairs": [
+     0,
+     18,
+     19,
+     21,
+     4
+    ]
+   },
+   "compound_v3_ethereum_lending": {
+    "from": "53c3631e6ef0a5f42e8f27c53bbd64fffffaed0f59970c165d2211dc42124289",
+    "pairs": [
+     0,
+     18,
+     19,
+     21,
+     4
+    ]
+   },
+   "compound_v3_optimism_lending": {
+    "from": "1da1447e8dabb815acf122ad8a4b49f8882363502cdd437b4d71f911fbe75238",
+    "pairs": [
+     0,
+     18,
+     19,
+     20,
+     4
+    ]
+   },
+   "compound_v3_polygon_lending": {
+    "from": "1da1447e8dabb815acf122ad8a4b49f8882363502cdd437b4d71f911fbe75238",
+    "pairs": [
+     0,
+     18,
+     19,
+     20,
+     4
+    ]
+   },
+   "ethereum_aave_pancake_borrow_and_trade": {
+    "from": "57ccfa2b3aacd1696851cb60dd9ef047ff864eca6b5029b2430d58a850d26a02",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "ethereum_aave_v4_borrow_and_trade": {
+    "from": "e760b2583bef2c51c3bd5323b621d2d97ff030e06d73f23c24a113e4d0701ab8",
+    "pairs": [
+     0,
+     16,
+     4
+    ]
+   },
+   "ethereum_base_borrow_and_trade": {
+    "from": "97ca6ca3c3c67ac351b64bd16d884e9919b165149d606f09311ad97699e7ba31",
+    "pairs": [
+     0,
+     22,
+     23,
+     4
+    ]
+   },
+   "ethereum_compound_curve_borrow_and_trade": {
+    "from": "b9e59a88fb172da1bc979fc30c53a84503257c9c141219e1d37aa78831f86cf8",
+    "pairs": [
+     0,
+     14,
+     4
+    ]
+   },
+   "ethereum_morpho_curve_borrow_and_trade": {
+    "from": "915c6c298a517ebc01f231423f0933eec9bf128bfee582f1694a2d106de37b82",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "ethereum_spark_curve_borrow_and_trade": {
+    "from": "7d8675e455c550257e5051212e7b112093ae9c2544f331385ece53e15cdd627a",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "morpho_blue_arbitrum_lending": {
+    "from": "c029c3171792f0cb35db620c24e3d15893bde12f933571d2bb87f5bdc5437b39",
+    "pairs": [
+     0,
+     24,
+     19,
+     20,
+     4
+    ]
+   },
+   "morpho_blue_avalanche_lending": {
+    "from": "ac076fe5fe1baeafc73298c14c36dfaff0b08b25345825843c2597371f4650ca",
+    "pairs": [
+     0,
+     24,
+     25,
+     20,
+     4
+    ]
+   },
+   "morpho_blue_base_lending": {
+    "from": "b3c935e3c98d1ec73c265ed4c4181214e0f5c76148c986d693b4ad1aa61e3b24",
+    "pairs": [
+     0,
+     24,
+     19,
+     26,
+     4
+    ]
+   },
+   "morpho_blue_bnb_lending": {
+    "from": "c029c3171792f0cb35db620c24e3d15893bde12f933571d2bb87f5bdc5437b39",
+    "pairs": [
+     0,
+     24,
+     19,
+     20,
+     4
+    ]
+   },
+   "morpho_blue_ethereum_lending": {
+    "from": "b3c935e3c98d1ec73c265ed4c4181214e0f5c76148c986d693b4ad1aa61e3b24",
+    "pairs": [
+     0,
+     24,
+     19,
+     26,
+     4
+    ]
+   },
+   "morpho_blue_optimism_lending": {
+    "from": "c029c3171792f0cb35db620c24e3d15893bde12f933571d2bb87f5bdc5437b39",
+    "pairs": [
+     0,
+     24,
+     19,
+     20,
+     4
+    ]
+   },
+   "morpho_blue_polygon_lending": {
+    "from": "c029c3171792f0cb35db620c24e3d15893bde12f933571d2bb87f5bdc5437b39",
+    "pairs": [
+     0,
+     24,
+     19,
+     20,
+     4
+    ]
+   },
+   "morpho_blue_robinhood_lending": {
+    "from": "c029c3171792f0cb35db620c24e3d15893bde12f933571d2bb87f5bdc5437b39",
+    "pairs": [
+     0,
+     24,
+     19,
+     20,
+     4
+    ]
+   },
+   "optimism_aave_borrow_and_trade": {
+    "from": "76881270e5cf358abf33fa936775fd8d203ab6b777244fb590d9ea5627b1420d",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "optimism_aave_borrow_and_trade_v4": {
+    "from": "cb4f7b82d56523eae63833783a8d1c0b624a84dddb99b289e75ba26df857486f",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "optimism_compound_curve_borrow_and_trade": {
+    "from": "df8483848e10f6d3b96424f42098cc699f78f9c996432a5ab2b022876bcfce3d",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "optimism_morpho_curve_borrow_and_trade": {
+    "from": "915c6c298a517ebc01f231423f0933eec9bf128bfee582f1694a2d106de37b82",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "polygon_aave_borrow_and_trade": {
+    "from": "d249b0741aae2c8100a431aea8e7014b2d52c27ce7ecade986252b5d676e723a",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "polygon_aave_borrow_and_trade_v3": {
+    "from": "fc31c96a90792b68b751515c712e714df7004677f7f5a045ee5632f8069afb74",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "polygon_aave_borrow_and_trade_v4": {
+    "from": "e959bf7a29bad139674215abcad1a23de40eb21eddd70f6307b9c5b54d947e2d",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "polygon_morpho_curve_borrow_and_trade": {
+    "from": "915c6c298a517ebc01f231423f0933eec9bf128bfee582f1694a2d106de37b82",
+    "pairs": [
+     0,
+     12,
+     4
+    ]
+   },
+   "robinhood_morpho_borrow_and_trade_v3": {
+    "from": "095b336d689578b5a0c1184838f475e7853e60a63ac51b4a8d831450cfde821f",
+    "pairs": [
+     0,
+     17,
+     4
+    ]
+   },
+   "robinhood_morpho_borrow_and_trade_v4": {
+    "from": "a3af73d67b65ff26251cc45664d1390cb85beb3a853b1d6f8f48489e73b0b7e4",
+    "pairs": [
+     0,
+     27,
+     4
+    ]
+   },
+   "robinhood_morpho_curve_borrow_and_trade": {
+    "from": "cd06c8ae84ce6fed914a1bfd3a94e14c25a10c7e1350336d1d92782a6d425961",
+    "pairs": [
+     0,
+     17,
+     4
+    ]
+   },
+   "sparklend_ethereum_lending": {
+    "from": "f708b2d545a99ad0ce704d4580fa529785c06a50ada9b589c8366477f09feeac",
+    "pairs": [
+     0,
+     28,
+     2,
+     3,
+     4
+    ]
+   }
+  }
+ },
+ "references": {
+  "aave_v3_arbitrum_lending": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5
+  ],
+  "aave_v3_avalanche_lending": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5
+  ],
+  "aave_v3_base_lending": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5
+  ],
+  "aave_v3_bnb_lending": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5
+  ],
+  "aave_v3_ethereum_lending": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5
+  ],
+  "aave_v3_optimism_lending": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5
+  ],
+  "aave_v3_polygon_lending": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5
+  ],
+  "aave_v4_avalanche_borrowing": [
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "aave_v4_multichain_borrowing": [
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "aave_v4_weth_supply": [
+   11,
+   12,
+   13,
+   14,
+   15,
+   10
+  ],
+  "arbitrum_aave_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   20,
+   21,
+   22
+  ],
+  "arbitrum_aave_borrow_and_trade_gmx": [
+   23,
+   24,
+   25,
+   26,
+   27
+  ],
+  "arbitrum_aave_borrow_and_trade_v4": [
+   16,
+   17,
+   28,
+   19,
+   29,
+   30,
+   21,
+   22
+  ],
+  "arbitrum_aave_curve_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   31,
+   21,
+   22
+  ],
+  "arbitrum_aave_pancake_borrow_and_trade": [
+   16,
+   17,
+   32,
+   33,
+   34,
+   21,
+   22
+  ],
+  "arbitrum_compound_borrow_and_trade": [
+   16,
+   35,
+   18,
+   36,
+   37,
+   21,
+   22
+  ],
+  "arbitrum_morpho_borrow_and_trade": [
+   16,
+   17,
+   18,
+   36,
+   37,
+   21,
+   22
+  ],
+  "avalanche_aave_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   31,
+   21,
+   22
+  ],
+  "avalanche_aave_borrow_and_trade_gmx": [
+   38,
+   24,
+   25,
+   26,
+   27
+  ],
+  "avalanche_aave_borrow_and_trade_v3": [
+   39,
+   17,
+   32,
+   33,
+   34,
+   21,
+   22
+  ],
+  "avalanche_aave_v4_borrow_and_trade": [
+   16,
+   40,
+   18,
+   41,
+   42,
+   43,
+   44
+  ],
+  "avalanche_morpho_borrow_and_trade_v4": [
+   45,
+   46,
+   18,
+   47,
+   48,
+   49,
+   22
+  ],
+  "base_aave_aerodrome_stable_borrow_and_trade": [
+   16,
+   17,
+   32,
+   33,
+   34,
+   21,
+   22
+  ],
+  "base_aave_aerodrome_volatile_borrow_and_trade": [
+   16,
+   17,
+   32,
+   33,
+   34,
+   21,
+   22
+  ],
+  "base_aave_curve_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   31,
+   21,
+   22
+  ],
+  "base_aave_pancake_borrow_and_trade": [
+   16,
+   17,
+   32,
+   33,
+   34,
+   21,
+   22
+  ],
+  "base_aave_slipstream_borrow_and_trade": [
+   16,
+   17,
+   32,
+   33,
+   34,
+   21,
+   22
+  ],
+  "base_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   50,
+   21,
+   22
+  ],
+  "base_borrow_and_trade_v4": [
+   16,
+   17,
+   18,
+   19,
+   50,
+   21,
+   22
+  ],
+  "base_compound_borrow_and_trade": [
+   16,
+   35,
+   18,
+   19,
+   51,
+   21,
+   22
+  ],
+  "base_morpho_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   51,
+   21,
+   22
+  ],
+  "bnb_aave_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   31,
+   21,
+   22
+  ],
+  "bnb_aave_borrow_and_trade_v3": [
+   52,
+   17,
+   32,
+   33,
+   34,
+   21,
+   22
+  ],
+  "bnb_aave_borrow_and_trade_v4": [
+   16,
+   17,
+   32,
+   33,
+   34,
+   21,
+   22
+  ],
+  "bnb_aave_pancake_borrow_and_trade": [
+   16,
+   17,
+   32,
+   33,
+   34,
+   21,
+   22
+  ],
+  "bnb_morpho_curve_borrow_and_trade": [
+   53,
+   35,
+   54,
+   55,
+   56,
+   21,
+   57,
+   58
+  ],
+  "compound_v3_arbitrum_lending": [
+   59,
+   60,
+   61,
+   62,
+   63
+  ],
+  "compound_v3_base_lending": [
+   59,
+   60,
+   64,
+   62,
+   65
+  ],
+  "compound_v3_ethereum_lending": [
+   59,
+   60,
+   64,
+   62,
+   65
+  ],
+  "compound_v3_optimism_lending": [
+   59,
+   60,
+   61,
+   62,
+   63
+  ],
+  "compound_v3_polygon_lending": [
+   59,
+   60,
+   61,
+   62,
+   63
+  ],
+  "ethereum_aave_pancake_borrow_and_trade": [
+   16,
+   17,
+   32,
+   33,
+   34,
+   21,
+   22
+  ],
+  "ethereum_aave_v4_borrow_and_trade": [
+   16,
+   40,
+   18,
+   19,
+   66,
+   67,
+   44
+  ],
+  "ethereum_base_borrow_and_trade": [
+   68,
+   69,
+   70,
+   71,
+   72,
+   73,
+   74,
+   75
+  ],
+  "ethereum_compound_curve_borrow_and_trade": [
+   76,
+   35,
+   54,
+   55,
+   56,
+   21,
+   57,
+   58
+  ],
+  "ethereum_morpho_curve_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   56,
+   21,
+   22
+  ],
+  "ethereum_spark_curve_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   77,
+   21,
+   22
+  ],
+  "gmx_v2_arbitrum_collateral_path": [
+   78
+  ],
+  "gmx_v2_avalanche_collateral_path": [
+   78
+  ],
+  "morpho_blue_arbitrum_lending": [
+   79,
+   80,
+   61,
+   62,
+   63
+  ],
+  "morpho_blue_avalanche_lending": [
+   79,
+   81,
+   61,
+   62,
+   63
+  ],
+  "morpho_blue_base_lending": [
+   79,
+   80,
+   82,
+   62,
+   65
+  ],
+  "morpho_blue_bnb_lending": [
+   79,
+   80,
+   61,
+   62,
+   63
+  ],
+  "morpho_blue_ethereum_lending": [
+   79,
+   80,
+   82,
+   62,
+   65
+  ],
+  "morpho_blue_optimism_lending": [
+   79,
+   80,
+   61,
+   62,
+   63
+  ],
+  "morpho_blue_polygon_lending": [
+   79,
+   80,
+   61,
+   62,
+   63
+  ],
+  "morpho_blue_robinhood_lending": [
+   79,
+   80,
+   61,
+   62,
+   63
+  ],
+  "optimism_aave_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   20,
+   21,
+   22
+  ],
+  "optimism_aave_borrow_and_trade_v4": [
+   16,
+   17,
+   28,
+   19,
+   29,
+   30,
+   21,
+   22
+  ],
+  "optimism_compound_curve_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   56,
+   21,
+   22
+  ],
+  "optimism_morpho_curve_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   56,
+   21,
+   22
+  ],
+  "polygon_aave_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   31,
+   21,
+   22
+  ],
+  "polygon_aave_borrow_and_trade_v3": [
+   52,
+   17,
+   32,
+   33,
+   34,
+   21,
+   22
+  ],
+  "polygon_aave_borrow_and_trade_v4": [
+   83,
+   17,
+   32,
+   33,
+   34,
+   21,
+   22
+  ],
+  "polygon_morpho_curve_borrow_and_trade": [
+   16,
+   17,
+   18,
+   19,
+   56,
+   21,
+   22
+  ],
+  "robinhood_morpho_borrow_and_trade_v3": [
+   16,
+   46,
+   32,
+   84,
+   34,
+   21,
+   22
+  ],
+  "robinhood_morpho_borrow_and_trade_v4": [
+   83,
+   85,
+   32,
+   84,
+   34,
+   21,
+   22
+  ],
+  "robinhood_morpho_curve_borrow_and_trade": [
+   16,
+   46,
+   18,
+   19,
+   56,
+   21,
+   22
+  ],
+  "sparklend_ethereum_lending": [
+   0,
+   86,
+   2,
+   3,
+   4,
+   5
+  ]
+ }
+}

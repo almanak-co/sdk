@@ -1,1 +1,0 @@
-# BSC intent tests

@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GMX V2 market position",
+  "description": "One GM market carries three allocation kinds. The kind selects the perpetual position, the market swap or the GM liquidity allocation; none of them is a default.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Position"
+    },
+    {
+      "$ref": "#/$defs/Swap"
+    },
+    {
+      "$ref": "#/$defs/Liquidity"
+    }
+  ],
+  "$defs": {
+    "Position": {
+      "title": "GMX V2 perpetual position",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "market",
+        "account",
+        "kind",
+        "side",
+        "capital",
+        "entry_collateral",
+        "entry_size_usd_e30",
+        "execution_fee",
+        "increase_acceptable_price",
+        "decrease_acceptable_price",
+        "maximum_event_block_span",
+        "minimum_native_balance"
+      ],
+      "properties": {
+        "market": {
+          "$ref": "../strategy.schema.json#/$defs/Name"
+        },
+        "account": {
+          "$ref": "../strategy.schema.json#/$defs/Name"
+        },
+        "kind": {
+          "const": "gmx_position"
+        },
+        "side": {
+          "enum": [
+            "long",
+            "short"
+          ]
+        },
+        "capital": {
+          "$ref": "#/$defs/Amount"
+        },
+        "entry_collateral": {
+          "$ref": "#/$defs/Amount"
+        },
+        "entry_size_usd_e30": {
+          "$ref": "#/$defs/Bound"
+        },
+        "execution_fee": {
+          "$ref": "#/$defs/Amount"
+        },
+        "increase_acceptable_price": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decrease_acceptable_price": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "hold_seconds": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveDuration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional. Read only by strategy code for its own timed exit; connectors never act on it. Omit to hold until teardown."
+        },
+        "maximum_event_block_span": {
+          "$ref": "#/$defs/Positive"
+        },
+        "minimum_native_balance": {
+          "$ref": "../strategy.schema.json#/$defs/Quantity"
+        }
+      }
+    },
+    "Swap": {
+      "title": "GMX V2 market swap",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "market",
+        "account",
+        "kind",
+        "initial_inventory",
+        "execution_fee",
+        "deadline_seconds",
+        "maximum_event_block_span",
+        "minimum_native_balance",
+        "entry_amount",
+        "entry_minimum_output",
+        "exit_minimum_output"
+      ],
+      "properties": {
+        "market": {
+          "$ref": "../strategy.schema.json#/$defs/Name"
+        },
+        "account": {
+          "$ref": "../strategy.schema.json#/$defs/Name"
+        },
+        "kind": {
+          "const": "gmx_swap"
+        },
+        "initial_inventory": {
+          "$ref": "#/$defs/Amounts"
+        },
+        "execution_fee": {
+          "$ref": "#/$defs/Amount"
+        },
+        "hold_seconds": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveDuration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional. Read only by strategy code for its own timed exit; connectors never act on it. Omit to hold until teardown."
+        },
+        "deadline_seconds": {
+          "$ref": "#/$defs/PositiveDuration"
+        },
+        "maximum_event_block_span": {
+          "$ref": "#/$defs/Positive"
+        },
+        "minimum_native_balance": {
+          "$ref": "../strategy.schema.json#/$defs/Quantity"
+        },
+        "entry_amount": {
+          "$ref": "#/$defs/Amount"
+        },
+        "entry_minimum_output": {
+          "$ref": "#/$defs/Amount"
+        },
+        "exit_minimum_output": {
+          "$ref": "#/$defs/Amount"
+        }
+      }
+    },
+    "Liquidity": {
+      "title": "GMX V2 GM liquidity allocation",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "market",
+        "account",
+        "kind",
+        "initial_inventory",
+        "execution_fee",
+        "deadline_seconds",
+        "maximum_event_block_span",
+        "minimum_native_balance",
+        "funding_asset",
+        "entry_amounts",
+        "additional_amounts",
+        "minimum_market_tokens",
+        "partial_withdrawal",
+        "withdrawal_minimums"
+      ],
+      "properties": {
+        "market": {
+          "$ref": "../strategy.schema.json#/$defs/Name"
+        },
+        "account": {
+          "$ref": "../strategy.schema.json#/$defs/Name"
+        },
+        "kind": {
+          "const": "gmx_liquidity"
+        },
+        "initial_inventory": {
+          "$ref": "#/$defs/Amounts"
+        },
+        "execution_fee": {
+          "$ref": "#/$defs/Amount"
+        },
+        "hold_seconds": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveDuration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional. Read only by strategy code for its own timed exit; connectors never act on it. Omit to hold until teardown."
+        },
+        "deadline_seconds": {
+          "$ref": "#/$defs/PositiveDuration"
+        },
+        "maximum_event_block_span": {
+          "$ref": "#/$defs/Positive"
+        },
+        "minimum_native_balance": {
+          "$ref": "../strategy.schema.json#/$defs/Quantity"
+        },
+        "funding_asset": {
+          "$ref": "#/$defs/AssetType"
+        },
+        "entry_amounts": {
+          "$ref": "#/$defs/Amounts"
+        },
+        "additional_amounts": {
+          "$ref": "#/$defs/Amounts"
+        },
+        "minimum_market_tokens": {
+          "$ref": "#/$defs/Amount"
+        },
+        "partial_withdrawal": {
+          "$ref": "#/$defs/Amount"
+        },
+        "withdrawal_minimums": {
+          "$ref": "#/$defs/Amounts"
+        }
+      }
+    },
+    "AssetType": {
+      "type": "string",
+      "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+    },
+    "Positive": {
+      "type": "integer",
+      "exclusiveMinimum": 0
+    },
+    "Bound": {
+      "type": "integer",
+      "exclusiveMinimum": 0,
+      "maximum": 340282366920938463463374607431768211455
+    },
+    "Amount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset",
+        "quantity"
+      ],
+      "properties": {
+        "asset": {
+          "$ref": "#/$defs/AssetType"
+        },
+        "quantity": {
+          "$ref": "../strategy.schema.json#/$defs/Quantity"
+        }
+      }
+    },
+    "Amounts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/$defs/Amount"
+      }
+    },
+    "PositiveDuration": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(s|m|h|d)$"
+        }
+      ]
+    }
+  }
+}

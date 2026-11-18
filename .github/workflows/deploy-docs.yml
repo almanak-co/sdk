@@ -1,0 +1,54 @@
+name: Deploy Docs
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  # Republishes the production docs from main between releases (docs-only fixes).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-repo
+
+      - name: Build docs
+        run: make docs
+
+      # use_directory_urls is off, so /page must rewrite to /page.html.
+      - name: Prepare Vercel output
+        run: |
+          mkdir -p .vercel/output/static
+          cp -r site/* .vercel/output/static/
+          printf '{"version":3,"routes":[{"handle":"filesystem"},{"src":"/(.*)","dest":"/$1.html","check":true}]}' > .vercel/output/config.json
+
+      - name: Install Vercel CLI
+        run: npm i -g vercel
+
+      # A preview deployment of every push to main; only releases and dispatches go live.
+      - name: Deploy to staging
+        if: github.event_name == 'push'
+        run: vercel deploy --prebuilt --token="$VERCEL_TOKEN"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Deploy to production
+        if: >-
+          (github.event_name == 'release' && !github.event.release.prerelease)
+          || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+        run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}

@@ -1,0 +1,40 @@
+# Operator execution context for a fork run of strategies/uniswap_v4_optimism_lp. Provider
+# credentials stay in the selected --env-file. The account bindings are
+# placeholders: fork provisioning generates the actual fixture accounts, and a
+# production run requires reviewed bindings and signing files outside
+# strategy-readable paths.
+schema_version: operator-gateway-config-v1
+modes:
+- fork
+networks:
+- chain: eip155:10
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: lp
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:10
+          environment: mainnet
+        address: '0x0000000000000000000000000000000000000001'
+fork:
+  anchors:
+  - chain: eip155:10
+    height: 156669521
+    reference: '0x2015c102d680eff8281d89b1c9148956b596fdc873d111f0aa2454fd95ff5feb'
+  funds:
+  - kind: safe_roles
+    account: lp
+    operator: operator
+    assets:
+    - asset: eip155:10/erc20:0x0b2c639c533813f4aa9d7837caf62653d097ff85
+      amount: 10000000
+  operators:
+  - name: operator
+    native_balance:
+      asset: eip155:10/slip44:60
+      amount: 1000000000000000000

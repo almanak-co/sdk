@@ -1,0 +1,51 @@
+name: Publish to PyPI
+
+# Uploads the distributions template_build_dist.yml built and verified in the
+# same run (artifact `sdk-dist`). Nothing is rebuilt here, so PyPI serves the
+# files whose hashes release-sha256.txt records. A PyPI version can never be
+# uploaded twice; callers run this last, after every gate succeeded.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version the downloaded distributions must carry"
+        required: true
+        type: string
+    secrets:
+      PYPI_API_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: sdk-dist
+
+      - name: Verify downloaded distributions
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::PyPI receives stable versions only: $VERSION"; exit 1; }
+          sha256sum --check --strict release-sha256.txt
+          # Exactly the five platform wheels and the sdist the hashes list.
+          [ "$(ls dist | wc -l)" -eq "$(wc -l < release-sha256.txt)" ] || { echo "::error::dist differs from release-sha256.txt"; exit 1; }
+          [ "$(ls dist | wc -l)" -eq 6 ] || { echo "::error::expected five wheels and one sdist"; exit 1; }
+          for f in dist/*; do
+            case "$(basename "$f")" in
+              "almanak-${VERSION}.tar.gz"|"almanak-${VERSION}-py3-none-"*.whl) ;;
+              *) echo "::error::unexpected distribution: $f"; exit 1 ;;
+            esac
+          done
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+
+      - name: Upload package to PyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: uv publish dist/*

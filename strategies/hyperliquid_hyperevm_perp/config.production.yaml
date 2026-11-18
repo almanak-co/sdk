@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Explicit production example: config.yaml with the operator's gas policy, which
+# production requires. The operator context is
+# examples/operators/hyperliquid_hyperevm_perp.production.yaml. The connector admits
+# production only once D7 is accepted (blueprint 30, section 14.4).
+strategy:
+  decision_interval: 60s
+  parameters:
+    # The BTC position the strategy opens once, in coins, and its side.
+    size: '0.002'
+    side: long
+  allocations:
+    Main:
+      market: btc
+      account: trader
+      capital:
+        asset: eip155:999/erc20:0xb88339cb7199b77e23db6e890353e22632ba630f
+        quantity: '30'
+      leverage: 10
+      slippage_bps: 50
+      hold_seconds: 2h
+  gas:
+    # HyperEVM amounts for the operator that submits the Safe's custody calls; agent-signed
+    # trades use no gas. Custody calls use up to about 370,000 gas, so a 0.002 HYPE ceiling
+    # covers 400,000 gas at 5 gwei. Entry takes 5 transactions and exit 2
+    # (almanak check --production): exit_reserve = 2 fees, total_budget = exit_reserve +
+    # 5 entry fees + 20 later fees.
+    operator:
+      accounts:
+      - trader
+      chain: eip155:999
+      max_transaction_fee:
+        base_units: 2000000000000000
+      total_budget:
+        base_units: 54000000000000000
+      exit_reserve:
+        base_units: 4000000000000000
+markets:
+  btc:
+    connector: hyperliquid
+    chain: eip155:999
+    market: BTC
+accounts:
+  trader:
+    chain: eip155:999

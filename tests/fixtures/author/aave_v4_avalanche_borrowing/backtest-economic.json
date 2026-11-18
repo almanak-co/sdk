@@ -1,0 +1,62 @@
+{
+  "schedule": {
+    "start": 1788566400,
+    "end": 1788652800,
+    "decision_interval_override_seconds": 3600,
+    "latency_seconds": 30,
+    "end_policy": "teardown",
+    "cleanup_seconds": 3600
+  },
+  "history": [
+    {
+      "chain": {
+        "chain_id": "eip155:43114",
+        "environment": "mainnet"
+      },
+      "provider": {
+        "kind": "rpc_url",
+        "url_env": "AVALANCHE_RPC_URL"
+      },
+      "collection": {
+        "max_in_flight": 4,
+        "requests_per_second": 20.0,
+        "batch_size": 32
+      }
+    }
+  ],
+  "funds": [
+    {
+      "name": "avalanche_fund",
+      "fund": {
+        "chain": {
+          "chain_id": "eip155:43114",
+          "environment": "mainnet"
+        },
+        "address": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+      },
+      "balances": [
+        {
+          "asset": "eip155:43114/slip44:9005",
+          "amount": 1000000000000000000
+        },
+        {
+          "asset": "eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7",
+          "amount": 10000000000000000000
+        },
+        {
+          "asset": "eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e",
+          "amount": 1000000
+        }
+      ]
+    }
+  ],
+  "market_model": "economic",
+  "data": {
+    "source": "aave_v4_archive",
+    "rate_sample_seconds": 3600,
+    "risk_prices": "spoke_oracle_events"
+  },
+  "costs": {
+    "kind": "excluded"
+  }
+}

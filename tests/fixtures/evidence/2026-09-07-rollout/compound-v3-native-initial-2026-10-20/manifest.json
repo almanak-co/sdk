@@ -1,0 +1,712 @@
+{
+  "status": "recaptured_process_evidence",
+  "scope": "Recapture on 2026-10-20 of the six compound-v3-native-initial lifecycles (Ethereum and Base generated Safe/Roles with configured and distinct operators, explicit EOA) after the held-balance repay approval (blueprint 25) and scope-only authority (blueprint 27). Identified Anvil forks at the operator file anchors, public Foundry test keys, no real funds, no production permission installation. Same lifecycle identities as the 2026-09-07 package, which stays unchanged.",
+  "capture_commit": "1354c3c0c",
+  "producers": {
+    "safe": "artifacts/recaptureG/safe_capture.py (tests/strategy_fork/harness execute_case with the converted reference's case_fork_config), copied here as safe_capture.py",
+    "eoa": "uv run --locked pytest tests/fork/test_compound_v3_eoa.py::test_compound_eoa_fork_lifecycle[<chain>] --fork-env=<operator .env>"
+  },
+  "cases": [
+    {
+      "name": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b",
+      "reference": "compound_v3_base_lending",
+      "profile": "safe",
+      "operator_mode": "configured",
+      "status": "passed",
+      "wall_seconds": 644.087
+    },
+    {
+      "name": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390",
+      "reference": "compound_v3_base_lending",
+      "profile": "safe",
+      "operator_mode": "distinct",
+      "status": "passed",
+      "wall_seconds": 644.681
+    },
+    {
+      "name": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9",
+      "reference": "compound_v3_ethereum_lending",
+      "profile": "safe",
+      "operator_mode": "configured",
+      "status": "passed",
+      "wall_seconds": 686.921
+    },
+    {
+      "name": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80",
+      "reference": "compound_v3_ethereum_lending",
+      "profile": "safe",
+      "operator_mode": "distinct",
+      "status": "passed",
+      "wall_seconds": 689.886
+    },
+    {
+      "name": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377",
+      "reference": "compound_v3_base_lending",
+      "profile": "eoa",
+      "operator_mode": "eoa",
+      "status": "passed",
+      "wall_seconds": 631.63
+    },
+    {
+      "name": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34",
+      "reference": "compound_v3_ethereum_lending",
+      "profile": "eoa",
+      "operator_mode": "eoa",
+      "status": "passed",
+      "wall_seconds": 685.193
+    }
+  ],
+  "wall_seconds_note": "Measured inside the provider lock from job start to exit of the producing process, including fork start, permission installation and teardown.",
+  "files": [
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/checkpoint.json.gz",
+      "sha256": "69f916ed7992f9ee7eda4d2fda7a69d2c304523714b8902eef57135f3a8cb2ff",
+      "bytes": 65341
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/dashboard.html.gz",
+      "sha256": "4fe1ae55a397138b42e3e83704ab017a111ab76690b9cd00f87da12ab3e86cd0",
+      "bytes": 15380
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/dashboard.json.gz",
+      "sha256": "0e99abe61fde77791c5df43f09c9722e3ad637331e6773b112f41f1fc8783ec6",
+      "bytes": 2587
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/deployment.json.gz",
+      "sha256": "13d5fcee4bdcc1a2cc31205b267120f3d7597609c28ec6b49183057afb46e574",
+      "bytes": 1142
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/fixture-installation.json.gz",
+      "sha256": "0b1773db7dcf30a733d77227b61ac4719165cb59b8cfa5bb9e92efe14a56f539",
+      "bytes": 2307
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/fork-routes.json.gz",
+      "sha256": "c069235fce86066ab96e7e758f5cfbcc6e0df9439774237786ccdcb7dff08783",
+      "bytes": 168
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/permission-budget-observations.json.gz",
+      "sha256": "1d60c1306f0d23f2eb643f1c2e20dfa871208de4b5eae22de49f77bbb657f9de",
+      "bytes": 545
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/permission-generation.json.gz",
+      "sha256": "f892c561b4d061a107ac8315a18ec3e19941d9b586d025cd6e857b0f33c375b0",
+      "bytes": 257
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/permission-installation.json.gz",
+      "sha256": "c6a8f35c4b3679b31b84f98325acfb925e3a26a5009aae84bc347afb8ad0b0b4",
+      "bytes": 3910
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/permission-verification.json.gz",
+      "sha256": "14d7e75bc9882f75c0c75fd116da5d0be657abf458f598b8aeed5a9baf05446c",
+      "bytes": 384
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/permissions/manifest.json.gz",
+      "sha256": "ddcb1d722372fc54bb2216b1e41d6db0bf464c35335f81a5f3ba5a1d4ecd5728",
+      "bytes": 3026
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/permissions/permissions.txt.gz",
+      "sha256": "a94fc5df8bd2cfcd4d22d29bae7c7bc259e5a06a2cce58a32a6b70bdb8eed4f3",
+      "bytes": 536
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/permissions/safe-0.json.gz",
+      "sha256": "cca3527656ddffc0e783717cbf5d18fdf99574ec753efdc91c2eff460a4f46bc",
+      "bytes": 659
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/permissions/safe-1.json.gz",
+      "sha256": "d6fd6a6f6a4313c9ab3c5953023629147307269026fbdcde016e30bc2e204663",
+      "bytes": 570
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/process-0.log.gz",
+      "sha256": "fc7b3760b293248eb0887715d9b4b17924b7ffa6a9052c44123a74a43bc38442",
+      "bytes": 5617
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/process-2.log.gz",
+      "sha256": "2b7571c8649dfe13fb6694d67df5133e0696e15bb987131a1725774c490cde55",
+      "bytes": 1139
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/process-3.log.gz",
+      "sha256": "763a807108b03f0daa6d3ee7bd22bf00e3ca0ceea199dc54254db0f4386aca3b",
+      "bytes": 137
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/process-4.log.gz",
+      "sha256": "763a807108b03f0daa6d3ee7bd22bf00e3ca0ceea199dc54254db0f4386aca3b",
+      "bytes": 137
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/process-5.log.gz",
+      "sha256": "9da05f9a4f33ea2d164fcb410b1439d8bb10fd66218cf67b42fb666b761036b4",
+      "bytes": 3726
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/process-6.log.gz",
+      "sha256": "a630ea110be4eae507ae80c7fa7c03b73228ca6727ab303e3157f772c90c83a3",
+      "bytes": 5612
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/report.json.gz",
+      "sha256": "d391684f6a14f46c5b300fde98195eebd903e2a5a9be76cfb02db4cb030950c1",
+      "bytes": 5591
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/result.json.gz",
+      "sha256": "59039da4143fd97fb238240d57fc4f66c83a4ccafcf693f7e1de808258e33aab",
+      "bytes": 1420
+    },
+    {
+      "path": "compound_v3_base_lending-7f81dd1cc6d44757a8044f608e4c6f6b/state.sqlite.gz",
+      "sha256": "9aa5dac0ec295426eb0c3db33a0fd61eed1bda95e56a67a349000f77d03b1434",
+      "bytes": 75393
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/checkpoint.json.gz",
+      "sha256": "71bd11c29f08f3b89b2ee1a199293eab84d6a5686372cb825006ac6afbbf359e",
+      "bytes": 66379
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/dashboard.html.gz",
+      "sha256": "3b80106c10e2c290e04d34cc337c6ea2151678ecbed095f9df6cd063c62f1327",
+      "bytes": 15416
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/dashboard.json.gz",
+      "sha256": "f71058effedc97d1253fb2c8f6cef438de9766f316f48a793a3a37551a47b3cd",
+      "bytes": 2618
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/deployment.json.gz",
+      "sha256": "7a265a1f18427673cb02fdaf3874baa7ff8978af38f4737a2329426d1a6f888b",
+      "bytes": 1168
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/fixture-installation.json.gz",
+      "sha256": "0b1773db7dcf30a733d77227b61ac4719165cb59b8cfa5bb9e92efe14a56f539",
+      "bytes": 2307
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/fork-routes.json.gz",
+      "sha256": "9fdf0c8f119e44250248cfab65033d83ac2a68b684aa2af5b71e6fb68d995ab8",
+      "bytes": 168
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/permission-budget-observations.json.gz",
+      "sha256": "0475ec3ead624c3a0aa00b5ceeb400a4edb1f6d18fef23d73aff7f4a2d15cf75",
+      "bytes": 547
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/permission-generation.json.gz",
+      "sha256": "2fb8b0e50c47198f563458fa5ff1e215e93c06f7b28957bfa57894677b967204",
+      "bytes": 258
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/permission-installation.json.gz",
+      "sha256": "fd983410fd2091f2ca2bb29e48c45e4d88cdd2087034c2d9cd3fce4a1748d2ca",
+      "bytes": 3949
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/permission-verification.json.gz",
+      "sha256": "c73d651b65d28821b84dfdebde419abb9515ee5e02d7b70c574f56f0f6128b8c",
+      "bytes": 383
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/permissions/manifest.json.gz",
+      "sha256": "93c1856c62f83c2cee241ade58b67df5d64ed7e367a2f6eb21c071d7d4eb7dee",
+      "bytes": 3061
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/permissions/permissions.txt.gz",
+      "sha256": "a94fc5df8bd2cfcd4d22d29bae7c7bc259e5a06a2cce58a32a6b70bdb8eed4f3",
+      "bytes": 536
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/permissions/safe-0.json.gz",
+      "sha256": "eab9625b02c3532527123cf5e93895665e8c5955a697efeb929bb75c29cbe6d9",
+      "bytes": 658
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/permissions/safe-1.json.gz",
+      "sha256": "fafb96c5c9f7754f9bc1bb68432273ae215411ea56e188d1789b8068f63ec1bb",
+      "bytes": 568
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/process-0.log.gz",
+      "sha256": "be38ea54fd57f80a45c06901d9e72cf1bde6af56c4eca7d1c73ff194b2dcc5b7",
+      "bytes": 5647
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/process-2.log.gz",
+      "sha256": "c1727264cd68d022203c15510dfb87aff94932783d2134d8d03f72e030a69a21",
+      "bytes": 1167
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/process-3.log.gz",
+      "sha256": "0eab3bfcde34f6ef289e589c9fc6c23dfc1c96be0d0f0f88f058e263ef81ea69",
+      "bytes": 136
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/process-4.log.gz",
+      "sha256": "0eab3bfcde34f6ef289e589c9fc6c23dfc1c96be0d0f0f88f058e263ef81ea69",
+      "bytes": 136
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/process-5.log.gz",
+      "sha256": "25c4a4f455f1acb68aa819ddf38e040b695baec8ec94aef5fc56047b97b3cb10",
+      "bytes": 3694
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/process-6.log.gz",
+      "sha256": "658943db03e63d8421f408ed4557c7dda5113d6b717ec6380fa86bacb3df5868",
+      "bytes": 5703
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/report.json.gz",
+      "sha256": "d05ad81b6cbf17861979a80c2690eaccd1df14c17f22d9ea4c11bdb6feb0a7ae",
+      "bytes": 5683
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/result.json.gz",
+      "sha256": "81d9833de2b6dd8c916cb94ea3371437f0981bcf8355340797c4cbc49b5a31af",
+      "bytes": 1467
+    },
+    {
+      "path": "compound_v3_base_lending-ca2533c4c6d34670ba7178a510995390/state.sqlite.gz",
+      "sha256": "b27ebc164a8458ea2e8653fab26d43ca071e95ba30acd7ca278328296334d115",
+      "bytes": 75326
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/checkpoint.json.gz",
+      "sha256": "1962a7277a014cb2626f8af6ad0c21788ab89e28749fd43a747861a7c25e1b49",
+      "bytes": 59500
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/dashboard.html.gz",
+      "sha256": "39fef3c169b160eaae844456504eb826eb86ba281b4f3145795c24c1ac7d6e2f",
+      "bytes": 15352
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/dashboard.json.gz",
+      "sha256": "ba01ad3f7fe800998266f2bc158d3e8885fe274641397a3a0dda3d8cdef0d903",
+      "bytes": 2558
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/deployment.json.gz",
+      "sha256": "c97b8a3594372731fcf7e3b393f6a0598218165c164ee1f8b4a84199eff5bc60",
+      "bytes": 907
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/fixture-installation.json.gz",
+      "sha256": "f096a6f91322eeb28190d91404bd19f1a7476f7a9a3054ab00504948ac56e9a1",
+      "bytes": 273
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/fork-routes.json.gz",
+      "sha256": "33e5da106d658053799b442e7019467246b9d2eac92faf9611c2f200482ed5aa",
+      "bytes": 167
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/process-0.log.gz",
+      "sha256": "2725b12262288e3faa4cd75e745694cae79dd1ad19998f42e993396e6addfa9a",
+      "bytes": 5655
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/process-2.log.gz",
+      "sha256": "58c6ac5f4a9ccc139772e98280f83c3470486135bc41d7fb1916bee828742109",
+      "bytes": 1021
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/process-3.log.gz",
+      "sha256": "3727a2fb4765136bd8e53202afc63ef1c82543e7b4c1de13d7514a817167f315",
+      "bytes": 138
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/process-4.log.gz",
+      "sha256": "3727a2fb4765136bd8e53202afc63ef1c82543e7b4c1de13d7514a817167f315",
+      "bytes": 138
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/process-5.log.gz",
+      "sha256": "600c5d59fbc070e8ab1c54376246c1eb313e3e8adae6586b83a1c999ab0cb142",
+      "bytes": 3478
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/process-6.log.gz",
+      "sha256": "657ff8c0c32aaa933ab020c17f165d9dee8d2347e60250c5ad78b25227bf07fb",
+      "bytes": 5615
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/report.json.gz",
+      "sha256": "2d3a5a743a76401a9d37c7eb40e02a74c38c9a317ac0c7f9a0ad1b87fc9e65d3",
+      "bytes": 5595
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/result.json.gz",
+      "sha256": "6d6fb4ec7c8c69d8d6df3dcf2bd9d0617a44beefe3193042b08204503d207fc2",
+      "bytes": 364
+    },
+    {
+      "path": "compound_v3_base_lending-eoa-b264b35e445f4a7aaf24f1428b5ed377/state.sqlite.gz",
+      "sha256": "82c45c49ea23ea8393e88a800b6fff0a27f78fefb8d7b820be3e2a919e6c95b9",
+      "bytes": 62492
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/checkpoint.json.gz",
+      "sha256": "4f4027415f3b1612890f9fc85b50b5e940a3ae36644532de8d6edbb691b100af",
+      "bytes": 150569
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/dashboard.html.gz",
+      "sha256": "080a0c1541449655c5808fb2cf8b3638098d35b4aaf4dbb2991842c7645c7da4",
+      "bytes": 15373
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/dashboard.json.gz",
+      "sha256": "e710a2ba313389e6411eb3146c895b3f38c77b8c406c7bb7242e3f8148b795b9",
+      "bytes": 2578
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/deployment.json.gz",
+      "sha256": "4d3d4342b1edc96bdc58c5d5d4caf66700aca876e5f6e12b476bfc00c0c3f05b",
+      "bytes": 924
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/fixture-installation.json.gz",
+      "sha256": "f53bf840410226f8a0392cc70e86695cca8ce182fd85273205d0eff43b9f8d39",
+      "bytes": 289
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/fork-routes.json.gz",
+      "sha256": "064518555ec8a99e6f2f92ca791882cfb6d7f23aa44335527f11b4e3909718e2",
+      "bytes": 166
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/process-0.log.gz",
+      "sha256": "ea3173dfd4b244bc975736c0dfa3521db71b974e295d918149f71975aaf663ca",
+      "bytes": 4915
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/process-2.log.gz",
+      "sha256": "1f5b2d89871bd240e1c03db663123b66fbe789021c6f3413558a0b51ac9c13f9",
+      "bytes": 1062
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/process-3.log.gz",
+      "sha256": "64880442f75eff98540c10f8fba1ec97b664d1b7ed368b03d2a5696021028799",
+      "bytes": 139
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/process-4.log.gz",
+      "sha256": "64880442f75eff98540c10f8fba1ec97b664d1b7ed368b03d2a5696021028799",
+      "bytes": 139
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/process-5.log.gz",
+      "sha256": "f95dc1f890b88f6d0bf1dead3535bd7f003cb1c9452b2cbab0f3af21705c4054",
+      "bytes": 3630
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/process-6.log.gz",
+      "sha256": "4ecbb7ade7d851eac574091a7d9f7c804546f4726590e8073d0a8a919447fa5b",
+      "bytes": 12253
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/report.json.gz",
+      "sha256": "b4530eac92f28cb19872dba4687d9c40f564efce8ffa4b38b7f5b4a53f7913f3",
+      "bytes": 12233
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/result.json.gz",
+      "sha256": "d619a3b15f6719c513fea9ceeb60a75cf96e07996015ed50ed084d845bfe761c",
+      "bytes": 362
+    },
+    {
+      "path": "compound_v3_ethereum_lending-eoa-0fd70f647c554833af369c667fd42a34/state.sqlite.gz",
+      "sha256": "6a940cf7455a2ed28a83c3ed550282234cee9cd56b51d010178ac0fb7bf995a3",
+      "bytes": 84432
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/checkpoint.json.gz",
+      "sha256": "f1fcf05249cf94fb4481d9165843f0e4da544acf72feb9bd5041dffbfce2b7c9",
+      "bytes": 158431
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/dashboard.html.gz",
+      "sha256": "431adb4295f17d8548be9b09ce8222517f1680e85159d45a0660194fab094b88",
+      "bytes": 15388
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/dashboard.json.gz",
+      "sha256": "08fa1a41f0ce58fe426fa0ae5dcab257b52815a4cfb37ed33ff22fc058b9c952",
+      "bytes": 2597
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/deployment.json.gz",
+      "sha256": "9fdeff56a086c8a6cd1433853e5cd83285fb1de44dd22dfe5935982f6fb37d85",
+      "bytes": 1158
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/fixture-installation.json.gz",
+      "sha256": "c4150cce62a05e5c03a93d4b702012bdf8bd63041ad157ac3c2efed4b7ed2489",
+      "bytes": 2440
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/fork-routes.json.gz",
+      "sha256": "dc0c914e438a3f9a3abb7410c28da7855a62a489090d8ac5d7fa2dc8212f2939",
+      "bytes": 167
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/permission-budget-observations.json.gz",
+      "sha256": "1238c40281b1d1cc970053cd07e718450c65588e89ef1f7dbafc258e724280e7",
+      "bytes": 545
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/permission-generation.json.gz",
+      "sha256": "b7aa59d99ff26af61a46bac5671ab6e978252b06031b57012e551168afe8f1cb",
+      "bytes": 260
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/permission-installation.json.gz",
+      "sha256": "9ede055f0d741ae4b60a6c0a149fa5a4b8c56d17a16d1195832f6c14332d73ef",
+      "bytes": 4117
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/permission-verification.json.gz",
+      "sha256": "fb64f4f49100303b7d10e22d80b207de0c57ca5233b5447f2820e38a0595ca2d",
+      "bytes": 381
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/permissions/manifest.json.gz",
+      "sha256": "f51a188cad38a02ba70723bbe806a49deb5fafb6b30d673c16df4b5470492f05",
+      "bytes": 2997
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/permissions/permissions.txt.gz",
+      "sha256": "8ee33edab4ca515c885638da4514ca8da6e2c97bccfe5f1bed387207aa6a5f0e",
+      "bytes": 554
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/permissions/safe-0.json.gz",
+      "sha256": "ac0a70d1b2ab1dc2ca1833195eff4827a89ee0598a1f08f002a5376beadfc84d",
+      "bytes": 676
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/permissions/safe-1.json.gz",
+      "sha256": "0f681a1f955ce7ebfddc9caeb1d35636b1c7af4afc3d29fa8cdeb2781fd3010c",
+      "bytes": 569
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/process-0.log.gz",
+      "sha256": "44dfe9b1126ed99b08c7fa1e499de24feb7bcef44563c369f9c997d3b88d9790",
+      "bytes": 5048
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/process-2.log.gz",
+      "sha256": "4ebfd0f7688111477f905c0ba2e65c9abd8bd01ef3af216a65c21e7aa6ff7e46",
+      "bytes": 1157
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/process-3.log.gz",
+      "sha256": "8c716a1752096230284cda8ed612999e50ed7204506929beeb634659cd091355",
+      "bytes": 136
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/process-4.log.gz",
+      "sha256": "8c716a1752096230284cda8ed612999e50ed7204506929beeb634659cd091355",
+      "bytes": 136
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/process-5.log.gz",
+      "sha256": "09336af8be8d9d9e8f2fd6efdcc41ac4b95ec1c785b7f2c5287830607d0564fc",
+      "bytes": 3835
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/process-6.log.gz",
+      "sha256": "8ebaacb1b3285c9499916e7f44fc3b79a1b9fedfece0a447e97eec350ca3a21b",
+      "bytes": 12155
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/report.json.gz",
+      "sha256": "9d3c721c44feeb6081071402159285a382449f8a5f483634a21683f6ba5b0476",
+      "bytes": 12134
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/result.json.gz",
+      "sha256": "38c3b87f88a70ca4bc6c990589960e640d35dbaab19f9609c1d01825eddfba08",
+      "bytes": 1440
+    },
+    {
+      "path": "compound_v3_ethereum_lending-f206771cc44240759d86379d364e6bb9/state.sqlite.gz",
+      "sha256": "7541071b4807589f92e64cc7572094795277eab70b41a8c297ab57bc07b9efb7",
+      "bytes": 94787
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/checkpoint.json.gz",
+      "sha256": "7fd42e367a0c8b3bb8a1b1f4e837a3131fb039a34b53b8d57bc87f8a86bf3f68",
+      "bytes": 158487
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/dashboard.html.gz",
+      "sha256": "b87b7901eae2f6357eb12947b8593ba0f74f781b2828c76ecfc9574b785b7c58",
+      "bytes": 15449
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/dashboard.json.gz",
+      "sha256": "d1f4f12ce329634b946f030f9d92d91cff418d88b672553666769e2d6f55c86b",
+      "bytes": 2640
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/deployment.json.gz",
+      "sha256": "b79b20efafb497958e73b13b02b24d640f20e9bc781bf2f509e5a92ee9148e8f",
+      "bytes": 1182
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/fixture-installation.json.gz",
+      "sha256": "aba18edf26f65a12758922e4893d52d919887281b70f2df38b26e5803e205d5c",
+      "bytes": 2429
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/fork-routes.json.gz",
+      "sha256": "014d4a1269cf342bca0f738dad43b6be1453421f55730d778c60960c99086c4e",
+      "bytes": 165
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/permission-budget-observations.json.gz",
+      "sha256": "5315f2ddeb097a9255b669262d6d0aba506880dd01a46c860ac782fa1fd61d60",
+      "bytes": 544
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/permission-generation.json.gz",
+      "sha256": "8740559b852aee8efacc913ada3a65326448851742284a43732085d0fa6163d7",
+      "bytes": 260
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/permission-installation.json.gz",
+      "sha256": "c22901d98461713b7d2e1a630c3e82447c617975cce781b6f0c1fcd0a3c21f39",
+      "bytes": 4145
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/permission-verification.json.gz",
+      "sha256": "551b7e0de29e439ebd2b571f87466fd269104dca39798aac46efb512fe1fb106",
+      "bytes": 380
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/permissions/manifest.json.gz",
+      "sha256": "c8c4a2937d497d6e2b4c848cf43aec3e550a9275be8021b929c31163b4c05c82",
+      "bytes": 3034
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/permissions/permissions.txt.gz",
+      "sha256": "8ee33edab4ca515c885638da4514ca8da6e2c97bccfe5f1bed387207aa6a5f0e",
+      "bytes": 554
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/permissions/safe-0.json.gz",
+      "sha256": "86ff46c256771327efce54e0cfca089bd367269078f68ae0642be38ffa1efdf9",
+      "bytes": 676
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/permissions/safe-1.json.gz",
+      "sha256": "275e3786f00bcd07bfc859481bb0d7b53820587aebc3edebd7076bc80bb26e6e",
+      "bytes": 569
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/process-0.log.gz",
+      "sha256": "832410622f7b4db834ae9a5d1ea3e20fcfef4d605bf8cd0092a384f1abe8f18b",
+      "bytes": 5083
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/process-1.log.gz",
+      "sha256": "5b3039c6af87e66262c9565d843ed6aca74f6ffe9425750df8b9955c85221243",
+      "bytes": 39
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/process-2.log.gz",
+      "sha256": "39fe705aaf976efcbe686dd64bc144f4daefaa5318fa9a3016a180337f34400b",
+      "bytes": 1154
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/process-3.log.gz",
+      "sha256": "53f41f428f973f76236041db060dcd7c484b7eff211d9e556449287c38599485",
+      "bytes": 136
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/process-4.log.gz",
+      "sha256": "53f41f428f973f76236041db060dcd7c484b7eff211d9e556449287c38599485",
+      "bytes": 136
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/process-5.log.gz",
+      "sha256": "fe5a155b6cb62ad19003b8852e04fa5dfed76b176c35ea4499c3033321d97dfd",
+      "bytes": 3867
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/process-6.log.gz",
+      "sha256": "74b39fbd62511be39d502468f62dc081f2790abe9ff48cee9c31fd0ebc67c02b",
+      "bytes": 12392
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/report.json.gz",
+      "sha256": "23bf238d6bf4cbd22aab327efdf3b93b9cf94e459c433c5637e2d294ef2812a0",
+      "bytes": 12372
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/result.json.gz",
+      "sha256": "90dc9927886e88f1d0606687490797bfcb08ceb09eff04bfc0428ccac61be1fc",
+      "bytes": 1489
+    },
+    {
+      "path": "compound_v3_ethereum_lending-fe38304ef16647bea62aa042175a7e80/state.sqlite.gz",
+      "sha256": "6af9413b1f323dbcbe18a43ce17a944507f727474bc5ecb88806aec8b8e2be0c",
+      "bytes": 97030
+    },
+    {
+      "path": "safe_capture.py",
+      "sha256": "ec086f3f5d792de9e5b94f9a61fd43e21109d5f1601f322a6bcbd63ad1b0ad55",
+      "bytes": 3934
+    },
+    {
+      "path": "source-freeze.json.gz",
+      "sha256": "6bd392bde956948acf0a5419af31f648be9524e9480761e9bed0dc92648fd2e2",
+      "bytes": 4135
+    }
+  ]
+}

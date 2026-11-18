@@ -1,0 +1,51 @@
+name: "Set up repository"
+description: >-
+  Install uv with Python 3.12, sync the locked environment with every dependency
+  group, and optionally install bubblewrap. Strategy execution on Linux refuses to
+  run without bwrap, and 43 offline test modules spawn the sandboxed worker, so
+  the pytest, CRAP and smoke jobs all need it.
+
+inputs:
+  python-version:
+    description: "Python version for uv to install and sync against."
+    required: false
+    default: "3.12"
+  install-bwrap:
+    description: "Install bubblewrap and libseccomp2 on Linux runners."
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      with:
+        python-version: ${{ inputs.python-version }}
+        enable-cache: true
+
+    # macOS runners ship a python.org framework build whose `bin/python3.12` is a
+    # stub that re-executes Python.app/Contents/MacOS/Python; the sandbox-exec
+    # profile only allows the resolved interpreter, so the strategy worker cannot
+    # start. The uv-managed interpreter has no such stub on either platform.
+    - name: Use the uv-managed interpreter
+      shell: bash
+      run: echo "UV_PYTHON_PREFERENCE=only-managed" >> "$GITHUB_ENV"
+
+    - name: Install locked environment
+      shell: bash
+      run: uv sync --locked --all-groups
+
+    - name: Install bubblewrap
+      if: ${{ inputs.install-bwrap == 'true' && runner.os == 'Linux' }}
+      shell: bash
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -y -q bubblewrap libseccomp2
+        test -x /usr/bin/bwrap
+        # Ubuntu 24.04 (ubuntu-latest, including the -l larger runners) gates
+        # unprivileged user namespaces behind AppArmor; 22.04 has no such key.
+        # The sandbox refuses to run without user namespaces, so lift the gate.
+        if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        fi
+        bwrap --ro-bind / / --unshare-user --dev /dev --proc /proc true

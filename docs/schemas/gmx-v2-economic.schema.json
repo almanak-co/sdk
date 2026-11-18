@@ -1,0 +1,361 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GMX V2 prepared economic backtest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "window",
+    "inventory",
+    "mode",
+    "execution",
+    "data",
+    "costs"
+  ],
+  "properties": {
+    "window": {
+      "$ref": "uniswap-economic.schema.json#/properties/window"
+    },
+    "inventory": {
+      "$ref": "uniswap-economic.schema.json#/properties/inventory"
+    },
+    "mode": {
+      "const": "economic"
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "latency",
+        "models"
+      ],
+      "properties": {
+        "latency": {
+          "$ref": "strategy.schema.json#/$defs/Duration"
+        },
+        "decision_interval": {
+          "$ref": "strategy.schema.json#/$defs/Duration"
+        },
+        "models": {
+          "$ref": "#/$defs/Models"
+        }
+      }
+    },
+    "data": {
+      "$ref": "#/$defs/DataPolicy"
+    },
+    "costs": {
+      "discriminator": {
+        "mapping": {
+          "excluded": "#/$defs/ExcludedCosts",
+          "fixed_native": "#/$defs/FixedCosts"
+        },
+        "propertyName": "kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ExcludedCosts"
+        },
+        {
+          "$ref": "#/$defs/FixedCosts"
+        }
+      ],
+      "title": "Costs"
+    }
+  },
+  "$defs": {
+    "Address": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+    },
+    "ChainId": {
+      "type": "string",
+      "pattern": "^eip155:[0-9]+$"
+    },
+    "PositiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "NativeAmount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset",
+        "amount"
+      ],
+      "properties": {
+        "asset": {
+          "type": "string",
+          "description": "CAIP-19 native asset of the chain, for example eip155:42161/slip44:60."
+        },
+        "amount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Base units of the native asset."
+        }
+      }
+    },
+    "Models": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "swap_model",
+        "liquidity_model",
+        "position_model",
+        "keeper"
+      ],
+      "properties": {
+        "swap_model": {
+          "const": "prepared_integer_market",
+          "title": "Swap Model",
+          "type": "string"
+        },
+        "liquidity_model": {
+          "anyOf": [
+            {
+              "const": "fixed_external_gm_valuation",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Liquidity Model"
+        },
+        "position_model": {
+          "anyOf": [
+            {
+              "const": "prepared_position_accounting",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Position Model",
+          "description": "Candidate perpetual settlement; public prepared support is still refused."
+        },
+        "keeper": {
+          "$ref": "#/$defs/KeeperPolicy"
+        }
+      }
+    },
+    "KeeperPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "minimum_latency_seconds",
+        "payments"
+      ],
+      "properties": {
+        "model": {
+          "const": "published_opportunity_fixed_native_payment",
+          "type": "string"
+        },
+        "minimum_latency_seconds": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "payments": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "chain",
+              "payment"
+            ],
+            "properties": {
+              "chain": {
+                "$ref": "#/$defs/ChainId"
+              },
+              "payment": {
+                "$ref": "#/$defs/NativeAmount"
+              }
+            }
+          }
+        }
+      }
+    },
+    "PublishedSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "handler",
+        "oracle",
+        "request_kind",
+        "calldata_suffix"
+      ],
+      "properties": {
+        "handler": {
+          "$ref": "#/$defs/Address"
+        },
+        "oracle": {
+          "$ref": "#/$defs/Address"
+        },
+        "request_kind": {
+          "enum": [
+            "order",
+            "deposit",
+            "withdrawal",
+            "relay_batch"
+          ]
+        },
+        "calldata_suffix": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "prefix",
+            "length"
+          ],
+          "properties": {
+            "prefix": {
+              "type": "string",
+              "pattern": "^0x([0-9a-fA-F]{2})*$"
+            },
+            "length": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 64
+            }
+          }
+        }
+      }
+    },
+    "DataPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "publications",
+        "max_age_seconds",
+        "maximum_risk_blocks",
+        "maximum_report_age_seconds",
+        "publication_limits"
+      ],
+      "properties": {
+        "source": {
+          "const": "gmx_published_signed_reports",
+          "type": "string"
+        },
+        "publications": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "allocation",
+              "source"
+            ],
+            "properties": {
+              "allocation": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source": {
+                "$ref": "#/$defs/PublishedSource"
+              }
+            }
+          }
+        },
+        "max_age_seconds": {
+          "$ref": "strategy.schema.json#/$defs/Duration"
+        },
+        "maximum_risk_blocks": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "maximum_report_age_seconds": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "publication_limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "page_blocks",
+            "maximum_blocks",
+            "maximum_pages",
+            "maximum_logs",
+            "maximum_transactions"
+          ],
+          "properties": {
+            "page_blocks": {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            "maximum_blocks": {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            "maximum_pages": {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            "maximum_logs": {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            "maximum_transactions": {
+              "$ref": "#/$defs/PositiveInteger"
+            }
+          }
+        }
+      }
+    },
+    "ExcludedCosts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "excluded",
+          "type": "string"
+        }
+      }
+    },
+    "FixedCosts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "chains"
+      ],
+      "properties": {
+        "kind": {
+          "const": "fixed_native",
+          "type": "string"
+        },
+        "chains": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "chain",
+              "acceptance",
+              "cancellation",
+              "revocation",
+              "claim"
+            ],
+            "properties": {
+              "chain": {
+                "$ref": "#/$defs/ChainId"
+              },
+              "acceptance": {
+                "$ref": "#/$defs/NativeAmount"
+              },
+              "cancellation": {
+                "$ref": "#/$defs/NativeAmount"
+              },
+              "revocation": {
+                "$ref": "#/$defs/NativeAmount"
+              },
+              "claim": {
+                "$ref": "#/$defs/NativeAmount"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

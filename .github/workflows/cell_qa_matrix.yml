@@ -1,0 +1,363 @@
+name: Cell QA Matrix
+
+# Runs one connector/chain cell's QA matrix on hosted runners, one job per case,
+# through the same `scripts.qa_bench --case` entry point the local bench uses,
+# plus the cell's reverse-fault nodes through pytest. Every job runs this run's
+# commit; fresh fork origins and the input time are resolved once before the
+# fan-out. Fixture accounts are public Foundry test keys on identified Anvil
+# forks of the repository's read-only providers: no funds are spent and no
+# production permissions are installed. This is not the local retained-evidence
+# gate; docs/qa.md says which per-cell package gates it can and cannot satisfy.
+on:
+  workflow_dispatch:
+    inputs:
+      connector:
+        description: "Connector ID of the cell, for example uniswap_v3. Leave empty with explicit cases."
+        required: false
+        type: string
+        default: ""
+      chain:
+        description: "CAIP-2 chain of the cell, for example eip155:56."
+        required: false
+        type: string
+        default: ""
+      cases:
+        description: "Explicit comma-separated case IDs instead of a cell."
+        required: false
+        type: string
+        default: ""
+      lanes:
+        description: "Comma-separated hosted lanes: fork, backtest, pytest."
+        required: false
+        type: string
+        default: "fork,backtest"
+      reverse_fault:
+        description: "Run the reversal nodes parametrized by the cell's references."
+        required: false
+        type: boolean
+        default: true
+      nodes:
+        description: "Additional comma-separated pytest node IDs under tests/fork or tests/strategy_fork, for example recovery-foundation nodes."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12.13"
+
+jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-repo
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Plan the cell matrix
+        id: plan
+        env:
+          CONNECTOR: ${{ inputs.connector }}
+          CHAIN: ${{ inputs.chain }}
+          CASES: ${{ inputs.cases }}
+          LANES: ${{ inputs.lanes }}
+          REVERSE_FAULT: ${{ inputs.reverse_fault }}
+          NODES: ${{ inputs.nodes }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/plan"
+          uv run --locked python -m scripts.ci.cell_qa_matrix plan \
+            --connector "$CONNECTOR" --chain "$CHAIN" --cases "$CASES" \
+            --lanes "$LANES" --reverse-fault "$REVERSE_FAULT" --nodes "$NODES" \
+            --commit "$GITHUB_SHA" --output "$RUNNER_TEMP/plan/plan.json" > matrix.json
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "Planned $(jq length matrix.json) entries on $GITHUB_SHA"
+
+      # The provider key reaches the bench only through this env file; it is
+      # never a process argument, and the retained evidence is scanned for it.
+      - name: Write the provider env file
+        env:
+          ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ALCHEMY_API_KEY" ]; then
+            echo "::error::the ALCHEMY_API_KEY secret is not available to this run"
+            exit 1
+          fi
+          install -m 600 /dev/null "$RUNNER_TEMP/provider.env"
+          printf 'ALCHEMY_API_KEY=%s\n' "$ALCHEMY_API_KEY" >> "$RUNNER_TEMP/provider.env"
+          if [ -n "$COINGECKO_API_KEY" ]; then
+            printf 'COINGECKO_API_KEY=%s\n' "$COINGECKO_API_KEY" >> "$RUNNER_TEMP/provider.env"
+          fi
+
+      - name: Freeze fresh origins and the input time
+        run: |
+          uv run --locked python -m scripts.ci.cell_qa_matrix freeze \
+            --plan "$RUNNER_TEMP/plan/plan.json" --env-file "$RUNNER_TEMP/provider.env" \
+            --directory "$RUNNER_TEMP/plan"
+
+      - name: Refuse a plan that carries a provider key
+        env:
+          ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+        run: |
+          uv run --locked python -m scripts.ci.cell_qa_evidence scan \
+            --directory "$RUNNER_TEMP/plan" \
+            --secret-env ALCHEMY_API_KEY --secret-env COINGECKO_API_KEY
+
+      - name: Upload the plan
+        uses: actions/upload-artifact@v7
+        with:
+          name: cell-qa-plan
+          path: ${{ runner.temp }}/plan/
+          if-no-files-found: error
+          retention-days: 90
+
+  qa:
+    name: "${{ matrix.id }}"
+    needs: [plan]
+    runs-on: ubuntu-latest-l
+    # Fork and pytest-lane cases keep the bench's one-hour bound. Backtests get the
+    # policy's cold-preparation budget plus two hours; see docs/qa.md.
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      # Each job is a separate provider client. The bound is static: GitHub
+      # drops the whole matrix job, without an error, when max-parallel is an
+      # expression over a dispatch input.
+      max-parallel: 8
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-repo
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          install-bwrap: "true"
+
+      # Every job installs Anvil, even a backtest, so the recorded tool versions
+      # are identical across the run and the aggregate can compare them.
+      - uses: foundry-rs/foundry-toolchain@dba66c27052e63476d886f22216e119ba7e615bf # v1
+        with:
+          version: stable
+          cache: false
+
+      - name: Download the plan
+        uses: actions/download-artifact@v8
+        with:
+          name: cell-qa-plan
+          path: ${{ runner.temp }}/plan
+
+      - name: Write the provider env file
+        env:
+          ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+        run: |
+          set -euo pipefail
+          install -m 600 /dev/null "$RUNNER_TEMP/provider.env"
+          printf 'ALCHEMY_API_KEY=%s\n' "$ALCHEMY_API_KEY" >> "$RUNNER_TEMP/provider.env"
+          if [ -n "$COINGECKO_API_KEY" ]; then
+            printf 'COINGECKO_API_KEY=%s\n' "$COINGECKO_API_KEY" >> "$RUNNER_TEMP/provider.env"
+          fi
+          # Everything uploaded for this entry lives here: job.json and public/.
+          echo "OUT=$RUNNER_TEMP/entry" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/entry"
+
+      - name: Record the source identity before the entry
+        run: |
+          uv run --locked python -m scripts.ci.cell_qa_evidence identity \
+            --output "$RUNNER_TEMP/identity-before.json"
+
+      - name: Run the entry
+        id: run
+        env:
+          KIND: ${{ matrix.kind }}
+          ENTRY: ${{ matrix.id }}
+          BENCH_TIMEOUT: ${{ matrix.bench_timeout }}
+        run: |
+          set -euo pipefail
+          if [ "$KIND" = "case" ]; then
+            # The bench retains the full denominator, sanitizes public/ and
+            # exits nonzero unless the selected case passed.
+            uv run --locked python -m scripts.qa_bench \
+              --env-file "$RUNNER_TEMP/provider.env" \
+              --frozen-inputs "$RUNNER_TEMP/plan/frozen-inputs.json" \
+              --output "$RUNNER_TEMP/bench" --case "$ENTRY" --timeout "$BENCH_TIMEOUT"
+          else
+            mkdir -p "$RUNNER_TEMP/node"
+            set +e
+            uv run --locked pytest "$ENTRY" -p no:cacheprovider \
+              --fork-env="$RUNNER_TEMP/provider.env" -rfEs -v \
+              --junitxml="$RUNNER_TEMP/node/junit.xml" 2>&1 | tee "$RUNNER_TEMP/node/pytest.log"
+            status=${PIPESTATUS[0]}
+            set -e
+            if [ -f "$RUNNER_TEMP/node/junit.xml" ] && grep -q '<skipped' "$RUNNER_TEMP/node/junit.xml"; then
+              echo "::error::the selected node was skipped; a skip is not a pass"
+              exit 1
+            fi
+            exit "$status"
+          fi
+
+      # Only the bench's sanitized public/ tree is kept; private/ holds generated
+      # credentials and never leaves the runner. The source snapshot is identical
+      # in every job, so the aggregate archives it once for this commit.
+      - name: Export sanitized evidence
+        if: always()
+        env:
+          KIND: ${{ matrix.kind }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT/public"
+          echo '[]' > "$RUNNER_TEMP/omitted.json"
+          if [ "$KIND" = "case" ]; then
+            if [ -d "$RUNNER_TEMP/bench/public" ]; then
+              cp -a "$RUNNER_TEMP/bench/public/." "$OUT/public/"
+              rm -f "$OUT/public/source.tar.gz"
+            fi
+          else
+            for source in node artifacts; do
+              base="$RUNNER_TEMP"
+              [ "$source" = "artifacts" ] && base="$GITHUB_WORKSPACE"
+              uv run --locked python -m scripts.ci.cell_qa_evidence export \
+                --source "$base/$source" --destination "$OUT/public/$source" \
+                --env-file "$RUNNER_TEMP/provider.env" --omitted "$RUNNER_TEMP/omitted.json"
+            done
+          fi
+
+      - name: Record the source identity after the entry
+        if: always()
+        run: |
+          uv run --locked python -m scripts.ci.cell_qa_evidence identity \
+            --output "$RUNNER_TEMP/identity-after.json"
+
+      # Retained evidence must never carry a provider key. The scan compares file
+      # names and bytes, including gzip members, without printing either value.
+      - name: Refuse evidence that carries a provider key
+        id: scan
+        if: always()
+        env:
+          ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+        run: |
+          set -euo pipefail
+          if uv run --locked python -m scripts.ci.cell_qa_evidence scan --directory "$OUT" \
+              --secret-env ALCHEMY_API_KEY --secret-env COINGECKO_API_KEY; then
+            echo "result=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::retained evidence carries a provider key; it is not uploaded"
+            rm -rf "$OUT/public"
+            echo "result=refused" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Record the job
+        if: always()
+        env:
+          ENTRY_JSON: ${{ toJSON(matrix) }}
+          OUTCOME: ${{ steps.run.outcome }}
+          SCAN: ${{ steps.scan.outputs.result || 'refused' }}
+        run: |
+          uv run --locked python -m scripts.ci.cell_qa_evidence record \
+            --entry "$ENTRY_JSON" --outcome "$OUTCOME" --scan "$SCAN" \
+            --omitted "$RUNNER_TEMP/omitted.json" \
+            --before "$RUNNER_TEMP/identity-before.json" \
+            --after "$RUNNER_TEMP/identity-after.json" --output "$OUT/job.json"
+
+      - name: Upload the entry evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/entry/
+          if-no-files-found: error
+          retention-days: 90
+
+  aggregate:
+    needs: [plan, qa]
+    if: ${{ always() }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Refuse a run without a plan
+        if: ${{ needs.plan.result != 'success' }}
+        run: |
+          echo "::error::the plan job did not succeed; no cell result exists"
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-repo
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download the plan
+        uses: actions/download-artifact@v8
+        with:
+          name: cell-qa-plan
+          path: ${{ runner.temp }}/plan
+
+      # One directory per entry artifact; an entry without an artifact is a
+      # missing result, never an omitted row.
+      - name: Download the entry evidence
+        uses: actions/download-artifact@v8
+        with:
+          pattern: cell-qa-entry-*
+          path: ${{ runner.temp }}/entries
+
+      - name: Merge the entry results
+        id: merge
+        env:
+          ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set +e
+          uv run --locked python -m scripts.ci.cell_qa_summary \
+            --plan "$RUNNER_TEMP/plan/plan.json" \
+            --frozen-inputs "$RUNNER_TEMP/plan/frozen-inputs.json" \
+            --entries "$RUNNER_TEMP/entries" --output "$RUNNER_TEMP/summary" \
+            --run-url "$RUN_URL" \
+            --secret-env ALCHEMY_API_KEY --secret-env COINGECKO_API_KEY
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          if [ -f "$RUNNER_TEMP/summary/summary.md" ]; then
+            cat "$RUNNER_TEMP/summary/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Refuse a summary that carries a provider key
+        env:
+          ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+        run: |
+          uv run --locked python -m scripts.ci.cell_qa_evidence scan \
+            --directory "$RUNNER_TEMP/summary" \
+            --secret-env ALCHEMY_API_KEY --secret-env COINGECKO_API_KEY
+
+      - name: Upload the cell result
+        uses: actions/upload-artifact@v7
+        with:
+          name: cell-qa-summary
+          path: ${{ runner.temp }}/summary/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Fail unless every planned entry passed
+        env:
+          STATUS: ${{ steps.merge.outputs.status }}
+        run: |
+          if [ "$STATUS" != "0" ]; then
+            echo "::error::the cell matrix is incomplete or failed; see the job summary"
+            exit 1
+          fi

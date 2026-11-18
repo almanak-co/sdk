@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+mode: historical_path
+window:
+  start: '2026-08-20T00:00:00Z'
+  end: '2026-08-21T00:00:00Z'
+  end_policy: teardown
+  cleanup: 3600s
+inventory:
+  funds:
+    lending_0:
+      balances:
+      - asset: eip155:1/slip44:60
+        quantity: '5'
+      - asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+        quantity: '0.04'
+    lending_1:
+      balances:
+      - asset: eip155:1/slip44:60
+        quantity: '5'
+      - asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+        quantity: '0.04'
+execution:
+  latency: 0s
+costs:
+  kind: excluded

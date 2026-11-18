@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/morpho_blue_robinhood_lending.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '200'
+  allocations:
+    earn:
+      market: earn
+      account: lender
+      capital: '1000'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    collateral:
+      market: collateral
+      account: borrower
+      capital: '1'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: borrower
+      borrow: true
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+markets:
+  earn:
+    connector: morpho_blue
+    chain: eip155:4663
+    market_id: '0x127353ba63e08f74d8e9ce8a1c2b41b5f89c7167135b1c09fbed34a71b4cb06b'
+    leg: loan
+  collateral:
+    connector: morpho_blue
+    chain: eip155:4663
+    market_id: '0x127353ba63e08f74d8e9ce8a1c2b41b5f89c7167135b1c09fbed34a71b4cb06b'
+    leg: collateral
+  loan:
+    connector: morpho_blue
+    chain: eip155:4663
+    market_id: '0x127353ba63e08f74d8e9ce8a1c2b41b5f89c7167135b1c09fbed34a71b4cb06b'
+    leg: loan
+accounts:
+  lender:
+    chain: eip155:4663
+  borrower:
+    chain: eip155:4663

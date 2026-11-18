@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/aerodrome_base_stable_trading.fork.yaml.
+strategy:
+  decision_interval: 60s
+  allocations:
+    position:
+      market: pool
+      account: fund
+      liquidity_enabled: false
+      capital:
+        asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+        quantity: '100'
+      entry_swap_bps: 10000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 300
+      minimum_native_balance:
+        base_units: 0
+  gas:
+    # Example Base amounts; size them from the live gas price.
+    # Entry takes 1 transaction and exit 2 (almanak check --production):
+    # exit_reserve = 2 fees, total_budget = exit_reserve + 1 entry + 20 later fees.
+    fund_payer:
+      accounts:
+      - fund
+      chain: eip155:8453
+      max_transaction_fee:
+        base_units: 75000000000000
+      total_budget:
+        base_units: 1725000000000000
+      exit_reserve:
+        base_units: 150000000000000
+markets:
+  pool:
+    connector: aerodrome
+    chain: eip155:8453
+    pool: '0x27a8afa3bd49406e48a074350fb7b2020c43b2bd'
+accounts:
+  fund:
+    chain: eip155:8453

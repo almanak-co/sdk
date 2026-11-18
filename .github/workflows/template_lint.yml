@@ -1,0 +1,17 @@
+name: Lint
+
+on:
+  workflow_call:
+
+jobs:
+  lint:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-repo
+      - name: Run lint check
+        run: make lint-check
+      - name: Refuse private material in the published tree
+        run: make hygiene

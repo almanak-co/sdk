@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Uniswap V3 pool selection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "connector",
+    "chain",
+    "pool"
+  ],
+  "properties": {
+    "connector": {
+      "const": "uniswap_v3"
+    },
+    "chain": {
+      "type": "string",
+      "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$"
+    },
+    "pool": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+    },
+    "assertions": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "currency0": {
+              "type": "string",
+              "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+            },
+            "currency1": {
+              "type": "string",
+              "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+            },
+            "fee": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 999999
+            },
+            "tick_spacing": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16383
+            },
+            "decimals0": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "decimals1": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

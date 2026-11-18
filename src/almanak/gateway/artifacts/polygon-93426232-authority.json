@@ -1,0 +1,27 @@
+{
+  "block": {
+    "chain": {
+      "chain_id": "eip155:137",
+      "environment": "mainnet"
+    },
+    "number": 93426232,
+    "hash": "0x37e6030ad34903a763ea2ef9cbdc3eca891d1681942b31cbb0d8caf7f8c8ebe3",
+    "timestamp": 1788844381
+  },
+  "contracts": [
+    {
+      "address": "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
+      "code_hash": "0x7dbf0ee7d6d69b563891ceb7056cf0ff0fa09d21a48e5f812d89981c2ef95944",
+      "implementation": "0x235ae97b28466db30469b89a9fe4cff0659f82cb",
+      "implementation_hash": "0x39ec98a4509fb2d4380a9cd4623e7b20cf651cb58edb8d8332bfad9c3d698143",
+      "implementation_slot": 50801780122331352337026042894847907698553222651959119521779622085092237899971
+    },
+    {
+      "address": "0xc4ce1d6f5d98d65ee25cf85e9f2e9dcfee6cb5d6",
+      "code_hash": "0xe0039e200dc94a84760089ea18de72126e37d0c2aabbd11ca76d4b258f2249ff",
+      "implementation": "0x75c7a45829c6eda587b8790666d7b2506f1706ff",
+      "implementation_hash": "0x2f4a87e3179f89023084e46fe7c926f5e9dcb4a967b86b82ec7d131dedc9aba9",
+      "implementation_slot": 84433188562787201722726714929437435311388101951060452362756020190511228960639
+    }
+  ]
+}

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "almanak-funding-v1",
+  "title": "Almanak strategy funding requirements",
+  "description": "The `funding` block of `almanak check --json` for --fork and --production online checks. Requirements only: consumers compare them with balances they measure. Amounts are unsigned base-unit decimal strings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "mode", "parameters_digest", "accounts", "payers"],
+  "properties": {
+    "schema": { "const": "almanak-funding-v1" },
+    "mode": { "enum": ["fork", "production"] },
+    "parameters_digest": { "$ref": "#/$defs/Digest" },
+    "accounts": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/Account" }
+    },
+    "payers": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/Payer" }
+    }
+  },
+  "$defs": {
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "BaseUnits": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "ChainId": { "type": "string", "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$" },
+    "AssetType": {
+      "type": "string",
+      "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+    },
+    "Address": { "type": "string", "minLength": 1 },
+    "Asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset", "amount_base_units", "decimals", "symbol", "basis"],
+      "properties": {
+        "asset": { "$ref": "#/$defs/AssetType" },
+        "amount_base_units": { "$ref": "#/$defs/BaseUnits" },
+        "decimals": { "type": ["integer", "null"], "minimum": 0 },
+        "symbol": { "type": ["string", "null"] },
+        "basis": { "type": "string", "minLength": 1 }
+      }
+    },
+    "Account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account", "chain", "fund", "payer", "assets"],
+      "properties": {
+        "account": { "type": "string", "minLength": 1 },
+        "chain": { "$ref": "#/$defs/ChainId" },
+        "fund": { "$ref": "#/$defs/Address" },
+        "payer": { "$ref": "#/$defs/Address" },
+        "assets": { "type": "array", "items": { "$ref": "#/$defs/Asset" } }
+      }
+    },
+    "Gas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "max_transaction_fee_base_units",
+        "exit_reserve_base_units"
+      ],
+      "properties": {
+        "policy": { "type": ["string", "null"] },
+        "max_transaction_fee_base_units": { "$ref": "#/$defs/BaseUnits" },
+        "exit_reserve_base_units": { "$ref": "#/$defs/BaseUnits" },
+        "total_budget_base_units": { "$ref": "#/$defs/BaseUnits" }
+      }
+    },
+    "Payer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "payer",
+        "chain",
+        "accounts",
+        "asset",
+        "decimals",
+        "minimum_native_balance_base_units",
+        "entry_minimum_base_units",
+        "gas"
+      ],
+      "properties": {
+        "payer": { "$ref": "#/$defs/Address" },
+        "chain": { "$ref": "#/$defs/ChainId" },
+        "accounts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "asset": { "$ref": "#/$defs/AssetType" },
+        "decimals": { "type": "integer", "minimum": 0 },
+        "minimum_native_balance_base_units": { "$ref": "#/$defs/BaseUnits" },
+        "entry_transactions": { "type": "integer", "minimum": 0 },
+        "entry_minimum_base_units": { "$ref": "#/$defs/BaseUnits" },
+        "gas": { "anyOf": [{ "$ref": "#/$defs/Gas" }, { "type": "null" }] }
+      }
+    }
+  }
+}

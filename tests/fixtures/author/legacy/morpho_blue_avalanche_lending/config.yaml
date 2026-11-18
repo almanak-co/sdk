@@ -1,0 +1,129 @@
+strategy:
+  connector: morpho_blue
+  decision_interval: 5s
+  allocations:
+    earn:
+      market: earn
+      account: lender
+      supply_limit: '1'
+      borrow_limit: '0'
+      minimum_health_factor: '2'
+      native_asset: eip155:43114/slip44:9005
+      minimum_native_balance: '0'
+    collateral:
+      market: collateral
+      account: borrower
+      supply_limit: '1'
+      borrow_limit: '0'
+      minimum_health_factor: '2'
+      native_asset: eip155:43114/slip44:9005
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: borrower
+      supply_limit: '0'
+      borrow_limit: '0.1'
+      minimum_health_factor: '2'
+      native_asset: eip155:43114/slip44:9005
+      minimum_native_balance: '0'
+assets:
+  eip155:43114/slip44:9005:
+    decimals: 18
+  eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7:
+    decimals: 18
+  eip155:43114/erc20:0xa25eaf2906fa1a3a13edac9b9657108af7b703e3:
+    decimals: 18
+markets:
+  earn:
+    kind: morpho_blue
+    market:
+      chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      core: '0x895383274303aa19fe978afb4ac55c7f094f982c'
+      market_id: '0x2358f128789e67e053f9b9082cfbe4c0ceca8c51fa67c72f3a395e140b96607b'
+      loan_asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+      collateral_asset: eip155:43114/erc20:0xa25eaf2906fa1a3a13edac9b9657108af7b703e3
+      oracle: '0x7759c62e0e3c1c6ee5789b60ccd0826936cb618d'
+      irm: '0xb6ac9477d574ee2a7bf32d2475b303fb70968aa4'
+      lltv: 915000000000000000
+    asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+  collateral:
+    kind: morpho_blue
+    market:
+      chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      core: '0x895383274303aa19fe978afb4ac55c7f094f982c'
+      market_id: '0x2358f128789e67e053f9b9082cfbe4c0ceca8c51fa67c72f3a395e140b96607b'
+      loan_asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+      collateral_asset: eip155:43114/erc20:0xa25eaf2906fa1a3a13edac9b9657108af7b703e3
+      oracle: '0x7759c62e0e3c1c6ee5789b60ccd0826936cb618d'
+      irm: '0xb6ac9477d574ee2a7bf32d2475b303fb70968aa4'
+      lltv: 915000000000000000
+    asset: eip155:43114/erc20:0xa25eaf2906fa1a3a13edac9b9657108af7b703e3
+  loan:
+    kind: morpho_blue
+    market:
+      chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      core: '0x895383274303aa19fe978afb4ac55c7f094f982c'
+      market_id: '0x2358f128789e67e053f9b9082cfbe4c0ceca8c51fa67c72f3a395e140b96607b'
+      loan_asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+      collateral_asset: eip155:43114/erc20:0xa25eaf2906fa1a3a13edac9b9657108af7b703e3
+      oracle: '0x7759c62e0e3c1c6ee5789b60ccd0826936cb618d'
+      irm: '0xb6ac9477d574ee2a7bf32d2475b303fb70968aa4'
+      lltv: 915000000000000000
+    asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+accounts:
+  lender:
+    chain:
+      chain_id: eip155:43114
+      environment: mainnet
+  borrower:
+    chain:
+      chain_id: eip155:43114
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: avax-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      block:
+        chain:
+          chain_id: eip155:43114
+          environment: mainnet
+        number: 94864140
+        hash: '0xdd2be4027d9261203dd9035b2969f2fd1a17d4ba63542264e1bb4d6d13c01b7a'
+        timestamp: 1788966469
+    funds:
+    - account: lender
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+          quantity: '1'
+        method: wrap_native
+    - account: borrower
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:43114/erc20:0xa25eaf2906fa1a3a13edac9b9657108af7b703e3
+          quantity: '1'
+        method: local_storage
+      - balance:
+          asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+          quantity: '0.01'
+        method: wrap_native
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:43114/slip44:9005
+        quantity: '5'
+      foundry_account_index: 0

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "almanak-backtest-report",
+  "title": "Almanak backtest report",
+  "description": "The JSON document `almanak backtest run --json` prints. Only the summary members are typed here.",
+  "type": "object",
+  "properties": {
+    "closed": {
+      "type": "boolean"
+    },
+    "completed_steps": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "evaluations": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "decision_evaluations": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "elapsed_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "end_to_end_seconds": {
+      "type": "number",
+      "minimum": 0
+    },
+    "captured_rpc_requests": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "window": {
+      "type": "object"
+    },
+    "decision_interval": {
+      "type": "object"
+    },
+    "performance": {
+      "type": "object"
+    }
+  }
+}

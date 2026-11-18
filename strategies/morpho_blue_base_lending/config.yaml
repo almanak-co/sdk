@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/morpho_blue_base_lending.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '200'
+  allocations:
+    earn:
+      market: earn
+      account: lender
+      capital: '1000'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    collateral:
+      market: collateral
+      account: borrower
+      capital: '1'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: borrower
+      borrow: true
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+  gas:
+    # Example Base amounts; size them from the live gas price.
+    # Entry takes 3 transactions and exit 5 (almanak check --production):
+    # exit_reserve = 5 fees, total_budget = exit_reserve + 3 entry + 20 later fees.
+    gas_payer:
+      accounts:
+      - lender
+      - borrower
+      chain: eip155:8453
+      max_transaction_fee:
+        base_units: 75000000000000
+      total_budget:
+        base_units: 2100000000000000
+      exit_reserve:
+        base_units: 375000000000000
+markets:
+  earn:
+    connector: morpho_blue
+    chain: eip155:8453
+    market_id: '0x8793cf302b8ffd655ab97bd1c695dbd967807e8367a65cb2f4edaf1380ba1bda'
+    leg: loan
+  collateral:
+    connector: morpho_blue
+    chain: eip155:8453
+    market_id: '0x8793cf302b8ffd655ab97bd1c695dbd967807e8367a65cb2f4edaf1380ba1bda'
+    leg: collateral
+  loan:
+    connector: morpho_blue
+    chain: eip155:8453
+    market_id: '0x8793cf302b8ffd655ab97bd1c695dbd967807e8367a65cb2f4edaf1380ba1bda'
+    leg: loan
+accounts:
+  lender:
+    chain: eip155:8453
+  borrower:
+    chain: eip155:8453

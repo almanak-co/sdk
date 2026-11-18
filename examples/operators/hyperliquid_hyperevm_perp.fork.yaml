@@ -1,0 +1,49 @@
+# Operator execution context for a fork run of strategies/hyperliquid_hyperevm_perp. Provider
+# credentials stay in the selected --env-file. The account binding is a placeholder:
+# fork provisioning generates the actual fixture Safe, Roles module and operator. A
+# Hyperliquid deployment runs on identified forks only until D7 (blueprint 30).
+#
+# The fork workspace also runs the synthesized HyperCore beside the HyperEVM node, the
+# `hypercore-model` process (blueprint 30, section 9.1), seeded from mainnet `/info` when
+# the workspace is created. The fixture gives the Safe 0.01 HYPE, which its owners send to
+# the Safe's HyperCore account once the first deposit activates it, to pay withdrawals'
+# system transactions (section 7). Every HyperCore effect is synthesized.
+schema_version: operator-gateway-config-v1
+modes:
+- fork
+networks:
+- chain: eip155:999
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: trader
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:999
+          environment: mainnet
+        address: '0x0000000000000000000000000000000000000001'
+fork:
+  # A 3,000,000-gas small block, so fixture transactions meet the limit mainnet
+  # transactions without big-block opt-in do.
+  anchors:
+  - chain: eip155:999
+    height: 49017682
+    reference: '0xd6e25a1a30734e9231ff1256c22710f7574fbc563202c8e97b6668babd5da229'
+  funds:
+  # The Safe that owns the HyperCore account, holding the USDC the strategy deposits.
+  - kind: safe_roles
+    account: trader
+    operator: operator
+    assets:
+    - asset: eip155:999/erc20:0xb88339cb7199b77e23db6e890353e22632ba630f
+      amount: 30000000
+  # The operator pays HyperEVM gas for the custody calls; agent-signed trades use none.
+  operators:
+  - name: operator
+    native_balance:
+      asset: eip155:999/slip44:2457
+      amount: 5000000000000000000

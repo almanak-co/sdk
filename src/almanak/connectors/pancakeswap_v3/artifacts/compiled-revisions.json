@@ -1,0 +1,533 @@
+{
+  "factory": {
+    "runtime_length": 5151,
+    "normalized_code_hash": "0xe54452f4821538133505a3169b31ebbaa714a788487910ecaf26aff75f431cad",
+    "immutables": {
+      "poolDeployer": [
+        {
+          "length": 32,
+          "start": 1779
+        },
+        {
+          "length": 32,
+          "start": 4315
+        }
+      ]
+    }
+  },
+  "deployer": {
+    "runtime_length": 24556,
+    "normalized_code_hash": "0xedd527f11646c1912dfc51b57ffa0ee27972f8798bcaf7bc68ae6ad054b6022b",
+    "immutables": {}
+  },
+  "router": {
+    "runtime_length": 12154,
+    "normalized_code_hash": "0x3fb454f7480821601d98710f26dcc4055e29dbf11e31a742e66991b5f9c1a40b",
+    "immutables": {
+      "deployer": [
+        {
+          "length": 32,
+          "start": 962
+        },
+        {
+          "length": 32,
+          "start": 3937
+        },
+        {
+          "length": 32,
+          "start": 9435
+        }
+      ],
+      "factory": [
+        {
+          "length": 32,
+          "start": 3901
+        }
+      ],
+      "WETH9": [
+        {
+          "length": 32,
+          "start": 330
+        },
+        {
+          "length": 32,
+          "start": 1786
+        },
+        {
+          "length": 32,
+          "start": 2084
+        },
+        {
+          "length": 32,
+          "start": 2238
+        },
+        {
+          "length": 32,
+          "start": 2302
+        },
+        {
+          "length": 32,
+          "start": 2600
+        },
+        {
+          "length": 32,
+          "start": 5890
+        },
+        {
+          "length": 32,
+          "start": 5986
+        },
+        {
+          "length": 32,
+          "start": 6115
+        }
+      ]
+    }
+  },
+  "quoter": {
+    "runtime_length": 8331,
+    "normalized_code_hash": "0x98cc616764849559157493f5101be359a4ada38cec11d7a177fef395b6ac6ab8",
+    "immutables": {
+      "deployer": [
+        {
+          "length": 32,
+          "start": 365
+        },
+        {
+          "length": 32,
+          "start": 2813
+        },
+        {
+          "length": 32,
+          "start": 2934
+        }
+      ],
+      "factory": [
+        {
+          "length": 32,
+          "start": 1862
+        }
+      ],
+      "WETH9": [
+        {
+          "length": 32,
+          "start": 1264
+        }
+      ]
+    }
+  },
+  "pool": {
+    "runtime_length": 22962,
+    "normalized_code_hash": "0x4ef16dfd4d3a1481e945e15d2579e8fb74f78cc27678875fdee9b06eed2e86ac",
+    "immutables": {
+      "factory": [
+        {
+          "length": 32,
+          "start": 8694
+        },
+        {
+          "length": 32,
+          "start": 8735
+        },
+        {
+          "length": 32,
+          "start": 10453
+        },
+        {
+          "length": 32,
+          "start": 10494
+        },
+        {
+          "length": 32,
+          "start": 10915
+        },
+        {
+          "length": 32,
+          "start": 10960
+        },
+        {
+          "length": 32,
+          "start": 11001
+        }
+      ],
+      "token0": [
+        {
+          "length": 32,
+          "start": 2324
+        },
+        {
+          "length": 32,
+          "start": 5186
+        },
+        {
+          "length": 32,
+          "start": 7120
+        },
+        {
+          "length": 32,
+          "start": 8194
+        },
+        {
+          "length": 32,
+          "start": 9074
+        },
+        {
+          "length": 32,
+          "start": 16564
+        }
+      ],
+      "token1": [
+        {
+          "length": 32,
+          "start": 4884
+        },
+        {
+          "length": 32,
+          "start": 7169
+        },
+        {
+          "length": 32,
+          "start": 8296
+        },
+        {
+          "length": 32,
+          "start": 9208
+        },
+        {
+          "length": 32,
+          "start": 11277
+        },
+        {
+          "length": 32,
+          "start": 16893
+        }
+      ],
+      "fee": [
+        {
+          "length": 32,
+          "start": 3488
+        },
+        {
+          "length": 32,
+          "start": 6983
+        },
+        {
+          "length": 32,
+          "start": 7038
+        },
+        {
+          "length": 32,
+          "start": 11313
+        },
+        {
+          "length": 32,
+          "start": 11776
+        },
+        {
+          "length": 32,
+          "start": 11842
+        },
+        {
+          "length": 32,
+          "start": 11913
+        },
+        {
+          "length": 32,
+          "start": 11984
+        }
+      ],
+      "tickSpacing": [
+        {
+          "length": 32,
+          "start": 3249
+        },
+        {
+          "length": 32,
+          "start": 11241
+        },
+        {
+          "length": 32,
+          "start": 20280
+        },
+        {
+          "length": 32,
+          "start": 20330
+        }
+      ],
+      "maxLiquidityPerTick": [
+        {
+          "length": 32,
+          "start": 8563
+        },
+        {
+          "length": 32,
+          "start": 20173
+        },
+        {
+          "length": 32,
+          "start": 20228
+        }
+      ]
+    }
+  },
+  "position_manager": {
+    "runtime_length": 24466,
+    "normalized_code_hash": "0x91d390a2f85270716bdc52a7782842724fee537f3f8c4e282ce31b98eea7807b",
+    "immutables": {
+      "_tokenDescriptor": [
+        {
+          "length": 32,
+          "start": 11057
+        }
+      ],
+      "nameHash": [
+        {
+          "length": 32,
+          "start": 5390
+        }
+      ],
+      "versionHash": [
+        {
+          "length": 32,
+          "start": 5423
+        }
+      ],
+      "deployer": [
+        {
+          "length": 32,
+          "start": 2775
+        },
+        {
+          "length": 32,
+          "start": 9238
+        },
+        {
+          "length": 32,
+          "start": 11198
+        },
+        {
+          "length": 32,
+          "start": 11928
+        },
+        {
+          "length": 32,
+          "start": 14133
+        }
+      ],
+      "factory": [
+        {
+          "length": 32,
+          "start": 3598
+        },
+        {
+          "length": 32,
+          "start": 3797
+        },
+        {
+          "length": 32,
+          "start": 10955
+        }
+      ],
+      "WETH9": [
+        {
+          "length": 32,
+          "start": 692
+        },
+        {
+          "length": 32,
+          "start": 5960
+        },
+        {
+          "length": 32,
+          "start": 6206
+        },
+        {
+          "length": 32,
+          "start": 6342
+        },
+        {
+          "length": 32,
+          "start": 15967
+        },
+        {
+          "length": 32,
+          "start": 16037
+        },
+        {
+          "length": 32,
+          "start": 16153
+        }
+      ]
+    }
+  },
+  "lm_v4": {
+    "runtime_length": 8168,
+    "normalized_code_hash": "0x75afff5ff517acab45c74fcb3901c1e3b5f7ccf25e26293e6173eb919721e652",
+    "immutables": {
+      "pool": [
+        {
+          "length": 32,
+          "start": 944
+        },
+        {
+          "length": 32,
+          "start": 1002
+        },
+        {
+          "length": 32,
+          "start": 1341
+        },
+        {
+          "length": 32,
+          "start": 3004
+        },
+        {
+          "length": 32,
+          "start": 3223
+        },
+        {
+          "length": 32,
+          "start": 3654
+        },
+        {
+          "length": 32,
+          "start": 4396
+        }
+      ],
+      "masterChef": [
+        {
+          "length": 32,
+          "start": 1065
+        },
+        {
+          "length": 32,
+          "start": 1281
+        },
+        {
+          "length": 32,
+          "start": 1914
+        },
+        {
+          "length": 32,
+          "start": 2842
+        }
+      ],
+      "firstLMPool": [
+        {
+          "length": 32,
+          "start": 3995
+        },
+        {
+          "length": 32,
+          "start": 7802
+        }
+      ],
+      "secondLMPool": [
+        {
+          "length": 32,
+          "start": 4031
+        },
+        {
+          "length": 32,
+          "start": 5405
+        },
+        {
+          "length": 32,
+          "start": 7521
+        },
+        {
+          "length": 32,
+          "start": 7686
+        }
+      ],
+      "thirdLMPool": [
+        {
+          "length": 32,
+          "start": 1878
+        },
+        {
+          "length": 32,
+          "start": 2205
+        },
+        {
+          "length": 32,
+          "start": 2386
+        },
+        {
+          "length": 32,
+          "start": 2607
+        },
+        {
+          "length": 32,
+          "start": 5048
+        },
+        {
+          "length": 32,
+          "start": 5227
+        },
+        {
+          "length": 32,
+          "start": 7136
+        },
+        {
+          "length": 32,
+          "start": 7301
+        }
+      ]
+    }
+  },
+  "lm_v1": {
+    "runtime_length": 5129,
+    "normalized_code_hash": "0x04a35f240bcb2a3d110a93076a6a6a292434bc92511b346173461ccb44f5c16c",
+    "immutables": {
+      "pool": [
+        {
+          "length": 32,
+          "start": 798
+        },
+        {
+          "length": 32,
+          "start": 834
+        },
+        {
+          "length": 32,
+          "start": 1274
+        },
+        {
+          "length": 32,
+          "start": 1876
+        },
+        {
+          "length": 32,
+          "start": 2337
+        },
+        {
+          "length": 32,
+          "start": 2568
+        },
+        {
+          "length": 32,
+          "start": 3024
+        }
+      ],
+      "masterChef": [
+        {
+          "length": 32,
+          "start": 919
+        },
+        {
+          "length": 32,
+          "start": 1214
+        },
+        {
+          "length": 32,
+          "start": 1831
+        },
+        {
+          "length": 32,
+          "start": 2142
+        }
+      ]
+    }
+  }
+}

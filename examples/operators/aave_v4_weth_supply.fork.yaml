@@ -1,0 +1,67 @@
+# Operator execution context for an identified Ethereum fork of
+# strategies/aave_v4_weth_supply. Provider credentials stay in the selected
+# --env-file (ALCHEMY_API_KEY). The account bindings are provisional read-scope
+# identities; provisioning generates the actual Safe funds and shared operator.
+# Fixture balances are exact base units (WETH and ETH: 18 decimals, USDC: 6).
+schema_version: operator-gateway-config-v1
+modes:
+- fork
+networks:
+- chain: eip155:1
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: lending_0
+    profile:
+      kind: eoa
+      fund:
+        chain: {chain_id: eip155:1, environment: mainnet}
+        address: '0x0000000000000000000000000000000000000001'
+  - name: lending_1
+    profile:
+      kind: eoa
+      fund:
+        chain: {chain_id: eip155:1, environment: mainnet}
+        address: '0x0000000000000000000000000000000000000002'
+fork:
+  anchors:
+  - chain: eip155:1
+    height: 25908472
+    reference: '0xebd2f4a6612e094a8db8d1ab770970f7060bdaf3a18a49e4274f8935d5348ea0'
+  funds:
+  - kind: safe_roles
+    account: lending_0
+    operator: operator_shared
+    assets:
+    - asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+      amount: 40000000000000000
+    - asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+      amount: 1000000
+  - kind: safe_roles
+    account: lending_1
+    operator: operator_shared
+    assets:
+    - asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+      amount: 40000000000000000
+    - asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+      amount: 1000000
+  operators:
+  - name: operator_shared
+    native_balance:
+      asset: eip155:1/slip44:60
+      amount: 5000000000000000000
+  gas:
+  - accounts:
+    - lending_0
+    - lending_1
+    max_gas_price_wei: 3416666666
+    max_gas_limit: 1200000
+    max_transaction_fee:
+      asset: eip155:1/slip44:60
+      amount: 4100000000000000
+    total_budget:
+      asset: eip155:1/slip44:60
+      amount: 155800000000000000
+    allow_replacement: false

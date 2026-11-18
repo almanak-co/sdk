@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Curve pool selection",
+  "description": "The author names a chain and a pool address. Resolution decides the family, the factory and the compiled revision; assertions only refuse a market that differs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "connector",
+    "chain",
+    "pool"
+  ],
+  "properties": {
+    "connector": {
+      "const": "curve"
+    },
+    "chain": {
+      "type": "string",
+      "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$"
+    },
+    "pool": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+    },
+    "assertions": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "family": {
+              "enum": [
+                "stableswap_ng",
+                "twocrypto_ng",
+                "tricrypto_ng"
+              ]
+            },
+            "revision": {
+              "enum": [
+                "stableswap-ng-2023-11-15",
+                "stableswap-ng-2023-12-12",
+                "twocrypto-ng-v2.1.0",
+                "tricrypto-ng-v2.0.0",
+                "tricrypto-ng-2024-01-04"
+              ]
+            },
+            "coins": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 8,
+              "items": {
+                "type": "string",
+                "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+              }
+            },
+            "decimals": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 8,
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              }
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "manifest_digest": "7cdc0554b4c96e4971aa729a55eb4e36aad558593bc53ab7a1d632090bbe127b",
+  "partitions": [
+    {
+      "account": "lending_0",
+      "bundle": null,
+      "chain": "eip155:1",
+      "explanation": [
+        "main_weth: full withdrawal to its Safe.",
+        "main_weth: supply only its exact reserve for this Safe.",
+        "main_weth: enable or disable collateral for its Safe.",
+        "main_usdc: repay only its Safe's debt, any amount; the Spoke clamps a repayment to the debt.",
+        "main_usdc: borrow only its exact reserve for this Safe.",
+        "bluechip_weth: full withdrawal to its Safe.",
+        "bluechip_weth: supply only its exact reserve for this Safe.",
+        "main_usdc: approve only eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48 to Spoke 0x94e7a5dcbe816e498b89ab752661904e2f56c485, any amount or zero cleanup.",
+        "main_weth: approve only eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2 to Spoke 0x94e7a5dcbe816e498b89ab752661904e2f56c485, any amount or zero cleanup.",
+        "bluechip_weth: approve only eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2 to Spoke 0x973a023a77420ba610f06b3858ad991df6d85a08, any amount or zero cleanup."
+      ],
+      "observed_block": 25908510,
+      "operator": "0x8c3229ec621644789d7f61faa82c6d0e5f97d43d",
+      "roles_module": "0x49808e15d4b772c0a3f02aa612f0fffc8440d02f",
+      "safe": "0xb9307bb831bbecdec508f1138c47ec922e929058",
+      "status": "installed"
+    },
+    {
+      "account": "lending_1",
+      "bundle": null,
+      "chain": "eip155:1",
+      "explanation": [
+        "main_weth_1: full withdrawal to its Safe.",
+        "main_weth_1: supply only its exact reserve for this Safe.",
+        "main_weth_1: enable or disable collateral for its Safe.",
+        "main_usdc_1: repay only its Safe's debt, any amount; the Spoke clamps a repayment to the debt.",
+        "main_usdc_1: borrow only its exact reserve for this Safe.",
+        "bluechip_weth_1: full withdrawal to its Safe.",
+        "bluechip_weth_1: supply only its exact reserve for this Safe.",
+        "main_usdc_1: approve only eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48 to Spoke 0x94e7a5dcbe816e498b89ab752661904e2f56c485, any amount or zero cleanup.",
+        "main_weth_1: approve only eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2 to Spoke 0x94e7a5dcbe816e498b89ab752661904e2f56c485, any amount or zero cleanup.",
+        "bluechip_weth_1: approve only eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2 to Spoke 0x973a023a77420ba610f06b3858ad991df6d85a08, any amount or zero cleanup."
+      ],
+      "observed_block": 25908510,
+      "operator": "0x9586a4833970847aef259ad5bfb7aa8901ddf746",
+      "roles_module": "0xa6816856aea5114a640296322bb445ae3dc42218",
+      "safe": "0xe31bfa3914292c8f583cc7ef9813268420ea717f",
+      "status": "installed"
+    }
+  ],
+  "pending": false,
+  "runtime_checks": [
+    "Health factor, explicit oracle sources and projected borrowing health.",
+    "Intent admission, position ownership, dependencies and execution ordering.",
+    "Exit timers, fresh debt closure and repayment funding."
+  ],
+  "schema": "almanak-permissions-v1"
+}

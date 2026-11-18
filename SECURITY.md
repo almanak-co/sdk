@@ -1,64 +1,61 @@
-# Security Policy
+# Security policy
 
-## Reporting a Vulnerability
+## Reporting a vulnerability
 
-If you discover a security vulnerability in the Almanak SDK, please report it responsibly. **Do not open a public GitHub issue.**
+If you find a security vulnerability in the Almanak SDK, report it privately.
+Do not open a public GitHub issue.
 
 Email: **security@almanak.co**
 
-Include as much of the following as possible:
+Include as much of the following as you can:
 
-- Description of the vulnerability
-- Steps to reproduce or proof-of-concept
+- A description of the vulnerability
+- Steps to reproduce, or a proof of concept
 - Affected versions and components
-- Potential impact assessment
+- Your assessment of the impact
 
-## Response Timeline
+## Response timeline
 
 | Stage | Timeframe |
-|-------|-----------|
+|---|---|
 | Acknowledgment | Within 2 business days |
 | Initial assessment | Within 5 business days |
 | Fix for critical issues | Within 30 days |
-| Public disclosure | After fix is released and users have time to upgrade |
+| Public disclosure | After a fix is released and users have had time to upgrade |
 
 ## Scope
 
-The following are in scope for security reports:
+In scope:
 
-- `almanak` PyPI package (SDK framework, connectors, intents, backtesting)
-- Gateway (gRPC sidecar)
-- CLI (`almanak` command)
-- Documentation site (sdk.docs.almanak.co)
-- Bundled dependencies shipped with the package
+- The `almanak` PyPI package: runtime, connectors, intents and backtesting
+- The gateway services: execution gateway, historical gateway and read gateway
+- Strategy isolation: the sandbox that runs author code
+- Generated Safe and Zodiac Roles permissions and their verification
+- The `almanak` command-line tool
+- The documentation site (docs.almanak.co)
+- Dependencies and binaries shipped inside the package
 
-## Out of Scope
+Out of scope:
 
-The following are **not** in scope:
-
-- Deployed user strategies (your own code)
-- Third-party DeFi protocols (Uniswap, Aave, etc.)
-- User-provided configuration or private keys
+- Your own strategy code and configuration
+- Third-party DeFi protocols such as Uniswap or Aave
+- Private keys, provider keys and operator files you manage
 - RPC providers and external API services
-- Social engineering attacks
+- Social engineering
 
-## Supported Versions
+## Supported versions
 
 | Version | Supported |
-|---------|-----------|
-| 2.x     | Yes       |
-| < 2.0   | No        |
+|---|---|
+| 3.x | Yes |
+| 2.x and earlier | No |
 
-## Disclosure Policy
+## Disclosure
 
 We follow coordinated disclosure. We will:
 
-1. Confirm the vulnerability and determine affected versions
+1. Confirm the vulnerability and determine the affected versions
 2. Develop and test a fix
 3. Release a patched version
-4. Credit the reporter (unless anonymity is requested)
+4. Credit the reporter, unless they ask to remain anonymous
 5. Publish a security advisory on GitHub
-
-## Recognition
-
-We appreciate security researchers who help keep Almanak and its users safe. Reporters will be credited in the security advisory unless they prefer to remain anonymous.

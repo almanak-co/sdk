@@ -1,0 +1,119 @@
+# yaml-language-server: $schema=../../docs/schemas/harness.schema.json
+strategy:
+  connector: uniswap_v4
+  decision_interval: 5s
+  allocations:
+    trading:
+      market: trading_market
+      account: trading
+      capital:
+        asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '1'
+      maximum1:
+        asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+        quantity: '1'
+      hold_seconds: 43200s
+      slippage_bps: 100
+      deadline_seconds: 300s
+      native_asset: eip155:43114/slip44:9005
+      minimum_native_balance: '0.001'
+      maximum0:
+        asset: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+        quantity: '0.5'
+      kind: trading
+assets:
+  eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7:
+    decimals: 18
+  eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e:
+    decimals: 6
+  eip155:43114/slip44:9005:
+    decimals: 18
+markets:
+  trading_market:
+    pool:
+      kind: uniswap_v4
+      chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      pool_manager: '0x06380c0e0912312b5150364b9dc4542ba0dbbc85'
+      state_view: '0xc3c9e198c735a4b97e3e683f391ccbdd60b69286'
+      currency0: eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7
+      currency1: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+      fee: 500
+      tick_spacing: 10
+      hooks: '0x0000000000000000000000000000000000000000'
+    contracts:
+      router: '0x94b75331ae8d42c1b61065089b7d48fe14aa73b7'
+      position_manager: '0xb74b1f14d2754acfcbbe1a221023a5cf50ab8acd'
+      quoter: '0xbe40675bb704506a3c2ccfb762dcfd1e979845c2'
+      permit2: '0x000000000022d473030f116ddee9f6b43ac78ba3'
+accounts:
+  trading:
+    chain:
+      chain_id: eip155:43114
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: avax-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      block:
+        chain:
+          chain_id: eip155:43114
+          environment: mainnet
+        number: 94581397
+        hash: '0xabb1529862e4b99fdbd08e9c056edc97b00441407043ba18d45b0d1cb7c6297a'
+        timestamp: 1788667442
+    funds:
+    - account: trading
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:43114/erc20:0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e
+          quantity: '1'
+        method: local_storage
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:43114/slip44:9005
+        quantity: '1'
+      foundry_account_index: 91
+  production:
+    networks:
+    - chain:
+        chain_id: eip155:43114
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: avax-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      max_observation_age_seconds: 180
+    payers:
+      budget_0:
+        accounts:
+        - trading
+        asset: eip155:43114/slip44:9005
+        source: network_rpc_fee_history
+        reward_percentile: 50
+        base_fee_multiplier_bps: 20000
+        max_gas_price_wei: 1000000000000
+        max_gas_limit: 2000000
+        max_transaction_fee:
+          asset: eip155:43114/slip44:9005
+          quantity:
+            base_units: 200000000000000000
+        total_budget:
+          asset: eip155:43114/slip44:9005
+          quantity:
+            base_units: 1000000000000000000
+        exit_reserve:
+          asset: eip155:43114/slip44:9005
+          quantity:
+            base_units: 200000000000000000
+        gas_limit_buffer_bps: 2500
+        base_fee_basis: observed_block

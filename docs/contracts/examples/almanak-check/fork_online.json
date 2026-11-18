@@ -1,0 +1,425 @@
+{
+  "authored_digest": "a1886913af24a8ce77ce04227d7695261d5ac5b4d27c3fd215eff759b97dc83d",
+  "capabilities": {
+    "requirements": [
+      {
+        "kind": "aave_supply",
+        "target": {
+          "account": "lending_0",
+          "allocation": "main_weth",
+          "fund": {
+            "address": "0x521a5c391acc7cce5158c12997fb50b03e75143d",
+            "chain": {
+              "chain_id": "eip155:1",
+              "environment": "mainnet"
+            }
+          },
+          "reserve": {
+            "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "chain": {
+              "chain_id": "eip155:1",
+              "environment": "mainnet"
+            },
+            "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+            "kind": "aave_v4",
+            "reserve_id": 0,
+            "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+          }
+        }
+      },
+      {
+        "kind": "aave_supply",
+        "target": {
+          "account": "lending_0",
+          "allocation": "bluechip_weth",
+          "fund": {
+            "address": "0x521a5c391acc7cce5158c12997fb50b03e75143d",
+            "chain": {
+              "chain_id": "eip155:1",
+              "environment": "mainnet"
+            }
+          },
+          "reserve": {
+            "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "chain": {
+              "chain_id": "eip155:1",
+              "environment": "mainnet"
+            },
+            "hub": "0x943827dca022d0f354a8a8c332da1e5eb9f9f931",
+            "kind": "aave_v4",
+            "reserve_id": 0,
+            "spoke": "0x973a023a77420ba610f06b3858ad991df6d85a08"
+          }
+        }
+      },
+      {
+        "kind": "aave_supply",
+        "target": {
+          "account": "lending_1",
+          "allocation": "main_weth_1",
+          "fund": {
+            "address": "0xec3227cc5934822b950000ef478b215864e98831",
+            "chain": {
+              "chain_id": "eip155:1",
+              "environment": "mainnet"
+            }
+          },
+          "reserve": {
+            "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "chain": {
+              "chain_id": "eip155:1",
+              "environment": "mainnet"
+            },
+            "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+            "kind": "aave_v4",
+            "reserve_id": 0,
+            "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+          }
+        }
+      },
+      {
+        "kind": "aave_supply",
+        "target": {
+          "account": "lending_1",
+          "allocation": "bluechip_weth_1",
+          "fund": {
+            "address": "0xec3227cc5934822b950000ef478b215864e98831",
+            "chain": {
+              "chain_id": "eip155:1",
+              "environment": "mainnet"
+            }
+          },
+          "reserve": {
+            "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "chain": {
+              "chain_id": "eip155:1",
+              "environment": "mainnet"
+            },
+            "hub": "0x943827dca022d0f354a8a8c332da1e5eb9f9f931",
+            "kind": "aave_v4",
+            "reserve_id": 0,
+            "spoke": "0x973a023a77420ba610f06b3858ad991df6d85a08"
+          }
+        }
+      },
+      {
+        "collateral": [
+          {
+            "account": "lending_0",
+            "allocation": "main_weth",
+            "fund": {
+              "address": "0x521a5c391acc7cce5158c12997fb50b03e75143d",
+              "chain": {
+                "chain_id": "eip155:1",
+                "environment": "mainnet"
+              }
+            },
+            "reserve": {
+              "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "chain": {
+                "chain_id": "eip155:1",
+                "environment": "mainnet"
+              },
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "kind": "aave_v4",
+              "reserve_id": 0,
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+            }
+          }
+        ],
+        "kind": "aave_borrow",
+        "target": {
+          "account": "lending_0",
+          "allocation": "main_usdc",
+          "fund": {
+            "address": "0x521a5c391acc7cce5158c12997fb50b03e75143d",
+            "chain": {
+              "chain_id": "eip155:1",
+              "environment": "mainnet"
+            }
+          },
+          "reserve": {
+            "asset": "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "chain": {
+              "chain_id": "eip155:1",
+              "environment": "mainnet"
+            },
+            "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+            "kind": "aave_v4",
+            "reserve_id": 7,
+            "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+          }
+        }
+      },
+      {
+        "collateral": [
+          {
+            "account": "lending_1",
+            "allocation": "main_weth_1",
+            "fund": {
+              "address": "0xec3227cc5934822b950000ef478b215864e98831",
+              "chain": {
+                "chain_id": "eip155:1",
+                "environment": "mainnet"
+              }
+            },
+            "reserve": {
+              "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+              "chain": {
+                "chain_id": "eip155:1",
+                "environment": "mainnet"
+              },
+              "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+              "kind": "aave_v4",
+              "reserve_id": 0,
+              "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+            }
+          }
+        ],
+        "kind": "aave_borrow",
+        "target": {
+          "account": "lending_1",
+          "allocation": "main_usdc_1",
+          "fund": {
+            "address": "0xec3227cc5934822b950000ef478b215864e98831",
+            "chain": {
+              "chain_id": "eip155:1",
+              "environment": "mainnet"
+            }
+          },
+          "reserve": {
+            "asset": "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+            "chain": {
+              "chain_id": "eip155:1",
+              "environment": "mainnet"
+            },
+            "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+            "kind": "aave_v4",
+            "reserve_id": 7,
+            "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+          }
+        }
+      }
+    ]
+  },
+  "context_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "dependencies": {
+    "assets": [],
+    "markets": [],
+    "prices": []
+  },
+  "fixture_digest": "efbf7c8f6b8b41fa40365805f42b28949a34312dd162132d3ea6fac44f5a1811",
+  "funding": {
+    "accounts": [
+      {
+        "account": "lending_0",
+        "assets": [
+          {
+            "amount_base_units": "20000000000000000",
+            "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "basis": "configured allocation capital",
+            "decimals": 18,
+            "symbol": null
+          }
+        ],
+        "chain": "eip155:1",
+        "fund": "0x521a5c391acc7cce5158c12997fb50b03e75143d",
+        "payer": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+      },
+      {
+        "account": "lending_1",
+        "assets": [
+          {
+            "amount_base_units": "20000000000000000",
+            "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+            "basis": "configured allocation capital",
+            "decimals": 18,
+            "symbol": null
+          }
+        ],
+        "chain": "eip155:1",
+        "fund": "0xec3227cc5934822b950000ef478b215864e98831",
+        "payer": "0xec3227cc5934822b950000ef478b215864e98831"
+      }
+    ],
+    "mode": "fork",
+    "parameters_digest": "db159160d4d70afa0c0fcbd6de810cc43559f5f2e23b06ed41b7a4be7e722f3b",
+    "payers": [
+      {
+        "accounts": [
+          "lending_0"
+        ],
+        "asset": "eip155:1/slip44:60",
+        "chain": "eip155:1",
+        "decimals": 18,
+        "entry_minimum_base_units": "1000000000000000",
+        "entry_transactions": 6,
+        "gas": null,
+        "minimum_native_balance_base_units": "1000000000000000",
+        "payer": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+      },
+      {
+        "accounts": [
+          "lending_1"
+        ],
+        "asset": "eip155:1/slip44:60",
+        "chain": "eip155:1",
+        "decimals": 18,
+        "entry_minimum_base_units": "1000000000000000",
+        "entry_transactions": 6,
+        "gas": null,
+        "minimum_native_balance_base_units": "1000000000000000",
+        "payer": "0xec3227cc5934822b950000ef478b215864e98831"
+      }
+    ],
+    "schema": "almanak-funding-v1"
+  },
+  "parameters_digest": "db159160d4d70afa0c0fcbd6de810cc43559f5f2e23b06ed41b7a4be7e722f3b",
+  "preview": {
+    "accounts": [
+      {
+        "binding": "safe_roles",
+        "chain": "eip155:1",
+        "fund": "0x521a5c391acc7cce5158c12997fb50b03e75143d",
+        "name": "lending_0"
+      },
+      {
+        "binding": "eoa",
+        "chain": "eip155:1",
+        "fund": "0xec3227cc5934822b950000ef478b215864e98831",
+        "name": "lending_1"
+      }
+    ],
+    "anchors": [
+      {
+        "chain": {
+          "chain_id": "eip155:1",
+          "environment": "mainnet"
+        },
+        "height": 25792601,
+        "reference": "0x510f460620d3c53520bbb3de38c052be2440c5bd82fd2254a130f8525f4e08c2",
+        "timestamp": 1787183999
+      }
+    ],
+    "markets": [
+      {
+        "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "block": 25792601,
+        "decimals": 18,
+        "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+        "hub_asset_id": 0,
+        "name": "main_weth_market",
+        "selection": {
+          "assertions": null,
+          "chain": "eip155:1",
+          "connector": "aave_v4",
+          "reserve_id": 0,
+          "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+        }
+      },
+      {
+        "asset": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "block": 25792601,
+        "decimals": 18,
+        "hub": "0x943827dca022d0f354a8a8c332da1e5eb9f9f931",
+        "hub_asset_id": 0,
+        "name": "bluechip_weth_market",
+        "selection": {
+          "assertions": null,
+          "chain": "eip155:1",
+          "connector": "aave_v4",
+          "reserve_id": 0,
+          "spoke": "0x973a023a77420ba610f06b3858ad991df6d85a08"
+        }
+      },
+      {
+        "asset": "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+        "block": 25792601,
+        "decimals": 6,
+        "hub": "0xcca852bc40e560adc3b1cc58ca5b55638ce826c9",
+        "hub_asset_id": 5,
+        "name": "main_usdc_market",
+        "selection": {
+          "assertions": null,
+          "chain": "eip155:1",
+          "connector": "aave_v4",
+          "reserve_id": 7,
+          "spoke": "0x94e7a5dcbe816e498b89ab752661904e2f56c485"
+        }
+      }
+    ],
+    "operator_digest": "742e1de8ce1094cd670e2910b33a6b0263e919e2e6699e29ae41c7185312fe60"
+  },
+  "ready": false,
+  "resolution_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+  "resolution_facts": "c4aad9f7a19cf22e8c77807df9724ddc0d20a3e129f024f8b40cb5750180ce0d",
+  "stages": [
+    {
+      "message": "",
+      "stage": "configuration",
+      "status": "passed"
+    },
+    {
+      "message": "Matching retained contract reads replayed offline.",
+      "stage": "resolution",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "operator_configuration",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "resolution",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "parameters",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "sandbox",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "strategy",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "capabilities",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "data_dependencies",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "pool_liquidity",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "fixture",
+      "status": "passed"
+    },
+    {
+      "message": "",
+      "stage": "fork_compatibility",
+      "status": "passed"
+    },
+    {
+      "message": "Operator execution ceilings, fixture and installed authority remain unadmitted.",
+      "stage": "online_admission",
+      "status": "not_checked"
+    }
+  ],
+  "strategy_digest": "c711751baf302b2046f7390334e86c9122eafdebea89b27086b3a0c87d6f8e6b",
+  "valid": true
+}

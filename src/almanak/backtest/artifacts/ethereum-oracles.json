@@ -1,0 +1,58 @@
+{
+  "chain_id": "eip155:1",
+  "contracts": [
+    {
+      "address": "0x7c7fdfca295a787ded12bb5c1a49a8d2cc20e3f8",
+      "kind": "dual",
+      "code_hash": "0x671e191126050c4e182d1271d5a96e6705e60e6395b777e1fce7351b3bae5ee3",
+      "verification": "https://sourcify.dev/server/v2/contract/1/0x7c7fdfca295a787ded12bb5c1a49a8d2cc20e3f8?fields=all",
+      "verification_sha256": "c2e2a1256ad941fa7fd58de6b6abbfc1fb80b3d5aa2bcde9a42a3827c7000ba2",
+      "secondary_proxy": "0x5424384b256154046e9667ddfaaa5e550145215e",
+      "max_sync_iterations": 20
+    },
+    {
+      "address": "0xe13fafe4fb769e0f4a1cb69d35d21ef99188eff7",
+      "kind": "dual",
+      "code_hash": "0x21b8634f6ded6c2ab4c41db1b7846a0d61b1bb2a30877df86563dda2dbff03ee",
+      "verification": "https://sourcify.dev/server/v2/contract/1/0xe13fafe4fb769e0f4a1cb69d35d21ef99188eff7?fields=all",
+      "verification_sha256": "317589e94edddbe83dbde71099034cd8690e5974815ae46ef5f5f0263e85989e",
+      "secondary_proxy": "0xea674bbc33ae708bc9eb4ba348b04e4eb55b496b",
+      "max_sync_iterations": 20
+    },
+    {
+      "address": "0xea674bbc33ae708bc9eb4ba348b04e4eb55b496b",
+      "kind": "proxy",
+      "code_hash": "0xbd6f524cdc4268b6bd1bb6f77a8821faeea9c52ee9e0afa0b6d948ce82c966c2",
+      "verification": "https://sourcify.dev/server/v2/contract/1/0xea674bbc33ae708bc9eb4ba348b04e4eb55b496b?fields=all",
+      "verification_sha256": "db16f3e2cf348c1fc0ec7551d040274b2f543b7cb7047a0c845897ab51982fd4"
+    },
+    {
+      "address": "0x5424384b256154046e9667ddfaaa5e550145215e",
+      "kind": "proxy",
+      "code_hash": "0xbd6f524cdc4268b6bd1bb6f77a8821faeea9c52ee9e0afa0b6d948ce82c966c2",
+      "verification": "https://sourcify.dev/server/v2/contract/1/0x5424384b256154046e9667ddfaaa5e550145215e?fields=all",
+      "verification_sha256": "5f17c1fe6e1d4eef708e7e1578b3bbbee560e1f368ef48a9d7ca8bdbeb18a9a0"
+    },
+    {
+      "address": "0x3f73f03aa83b2a48ed27e964ed0fdb590332095b",
+      "kind": "cap",
+      "code_hash": "0x68b60e38f9168ca9d7fcd3004e683ee10218a719ad915dfe78b890c07c35d8b9",
+      "verification": "https://eth.blockscout.com/api/v2/smart-contracts/0x3f73f03aa83b2a48ed27e964ed0fdb590332095b",
+      "verification_sha256": "494b8a214a74cd6b3972fbfacba95ad105324b873e5cc34a18d8d72f7ee719fe"
+    },
+    {
+      "address": "0x99b2b6cea9c3d2fd8f4d90f86741c44b212a6127",
+      "kind": "oracle",
+      "code_hash": "0x9f0daa826924895cba1af40b38a2672bd41f7183b5a3cc47e3c740756020c009",
+      "verification": "https://eth.blockscout.com/api/v2/smart-contracts/0x99b2b6cea9c3d2fd8f4d90f86741c44b212a6127",
+      "verification_sha256": "a6786e791fab53630d2fa34748b3de80c1a19a07c6e3485f08b62979f1a1bd9c"
+    },
+    {
+      "address": "0xda1266a7b8620819dae3f8bd6b546da36e505bb8",
+      "kind": "oracle",
+      "code_hash": "0x5ac1085ed77f16e5fb27ace96b47317de54dcce8c871f6ece2928e0d04aa85dd",
+      "verification": "https://eth.blockscout.com/api/v2/smart-contracts/0xda1266a7b8620819dae3f8bd6b546da36e505bb8",
+      "verification_sha256": "e66bcfc2b98d754f07d6795a052a3763ffe00ac7fe1d25c185e158e6960e2d4e"
+    }
+  ]
+}

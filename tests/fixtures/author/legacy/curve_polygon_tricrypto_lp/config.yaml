@@ -1,0 +1,132 @@
+strategy:
+  connector: curve
+  decision_interval: 5s
+  allocations:
+    proportional:
+      market: crypto_pool
+      account: proportional
+      funding_asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+      trading_asset: eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722
+        quantity: '0'
+      - asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+        quantity: '0.02'
+      - asset: eip155:137/erc20:0xbbba073c31bf03b8acf7c28ef0738decf3695683
+        quantity: '0'
+      maximums:
+      - asset: eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722
+        quantity: '1000000'
+      - asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+        quantity: '1'
+      - asset: eip155:137/erc20:0xbbba073c31bf03b8acf7c28ef0738decf3695683
+        quantity: '1000000'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      native_asset: eip155:137/slip44:966
+      minimum_native_balance:
+        base_units: 0
+    single_coin:
+      market: crypto_pool
+      account: single_coin
+      funding_asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+      trading_asset: eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722
+      liquidity_enabled: true
+      capital:
+      - asset: eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722
+        quantity: '0'
+      - asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+        quantity: '0.02'
+      - asset: eip155:137/erc20:0xbbba073c31bf03b8acf7c28ef0738decf3695683
+        quantity: '0'
+      maximums:
+      - asset: eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722
+        quantity: '1000000'
+      - asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+        quantity: '1'
+      - asset: eip155:137/erc20:0xbbba073c31bf03b8acf7c28ef0738decf3695683
+        quantity: '1000000'
+      entry_swap_bps: 5000
+      hold_seconds: 2h
+      slippage_bps: 100
+      deadline_seconds: 5m
+      native_asset: eip155:137/slip44:966
+      minimum_native_balance:
+        base_units: 0
+      single_coin_exit: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+assets:
+  eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359:
+    decimals: 6
+  eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722:
+    decimals: 18
+  eip155:137/erc20:0xbbba073c31bf03b8acf7c28ef0738decf3695683:
+    decimals: 18
+  eip155:137/erc20:0x559a3e77f94b0055a4b7f1acaaed893308115dab:
+    decimals: 18
+  eip155:137/slip44:966:
+    decimals: 18
+markets:
+  crypto_pool:
+    pool:
+      kind: curve
+      family: tricrypto_ng
+      chain:
+        chain_id: eip155:137
+        environment: mainnet
+      factory: '0xc1b393efef38140662b91441c6710aa704973228'
+      pool: '0x559a3e77f94b0055a4b7f1acaaed893308115dab'
+      coins:
+      - eip155:137/erc20:0x6b2f1c1fcfa168a09007e8ae959f4de11bcfd722
+      - eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+      - eip155:137/erc20:0xbbba073c31bf03b8acf7c28ef0738decf3695683
+      implementation_revision: tricrypto-ng-2024-01-04
+accounts:
+  proportional:
+    chain:
+      chain_id: eip155:137
+      environment: mainnet
+  single_coin:
+    chain:
+      chain_id: eip155:137
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:137
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: polygon-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      block:
+        chain:
+          chain_id: eip155:137
+          environment: mainnet
+        number: 93427995
+        hash: '0xd21e7dd3f6f73ece6c9c1b1dd2bd2f92fb30dacde017eab616464bfefc790519'
+        timestamp: 1788847026
+    funds:
+    - account: proportional
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+          quantity: '0.02'
+        method: local_storage
+    - account: single_coin
+      operator: operator
+      assets:
+      - balance:
+          asset: eip155:137/erc20:0x3c499c542cef5e3811e1192ce70d8cc03d5c3359
+          quantity: '0.02'
+        method: local_storage
+    operators:
+    - name: operator
+      native_balance:
+        asset: eip155:137/slip44:966
+        quantity: '10'
+      foundry_account_index: 743

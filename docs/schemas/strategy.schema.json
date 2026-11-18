@@ -1,0 +1,358 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Almanak strategy author configuration",
+  "description": "Named markets, accounts and economic choices. Provider credentials, execution authority and fork fixtures live in the operator configuration.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "strategy",
+    "markets",
+    "accounts"
+  ],
+  "properties": {
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_interval",
+        "allocations"
+      ],
+      "properties": {
+        "decision_interval": {
+          "$ref": "#/$defs/Duration"
+        },
+        "allocations": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S+$"
+          },
+          "additionalProperties": {
+            "$ref": "positions.schema.json"
+          }
+        },
+        "debts": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S+$"
+          },
+          "additionalProperties": {
+            "$ref": "positions/aave_v4_debt.schema.json"
+          }
+        },
+        "gas": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^\\S+$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/Gas"
+          }
+        },
+        "parameters": {
+          "description": "Author knobs the strategy reads as config.parameters. Check validates only their shape; the strategy validates their values in validate_config.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ParameterScalar"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ParameterScalar"
+                }
+              }
+            ]
+          }
+        },
+        "test_parameters": {
+          "description": "Fork-test values for declared strategy.parameters keys, in their declared types. almanak test run applies them by default (--production-parameters disables them); strategy code in production and backtests never sees them.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ParameterScalar"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/ParameterScalar"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "markets": {
+      "$ref": "markets.schema.json"
+    },
+    "accounts": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^\\S+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "chain"
+        ],
+        "properties": {
+          "chain": {
+            "$ref": "#/$defs/ChainId"
+          }
+        }
+      }
+    },
+    "assets": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "decimals": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "symbol": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "inventory": {
+      "type": "array",
+      "description": "Owned cash a composed root declares per account; never spending authority.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "account",
+          "balance"
+        ],
+        "properties": {
+          "account": {
+            "$ref": "#/$defs/Name"
+          },
+          "balance": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "asset",
+              "quantity"
+            ],
+            "properties": {
+              "asset": {
+                "type": "string",
+                "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+              },
+              "quantity": {
+                "$ref": "#/$defs/Quantity"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "Name": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\S+$"
+    },
+    "ChainId": {
+      "type": "string",
+      "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$"
+    },
+    "Address": {
+      "type": "string",
+      "pattern": "^0x[0-9a-fA-F]{40}$"
+    },
+    "Quantity": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "base_units": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "base_units"
+          ]
+        }
+      ]
+    },
+    "Duration": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)(s|m|h|d)$"
+        }
+      ]
+    },
+    "PositiveDuration": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(s|m|h|d)$"
+        }
+      ]
+    },
+    "Replacement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "interval_seconds",
+        "minimum_bump_bps",
+        "max_candidates",
+        "max_elapsed_seconds"
+      ],
+      "properties": {
+        "interval_seconds": {
+          "$ref": "#/$defs/Duration"
+        },
+        "minimum_bump_bps": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_candidates": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "max_elapsed_seconds": {
+          "$ref": "#/$defs/Duration"
+        }
+      }
+    },
+    "Gas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accounts",
+        "chain",
+        "max_transaction_fee",
+        "exit_reserve"
+      ],
+      "properties": {
+        "accounts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/Name"
+          }
+        },
+        "chain": {
+          "$ref": "#/$defs/ChainId"
+        },
+        "source": {
+          "const": "network_rpc_fee_history",
+          "default": "network_rpc_fee_history"
+        },
+        "base_fee_basis": {
+          "enum": [
+            "next_block",
+            "observed_block"
+          ],
+          "description": "Defaults to next_block (observed_block on Avalanche)."
+        },
+        "reward_percentile": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 50
+        },
+        "base_fee_multiplier_bps": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 50000,
+          "description": "Defaults to 20000 (12500 on Arbitrum and Robinhood Chain)."
+        },
+        "max_gas_price_wei": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Defaults to max_transaction_fee in wei divided by max_gas_limit, rounded down."
+        },
+        "max_gas_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1200000
+        },
+        "max_transaction_fee": {
+          "$ref": "#/$defs/Quantity"
+        },
+        "total_budget": {
+          "$ref": "#/$defs/Quantity"
+        },
+        "exit_reserve": {
+          "$ref": "#/$defs/Quantity"
+        },
+        "gas_limit_buffer_bps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000,
+          "default": 2500
+        },
+        "replacement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Replacement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "title": "Author gas policy"
+    },
+    "ParameterScalar": {
+      "type": [
+        "boolean",
+        "integer",
+        "number",
+        "string",
+        "null"
+      ]
+    }
+  }
+}

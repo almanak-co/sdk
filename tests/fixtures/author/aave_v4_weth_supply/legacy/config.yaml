@@ -1,0 +1,152 @@
+# Frozen unconverted author input of strategies/aave_v4_weth_supply (harness root).
+strategy:
+  connector: aave_v4
+  decision_interval: 5s
+  allocations:
+    main_weth:
+      market: main_weth_market
+      account: lending_0
+      amount: '0.01'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0.001'
+      hold_seconds: 300s
+    bluechip_weth:
+      market: bluechip_weth_market
+      account: lending_0
+      amount: '0.01'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0.001'
+      hold_seconds: null
+    main_weth_1:
+      market: main_weth_market
+      account: lending_1
+      amount: '0.01'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0.001'
+      hold_seconds: 300s
+    bluechip_weth_1:
+      market: bluechip_weth_market
+      account: lending_1
+      amount: '0.01'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0.001'
+      hold_seconds: null
+  debts:
+    main_usdc:
+      market: main_usdc_market
+      account: lending_0
+      amount: '5'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0.001'
+      hold_seconds: 300s
+      minimum_health_factor: '2'
+      collateral:
+      - main_weth
+      oracle: '0x99b2b6cea9c3d2fd8f4d90f86741c44b212a6127'
+      collateral_price_sources:
+      - '0x5424384b256154046e9667ddfaaa5e550145215e'
+      debt_price_source: '0x3f73f03aa83b2a48ed27e964ed0fdb590332095b'
+    main_usdc_1:
+      market: main_usdc_market
+      account: lending_1
+      amount: '5'
+      native_asset: eip155:1/slip44:60
+      minimum_native_balance: '0.001'
+      hold_seconds: 300s
+      minimum_health_factor: '2'
+      collateral:
+      - main_weth_1
+      oracle: '0x99b2b6cea9c3d2fd8f4d90f86741c44b212a6127'
+      collateral_price_sources:
+      - '0x5424384b256154046e9667ddfaaa5e550145215e'
+      debt_price_source: '0x3f73f03aa83b2a48ed27e964ed0fdb590332095b'
+assets:
+  eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48:
+    decimals: 6
+  eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2:
+    decimals: 18
+  eip155:1/slip44:60:
+    decimals: 18
+markets:
+  main_weth_market:
+    kind: aave_v4
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+    spoke: '0x94e7a5dcbe816e498b89ab752661904e2f56c485'
+    reserve_id: 0
+    hub: '0xcca852bc40e560adc3b1cc58ca5b55638ce826c9'
+    asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+  bluechip_weth_market:
+    kind: aave_v4
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+    spoke: '0x973a023a77420ba610f06b3858ad991df6d85a08'
+    reserve_id: 0
+    hub: '0x943827dca022d0f354a8a8c332da1e5eb9f9f931'
+    asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+  main_usdc_market:
+    kind: aave_v4
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+    spoke: '0x94e7a5dcbe816e498b89ab752661904e2f56c485'
+    reserve_id: 7
+    hub: '0xcca852bc40e560adc3b1cc58ca5b55638ce826c9'
+    asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+accounts:
+  lending_0:
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+  lending_1:
+    chain:
+      chain_id: eip155:1
+      environment: mainnet
+execution:
+  fork:
+    targets:
+    - chain:
+        chain_id: eip155:1
+        environment: mainnet
+      provider:
+        kind: alchemy
+        network: eth-mainnet
+        api_key_env: ALCHEMY_API_KEY
+      block:
+        chain:
+          chain_id: eip155:1
+          environment: mainnet
+        number: 25908472
+        hash: '0xebd2f4a6612e094a8db8d1ab770970f7060bdaf3a18a49e4274f8935d5348ea0'
+        timestamp: 1788579287
+    funds:
+    - account: lending_0
+      operator: operator_shared
+      assets:
+      - balance:
+          asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+          quantity: '0.04'
+        method: wrap_native
+      - balance:
+          asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+          quantity: '1'
+        method: local_storage
+    - account: lending_1
+      operator: operator_shared
+      assets:
+      - balance:
+          asset: eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
+          quantity: '0.04'
+        method: wrap_native
+      - balance:
+          asset: eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+          quantity: '1'
+        method: local_storage
+    operators:
+    - name: operator_shared
+      native_balance:
+        asset: eip155:1/slip44:60
+        quantity: '5'
+      foundry_account_index: 0

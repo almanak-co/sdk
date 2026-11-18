@@ -1,0 +1,306 @@
+{
+  "factory": {
+    "source": "PoolFactory.sol",
+    "contract": "PoolFactory",
+    "compiler": "0.8.19+commit.7dd6d404",
+    "runtime_length": 3516,
+    "normalized_code_hash": "0x9c9413070e5ce08549b2a1c58788c05920e33796dc30740f9845a381bc0bed74",
+    "immutables": {
+      "implementation": [
+        {
+          "length": 32,
+          "start": 651
+        },
+        {
+          "length": 32,
+          "start": 1545
+        }
+      ]
+    },
+    "compilation_comparison": "runtime_match_after_retained_cbor_metadata_only"
+  },
+  "router": {
+    "source": "Router.sol",
+    "contract": "Router",
+    "compiler": "0.8.19+commit.7dd6d404",
+    "runtime_length": 23581,
+    "normalized_code_hash": "0x80dc54892dfdf4425bc2b82d319787d9902c0f278b97de8b152f468f5cccd47a",
+    "immutables": {
+      "_trustedForwarder": [
+        {
+          "length": 32,
+          "start": 1102
+        },
+        {
+          "length": 32,
+          "start": 13126
+        }
+      ],
+      "factoryRegistry": [
+        {
+          "length": 32,
+          "start": 711
+        },
+        {
+          "length": 32,
+          "start": 5996
+        }
+      ],
+      "defaultFactory": [
+        {
+          "length": 32,
+          "start": 1569
+        },
+        {
+          "length": 32,
+          "start": 2077
+        },
+        {
+          "length": 32,
+          "start": 4839
+        },
+        {
+          "length": 32,
+          "start": 5387
+        },
+        {
+          "length": 32,
+          "start": 5907
+        },
+        {
+          "length": 32,
+          "start": 8657
+        },
+        {
+          "length": 32,
+          "start": 15466
+        },
+        {
+          "length": 32,
+          "start": 15627
+        },
+        {
+          "length": 32,
+          "start": 15765
+        }
+      ],
+      "voter": [
+        {
+          "length": 32,
+          "start": 943
+        },
+        {
+          "length": 32,
+          "start": 12328
+        }
+      ],
+      "weth": [
+        {
+          "length": 32,
+          "start": 470
+        },
+        {
+          "length": 32,
+          "start": 806
+        },
+        {
+          "length": 32,
+          "start": 2419
+        },
+        {
+          "length": 32,
+          "start": 2889
+        },
+        {
+          "length": 32,
+          "start": 3061
+        },
+        {
+          "length": 32,
+          "start": 3193
+        },
+        {
+          "length": 32,
+          "start": 3320
+        },
+        {
+          "length": 32,
+          "start": 3436
+        },
+        {
+          "length": 32,
+          "start": 7024
+        },
+        {
+          "length": 32,
+          "start": 7301
+        },
+        {
+          "length": 32,
+          "start": 7443
+        },
+        {
+          "length": 32,
+          "start": 7830
+        },
+        {
+          "length": 32,
+          "start": 8569
+        },
+        {
+          "length": 32,
+          "start": 8623
+        },
+        {
+          "length": 32,
+          "start": 8709
+        },
+        {
+          "length": 32,
+          "start": 8858
+        },
+        {
+          "length": 32,
+          "start": 9164
+        },
+        {
+          "length": 32,
+          "start": 9630
+        },
+        {
+          "length": 32,
+          "start": 10954
+        },
+        {
+          "length": 32,
+          "start": 11034
+        },
+        {
+          "length": 32,
+          "start": 11873
+        },
+        {
+          "length": 32,
+          "start": 11908
+        },
+        {
+          "length": 32,
+          "start": 12779
+        },
+        {
+          "length": 32,
+          "start": 12964
+        },
+        {
+          "length": 32,
+          "start": 16643
+        },
+        {
+          "length": 32,
+          "start": 16788
+        }
+      ]
+    },
+    "compilation_comparison": "runtime_match_after_retained_cbor_metadata_only"
+  },
+  "implementation": {
+    "source": "Pool.sol",
+    "contract": "Pool",
+    "compiler": "0.8.19+commit.7dd6d404",
+    "runtime_length": 21057,
+    "normalized_code_hash": "0xf219ad65f28a91d63d74457a7bf14873d43cc52dee2c9c45f606425536c96008",
+    "immutables": {
+      "_cachedDomainSeparator": [
+        {
+          "length": 32,
+          "start": 12799
+        }
+      ],
+      "_cachedChainId": [
+        {
+          "length": 32,
+          "start": 12756
+        }
+      ],
+      "_cachedThis": [
+        {
+          "length": 32,
+          "start": 12713
+        }
+      ],
+      "_name": [
+        {
+          "length": 32,
+          "start": 5663
+        }
+      ],
+      "_version": [
+        {
+          "length": 32,
+          "start": 5708
+        }
+      ],
+      "_hashedName": [
+        {
+          "length": 32,
+          "start": 12881
+        }
+      ],
+      "_hashedVersion": [
+        {
+          "length": 32,
+          "start": 12921
+        }
+      ]
+    },
+    "compilation_comparison": "runtime_match_after_retained_cbor_metadata_only"
+  },
+  "pool_fees": {
+    "source": "contracts/PoolFees.sol",
+    "contract": "PoolFees",
+    "compiler": "0.8.19+commit.7dd6d404",
+    "runtime_length": 1212,
+    "normalized_code_hash": "0x5edc28588a2c99d618040d71d3f751b4ff2f310221f7cf38383fae4a81a69699",
+    "immutables": {
+      "pool": [
+        {
+          "length": 32,
+          "start": 80
+        }
+      ],
+      "token0": [
+        {
+          "length": 32,
+          "start": 161
+        }
+      ],
+      "token1": [
+        {
+          "length": 32,
+          "start": 219
+        }
+      ]
+    },
+    "compilation_comparison": "full_runtime"
+  },
+  "factory_registry": {
+    "source": "FactoryRegistry.sol",
+    "contract": "FactoryRegistry",
+    "compiler": "0.8.19+commit.7dd6d404",
+    "runtime_length": 2649,
+    "normalized_code_hash": "0x8c2e8f2b09b3085003da2d3e9a5be1db3aa810137f4eb2000a470ae7717c3269",
+    "immutables": {
+      "fallbackPoolFactory": [
+        {
+          "length": 32,
+          "start": 330
+        },
+        {
+          "length": 32,
+          "start": 1422
+        }
+      ]
+    },
+    "compilation_comparison": "runtime_match_after_retained_cbor_metadata_only"
+  }
+}

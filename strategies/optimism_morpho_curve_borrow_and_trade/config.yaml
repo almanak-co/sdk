@@ -1,0 +1,68 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/optimism_morpho_curve_borrow_and_trade.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the loan allocation borrows, in its asset's units.
+    borrow_quantity: '5'
+  allocations:
+    collateral:
+      market: collateral
+      account: fund
+      capital: '0.01'
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    loan:
+      market: loan
+      account: fund
+      borrow: true
+      minimum_health_factor: '2'
+      minimum_native_balance: '0'
+    trade:
+      market: pool
+      account: fund
+      funding_asset: eip155:10/erc20:0x0b2c639c533813f4aa9d7837caf62653d097ff85
+      trading_asset: eip155:10/erc20:0xc52d7f23a2e460248db6ee192cb23dd12bddcbf6
+      liquidity_enabled: false
+      capital:
+      - asset: eip155:10/erc20:0xc52d7f23a2e460248db6ee192cb23dd12bddcbf6
+        quantity: '0'
+      - asset: eip155:10/erc20:0x0b2c639c533813f4aa9d7837caf62653d097ff85
+        quantity: '2.5'
+      entry_swap_bps: 10000
+      slippage_bps: 100
+      deadline_seconds: 5m
+      minimum_native_balance:
+        base_units: 0
+markets:
+  collateral:
+    connector: morpho_blue
+    chain: eip155:10
+    market_id: '0x173b66359f0741b1c7f1963075cd271c739b6dc73b658e108a54ce6febeb279b'
+    leg: collateral
+  loan:
+    connector: morpho_blue
+    chain: eip155:10
+    market_id: '0x173b66359f0741b1c7f1963075cd271c739b6dc73b658e108a54ce6febeb279b'
+    leg: loan
+  pool:
+    connector: curve
+    chain: eip155:10
+    pool: '0x03771e24b7c9172d163bf447490b142a15be3485'
+accounts:
+  fund:
+    chain: eip155:10
+inventory:
+- account: fund
+  balance:
+    asset: eip155:10/erc20:0x4200000000000000000000000000000000000006
+    quantity: '0.01'
+- account: fund
+  balance:
+    asset: eip155:10/erc20:0x0b2c639c533813f4aa9d7837caf62653d097ff85
+    quantity: '2'
+- account: fund
+  balance:
+    asset: eip155:10/erc20:0xc52d7f23a2e460248db6ee192cb23dd12bddcbf6
+    quantity: '0'

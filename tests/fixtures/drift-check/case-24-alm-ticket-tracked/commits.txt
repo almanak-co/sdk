@@ -1,1 +1,0 @@
-fix(gateway): tighten a validation edge case
