@@ -345,7 +345,7 @@ independently.
   `--execute` nothing is signed.
 - Accepted risk: a direct command is not resumed. A signed step left
   unresolved keeps its record and the wallet's claim, which refuses later
-  actions for that wallet until the operator clears it.
+  actions for that wallet. No command clears that claim yet.
 - Operator actions have no amount ceiling or cumulative budget; the required
   fee ceilings and the wallet balance bound them. An operator-managed action
   policy is proposed, not accepted.

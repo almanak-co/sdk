@@ -22,6 +22,12 @@ class OperatorRuntime(Runtime):
     operator = True
     # Seconds between checks for an unmined signed step.
     poll = 1.0
+    # The latest refusal that dropped the active request's plan; nobody re-decides it.
+    refused: DataError | None = None
+
+    def count_replan(self, exc, *arguments, **options):
+        self.refused = exc
+        super().count_replan(exc, *arguments, **options)
 
     def decide(self, state):
         """No strategy decides; an idle deployment waits for the next operator request."""
@@ -135,6 +141,13 @@ class OperatorRuntime(Runtime):
         if state.plan is None:
             self.prepare_decision(state)
             state = self.journal.load()
+        if state.plan is None:
+            # Preparation refused the request and dropped it; a strategy would decide
+            # again, an operator has to be told why.
+            refused = self.refused
+            if refused is None:
+                raise DataError("plan_refused", "the request was refused during planning")
+            raise DataError(refused.kind, f"the request was refused during planning: {refused}")
         return state.plan
 
     def discard(self):

@@ -11,6 +11,7 @@ from almanak.cli_arguments import build_parser, parse_validated
 SKILL = Path(__file__).parents[1] / "skills/almanak/SKILL.md"
 PLACEHOLDERS = {
     "<address>": "0x" + "11" * 20,
+    "<chain>": "eip155:43114",
     "<spoke>": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
     "<id>": "0",
     "<base units>": "1000",

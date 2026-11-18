@@ -13,8 +13,8 @@ Code that is `~/.claude/skills/almanak/` for every project, or
 
 ```bash
 git clone https://github.com/almanak-co/sdk.git
-mkdir -p ~/.claude/skills
-cp -r sdk/skills/almanak ~/.claude/skills/almanak
+mkdir -p ~/.claude/skills/almanak
+cp -r sdk/skills/almanak/. ~/.claude/skills/almanak/
 ```
 
 The agent needs the `almanak` command on its `PATH`; the skill installs it with

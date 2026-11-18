@@ -37,12 +37,12 @@ def funded_wallet(fork, reserve, directory):
     token = to_checksum_address(erc20_address(reserve.asset, reserve.chain.chain_id))
     signer = fork.funded_signer(token, 4 * AMOUNT, 5 * 10**18)
     directory.mkdir(mode=0o700)
-    stores = {
-        ax_actions.ACCOUNT: Signer.encrypt(signer.key, PASSWORD, kdf="pbkdf2", iterations=1000)
-    }
+    # Any account name: the action binds the wallet under its keystore entry's name.
+    stores = {"treasury": Signer.encrypt(signer.key, PASSWORD, kdf="pbkdf2", iterations=1000)}
     write_private(directory / "keystores.json", json.dumps(stores))
     write_private(directory / "keystore-password", PASSWORD)
     wallet = {
+        "account": "treasury",
         "address": signer.address,
         "keystores": str(directory / "keystores.json"),
         "password_file": str(directory / "keystore-password"),
@@ -78,7 +78,8 @@ def act(fork, config, wallet, identity, action, amount=None, *, execute):
         gateway.close()
 
 
-def test_supply_then_withdraw_each_as_one_command(fork, tmp_path):
+@pytest.fixture
+def setting(fork, tmp_path):
     origin = fork.fixture.origin.chain
     reserve = AaveReserve.model_validate(
         {**fork.fixture.allocations[0].reserve.model_dump(), "chain": origin}
@@ -87,28 +88,42 @@ def test_supply_then_withdraw_each_as_one_command(fork, tmp_path):
     identity = as_mainnet(fork)
     config = ax_actions.lending_config(
         reserve,
-        wallet["address"],
+        wallet,
         ax_actions.alchemy(origin.chain_id),
         max_gas_price_wei=500 * 10**9,
         max_transaction_fee=10**17,
     )
+    return lambda action, amount=None, *, execute: act(
+        fork, config, wallet, identity, action, amount, execute=execute
+    )
 
-    preview = act(fork, config, wallet, identity, "supply", AMOUNT, execute=False)
+
+def operations(result):
+    return [item["operation"] for item in result["outcomes"]]
+
+
+def shares(result, moment):
+    return int(result[moment]["supplied_shares"])
+
+
+def assert_preview(preview):
     assert preview["executed"] is False and "outcomes" not in preview
     assert preview["first_step"]["operation"]["kind"] == "approve"
-    assert preview["position_before"]["supplied_shares"] == "0"
+    assert shares(preview, "position_before") == 0
 
-    supplied = act(fork, config, wallet, identity, "supply", AMOUNT, execute=True)
-    assert [item["operation"] for item in supplied["outcomes"]] == ["approve", "supply"]
-    assert all(item["success"] for item in supplied["outcomes"])
-    shares = int(supplied["position_after"]["supplied_shares"])
-    assert shares > 0
 
+def assert_supplied(result, before):
+    assert operations(result) == ["approve", "supply"] and result["completed"]
+    assert shares(result, "position_before") == before
+    assert shares(result, "position_after") > before
+
+
+def test_supply_then_withdraw_each_as_one_command(setting):
+    assert_preview(setting("supply", AMOUNT, execute=False))
+    first = setting("supply", AMOUNT, execute=True)
+    assert_supplied(first, 0)
     # A later command adopts the position the account already holds and adds to it.
-    again = act(fork, config, wallet, identity, "supply", AMOUNT, execute=True)
-    assert again["position_before"]["supplied_shares"] == str(shares)
-    assert int(again["position_after"]["supplied_shares"]) > shares
-
-    withdrawn = act(fork, config, wallet, identity, "withdraw", execute=True)
-    assert [item["operation"] for item in withdrawn["outcomes"]] == ["withdraw"]
-    assert withdrawn["position_after"]["supplied_shares"] == "0"
+    assert_supplied(setting("supply", AMOUNT, execute=True), shares(first, "position_after"))
+    withdrawn = setting("withdraw", execute=True)
+    assert operations(withdrawn) == ["withdraw"] and withdrawn["completed"]
+    assert shares(withdrawn, "position_after") == 0

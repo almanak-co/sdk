@@ -4,6 +4,7 @@ import getpass
 import json
 import os
 import secrets
+import shutil
 import stat
 from pathlib import Path
 
@@ -15,7 +16,8 @@ from almanak.sandbox import readable_paths, validate_key_path
 
 def private_text(path: Path) -> str:
     validate_key_path(path, readable_paths())
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    # Nonblocking, so a FIFO with no writer is refused below instead of waited on.
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor) as handle:
         info = os.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
@@ -82,8 +84,9 @@ def create_wallet(
     as a private file, for a caller that must unlock it without a terminal.
     """
     validate_key_path(directory, readable_paths())
-    if generate_password:
-        password = secrets.token_urlsafe(32)
+    generated = secrets.token_urlsafe(32) if generate_password else None
+    if generated is not None:
+        password = generated
     elif password_file is not None:
         password = keystore_password(password_file)
     else:
@@ -93,16 +96,26 @@ def create_wallet(
     signer = Signer.create()
     encrypted = Signer.encrypt(signer.key, password)
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+    try:
+        return write_wallet(directory, account, signer.address, encrypted, generated)
+    except BaseException:
+        # A partial directory would hold a keystore without its record or password, and
+        # would refuse a retry at the same path.
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+
+
+def write_wallet(directory, account, address, encrypted, generated):
     write_private(directory / "keystores.json", json.dumps({account: encrypted}))
     write_private(directory / "gateway-auth.token", secrets.token_hex(32))
     result = {
         "account": account,
-        "address": signer.address,
+        "address": address,
         "keystores": str((directory / "keystores.json").resolve()),
         "auth_token_file": str((directory / "gateway-auth.token").resolve()),
     }
-    if generate_password:
-        write_private(directory / "keystore-password", password)
+    if generated is not None:
+        write_private(directory / "keystore-password", generated)
         result["password_file"] = str((directory / "keystore-password").resolve())
     write_private(directory / "wallet.json", json.dumps(result, indent=2))
     return result

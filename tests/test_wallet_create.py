@@ -73,3 +73,26 @@ def test_the_two_password_sources_are_exclusive(capsys):
     with pytest.raises(SystemExit):
         parse_validated(build_parser(), [*base, "--generate-password", "--password-file", "secret"])
     capsys.readouterr()
+
+
+def test_a_failed_write_leaves_no_partial_wallet_and_a_retry_succeeds(tmp_path, monkeypatch):
+    real = credentials.write_private
+
+    def failing(path, contents):
+        if path.name == "keystore-password":
+            raise OSError("no space left on device")
+        real(path, contents)
+
+    monkeypatch.setattr(credentials, "write_private", failing)
+    with pytest.raises(OSError):
+        create_wallet(tmp_path / "operator", "treasury", generate_password=True)
+    assert not (tmp_path / "operator").exists()
+    monkeypatch.setattr(credentials, "write_private", real)
+    assert create_wallet(tmp_path / "operator", "treasury", generate_password=True)["address"]
+
+
+def test_a_fifo_password_file_is_refused_without_waiting_for_a_writer(tmp_path):
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo, 0o600)
+    with pytest.raises(ValueError, match="private regular file"):
+        create_wallet(tmp_path / "operator", "treasury", password_file=fifo)

@@ -11,8 +11,10 @@ Without `--execute` the command plans the first step and signs nothing.
 
 import json
 import shutil
+import signal
 import tempfile
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from almanak.gateway.client import GatewayClient
@@ -23,7 +25,6 @@ ACTIONS = {
     "withdraw": "withdraw the whole supplied balance, including interest",
 }
 CONNECTORS = ("aave_v4",)
-ACCOUNT = "wallet"
 ALLOCATION = "position"
 
 
@@ -83,7 +84,8 @@ def command(args) -> int:
     finally:
         backend.close()
     print(json.dumps(result, indent=2))
-    return 0
+    # A preview succeeds by planning; an execution only by completing the action.
+    return 0 if not args.execute or result["completed"] else 1
 
 
 def read_wallet(directory: Path) -> dict:
@@ -91,7 +93,7 @@ def read_wallet(directory: Path) -> dict:
     from almanak.gateway.credentials import private_text
 
     wallet = json.loads(private_text(directory / "wallet.json"))
-    if not isinstance(wallet, dict) or not {"address", "keystores"} <= set(wallet):
+    if not isinstance(wallet, dict) or not {"account", "address", "keystores"} <= set(wallet):
         raise ValueError("wallet directory holds no wallet.json from `almanak wallet create`")
     return wallet
 
@@ -129,17 +131,19 @@ def action_config(args, request, wallet, provider, endpoint):
         resolved = resolve(reader, family(args.connector), request, reader.pin_block("latest"))
     return lending_config(
         resolved.reserve,
-        wallet["address"],
+        wallet,
         provider,
         max_gas_price_wei=args.max_gas_price_wei,
         max_transaction_fee=args.max_transaction_fee,
     )
 
 
-def lending_config(reserve, address, provider, *, max_gas_price_wei, max_transaction_fee):
+def lending_config(reserve, wallet, provider, *, max_gas_price_wei, max_transaction_fee):
+    """Bind the wallet under the account name its keystore entry carries."""
     from almanak.chains import evm_network
     from almanak.connectors.aave_v4.models import LendingConfig
 
+    account, address = wallet["account"], wallet["address"]
     chain = reserve.chain.model_dump(mode="json")
     native = str(evm_network(reserve.chain.chain_id).native_asset)
     document = {
@@ -147,7 +151,7 @@ def lending_config(reserve, address, provider, *, max_gas_price_wei, max_transac
         "accounts": {
             "bindings": [
                 {
-                    "name": ACCOUNT,
+                    "name": account,
                     "profile": {
                         "kind": "eoa",
                         "fund": {"chain": chain, "address": address.lower()},
@@ -158,7 +162,7 @@ def lending_config(reserve, address, provider, *, max_gas_price_wei, max_transac
         "allocations": [
             {
                 "name": ALLOCATION,
-                "account": ACCOUNT,
+                "account": account,
                 "reserve": reserve.model_dump(mode="json"),
                 "native_asset": native,
             }
@@ -173,7 +177,7 @@ def lending_config(reserve, address, provider, *, max_gas_price_wei, max_transac
             ],
             "gas": [
                 {
-                    "accounts": [ACCOUNT],
+                    "accounts": [account],
                     "asset": native,
                     "source": "network_rpc_fee_history",
                     "reward_percentile": 50,
@@ -200,6 +204,30 @@ def intent(config, action: str, amount: int | None):
     return config.withdraw(ALLOCATION)
 
 
+class Terminated(SystemExit):
+    """SIGTERM during an action; it unwinds like an interrupt so the record is reported."""
+
+
+@contextmanager
+def terminable():
+    """Turn SIGTERM into an exception for the duration of one action.
+
+    The default action would end the process without reporting a retained record.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def stop(signum, frame):
+        raise Terminated(128 + signum)
+
+    previous = signal.signal(signal.SIGTERM, stop)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 def run(config, backend, action: str, amount: int | None, *, execute: bool) -> dict:
     """Plan one action against the account's current position, and execute it when asked."""
     from almanak.gateway.service import GatewayService
@@ -211,7 +239,8 @@ def run(config, backend, action: str, amount: int | None, *, execute: bool) -> d
     )
     kept = True
     try:
-        result = perform(service, action, amount, execute=execute, create=config)
+        with terminable():
+            result = perform(service, action, amount, execute=execute, create=config)
         kept = False
         return result
     except BaseException:
@@ -235,23 +264,36 @@ def perform(service, action: str, amount: int | None, *, execute: bool, create=N
     try:
         before = runtime.recover()
         runtime.submit(intent(before.config, action, amount))
-        plan = runtime.preview()
         result = {
             "action": action,
             "executed": False,
             "position_before": position(before),
-            "first_step": step(plan),
+            "first_step": step(runtime.preview()),
         }
         if execute:
-            outcomes = runtime.execute()
-            result.update(
-                executed=True,
-                outcomes=[outcome_summary(item) for item in outcomes],
-                position_after=position(runtime.journal.load()),
-            )
+            result.update(executed_result(runtime, action, runtime.execute()))
         return result
     finally:
         runtime.close()
+
+
+def executed_result(runtime, action: str, outcomes) -> dict:
+    """What an execution did: `completed` only when the action's own step succeeded.
+
+    A step refused at signing leaves no outcome, and an approval can succeed before its
+    supply is refused, so neither an empty nor a non-empty outcome list means success.
+    """
+    final = outcomes[-1] if outcomes else None
+    result = {
+        "executed": bool(outcomes),
+        "completed": final is not None and final.success and final.operation.kind == action,
+        "outcomes": [outcome_summary(item) for item in outcomes],
+        "position_after": position(runtime.journal.load()),
+    }
+    refused = getattr(runtime, "refused", None)
+    if refused is not None and not result["completed"]:
+        result["refused"] = {"kind": refused.kind, "message": str(refused)}
+    return result
 
 
 def position(state) -> dict:

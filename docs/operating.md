@@ -437,11 +437,21 @@ not opened. With `--execute` it signs and sends each step, waits for its receipt
 prints the outcomes with the position before and after. A supply is an approval
 followed by the supply, so the preview shows the approval.
 
+An executed action reports `completed`, true only when the action's own step
+succeeded, and the command exits 1 when it is false. A supply is not atomic: its
+approval can be mined and the supply then be refused, for example on a fee quote
+above the ceiling, or revert. The position is then unchanged and the allowance stays
+on chain; `outcomes` lists the steps that ran and `refused` names the refusal. Check
+the allowance as well as the position before retrying. A first step refused at
+planning fails the command with that refusal and signs nothing. Each fee ceiling
+applies to one transaction, so a supply can spend up to twice
+`--max-transaction-fee`.
+
 | Option | Meaning |
 | --- | --- |
 | market selection | The same flags or `--config` file as `ax lending-reserve`. |
 | `--amount` | Base units of the reserve asset. `withdraw` takes none: it withdraws the whole supplied balance. |
-| `--wallet` | The directory `almanak wallet create` wrote. Its keystore must hold the account `wallet`, and it is unlocked with the recorded `password_file` or by asking. |
+| `--wallet` | The directory `almanak wallet create` wrote, under any account name. The keystore is unlocked with the recorded `password_file` or by asking. |
 | `--env-file` | The provider key (`ALCHEMY_API_KEY`). |
 | `--max-gas-price-wei`, `--max-transaction-fee` | Required ceilings; a step quoted above either is refused. |
 
@@ -454,12 +464,16 @@ command: its journal is a private temporary directory, removed when the command
 ends. The deployment adopts the position the wallet already holds, read at the start,
 so a later command sees what an earlier one did.
 
-Nothing is kept between commands, so an interrupted command is not resumed. If the
-process stops while a signed step is unresolved, its directory is kept, the command
-prints `{"event": "record_kept", "path": ...}`, and the wallet stays claimed: later
-actions for it are refused with "fund is already claimed" until the operator has
-checked the transaction on chain and removed the claim. A wallet a running strategy
-uses is refused the same way. An action has no amount ceiling: it is bounded by the
+Nothing is kept between commands, so an interrupted command is not resumed. If a
+command fails, is interrupted or receives SIGTERM while a signed step is unresolved,
+its directory is kept and the command prints
+`{"event": "record_kept", "path": ...}`. A process that is killed outright prints
+nothing, so the absence of that line does not mean nothing was kept: the record is
+then an `almanak-ax-*` directory under the system temporary directory. Either way
+the wallet stays claimed and later actions for it are refused with "fund is already
+claimed". Checking the transaction on chain does not release the claim, and there is
+no command that clears it yet, so the wallet stays blocked for operator actions on
+that machine. A wallet a running strategy uses is refused the same way. An action has no amount ceiling: it is bounded by the
 wallet's balance and the two fee ceilings.
 
 ### Market resolution

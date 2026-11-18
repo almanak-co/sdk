@@ -70,6 +70,7 @@ def test_execute_runs_the_action_and_reports_the_position(desk):
     supplied = ax_actions.perform(desk.service, "supply", amount, execute=True)
     assert [item["operation"] for item in supplied["outcomes"]] == ["approve", "supply"]
     assert all(item["success"] and item["transaction"] for item in supplied["outcomes"])
+    assert supplied["executed"] and supplied["completed"] and "refused" not in supplied
     shares = desk.gateway.outcome("supply").shares
     assert supplied["position_after"]["supplied_shares"] == str(shares)
 
@@ -119,15 +120,17 @@ def test_the_configuration_binds_one_wallet_one_market_and_explicit_fee_ceilings
     reserve = type(reserve).model_validate_json(json.dumps(document))
     config = ax_actions.lending_config(
         reserve,
-        "0x" + "Ab" * 20,
+        {"account": "treasury", "address": "0x" + "Ab" * 20},
         ax_actions.alchemy(reserve.chain.chain_id),
         max_gas_price_wei=5,
         max_transaction_fee=9,
     )
     binding = config.accounts.bindings[0]
-    assert binding.profile.kind == "eoa" and binding.profile.fund.address == "0x" + "ab" * 20
+    # The binding carries the keystore entry's own name, so any wallet's keystore loads.
+    assert binding.name == "treasury" and binding.profile.kind == "eoa"
+    assert binding.profile.fund.address == "0x" + "ab" * 20
     assert config.target(ax_actions.ALLOCATION).reserve == reserve
-    policy = config.production.policy(ax_actions.ACCOUNT)
+    policy = config.production.policy("treasury")
     assert (policy.max_gas_price_wei, policy.max_transaction_fee.amount) == (5, 9)
     assert policy.total_budget is None
     assert config.production.networks[0].provider == AlchemyProvider(
@@ -154,9 +157,9 @@ def test_local_gateway_serves_the_service_in_process(tmp_path, recorded):
 
 
 def test_wallet_record_comes_from_wallet_create(tmp_path):
-    created = create_wallet(tmp_path / "wallet", "wallet", generate_password=True)
+    created = create_wallet(tmp_path / "wallet", "treasury", generate_password=True)
     wallet = ax_actions.read_wallet(tmp_path / "wallet")
-    assert wallet["address"] == created["address"]
+    assert (wallet["address"], wallet["account"]) == (created["address"], "treasury")
     assert Path(wallet["password_file"]).name == "keystore-password"
     (tmp_path / "other").mkdir()
     (tmp_path / "other/wallet.json").write_text("{}")
@@ -233,3 +236,103 @@ def test_a_signed_step_in_flight_keeps_its_record(monkeypatch, tmp_path, capsys)
         ax_actions.run("config", None, "supply", 5, execute=True)
     assert record.exists()
     assert json.loads(capsys.readouterr().out) == {"event": "record_kept", "path": str(record)}
+
+
+def outcome(kind, success=True):
+    return SimpleNamespace(operation=SimpleNamespace(kind=kind), success=success, tx_hash="0x1")
+
+
+def finished(outcomes, refused=None):
+    state = SimpleNamespace(owned=[SimpleNamespace(shares=0, drawn_shares=0)])
+    runtime = SimpleNamespace(journal=SimpleNamespace(load=lambda: state), refused=refused)
+    return ax_actions.executed_result(runtime, "supply", outcomes)
+
+
+def test_only_the_actions_own_successful_step_completes_it():
+    from almanak.gateway.ethereum import DataError
+
+    assert finished([outcome("approve"), outcome("supply")])["completed"] is True
+    reverted = finished([outcome("approve"), outcome("supply", success=False)])
+    assert reverted["executed"] and not reverted["completed"]
+    # An approval can succeed before the supply is refused: sent, but not completed.
+    partial = finished([outcome("approve")], DataError("gas_fee_quote", "above the ceiling"))
+    assert partial["executed"] and not partial["completed"]
+    assert partial["refused"] == {"kind": "gas_fee_quote", "message": "above the ceiling"}
+    # A step refused at signing leaves no outcome at all.
+    unsent = finished([], DataError("deadline_margin", "too late"))
+    assert (unsent["executed"], unsent["completed"]) == (False, False)
+    assert unsent["refused"]["kind"] == "deadline_margin"
+
+
+@pytest.mark.parametrize(
+    ("execute", "completed", "status"),
+    [(False, None, 0), (True, True, 0), (True, False, 1)],
+)
+def test_exit_status_follows_completion_only_when_executing(
+    monkeypatch, capsys, execute, completed, status
+):
+    monkeypatch.setattr("almanak.ax.lending_request", lambda args: SimpleNamespace(chain="c"))
+    monkeypatch.setattr(ax_actions, "read_wallet", lambda directory: {})
+    monkeypatch.setattr(ax_actions, "alchemy", lambda chain: None)
+    monkeypatch.setattr("almanak.gateway.providers.provider_endpoint", lambda *a: "endpoint")
+    monkeypatch.setattr(ax_actions, "action_config", lambda *a: "config")
+    backend = SimpleNamespace(close=lambda: None)
+    monkeypatch.setattr(ax_actions, "production_backend", lambda *a: backend)
+    result = {"executed": execute} if completed is None else {"completed": completed}
+    monkeypatch.setattr(ax_actions, "run", lambda *a, **k: result)
+    args = SimpleNamespace(
+        wallet=None, env_file=None, ax_command="supply", amount=1, execute=execute
+    )
+    assert ax_actions.command(args) == status
+    assert json.loads(capsys.readouterr().out) == result
+
+
+def test_a_plan_refused_in_preview_names_its_refusal(desk):
+    from almanak.gateway.ethereum import DataError
+
+    runtime = desk.runtime()
+    runtime.submit(desk.intent("supply"))
+
+    def refuse(state):
+        runtime.count_replan(
+            DataError("simulation_reverted", "transfer exceeds balance"), "prepare"
+        )
+
+    runtime.prepare_decision = refuse
+    runtime.replanning = lambda: SimpleNamespace(attempts={}, stages={}, delay=0)
+    runtime.route = lambda: None
+    with pytest.raises(DataError, match="refused during planning: transfer exceeds") as raised:
+        runtime.preview()
+    assert raised.value.kind == "simulation_reverted"
+    runtime.refused = None
+    runtime.prepare_decision = lambda state: None
+    with pytest.raises(DataError) as unnamed:
+        runtime.preview()
+    assert unnamed.value.kind == "plan_refused"
+
+
+def test_sigterm_unwinds_the_action_like_an_interrupt():
+    import os
+    import signal
+
+    previous = signal.getsignal(signal.SIGTERM)
+    with pytest.raises(ax_actions.Terminated) as stopped, ax_actions.terminable():
+        os.kill(os.getpid(), signal.SIGTERM)
+    assert stopped.value.code == 128 + signal.SIGTERM
+    assert signal.getsignal(signal.SIGTERM) is previous
+
+
+def test_sigterm_handling_is_left_alone_off_the_main_thread():
+    import signal
+    import threading
+
+    seen = []
+
+    def body():
+        with ax_actions.terminable():
+            seen.append(signal.getsignal(signal.SIGTERM))
+
+    worker = threading.Thread(target=body)
+    worker.start()
+    worker.join()
+    assert seen == [signal.getsignal(signal.SIGTERM)]
