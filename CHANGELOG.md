@@ -8,6 +8,23 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Added
+- `almanak ax supply` and `almanak ax withdraw` run one operator action for one wallet in
+  one process, without a strategy, workspace or gateway process. Without `--execute` the
+  first step is planned and nothing is signed. They support Aave V4 with an EOA wallet,
+  take required `--max-gas-price-wei` and `--max-transaction-fee` ceilings, and adopt the
+  position the wallet already holds.
+- An agent skill, `skills/almanak/SKILL.md`, teaches an AI agent to manage positions from
+  plain requests with the operator actions: setup on load, then preview, confirm and
+  execute. `docs/agents.md` covers installing it.
+- `almanak wallet create` takes `--password-file` or `--generate-password`, so a keystore
+  can be created without a terminal. A generated password is written to a private
+  `keystore-password` file beside the keystore.
+
+### Fixed
+- A plan without a gas policy on a local Anvil fixture (`eip155:31337`) is priced from its
+  pinned block instead of being refused with "no verified EVM network definition".
+
 ### Removed
 - Publishing release candidates to a package index. Stable releases go to PyPI only; a
   release candidate builds and verifies its distributions as a workflow artifact and

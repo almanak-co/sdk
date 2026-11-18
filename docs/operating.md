@@ -372,6 +372,12 @@ the read-only gateway and never opens signing files. EOA funds are their own
 submitters. Safe funds use delegated Roles operators; owners remain distinct and
 are never a fallback signer.
 
+`wallet create` asks for the keystore password twice. Without a terminal, name
+the password with `--password-file` (an operator-owned private file, which is not
+copied), or pass `--generate-password` to have one generated into
+`keystore-password` beside the keystore; the printed result then names it as
+`password_file`. The result never contains the password or the key.
+
 Encrypted keystores must match the named submitters. Interactive passwords are
 passed ephemerally and are not saved in manifests. An explicit private
 `password_file` in the operator signing section is an operator choice. A gateway
@@ -412,6 +418,49 @@ assumptions. Custom dashboard failure remains visible without hiding the report.
 Explicit process management remains under `service gateway`, `service fork`,
 `service start`, `service resume`, `service status` and `service teardown`.
 `permissions generate|verify` uses an authenticated gateway.
+
+### Operator actions
+
+`almanak ax supply` and `almanak ax withdraw` run one action for one wallet in one
+process, with no strategy, workspace or gateway process to start:
+
+```bash
+almanak ax supply --connector aave_v4 --chain eip155:1 \
+  --spoke 0x94e7a5dcbe816e498b89ab752661904e2f56c485 --reserve-id 0 \
+  --amount 10000000000000000 --wallet /private/operator --env-file /private/providers.env \
+  --max-gas-price-wei 5000000000 --max-transaction-fee 5000000000000000
+```
+
+Without `--execute` the command resolves the market, reads the wallet's current
+position, plans the first step and prints it; nothing is signed, and the keystore is
+not opened. With `--execute` it signs and sends each step, waits for its receipt and
+prints the outcomes with the position before and after. A supply is an approval
+followed by the supply, so the preview shows the approval.
+
+| Option | Meaning |
+| --- | --- |
+| market selection | The same flags or `--config` file as `ax lending-reserve`. |
+| `--amount` | Base units of the reserve asset. `withdraw` takes none: it withdraws the whole supplied balance. |
+| `--wallet` | The directory `almanak wallet create` wrote. Its keystore must hold the account `wallet`, and it is unlocked with the recorded `password_file` or by asking. |
+| `--env-file` | The provider key (`ALCHEMY_API_KEY`). |
+| `--max-gas-price-wei`, `--max-transaction-fee` | Required ceilings; a step quoted above either is refused. |
+
+Operator actions support Aave V4 with an EOA wallet. Safe/Roles accounts are not
+supported.
+
+The action runs through the same planning, simulation, signing and receipt
+reconciliation as a strategy's, as an operator deployment that exists only for the
+command: its journal is a private temporary directory, removed when the command
+ends. The deployment adopts the position the wallet already holds, read at the start,
+so a later command sees what an earlier one did.
+
+Nothing is kept between commands, so an interrupted command is not resumed. If the
+process stops while a signed step is unresolved, its directory is kept, the command
+prints `{"event": "record_kept", "path": ...}`, and the wallet stays claimed: later
+actions for it are refused with "fund is already claimed" until the operator has
+checked the transaction on chain and removed the claim. A wallet a running strategy
+uses is refused the same way. An action has no amount ceiling: it is bounded by the
+wallet's balance and the two fee ceilings.
 
 ### Market resolution
 

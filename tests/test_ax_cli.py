@@ -114,6 +114,9 @@ def test_parser_connector_choices_match_the_handler_table():
                 continue
             for sub_parser in sub.choices.values():
                 product = sub_parser.get_default("product")
+                # `ax supply` and `ax withdraw` are operator actions, not read handlers.
+                if not product.startswith("ax-"):
+                    continue
                 for argument in sub_parser._actions:
                     if argument.dest == "connector":
                         choices.update((product, connector) for connector in argument.choices)

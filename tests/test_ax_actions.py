@@ -1,0 +1,235 @@
+"""`almanak ax supply` and `ax withdraw`: the one-process operator action.
+
+Component evidence against captured Aave V4 receipts, without signing or chain access.
+The fork proof of the whole command is tests/fork/test_ax_actions.py.
+"""
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from almanak import ax_actions, operator_runtime
+from almanak.cli_arguments import build_parser, parse_validated
+from almanak.connectors.aave_v4.lifecycle import adopt_ownership, commit_ownership
+from almanak.gateway.credentials import create_wallet
+from almanak.gateway.providers import AlchemyProvider
+from almanak.operator_deployment import adopts
+from tests.test_operator_runtime import Desk
+
+COMMON = [
+    "--connector",
+    "aave_v4",
+    "--chain",
+    "eip155:1",
+    "--spoke",
+    "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+    "--reserve-id",
+    "0",
+    "--wallet",
+    "wallet",
+    "--env-file",
+    ".env",
+    "--max-gas-price-wei",
+    "5000000000",
+    "--max-transaction-fee",
+    "5000000000000000",
+]
+
+
+@pytest.fixture
+def desk(tmp_path, recorded, monkeypatch):
+    desk = Desk(tmp_path, recorded)
+    monkeypatch.setattr(ax_actions, "ALLOCATION", recorded.config.allocations[0].name)
+
+    def coordinator(*, gateway, create):
+        runtime = desk.runtime()
+        runtime.close = lambda: None
+        return runtime
+
+    monkeypatch.setattr(operator_runtime, "OperatorRuntime", coordinator)
+    return desk
+
+
+def parse(*arguments):
+    return parse_validated(build_parser(), ["ax", *arguments])
+
+
+def test_preview_plans_the_first_step_and_signs_nothing(desk):
+    amount = desk.intent("supply").amount.amount
+    result = ax_actions.perform(desk.service, "supply", amount, execute=False)
+    assert result["executed"] is False and "outcomes" not in result
+    assert result["first_step"]["operation"]["kind"] == "approve"
+    assert result["position_before"] == {"supplied_shares": "0", "debt_shares": "0"}
+    assert desk.gateway.broadcasts == [] and desk.store.load().pending is None
+
+
+def test_execute_runs_the_action_and_reports_the_position(desk):
+    amount = desk.intent("supply").amount.amount
+    supplied = ax_actions.perform(desk.service, "supply", amount, execute=True)
+    assert [item["operation"] for item in supplied["outcomes"]] == ["approve", "supply"]
+    assert all(item["success"] and item["transaction"] for item in supplied["outcomes"])
+    shares = desk.gateway.outcome("supply").shares
+    assert supplied["position_after"]["supplied_shares"] == str(shares)
+
+    withdrawn = ax_actions.perform(desk.service, "withdraw", None, execute=True)
+    assert withdrawn["position_before"]["supplied_shares"] == str(shares)
+    assert withdrawn["position_after"]["supplied_shares"] == "0"
+
+
+def test_an_action_states_its_amount_exactly_once(recorded, monkeypatch):
+    monkeypatch.setattr(ax_actions, "ALLOCATION", recorded.config.allocations[0].name)
+    assert ax_actions.intent(recorded.config, "withdraw", None).kind == "withdraw"
+    assert ax_actions.intent(recorded.config, "supply", 7).amount.amount == 7
+    with pytest.raises(ValueError, match="requires --amount"):
+        ax_actions.intent(recorded.config, "supply", None)
+    with pytest.raises(ValueError, match="takes no --amount"):
+        ax_actions.intent(recorded.config, "withdraw", 7)
+
+
+def test_adoption_takes_ownership_from_the_observed_position(recorded):
+    supply = next(item for item in recorded.outcomes if item.operation.kind == "supply")
+    empty = recorded.model_copy(
+        update={"owned": adopt_ownership(recorded.owned, recorded.baseline)}
+    )
+    assert [item.shares for item in empty.owned] == [
+        item.position.supplied_shares for item in recorded.baseline
+    ]
+    adopted = adopt_ownership(empty.owned[:1], (supply.after,))
+    assert adopted == commit_ownership(empty.owned[:1], supply)
+    assert adopted[0].shares == supply.after.position.supplied_shares > 0
+
+
+def test_only_an_operator_deployments_first_update_adopts():
+    def state(operator, initialized):
+        return SimpleNamespace(operator=operator, initialized=initialized)
+
+    assert adopts(state(True, False), state(True, True))
+    assert not adopts(state(False, False), state(False, True))
+    assert not adopts(state(True, True), state(True, True))
+
+
+def test_the_configuration_binds_one_wallet_one_market_and_explicit_fee_ceilings(recorded):
+    reserve = recorded.config.allocations[0].reserve
+    mainnet = reserve.model_copy(
+        update={"chain": reserve.chain.model_copy(update={"environment": "mainnet"})}
+    )
+    document = json.loads(mainnet.model_dump_json().replace("eip155:31337", "eip155:1"))
+    reserve = type(reserve).model_validate_json(json.dumps(document))
+    config = ax_actions.lending_config(
+        reserve,
+        "0x" + "Ab" * 20,
+        ax_actions.alchemy(reserve.chain.chain_id),
+        max_gas_price_wei=5,
+        max_transaction_fee=9,
+    )
+    binding = config.accounts.bindings[0]
+    assert binding.profile.kind == "eoa" and binding.profile.fund.address == "0x" + "ab" * 20
+    assert config.target(ax_actions.ALLOCATION).reserve == reserve
+    policy = config.production.policy(ax_actions.ACCOUNT)
+    assert (policy.max_gas_price_wei, policy.max_transaction_fee.amount) == (5, 9)
+    assert policy.total_budget is None
+    assert config.production.networks[0].provider == AlchemyProvider(
+        kind="alchemy", network="eth-mainnet", api_key_env="ALCHEMY_API_KEY"
+    )
+
+
+def test_a_chain_without_a_provider_binding_is_refused():
+    from almanak.caip import ChainId
+
+    with pytest.raises(ValueError, match="no provider binding"):
+        ax_actions.alchemy(ChainId("eip155:31337"))
+
+
+def test_local_gateway_serves_the_service_in_process(tmp_path, recorded):
+    desk = Desk(tmp_path, recorded)
+    gateway = ax_actions.LocalGateway(desk.service)
+    assert gateway.configuration() == recorded.config
+    assert gateway.load().deployment_id == desk.store.load().deployment_id
+    # A refusal reaches the caller as the service raised it, not as an HTTP status.
+    with pytest.raises(ValueError):
+        gateway.request("state", unexpected=1)
+    gateway.close()
+
+
+def test_wallet_record_comes_from_wallet_create(tmp_path):
+    created = create_wallet(tmp_path / "wallet", "wallet", generate_password=True)
+    wallet = ax_actions.read_wallet(tmp_path / "wallet")
+    assert wallet["address"] == created["address"]
+    assert Path(wallet["password_file"]).name == "keystore-password"
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other/wallet.json").write_text("{}")
+    (tmp_path / "other/wallet.json").chmod(0o600)
+    with pytest.raises(ValueError, match="no wallet.json"):
+        ax_actions.read_wallet(tmp_path / "other")
+
+
+def test_supply_requires_an_amount_and_fee_ceilings_and_withdraw_takes_none(capsys):
+    supply = parse("supply", *COMMON, "--amount", "5")
+    assert (supply.product, supply.amount, supply.execute) == ("operator-action", 5, False)
+    withdraw = parse("withdraw", *COMMON, "--execute")
+    assert withdraw.amount is None and withdraw.execute
+    for arguments in (
+        ("supply", *COMMON),
+        ("supply", *COMMON, "--amount", "0"),
+        ("withdraw", *COMMON, "--amount", "5"),
+        ("withdraw", *COMMON[:-2]),
+        ("supply", *COMMON, "--amount", "5", "--config", "market.json"),
+    ):
+        with pytest.raises(SystemExit):
+            parse(*arguments)
+    capsys.readouterr()
+
+
+def test_an_action_never_reads_through_the_session_read_gateway(monkeypatch):
+    monkeypatch.setenv("ALMANAK_AX_GATEWAY_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("ALMANAK_AX_GATEWAY_AUTH_FILE", "read-token")
+    assert not hasattr(parse("withdraw", *COMMON), "gateway_url")
+
+
+class Service:
+    def __init__(self, config, database, backend, **options):
+        self.options = options
+        self.journal = SimpleNamespace(path=database)
+
+
+def test_the_private_record_is_removed_when_nothing_is_in_flight(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr("almanak.gateway.service.GatewayService", Service)
+    monkeypatch.setattr(ax_actions.tempfile, "mkdtemp", lambda prefix: str(tmp_path / "record"))
+    (tmp_path / "record").mkdir()
+
+    def perform(service, action, amount, *, execute, create):
+        seen.update(service.options, create=create)
+        return {"action": action}
+
+    monkeypatch.setattr(ax_actions, "perform", perform)
+    assert ax_actions.run("config", None, "withdraw", None, execute=False) == {"action": "withdraw"}
+    assert seen == {"lease_seconds": 30, "operator_actions": True, "create": "config"}
+    assert not (tmp_path / "record").exists()
+
+    (tmp_path / "record").mkdir()
+    monkeypatch.setattr(ax_actions, "perform", lambda *a, **k: (_ for _ in ()).throw(ValueError))
+    with pytest.raises(ValueError):
+        ax_actions.run("config", None, "withdraw", None, execute=True)
+    assert not (tmp_path / "record").exists()
+
+
+def test_a_signed_step_in_flight_keeps_its_record(monkeypatch, tmp_path, capsys):
+    record = tmp_path / "record"
+    record.mkdir()
+    (record / "state.sqlite").touch()
+
+    class Pending(Service):
+        def __init__(self, *arguments, **options):
+            super().__init__(*arguments, **options)
+            self.journal.load = lambda: SimpleNamespace(pending=object())
+
+    monkeypatch.setattr("almanak.gateway.service.GatewayService", Pending)
+    monkeypatch.setattr(ax_actions.tempfile, "mkdtemp", lambda prefix: str(record))
+    monkeypatch.setattr(ax_actions, "perform", lambda *a, **k: (_ for _ in ()).throw(OSError))
+    with pytest.raises(OSError):
+        ax_actions.run("config", None, "supply", 5, execute=True)
+    assert record.exists()
+    assert json.loads(capsys.readouterr().out) == {"event": "record_kept", "path": str(record)}

@@ -4,6 +4,7 @@ from almanak.chains import evm_network
 from almanak.connectors.composition import connector_for
 from almanak.gateway.environments import origin_chain
 from almanak.gateway.ethereum import DataError
+from almanak.gateway.evm import chain_number
 from almanak.gateway.production_config import execution_gas
 from almanak.state import FeeQuote
 
@@ -26,6 +27,9 @@ def fee_history_block(reader, block) -> int:
     parent hash binds that block to the pin, so re-preparation, signing and
     replacement at the same pin read the same history.
     """
+    # A local Anvil fixture has no network definition and mines uniform blocks.
+    if chain_number(block.chain.chain_id) == 31337:
+        return block.number
     if not evm_network(block.chain.chain_id).separate_large_block_fees or block.number == 0:
         return block.number
     pinned = reader._rpc("eth_getBlockByNumber", [hex(block.number), False])

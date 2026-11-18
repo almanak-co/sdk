@@ -419,7 +419,20 @@ def advanced(products):
     create.set_defaults(product="wallet-create")
     create.add_argument("--output", type=Path, required=True)
     create.add_argument("--account", required=True)
-    ax = products.add_parser("ax", help="read-only protocol observations at a pinned block")
+    password = create.add_mutually_exclusive_group()
+    password.add_argument(
+        "--password-file",
+        type=Path,
+        help="private file holding the keystore password, instead of asking for it",
+    )
+    password.add_argument(
+        "--generate-password",
+        action="store_true",
+        help="generate the password into a private file beside the keystore",
+    )
+    ax = products.add_parser(
+        "ax", help="read-only protocol observations at a pinned block, and operator actions"
+    )
     commands = ax.add_subparsers(dest="ax_command", required=True)
     for name, (help_text, connectors) in AX_REQUESTS.items():
         command = commands.add_parser(name, help=help_text, description=help_text)
@@ -462,6 +475,9 @@ def advanced(products):
     observation_transport(balance)
     discovery(commands)
     hypercore(commands)
+    from almanak.ax_actions import arguments as operator_actions
+
+    operator_actions(commands, lending_source)
 
 
 def block_option(command):
@@ -750,7 +766,8 @@ def parse_validated(parser, argv=None):
     product = getattr(args, "product", None)
     if product in INLINE_FLAGS:
         require_inline(parser, args, INLINE_FLAGS[product], INLINE_OPTIONS.get(product, ()))
-    if getattr(args, "ax_command", None) in LENDING_REQUESTS and args.config is not None:
+    lending = (*LENDING_REQUESTS, "supply", "withdraw")
+    if getattr(args, "ax_command", None) in lending and args.config is not None:
         given = [name for name in LENDING_SELECTOR_FLAGS if getattr(args, name) is not None]
         if given:
             flags = ", ".join("--" + name.replace("_", "-") for name in given)

@@ -68,12 +68,28 @@ def write_private(path: Path, contents: str):
         os.fsync(handle.fileno())
 
 
-def create_wallet(directory: Path, account: str):
-    """Interactive operator command; never returns private material."""
+def create_wallet(
+    directory: Path,
+    account: str,
+    *,
+    password_file: Path | None = None,
+    generate_password: bool = False,
+):
+    """Create one encrypted keystore; never returns private material.
+
+    The password is asked for twice unless an operator password file is named or a
+    generated one is requested. A generated password is written beside the keystore
+    as a private file, for a caller that must unlock it without a terminal.
+    """
     validate_key_path(directory, readable_paths())
-    password = getpass.getpass("New keystore password: ")
-    if not password or password != getpass.getpass("Repeat password: "):
-        raise ValueError("nonempty matching passwords are required")
+    if generate_password:
+        password = secrets.token_urlsafe(32)
+    elif password_file is not None:
+        password = keystore_password(password_file)
+    else:
+        password = getpass.getpass("New keystore password: ")
+        if not password or password != getpass.getpass("Repeat password: "):
+            raise ValueError("nonempty matching passwords are required")
     signer = Signer.create()
     encrypted = Signer.encrypt(signer.key, password)
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
@@ -85,5 +101,8 @@ def create_wallet(directory: Path, account: str):
         "keystores": str((directory / "keystores.json").resolve()),
         "auth_token_file": str((directory / "gateway-auth.token").resolve()),
     }
+    if generate_password:
+        write_private(directory / "keystore-password", password)
+        result["password_file"] = str((directory / "keystore-password").resolve())
     write_private(directory / "wallet.json", json.dumps(result, indent=2))
     return result

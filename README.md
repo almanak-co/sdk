@@ -87,6 +87,7 @@ and end treatment. It needs no wallet addresses or signing authority.
 - [Configuration](docs/configuration.md): YAML, exact quantities and financial identity
 - [Backtesting](docs/backtesting.md): models, datasets and reproduction
 - [Operating](docs/operating.md): supervision, production credentials and recovery
+- [Agents](docs/agents.md): the skill that lets an AI agent manage positions from plain requests
 - [Dashboards](docs/dashboards.md)
 - [Example strategies](docs/examples.md) and the references in [`strategies/`](strategies)
 - [Execution API](docs/api/index.md): runtime, gateways and adapter contracts

@@ -14,8 +14,13 @@ def validate_execution_update(backend, before, after):
         validate_outcome(backend, before, after)
     else:
         from almanak.connectors.composition import connector_for
+        from almanak.operator_deployment import adopts
 
-        ownership = connector_for(before.config).lifecycle.ownership(before)
+        lifecycle = connector_for(before.config).lifecycle
+        ownership = lifecycle.ownership(before)
+        if adopts(before, after):
+            # The service verifies the baseline these adopted positions come from.
+            ownership = {"owned": lifecycle.adopt(before.owned, after.baseline)}
         if any(getattr(after, field) != value for field, value in ownership.items()):
             raise ValueError("ownership can change only through verified execution evidence")
         from almanak.request_runtime import unresolved
@@ -67,7 +72,12 @@ def validate_initialization(backend, before, after):
         raise ValueError("initialization cannot be undone")
     if verified_observations(backend, after.baseline) != after.baseline:
         raise ValueError("baseline differs from verified chain observations")
-    validate_initial_balances(before, after.baseline)
+    from almanak.operator_deployment import is_operator
+
+    # An operator deployment adopts what the account holds; only a strategy needs a
+    # pristine, funded start.
+    if not is_operator(before):
+        validate_initial_balances(before, after.baseline)
     require_empty_venue(backend, after)
 
 

@@ -134,6 +134,7 @@ nav:
     - Example Strategies: examples.md
   - Operate:
     - Operating: operating.md
+    - Agents: agents.md
   - Reference:
     - Supported Connectors: support.md
     - CLI:

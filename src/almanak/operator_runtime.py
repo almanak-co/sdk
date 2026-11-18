@@ -29,6 +29,20 @@ class OperatorRuntime(Runtime):
             return self.initialize(state, self.gateway.observe())
         return True
 
+    def initialize(self, state, observed):
+        """Adopt the account's existing position instead of requiring a pristine fund.
+
+        An operator acts on what the account holds now. The gateway re-reads the baseline
+        and accepts only the ownership that baseline states.
+        """
+        owned = self.connector.lifecycle.adopt(state.owned, observed)
+        self.journal.update(
+            lambda current: current.model_copy(
+                update={"initialized": True, "baseline": observed, "owned": owned}
+            )
+        )
+        return False
+
     def deliver_outcome(self, state):
         # There is no strategy transition to apply: delivery only acknowledges the outcome.
         outcome = state.outcomes[state.delivered]

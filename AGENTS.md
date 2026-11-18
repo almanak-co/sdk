@@ -336,11 +336,19 @@ independently.
   `ALMANAK_AX_GATEWAY_AUTH_FILE`. `--block` defaults to `finalized`.
 - `ax resolve`, `ax dex-pools` and `ax lending-markets` name candidates for
   authoring under the discovery rules above.
-- Operator actions that do not come from a strategy run through durable
-  operator deployments. Their authority is an operator-managed action policy
-  compiled into ordinary capabilities, with cumulative budgets in durable
-  state. They use the shared runtime, planning, signing and recovery path and
-  preview the plan before signing.
+- Accepted: operator actions that do not come from a strategy are direct
+  commands (`ax supply`, `ax withdraw`), each one process with no workspace,
+  gateway process or state kept between commands. Inside the command they run
+  as an operator deployment through the shared planning, simulation, signing
+  and reconciliation path, with the gateway service in the same process. The
+  deployment adopts the position the wallet holds at the start. Without
+  `--execute` nothing is signed.
+- Accepted risk: a direct command is not resumed. A signed step left
+  unresolved keeps its record and the wallet's claim, which refuses later
+  actions for that wallet until the operator clears it.
+- Operator actions have no amount ceiling or cumulative budget; the required
+  fee ceilings and the wallet balance bound them. An operator-managed action
+  policy is proposed, not accepted.
 
 ## Check output and dashboards
 

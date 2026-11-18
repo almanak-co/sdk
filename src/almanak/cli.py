@@ -118,6 +118,10 @@ def dispatch(args) -> int:
         from almanak.markets import command as markets
 
         return markets(args)
+    if args.product == "operator-action":
+        from almanak.ax_actions import command as operator_action
+
+        return operator_action(args)
     if args.product.startswith("ax-"):
         from almanak.ax import command
 
