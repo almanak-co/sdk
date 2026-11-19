@@ -88,9 +88,13 @@ its changelog is on the `v2` branch.
   slippage, the tick range and the payout of a Curve burn, and explains what each one
   does not protect against. Its public endpoint table names
   each chain's native asset, and its `settings.json` notes the markets, the liquidity
-  positions and the tokens the wallet holds. `tests/test_agent_skill.py` holds the
-  skill's commands, connectors, selector flags, position fields and refusal texts to
-  the code.
+  positions and the tokens the wallet holds. It resolves with `ax recover` only a
+  record of its own wallet, and asks before a signed transaction that is not from an
+  action the user has just confirmed is sent again. `tests/test_agent_skill.py` holds
+  the skill's command lines, the flags it names, and its command, selector, public
+  endpoint, position field, health floor and result field tables to the parser, the
+  declarations and the models. A refusal the skill names is a kind the SDK raises or
+  part of a message it raises. The rules an agent must keep are checked only as text.
 
 ### Removed
 - `--public-rpc drpc` no longer serves Avalanche. Its keyless tier intermittently
