@@ -360,7 +360,7 @@ def test_create_shape_follows_the_gateway_mode(desk):
 
 def test_connectors_without_the_marker_refuse_operator_deployments(tmp_path):
     from almanak.connectors.aave_v4.state import Checkpoint as AaveCheckpoint
-    from almanak.connectors.uniswap_v4.state import Checkpoint as UniswapCheckpoint
+    from almanak.connectors.gmx_v2.state import Checkpoint as GmxCheckpoint
 
     assert supports_operator(AaveCheckpoint)
-    assert not supports_operator(UniswapCheckpoint)
+    assert not supports_operator(GmxCheckpoint)

@@ -7,6 +7,7 @@ from almanak.connectors.uniswap_v4.observation_models import counter_settled
 from almanak.connectors.uniswap_v4.observations import initial_owned
 from almanak.connectors.uniswap_v4.state import Checkpoint, Work
 from almanak.connectors.uniswap_v4.validation import validate_owned
+from almanak.connectors.v3_pool_lifecycle import adopt_owned
 from almanak.dex_intents import OpenLiquidity, SwapExactInput
 from almanak.work import initial_work
 
@@ -60,6 +61,9 @@ class UniswapLifecycle:
     validate_initial = staticmethod(validate_initial)
     validate_owned = staticmethod(validate_observed)
     commit_owned = staticmethod(commit_owned)
+    # An operator deployment starts with the inventory its allocation states,
+    # refused when the wallet does not cover it: a swap adopts no venue position.
+    adopt = staticmethod(adopt_owned)
     validate_closure = staticmethod(validate_closure)
 
     @staticmethod
@@ -72,6 +76,7 @@ class UniswapLifecycle:
             deployment_id=uuid4().hex,
             config=config,
             strategy=strategy,
+            operator=strategy is None,
             capabilities=capabilities,
             permissions=permissions,
             mode="running",

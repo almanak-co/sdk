@@ -142,7 +142,10 @@ def report(state):
         "deployment_id": state.deployment_id,
         "connector": "uniswap_v4",
         "mode": state.mode,
-        "strategy": {"filename": state.strategy.filename, "sha256": state.strategy.sha256},
+        # An operator deployment retains no strategy.
+        "strategy": {"filename": state.strategy.filename, "sha256": state.strategy.sha256}
+        if state.strategy is not None
+        else None,
         "pending_hash": state.pending.tx_hash if state.pending else None,
         "transaction_families": family_report(state),
         "reserved_attempt": state.plan.attempt_id if state.plan else None,
