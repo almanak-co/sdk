@@ -426,12 +426,12 @@ serve. The provider key and the session read gateway are removed from each
 command's environment. It needs no key, wallet or funds.
 
 ```bash
-uv run --locked python -m scripts.live_qa reads --list --output artifacts/live-reads
+uv run --locked python -m scripts.live_qa reads --list
 uv run --locked python -m scripts.live_qa reads --output artifacts/live-reads
 ```
 
-`--list` prints the plan and contacts nothing. Use a new output directory for each
-run. `--endpoint` and `--case <text>` narrow a run. `--almanak-command` selects the
+`--list` prints the plan, contacts nothing and writes nothing. Use a new output
+directory for each run. `--endpoint` and `--case <text>` narrow a run. `--almanak-command` selects the
 CLI under test; the default is the checkout's, and the published package runs as
 a user installs it:
 
@@ -447,7 +447,14 @@ HyperCore market, and the refusals a public endpoint must give (a
 vendor-key lookup, a chain it does not serve). Each case states the correct
 behavior. Where practical its output is compared with direct `eth_call`,
 `eth_getBalance` and block-header reads of the same endpoint at the block the
-command pinned, made by `scripts/live_qa/rpc.py` without the SDK's reader.
+command pinned, made by `scripts/live_qa/rpc.py` without the SDK's reader. A
+reserve is held to what its Pool, Spoke, Comet or Morpho core records for it, and
+each listed market to the same record: an Aave V4 market to its Spoke's reserve
+under that ID, an Aave V3 or SparkLend market to the Pool's reserve list, a Morpho
+market to the core's parameters for its ID. That a market is `verified` is the
+SDK's own statement; the direct reads check the identity it reports, not every
+fact the SDK verified. The GMX bare-label cases and the HyperCore case have no
+direct read.
 
 Outcomes. Each case on each endpoint ends as one of:
 
@@ -461,13 +468,16 @@ Outcomes. Each case on each endpoint ends as one of:
   without being run. A blocked case is not a pass and not a finding about the SDK.
 
 The run writes `results.csv` and `summary.md` and exits 0 when every case passed,
-1 when a case failed and 2 when none failed but one was blocked.
+1 when a case failed and 2 when none failed but one was blocked. With
+`--known-issues-ok`, a failure that reproduces its case's known issue does not
+count toward the exit code, so a routine run is red only for something new; the
+report lists those failures all the same.
 
 Known issues. A defect found by hand stays in the catalog as a case with a
 `KnownIssue`: the case still states the correct behavior and still fails, and the
 report's `known_issue` column says whether the known defect reproduced, was not
 observed, or no longer reproduces, in which case its marker is removed. The
-catalog currently holds two:
+catalog currently holds three:
 
 - Aave V3 reads refuse with `deployment_changed: Aave V3 pool has an unverified
   revision` on Ethereum and Avalanche, since the on-chain Pool was upgraded past
@@ -476,6 +486,13 @@ catalog currently holds two:
   `BTC/USD` and `AVAX/USD` labels match nothing. `BTC.b/USD [BTC.b-USDC]` and
   `WAVAX/USD [WAVAX-USDC]` resolve and are held as passing controls.
 
+- `ax lending-markets --connector aave_v4` on Avalanche reports the Spokes that
+  hold no reserves as `unreadable`. Such a Spoke reverts `getReserveCount()`.
+  Both public endpoints report that revert with JSON-RPC code -32000, and the
+  listing recognizes a revert only by code 3, so it takes the answer for an
+  endpoint failure. The case confirms each revert with a direct read before it
+  fails; a Spoke the endpoint really did not answer still blocks it.
+
 Not covered: `ax lending-markets --connector compound_v3` reads the
 Configurator's whole event history in one request, which both public endpoints
 refuse; `ax resolve` and `ax dex-pools` need a vendor key; and `ax perp-position`
@@ -483,8 +500,10 @@ takes a fully resolved GMX market document that no `ax` command prints.
 
 The same cases run under pytest with an explicit flag. Without `--live-public`
 the `tests/live` directory is not collected at all. Run it serially, since
-parallel workers share each endpoint's rate limit; a blocked case is reported as
-skipped:
+parallel workers share each endpoint's rate limit. A blocked case is reported as
+skipped, with the same three-case breaker as the script. A known issue that
+reproduces is an expected failure (`xfail`); one that no longer reproduces fails
+until its marker is removed, and any other failure fails:
 
 ```bash
 uv run --locked pytest tests/live --live-public -p no:xdist
@@ -492,8 +511,8 @@ uv run --locked pytest tests/live --live-public -p no:xdist
 
 The `Live Public Reads (optional)` workflow
 (`.github/workflows/live_public_reads.yml`) runs the read level on a hosted runner
-when dispatched by hand. It uses no secret, is called by no other workflow and
-has no schedule; its file holds a commented weekly cron for a maintainer who
+when dispatched by hand, with `--known-issues-ok`. It uses no secret, is called by
+no other workflow and has no schedule; its file holds a commented weekly cron for a maintainer who
 wants one. There is no workflow for the write level.
 
 ### Live write check (spends real funds)
@@ -514,7 +533,11 @@ these hold. Every unmet gate is named at once.
 1. `ALMANAK_QA_SPEND_REAL_FUNDS=1` is set, on the command line of that run.
 2. `--wallet` names a wallet directory written by `almanak wallet create`, yours
    and funded by you with gas and the market's asset. The check never creates a
-   wallet and never reads a keystore or its password; `almanak ax` signs.
+   wallet and never opens a keystore or a password file; `almanak ax` signs. A
+   wallet created without `--generate-password` or `--password-file` asks for
+   its password on the terminal, once for the supply and once for the
+   withdrawal. Without a terminal, as under an agent, nobody can answer, so the
+   check then requires `wallet.json` to name an existing password file.
 3. `--max-gas-price-wei` and `--max-transaction-fee` are given, as `almanak ax`
    takes them, and neither exceeds the check's own limit for the chain (100 gwei
    and 0.02 ETH on Ethereum, 200 gwei and 0.2 AVAX on Avalanche).
@@ -522,6 +545,8 @@ these hold. Every unmet gate is named at once.
    largest accepted size.
 5. Exactly one of `--public-rpc` and `--env-file` names the transport.
 6. Neither `CI` nor `GITHUB_ACTIONS` is set.
+7. `--output` is a new or empty directory. A report is never written over an
+   earlier one, which may hold the only record of the transactions a run sent.
 
 | `--market` | Chain | Asset | Suggested `--amount` | Largest accepted |
 | --- | --- | --- | --- | --- |
