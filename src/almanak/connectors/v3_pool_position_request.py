@@ -4,6 +4,12 @@ The request names a chain, a pool and a token ID. The pool is resolved by its
 connector's own resolver, as `ax pool` resolves it, and the NFT is read from that
 pool's reviewed position manager. An NFT that does not exist or belongs to another
 pool is refused. Nothing is required of the owner: the report names it.
+
+An Aerodrome Slipstream NFT whose owner is the pool's gauge is staked there. Its
+liquidity earns the gauge's emissions and no trading fees, so the report says `staked`
+and its `owed` is only what the position manager recorded. The other connectors model
+no gauge, and their reports carry no `staked` field: a position another contract holds
+for its owner is reported as any other.
 """
 
 from typing import Annotated
@@ -47,9 +53,11 @@ def read_liquidity_position(reader, connector: str, request: PositionRequest, bl
         position.liquidity, observation.sqrt_price_x96, sqrt_at_tick(lower), sqrt_at_tick(upper)
     )
     recorded = position.owed0, position.owed1
-    accrued = accrued_fees(reader, selected, observation, block, position, (lower, upper))
+    staked = staked_in_gauge(observation, owner)
+    accrued = (0, 0) if staked else accrued_fees(reader, selected, observation, block, record)
     currencies = observation.currency0, observation.currency1
     return {
+        **({} if staked is None else {"staked": staked}),
         "product": "liquidity_position",
         "request": {**request.model_dump(mode="json"), "connector": connector},
         "support": level,
@@ -73,7 +81,8 @@ def read_liquidity_position(reader, connector: str, request: PositionRequest, bl
             side(asset, value) for asset, value in zip(currencies, principal, strict=True)
         ],
         # What a collection would pay at this block: `owed_recorded` plus the fees the
-        # position's liquidity earned since the position manager last updated it.
+        # position's liquidity earned since the position manager last updated it. A
+        # staked position earns none.
         "owed": [
             side(asset, old + new)
             for asset, old, new in zip(currencies, recorded, accrued, strict=True)
@@ -111,16 +120,23 @@ def verified_position(reader, connector, resolved, owner, record, request, block
     return import_module(f"{package}.reader").nft_position(reader, target, nft, block)
 
 
-def accrued_fees(reader, selected, observation, block, position, bounds) -> tuple[int, int]:
-    """Fees the position's liquidity earned since the manager last recorded its growth.
+def staked_in_gauge(observation, owner) -> bool | None:
+    """Whether the pool's gauge holds the NFT; None for a pool the connector models no gauge of."""
+    gauge = getattr(observation, "gauge", None)
+    return None if gauge is None else owner == gauge
 
-    The pool's fee growth inside the range, less the checkpoint the position holds,
-    times its liquidity: the amounts the position manager adds to what it owes when the
-    position is next updated. A position without liquidity earns nothing.
+
+def accrued_fees(reader, selected, observation, block, record) -> tuple[int, int]:
+    """Fees an unstaked position's liquidity earned since the manager last recorded its growth.
+
+    The pool's fee growth inside the range, less the checkpoint the manager's `record`
+    holds, times its liquidity: the amounts the position manager adds to what it owes
+    when the position is next updated. A position without liquidity earns nothing.
     """
     from almanak.connectors.v3_fee_growth import accrued, inside
 
-    if not position.liquidity:
+    liquidity, bounds = record[7], record[5:7]
+    if not liquidity:
         return 0, 0
     pool = observation.source
     total = tuple(
@@ -129,7 +145,21 @@ def accrued_fees(reader, selected, observation, block, position, bounds) -> tupl
     lower, upper = (selected.read_tick(reader, pool, block, tick) for tick in bounds)
     current = inside(observation.tick, bounds[0], bounds[1], total, lower[2:4], upper[2:4])
     earned = tuple(
-        accrued(position.liquidity, previous, now)
-        for previous, now in zip(position.fee_growth, current, strict=True)
+        accrued(liquidity, previous, now)
+        for previous, now in zip(record[8:10], current, strict=True)
     )
     return earned[0], earned[1]
+
+
+def collectable(reader, pool, record, block) -> tuple[int, int]:
+    """What a collection would pay the holder of an unstaked NFT at this block.
+
+    What the manager's `record` holds as owed, plus the fees accrued since. The caller
+    has established that the holder is not the pool's gauge.
+    """
+    from almanak.connectors.v3_pool_request import family
+
+    selected = family(pool.kind)
+    observation = selected.read_pool(reader, pool, block)
+    accrued = accrued_fees(reader, selected, observation, block, record)
+    return record[10] + accrued[0], record[11] + accrued[1]

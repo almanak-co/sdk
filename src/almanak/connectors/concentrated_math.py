@@ -72,6 +72,38 @@ def liquidity_for(amount0: int, amount1: int, price: int, lower: int, upper: int
     return min(limits)
 
 
+def tolerance_edges(price: int, tolerance_bps: int) -> tuple[int, int]:
+    """The sqrt prices at the two edges of a price window of `tolerance_bps` around `price`."""
+    if type(tolerance_bps) is not int or not 0 <= tolerance_bps < 10000:
+        raise ValueError("price tolerance requires integer basis points in [0, 10000)")
+    low = isqrt(price * price * (10000 - tolerance_bps) // 10000)
+    high = isqrt(price * price * (10000 + tolerance_bps) // 10000) + 1
+    return low, high
+
+
+def addition_maximums(
+    amount0: int, amount1: int, price: int, lower: int, upper: int, tolerance_bps: int
+) -> tuple[int, int]:
+    """The most of each currency an addition takes at any price within `tolerance_bps`.
+
+    A position manager takes the liquidity both offered amounts cover at the execution
+    price. The currency that is not the limiting one is taken in proportion, and that
+    proportion grows without bound as the price moves against it: token0 as the price
+    falls, token1 as it rises. So the most token0 is taken at the low edge of the
+    window and the most token1 at the high edge. Offering no more than these two
+    amounts changes nothing inside the window, and outside it the trimmed currency
+    becomes the limiting one, so the other falls below the floor `addition_minimums`
+    derives from the same pair: the addition is bounded in both price directions.
+    """
+    low, high = tolerance_edges(price, tolerance_bps)
+    at_low = liquidity_for(amount0, amount1, low, lower, upper)
+    at_high = liquidity_for(amount0, amount1, high, lower, upper)
+    return (
+        min(amount0, amounts(at_low, low, lower, upper, up=True)[0]),
+        min(amount1, amounts(at_high, high, lower, upper, up=True)[1]),
+    )
+
+
 def addition_minimums(
     amount0: int, amount1: int, price: int, lower: int, upper: int, tolerance_bps: int
 ) -> tuple[int, int, int]:
@@ -87,10 +119,7 @@ def addition_minimums(
     the amounts of a couple of liquidity units and a parts-per-billion share of the
     ratio rounding; every floor leaves that margin.
     """
-    if type(tolerance_bps) is not int or not 0 <= tolerance_bps < 10000:
-        raise ValueError("price tolerance requires integer basis points in [0, 10000)")
-    low = isqrt(price * price * (10000 - tolerance_bps) // 10000)
-    high = isqrt(price * price * (10000 + tolerance_bps) // 10000) + 1
+    low, high = tolerance_edges(price, tolerance_bps)
     low_liquidity = liquidity_for(amount0, amount1, low, lower, upper)
     high_liquidity = liquidity_for(amount0, amount1, high, lower, upper)
     liquidity = min(

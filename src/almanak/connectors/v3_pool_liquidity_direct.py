@@ -10,6 +10,15 @@ amount of currency0 and `adopt.counter` the stated amount of currency1, attribut
 when the wallet covers both. The gateway admits the mint only into the stated range and
 only up to that inventory.
 
+A mint or an increase offers the position manager no more of either currency than the
+range takes at a price within `--slippage-bps` of the observed one
+(`concentrated_math.addition_maximums`), and its minimum amounts are derived from that
+offer. Together they bound the price it can be mined at in both directions: beyond the
+tolerance one of the two amounts falls below its minimum and the step reverts. Offering
+the stated amounts whole would leave the price unbounded on the side of the currency
+stated in surplus. The stated amounts stay the deployment's inventory; what the offer
+leaves out is never approved.
+
 The other position commands name an NFT by its token ID. The command reads the NFT at
 its pinned block and refuses one the wallet does not own or one of another pool. The
 NFT's own range becomes the allocation's range and its identity `adopt.nft`. The
@@ -20,9 +29,11 @@ that one retained NFT.
 A position without liquidity can only be increased. The family's collection is
 reconciled against the pool's own fee update, which the position manager makes only for
 a position that holds liquidity, so collecting from or closing an emptied position is
-refused here before anything is signed.
+refused here before anything is signed. A collection is also refused when the command's
+own read finds nothing owed: the deployment's observations hold only what the position
+manager last recorded, not the fees earned since, so that check is the command's alone.
 
-A mint or an increase approves the position manager for exactly the stated amount of
+A mint or an increase approves the position manager for exactly the offered amount of
 each currency and uses at most that. What it does not use stays approved. Nothing here
 revokes it: `revoke-exchange` is its own command, which sets every allowance the wallet
 gave the pool's router and position manager in the two pool currencies to zero and does
@@ -63,13 +74,14 @@ def positions(reader, block, resolved, wallet: Wallet, request: ActionRequest) -
     from almanak.chains import evm_network
 
     require_stated(request)
+    # Before any read of the NFT: an addition that states nothing is refused outright.
+    amount0, amount1 = stated_amounts(request)
     pool = resolved.pool
     selected, nft = None, None
     if request.action == "open-liquidity":
         selected = stated_range(pool, request)
     elif request.action in NFT_ACTIONS:
         selected, nft = named_position(reader, block, resolved, wallet, request)
-    amount0, amount1 = stated_amounts(request)
     return {
         "allocations": [
             {
@@ -138,8 +150,21 @@ def named_position(reader, block, resolved, wallet: Wallet, request: ActionReque
             f"NFT {token} holds no liquidity; {request.action} is not served for an "
             "emptied position"
         )
+    if request.action == "collect-liquidity-fees":
+        require_owed(reader, block, resolved, record, token)
     nft = f"{resolved.pool.chain.chain_id}/erc721:{resolved.contracts.position_manager}/{token}"
     return {"lower": record[5], "upper": record[6]}, nft
+
+
+def require_owed(reader, block, resolved, record, token: int) -> None:
+    """Refuse a collection that would pay nothing, before a transaction is signed for it."""
+    from almanak.connectors.v3_pool_position_request import collectable
+
+    if not any(collectable(reader, resolved.pool, record, block)):
+        raise ValueError(
+            f"NFT {token} is owed nothing in either currency at block {block.number}; "
+            "there is nothing to collect"
+        )
 
 
 def named_record(reader, block, resolved, token: int):
@@ -166,9 +191,10 @@ def named_record(reader, block, resolved, token: int):
 def intent(config, observed, request: ActionRequest):
     """The command's one intent, built from the observation it is admitted with.
 
-    An addition offers the whole attributed inventory, which is the stated amounts. A
-    removal's minimum outputs are the principal at the observed price less the stated
-    slippage. Each deadline is the observed block time plus the allocation's seconds.
+    An addition offers of the attributed inventory, which is the stated amounts, no
+    more than the range takes within the stated price tolerance (`bounded`). A removal's
+    minimum outputs are the principal at the observed price less the stated slippage.
+    Each deadline is the observed block time plus the allocation's seconds.
     """
     from almanak.connectors.composition import connector_for
 
@@ -189,12 +215,41 @@ def require_named(allocation, seen, request: ActionRequest) -> None:
 
 def open_liquidity(actions, allocation, seen, request):
     require_liquidity(seen)
-    return actions.authoring.open_liquidity(allocation, seen)
+    return bounded(actions.authoring.open_liquidity(allocation, seen), allocation, seen)
 
 
 def increase_liquidity(actions, allocation, seen, request):
     require_liquidity(seen)
-    return actions.authoring.increase_liquidity(allocation, seen)
+    return bounded(actions.authoring.increase_liquidity(allocation, seen), allocation, seen)
+
+
+def bounded(addition, allocation, seen):
+    """The addition, offering no more than the range takes within the price tolerance.
+
+    The planner derives the step's minimum amounts from the offered maximums. With the
+    maximums trimmed to the most the range takes at either edge of the tolerance window
+    around the observed price, a price beyond the window makes the trimmed currency the
+    limiting one and the other falls below its minimum, so the step reverts in either
+    direction. Inside the window the step takes exactly what the untrimmed offer would.
+    """
+    from almanak.connectors.concentrated_math import addition_maximums
+    from almanak.connectors.v3_pool_planning import sqrt_bounds
+
+    lower, upper = sqrt_bounds(seen.target, position=seen.owned.position)
+    most = addition_maximums(
+        addition.maximum0.amount,
+        addition.maximum1.amount,
+        seen.pool.sqrt_price_x96,
+        lower,
+        upper,
+        allocation.slippage_bps,
+    )
+    return addition.model_copy(
+        update={
+            "maximum0": addition.maximum0.model_copy(update={"amount": most[0]}),
+            "maximum1": addition.maximum1.model_copy(update={"amount": most[1]}),
+        }
+    )
 
 
 def require_liquidity(seen) -> None:

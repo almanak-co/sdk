@@ -39,6 +39,13 @@ RANGED = {
     "close-liquidity": (("token_id",), ()),
     "revoke-exchange": ((), ()),
 }
+# The position-manager call of each, which is the step that carries the deadline.
+STEPS = {
+    "open-liquidity": "mint",
+    "increase-liquidity": "increase",
+    "decrease-liquidity": "decrease",
+    "close-liquidity": "close",
+}
 
 
 def arguments(name: str, action) -> None:
@@ -147,13 +154,16 @@ def bound_arguments(name: str, action) -> None:
     if name in ADDITIONS:
         bound = (
             "the step is not signed when the pool price moved more than this since the"
-            " observed block, and it reverts when it would take less of a currency than the"
-            " range takes at the edges of that move; a curve deposit reverts when it would"
-            " mint more than this far below the LP shares its amounts were worth at the"
-            " observed block, and an aerodrome deposit when it would take or mint that much"
-            " less than its amounts were worth there"
+            " observed block, and a mint or an increase in a tick range reverts when mined at"
+            " a price beyond that tolerance in either direction: it offers and requires what"
+            " the range takes at its edges; a curve deposit reverts when it would mint more"
+            " than this far below the LP shares its amounts were worth at the observed block,"
+            " and an aerodrome deposit when it would take or mint that much less than its"
+            " amounts were worth there"
         )
+        unbounded = "; an approval before it carries no deadline"
     else:
+        unbounded = ""
         bound = (
             "the step reverts when it would pay out any currency more than this far below"
             " the position's principal at the observed block"
@@ -161,13 +171,14 @@ def bound_arguments(name: str, action) -> None:
     action.add_argument(
         "--slippage-bps", type=slippage_bps, required=True, help=f"{bound}, 1 to 9999 basis points"
     )
+    step = STEPS[name]
     action.add_argument(
         "--deadline-seconds",
         type=seconds,
         default=DEFAULT_DEADLINE_SECONDS,
-        help="the step is not signed later than this after the observed block, and it"
-        " reverts when mined later than that; a curve call carries no deadline, so a signed"
-        " curve step stays valid until it is mined or its nonce is used"
+        help="no step is planned or signed later than this after the observed block, and"
+        f" the {step} reverts when mined later{unbounded}; a curve call carries no deadline,"
+        " so a signed curve step stays valid until it is mined or its nonce is used"
         f" (default: {DEFAULT_DEADLINE_SECONDS})",
     )
 
