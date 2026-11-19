@@ -81,7 +81,10 @@ def report(state, *, position_reporter=position_report):
         "schema_version": state.schema_version,
         "connector": state.config.connector,
         "deployment_id": state.deployment_id,
-        "strategy": {"filename": state.strategy.filename, "sha256": state.strategy.sha256},
+        # An operator deployment retains no strategy.
+        "strategy": {"filename": state.strategy.filename, "sha256": state.strategy.sha256}
+        if state.strategy is not None
+        else None,
         "mode": state.mode,
         **execution_evidence(state),
         **accounting_evidence(state),
