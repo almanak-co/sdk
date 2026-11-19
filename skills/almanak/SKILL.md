@@ -1,6 +1,6 @@
 ---
 name: almanak
-description: Manage DeFi positions for the user from plain requests with the Almanak SDK CLI. Use when the user asks to supply, deposit, lend, withdraw, check balances, check gas or see their DeFi positions, or to set up an Almanak agent wallet. Covers installing the SDK, creating the agent wallet, and the preview-then-execute workflow for each action.
+description: Manage DeFi positions for the user from plain requests with the Almanak SDK CLI, through a wallet you create and operate yourself. Use when the user asks to supply, deposit, lend, withdraw, check balances, check gas or see their DeFi positions, or to set up an Almanak agent wallet. Start with its setup steps before asking the user anything. Covers installing the SDK, creating the agent wallet, and the preview-then-execute workflow for each action.
 ---
 
 # Almanak
@@ -8,6 +8,16 @@ description: Manage DeFi positions for the user from plain requests with the Alm
 You manage the user's DeFi positions with the `almanak` command line. The user
 states what they want in plain words; you turn it into one command, show them the
 preview, and execute only after they agree. You never write strategy code for this.
+
+You work through your own wallet. You create it on this machine, the user sends
+it the funds they want managed, and every action is signed by it. Do not ask the
+user for a wallet address, a private key or a seed phrase, and do not ask whether
+they want a regular address or a Safe: the setup below settles all of that. The
+user's own wallets are theirs; you never manage them.
+
+The first time you read this skill in a conversation, run the steps under "On
+load" before you answer or ask anything else, also when the conversation is
+already under way or the user has asked for something this skill cannot do.
 
 Every command prints one JSON document on standard output. A refusal prints one
 JSON line with `error` on standard error, usually with a `message`, and exits with
@@ -26,7 +36,13 @@ unchanged.
 | Resolve an action that stopped with a transaction unresolved | `almanak ax recover` | Aave V4 | same |
 | Read balances, markets and positions | `almanak ax balance`, `ax lending-markets`, `ax lending-reserve`, `ax lending-position` | see `almanak ax --help` | see `almanak support` |
 
-Tell the user plainly when a request is outside this table. In particular:
+Tell the user plainly when a request is outside this table, and still finish the
+setup, so they see the wallet and what you can do with it. When the user names a
+chain or protocol you cannot act on, say which ones you can, and do not offer a
+strategy, a Safe or anything else as a way around it. You may read a balance or
+position at an address on another chain only when the user gives you that address
+unasked and has a provider key set up; a public endpoint covers Ethereum and
+Avalanche only. In particular:
 
 - Swaps, borrowing, repaying, liquidity provision and partial withdrawals are not
   available as direct actions.
@@ -62,7 +78,9 @@ Everything lives in `~/.almanak/agent/`, outside any project:
 ## On load
 
 Do these steps in order every time the skill loads, then report to the user in a
-few lines. Stop at the first step that needs the user.
+few lines: the wallet's address, which chains have gas, and the positions you
+know of. Stop only at a step that says to ask the user; none of them asks for an
+address.
 
 ### 1. Install
 
@@ -81,7 +99,8 @@ Every read and preview below takes `<transport>`. Decide it once:
 
 - **`~/.almanak/agent/.env` exists.** Use `--env-file ~/.almanak/agent/.env`.
 - **It does not.** Use `--public-rpc publicnode`. This is a free public endpoint
-  that needs no key, so the user can start straight away. If it fails, use
+  for Ethereum and Avalanche that needs no key, so the user can start straight
+  away. If it fails, use
   `--public-rpc drpc` instead and say so; never switch between them silently in
   the middle of an action. Tell the user once that a public endpoint's operator
   can see the wallet address being read.
@@ -288,6 +307,8 @@ is false, report `refused` and stop; do not try anything else to free the wallet
 ## Rules
 
 - Preview, then confirm, then execute. One confirmation covers one action.
+- The wallet is the one you created under `~/.almanak/agent/wallet`. Never ask the
+  user for an address or a key to manage, and never import one.
 - Never print, copy or move the keystore, its password or the provider key.
 - Never send funds anywhere. These commands cannot transfer out of the wallet, and
   you must not look for another way to do it.
