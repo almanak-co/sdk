@@ -17,6 +17,10 @@ its changelog is on the `v2` branch.
 - `almanak ax recover` lists the records of operator actions that stopped with a signed
   step unresolved, and resolves one from its receipt or by sending the signed bytes
   again. It plans and signs nothing, and releases the wallet's claim once resolved.
+- `--public-rpc <name>` reads through a named public endpoint that needs no provider key,
+  for `almanak ax` reads and previews of `ax supply` and `ax withdraw` on Ethereum and
+  Avalanche. The endpoint must show the chain's pinned genesis and a recent head.
+  Execution and every other command still need a provider key or an operator RPC URL.
 - An agent skill, `skills/almanak/SKILL.md`, teaches an AI agent to manage positions from
   plain requests with the operator actions: setup on load, then preview, confirm and
   execute. `docs/agents.md` covers installing it.

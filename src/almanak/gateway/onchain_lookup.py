@@ -169,7 +169,8 @@ class VendorLookups:
     lacks the credential.
     """
 
-    def __init__(self, env_file: Path):
+    def __init__(self, env_file: Path | None):
+        # None is a command with no credentials at all: lookups that need no key answer.
         self.env_file = env_file
         self.coingecko: OnchainLookups | None = None
         self.morpho: MorphoApi | None = None
@@ -183,6 +184,11 @@ class VendorLookups:
 
     def coingecko_api(self) -> OnchainLookups:
         with self.lock:
+            if self.env_file is None:
+                raise DataError(
+                    "unavailable",
+                    "lookup: this lookup uses a vendor key; give --env-file or the read gateway",
+                )
             if self.coingecko is None:
                 try:
                     self.coingecko = OnchainLookups(self.env_file)

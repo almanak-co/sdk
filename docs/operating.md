@@ -479,7 +479,8 @@ base fee passes about half of it. The command also uses a gas limit of at most
 | market selection | The same flags or `--config` file as `ax lending-reserve`. |
 | `--amount` | Base units of the reserve asset. `withdraw` takes none: it withdraws the whole supplied balance. |
 | `--wallet` | The directory `almanak wallet create` wrote, under any account name. The keystore is unlocked with the recorded `password_file` or by asking. |
-| `--env-file` | The provider key (`ALCHEMY_API_KEY`). |
+| `--env-file` | The provider key (`ALCHEMY_API_KEY`). Required with `--execute`. |
+| `--public-rpc` | A named public endpoint instead of `--env-file`, for a preview only. |
 | `--max-gas-price-wei`, `--max-transaction-fee` | Required ceilings; a step quoted above either is refused. |
 
 Operator actions support Aave V4 with an EOA wallet. Safe/Roles accounts are not
@@ -584,14 +585,28 @@ provider still runs at another block is refused as `provider_context`; an
 explicit number is pinned as given.
 
 Each observation reads through exactly one transport: `--env-file` resolves the
-provider credentials in the calling process, or `--gateway-url` with
+provider credentials in the calling process, `--public-rpc` names a public endpoint
+that needs no key, or `--gateway-url` with
 `--gateway-auth-file` reads through `service read-gateway`, a read-only
 observation gateway that keeps the credentials in its own process and serves
 only whitelisted JSON-RPC reads and the discovery lookups below over
 authenticated loopback. Sessions that must not receive a provider key use
-the gateway transport. Without either flag, `ax` reads through the gateway named
+the gateway transport. Without a flag, `ax` reads through the gateway named
 by `ALMANAK_AX_GATEWAY_URL` and `ALMANAK_AX_GATEWAY_AUTH_FILE`; a flag always wins, and
-with neither the command is refused. The
+with neither the command is refused. A public endpoint is never chosen for the
+caller.
+
+`--public-rpc <name>` reads through one named public endpoint; `--help` lists the
+names and the chains each serves. It is for `ax` reads and for previews of
+`ax supply` and `ax withdraw`. Before any read the endpoint must report the chain's
+number and its pinned genesis block and a head no older than 120 seconds; otherwise
+the command is refused with `chain_mismatch` or `stale`. One endpoint serves a
+command, and a failure fails the read: nothing falls back to another endpoint.
+Nobody answers for a public endpoint. It gives no promise of availability, archive
+state or wide log ranges, it rate limits without notice, and its operator sees the
+addresses a command reads. `--execute`, `ax recover`, strategy runs, forks, checks
+and backtests do not accept one and need a provider key or an operator RPC URL. A
+lookup that uses a vendor key is refused when it is made. The
 inline `pool-price` key names a pool on the reviewed deployment for the chain,
 hookless unless `--hooks` names a reviewed hook (whose dynamic-fee profiles take
 `--fee 8388608`). Use each command's `--help` for the complete argument list.

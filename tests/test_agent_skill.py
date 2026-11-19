@@ -11,6 +11,7 @@ from almanak.cli_arguments import build_parser, parse_validated
 SKILL = Path(__file__).parents[1] / "skills/almanak/SKILL.md"
 PLACEHOLDERS = {
     "<address>": "0x" + "11" * 20,
+    "<transport>": "--public-rpc publicnode",
     "<record>": "actions/kept",
     "<chain>": "eip155:43114",
     "<spoke>": "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
@@ -88,3 +89,16 @@ def test_every_refusal_the_skill_names_is_text_the_sdk_can_print():
     assert len(messages) >= 9
     for message in messages:
         assert any(message in literal for literal in literals), message
+
+
+def test_reads_and_previews_take_either_transport_and_recovery_takes_the_key():
+    """A first run needs no key: only the commands that send anything name the env file."""
+    for line in commands():
+        if "--help" in line or line.startswith("almanak wallet "):
+            continue
+        if line.startswith("almanak ax recover"):
+            assert "<transport>" not in line
+        else:
+            assert "<transport>" in line and "--env-file" not in line, line
+        keyed = line.replace("<transport>", "--env-file .env")
+        parse_validated(build_parser(), filled(keyed))

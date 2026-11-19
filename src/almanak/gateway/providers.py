@@ -27,6 +27,36 @@ ALCHEMY_NETWORKS = {
 }
 
 
+# Public endpoints that need no key, by the name a command selects them with. One named
+# endpoint serves a command; nothing falls back to another. They serve `almanak ax`
+# reads and action previews only: none promises availability, archive state or wide
+# log ranges, and each operator sees the addresses a command reads.
+PUBLIC_RPC: dict[str, dict[ChainId, str]] = {
+    "publicnode": {
+        ChainId("eip155:1"): "https://ethereum-rpc.publicnode.com",
+        ChainId("eip155:43114"): "https://avalanche-c-chain-rpc.publicnode.com",
+    },
+    "drpc": {
+        ChainId("eip155:1"): "https://eth.drpc.org",
+        ChainId("eip155:43114"): "https://avalanche.drpc.org",
+    },
+}
+
+
+class PublicProvider(Model):
+    kind: Literal["public_rpc"]
+    name: Annotated[str, Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")]
+
+
+def public_endpoint(name: str, chain: ChainId) -> str:
+    try:
+        return PUBLIC_RPC[name][chain]
+    except KeyError:
+        names = sorted(known for known, chains in PUBLIC_RPC.items() if chain in chains)
+        choice = f"choose from {', '.join(names)}" if names else "use a provider key instead"
+        raise ValueError(f"no public endpoint named {name} serves {chain}; {choice}") from None
+
+
 class AlchemyProvider(Model):
     kind: Literal["alchemy"]
     network: Annotated[str, Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")]
@@ -38,10 +68,16 @@ class UrlProvider(Model):
     url_env: EnvName
 
 
-Provider = Annotated[AlchemyProvider | UrlProvider, Field(discriminator="kind")]
+Provider = Annotated[AlchemyProvider | UrlProvider | PublicProvider, Field(discriminator="kind")]
 
 
 def provider_endpoint(provider: Provider, env_file: Path) -> str:
+    if isinstance(provider, PublicProvider):
+        # Everything that resolves an endpoint here executes, forks or collects history.
+        raise ValueError(
+            "a public endpoint serves only `almanak ax` reads and action previews; "
+            "this needs a provider key or an operator RPC URL"
+        )
     values = dotenv_values(env_file, interpolate=False)
     name = provider.api_key_env if isinstance(provider, AlchemyProvider) else provider.url_env
     value = values.get(name)

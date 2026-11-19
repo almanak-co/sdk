@@ -1,12 +1,18 @@
 """Chain-aware read transport resolution for protocol observation commands."""
 
+import time
 from pathlib import Path
 
 from dotenv import dotenv_values
 
 from almanak.caip import ChainId
-from almanak.gateway.ethereum import BUSY_WAIT_LIMIT, EthereumReader
-from almanak.gateway.providers import ALCHEMY_NETWORKS, AlchemyProvider, provider_endpoint
+from almanak.gateway.ethereum import BUSY_WAIT_LIMIT, DataError, EthereumReader
+from almanak.gateway.providers import (
+    ALCHEMY_NETWORKS,
+    AlchemyProvider,
+    provider_endpoint,
+    public_endpoint,
+)
 from almanak.models import Chain
 
 
@@ -53,3 +59,35 @@ def verified_reader(chain: ChainId, env_file: Path) -> EthereumReader:
         reader.__exit__()
         raise
     return reader
+
+
+# A public endpoint whose head is older than this is lagging or stalled.
+PUBLIC_HEAD_AGE_SECONDS = 120
+
+
+def public_reader(chain: ChainId, name: str) -> EthereumReader:
+    """The named public endpoint for the chain, verified before any read.
+
+    Nobody answers for a public endpoint, so it has to show more than its chain
+    number: the pinned genesis block, which a fork or another network sharing the
+    number does not have, and a recent head. The caller owns the reader's lifecycle.
+    """
+    reader = mainnet_reader(chain, public_endpoint(name, chain), observation=True)
+    try:
+        reader.verify_chain()
+        verify_public(reader)
+    except Exception:
+        reader.__exit__()
+        raise
+    return reader
+
+
+def verify_public(reader: EthereumReader, clock=time.time) -> None:
+    from almanak.chains import evm_network
+
+    with reader.retained_pin():
+        if reader.pin_block(0).hash != evm_network(reader.chain.chain_id).genesis:
+            raise DataError("chain_mismatch", "public endpoint has a different genesis")
+        age = clock() - reader.pin_block("latest").timestamp
+    if age > PUBLIC_HEAD_AGE_SECONDS:
+        raise DataError("stale", f"public endpoint head is {int(age)} seconds old")

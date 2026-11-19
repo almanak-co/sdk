@@ -89,12 +89,10 @@ class LocalGateway(GatewayClient):
 
 def command(args) -> int:
     from almanak.ax import lending_request
-    from almanak.gateway.providers import provider_endpoint
 
     request = lending_request(args)
     wallet = read_wallet(args.wallet)
-    provider = alchemy(request.chain)
-    endpoint = provider_endpoint(provider, args.env_file)
+    provider, endpoint = transport(args, request.chain)
     config = action_config(args, request, wallet, provider, endpoint)
     backend = production_backend(config, endpoint, wallet if args.execute else None)
     try:
@@ -104,6 +102,25 @@ def command(args) -> int:
     print(json.dumps(result, indent=2))
     # A preview succeeds by planning; an execution only by completing the action.
     return 0 if not args.execute or result["completed"] else 1
+
+
+def transport(args, chain):
+    """The provider an action names and its endpoint: a key, or a public endpoint.
+
+    A public endpoint serves the preview only. Nobody answers for what it reports, and
+    the plan a transaction is signed from comes from its reads.
+    """
+    from almanak.gateway.providers import PublicProvider, provider_endpoint, public_endpoint
+
+    if args.public_rpc is None:
+        provider = alchemy(chain)
+        return provider, provider_endpoint(provider, args.env_file)
+    if args.execute:
+        raise ValueError("--execute needs --env-file; a public endpoint serves previews only")
+    return (
+        PublicProvider(kind="public_rpc", name=args.public_rpc),
+        public_endpoint(args.public_rpc, chain),
+    )
 
 
 def read_wallet(directory: Path) -> dict:
@@ -679,6 +696,8 @@ def recover_arguments(commands) -> None:
 
 
 def arguments(commands, lending_source) -> None:
+    from almanak.cli_arguments import public_rpc_option
+
     recover_arguments(commands)
     for name, text in ACTIONS.items():
         action = commands.add_parser(name, help=text, description=text)
@@ -699,9 +718,9 @@ def arguments(commands, lending_source) -> None:
             required=True,
             help="directory written by `almanak wallet create`",
         )
-        action.add_argument(
-            "--env-file", type=Path, required=True, help="private provider credentials"
-        )
+        provider = action.add_mutually_exclusive_group(required=True)
+        provider.add_argument("--env-file", type=Path, help="private provider credentials")
+        public_rpc_option(provider)
         action.add_argument(
             "--max-gas-price-wei",
             type=base_units,

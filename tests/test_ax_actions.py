@@ -463,8 +463,7 @@ def test_exit_status_follows_completion_only_when_executing(
 ):
     monkeypatch.setattr("almanak.ax.lending_request", lambda args: SimpleNamespace(chain="c"))
     monkeypatch.setattr(ax_actions, "read_wallet", lambda directory: {})
-    monkeypatch.setattr(ax_actions, "alchemy", lambda chain: None)
-    monkeypatch.setattr("almanak.gateway.providers.provider_endpoint", lambda *a: "endpoint")
+    monkeypatch.setattr(ax_actions, "transport", lambda args, chain: (None, "endpoint"))
     monkeypatch.setattr(ax_actions, "action_config", lambda *a: "config")
     backend = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr(ax_actions, "production_backend", lambda *a: backend)

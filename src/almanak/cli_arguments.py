@@ -47,18 +47,33 @@ def operator_context(parser, *, required):
 
 
 def observation_transport(parser):
-    # Exactly one read transport: a local operator env file, or a read-only
-    # observation gateway that holds the provider credentials instead. Without
-    # either flag, parse_validated takes the gateway from the session environment.
+    # Exactly one read transport: a local operator env file, a named public endpoint
+    # that needs no key, or a read-only observation gateway that holds the provider
+    # credentials instead. Without a flag, parse_validated takes the gateway from the
+    # session environment; a public endpoint is never chosen for the caller.
     transport = parser.add_mutually_exclusive_group()
     transport.add_argument(
         "--env-file", type=Path, help="private provider credentials read by this process"
     )
+    public_rpc_option(transport)
     transport.add_argument(
         "--gateway-url", help="read-only observation gateway on loopback (service read-gateway)"
     )
     parser.add_argument(
         "--gateway-auth-file", type=Path, help="authentication token file for --gateway-url"
+    )
+
+
+def public_rpc_option(group) -> None:
+    from almanak.gateway.providers import PUBLIC_RPC
+
+    served = "; ".join(
+        f"{name}: {', '.join(map(str, chains))}" for name, chains in PUBLIC_RPC.items()
+    )
+    group.add_argument(
+        "--public-rpc",
+        choices=sorted(PUBLIC_RPC),
+        help=f"a public endpoint that needs no key, for reads and previews only ({served})",
     )
 
 
@@ -781,13 +796,16 @@ def session_transport(parser: argparse.ArgumentParser, args) -> None:
     The flags always win, so a command line stays explicit about its transport.
     """
     if any(
-        value is not None for value in (args.env_file, args.gateway_url, args.gateway_auth_file)
+        value is not None
+        for value in (args.env_file, args.public_rpc, args.gateway_url, args.gateway_auth_file)
     ):
+        if args.public_rpc is not None and args.gateway_auth_file is not None:
+            parser.error("--gateway-auth-file belongs to --gateway-url, not --public-rpc")
         return
     url, token = (os.environ.get(name) for name in GATEWAY_ENV)
     if not url or not token:
         parser.error(
-            "give --env-file, or --gateway-url with --gateway-auth-file "
+            "give --env-file, --public-rpc, or --gateway-url with --gateway-auth-file "
             "(or set ALMANAK_AX_GATEWAY_URL and ALMANAK_AX_GATEWAY_AUTH_FILE)"
         )
     args.gateway_url, args.gateway_auth_file = url, Path(token)
