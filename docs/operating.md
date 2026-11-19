@@ -606,21 +606,9 @@ by `ALMANAK_AX_GATEWAY_URL` and `ALMANAK_AX_GATEWAY_AUTH_FILE`; a flag always wi
 with neither the command is refused. A public endpoint is never chosen for the
 caller.
 
-`--public-rpc <name>` reads through one named public endpoint; `--help` lists the
-names and the chains each serves. It is for `ax` reads and for `ax supply` and
-`ax withdraw`, previewed or executed. Before any read the endpoint must report the chain's
-number and its pinned genesis block and a head no older than 120 seconds; otherwise
-the command is refused with `chain_mismatch` or `stale`. One endpoint serves a
-command, and a failure fails the read: nothing falls back to another endpoint.
-Nobody answers for a public endpoint. It gives no promise of availability, archive
-state or wide log ranges, it rate limits without notice, and its operator sees the
-addresses a command reads and the transactions it sends before they are mined. An
-action executed through one signs what that endpoint's reads resolve, including
-the market's contract, so an endpoint that reports falsely can direct an approval
-or a supply elsewhere, up to the amount of the action. Naming a public endpoint
-accepts that. `ax recover` uses the endpoint its record's action ran on. Strategy
-runs, forks, checks and backtests do not accept a public endpoint and need a
-provider key or an operator RPC URL. A lookup that uses a vendor key is refused when it is made. The
+`--public-rpc <name>` reads through one named public endpoint;
+[Public endpoints](#public-endpoints) lists the names, the chains each serves and
+what they do not serve. The
 inline `pool-price` key names a pool on the reviewed deployment for the chain,
 hookless unless `--hooks` names a reviewed hook (whose dynamic-fee profiles take
 `--fee 8388608`). Use each command's `--help` for the complete argument list.
@@ -780,6 +768,68 @@ and a first deposit would set its price. `ax dex-pools` reports such a pool as
 it is unfunded, and `check --online` for fork or production refuses it in its
 `pool_liquidity` stage with code `unfunded_pool`, read through the operator's
 provider at the latest block.
+
+#### Public endpoints
+
+`--public-rpc <name>` reads through one named public endpoint that needs no key.
+It is for `ax` reads and for `ax supply` and `ax withdraw`, previewed or executed.
+The reviewed list is in code, and each command's `--help` prints it:
+
+| Name | Operator | Chains |
+| --- | --- | --- |
+| `publicnode` | Allnodes PublicNode | `eip155:1`, `eip155:43114` |
+| `drpc` | dRPC | `eip155:1`, `eip155:8453`, `eip155:10`, `eip155:137`, `eip155:4663` |
+| `base` | Base, the chain's own endpoint | `eip155:8453` |
+| `arbitrum` | Arbitrum, the chain's own endpoint | `eip155:42161` |
+| `bnbchain` | BNB Chain, the chain's own endpoint | `eip155:56` |
+| `optimism` | Optimism, the chain's own endpoint | `eip155:10` |
+
+Ethereum, Base and Optimism have two endpoints. Avalanche (`eip155:43114`),
+Arbitrum (`eip155:42161`), BNB (`eip155:56`), Polygon (`eip155:137`) and Robinhood
+(`eip155:4663`) have one, so there is no second endpoint to name when it fails.
+HyperEVM (`eip155:999`) has none and needs a provider key. A name that does not
+serve the command's chain is refused with the names that do.
+
+Before any read the endpoint must report the chain's number and its pinned genesis
+block and a head no older than 120 seconds; otherwise the command is refused with
+`chain_mismatch` or `stale`. One endpoint serves a command, and a failure fails the
+read: nothing falls back to another endpoint. Nobody answers for a public endpoint.
+It gives no promise of availability, archive state or wide log ranges, it rate
+limits without notice, and its operator sees the addresses a command reads and the
+transactions it sends before they are mined. An action executed through one signs
+what that endpoint's reads resolve, including the market's contract, so an endpoint
+that reports falsely can direct an approval or a supply elsewhere, up to the amount
+of the action. Naming a public endpoint accepts that. `ax recover` uses the
+endpoint its record's action ran on. Strategy runs, forks, checks and backtests do
+not accept a public endpoint and need a provider key or an operator RPC URL.
+
+A pair is listed only when the endpoint passes the
+[qualification](qa.md#public-endpoint-qualification) of everything a read and a
+direct action ask of it. A shared provider is absent from a chain where its
+keyless tier refuses one of those reads.
+
+A read of something named by its address works on every listed pair:
+`ax balance`, `ax pool`, `ax lending-reserve` and `ax lending-position`. A listing
+or a lookup works only where its source needs neither a wide log range nor a
+vendor key:
+
+| Command | Through a public endpoint |
+| --- | --- |
+| `ax lending-markets` for `aave_v3`, `sparklend` and `aave_v4` | Works: the record is read with calls at the pinned block. On Avalanche the public endpoint answers a reverting `getReserveCount()` with JSON-RPC -32000 instead of 3, so an Aave V4 listing there names the Spokes without reserves in `source.unreadable` and lists the others. |
+| `ax lending-markets --connector morpho_blue` | Works where Morpho's API names the markets. On Avalanche and BNB it reads the core's event history and is refused. |
+| `ax lending-markets --connector compound_v3` | Refused on every chain: it reads the Configurator's event history. |
+| `ax resolve`, `ax dex-pools` | Refused with `this lookup uses a vendor key; give --env-file or the read gateway`. |
+
+An event history is asked for from block zero in one request, and every listed
+endpoint refuses that range: with `eth_getLogs: the provider refused <contract>'s
+event history in one request`, or with `eth_getLogs: HTTP 429` or
+`eth_getLogs: RPC rejected the requested read (JSON-RPC -32005)` where the endpoint
+answers with its rate-limit code and the retries run out. A refused listing or
+lookup does not stop a direct read. Name the market or the token yourself: the
+Comet address or the Morpho market ID for `ax lending-reserve`, the pool address
+for `ax pool`, the token's CAIP-19 asset for `ax balance`. A provider key serves an
+event-history listing where the provider serves the range, and the lookups by name
+need `COINGECKO_API_KEY` as [Discovery](#discovery) describes.
 
 #### Discovery
 

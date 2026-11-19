@@ -15,11 +15,31 @@ its changelog is on the `v2` branch.
   action before any read, and the gateway admits and plans an operator request only
   for a declared action.
 - `ax supply` and `ax withdraw` take an optional `--max-gas-limit`.
+- `--public-rpc` serves `almanak ax` reads on Base, Arbitrum, BNB, Optimism, Polygon and
+  Robinhood beside Ethereum and Avalanche. `drpc` adds Base, Optimism, Polygon and
+  Robinhood, and four chain operators' own endpoints are named `base`, `arbitrum`,
+  `bnbchain` and `optimism`. Arbitrum, BNB, Polygon and Robinhood have one endpoint
+  each, and HyperEVM has none. Direct actions stay Aave V4 on Ethereum and Avalanche.
+  Compound V3 listings, Morpho Blue listings on Avalanche and BNB, and the lookups by
+  name are refused through a public endpoint; `docs/operating.md` says what works.
+- `scripts/qualify_public_rpc.py` checks a public endpoint, live, against the reads an
+  observation and a direct action make of it: the pinned genesis, pinned state at
+  `finalized`, `latest` and a numbered block, the fee quote and the receipt reads. A
+  (name, chain) pair is listed only when it passes every check.
 
 ### Changed
 - A direct action bids as an author's gas policy defaults on its chain: the observed
   block's base fee on Avalanche, 1.25 times the base fee on Arbitrum and Robinhood
   Chain, and a gas limit of at most 1,200,000 unless `--max-gas-limit` states another.
+
+### Removed
+- `--public-rpc drpc` no longer serves Avalanche. Its keyless tier refused the gas
+  estimate a direct action makes at a pinned block hash, so the pair fails
+  qualification. Avalanche keeps `publicnode` as its one public endpoint.
+
+### Fixed
+- The `--public-rpc` help no longer says the endpoint is for reads and previews only:
+  direct actions execute through it.
 
 ## [3.2.1] - 2026-11-19
 

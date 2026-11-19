@@ -4,6 +4,7 @@ Offline: no test here opens a connection. The endpoints themselves are exercised
 running the commands against them, which is not part of this suite.
 """
 
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,6 +66,47 @@ def test_every_listed_endpoint_is_https_on_a_chain_with_a_pinned_genesis():
 
 def test_no_public_endpoint_is_listed_for_hyperevm():
     assert all(ChainId("eip155:999") not in chains for chains in providers.PUBLIC_RPC.values())
+
+
+def test_every_other_chain_with_a_provider_route_has_a_public_endpoint():
+    served = {chain for chains in providers.PUBLIC_RPC.values() for chain in chains}
+    assert served == set(providers.ALCHEMY_NETWORKS) - {ChainId("eip155:999")}
+
+
+def test_each_name_is_one_operator_and_no_endpoint_is_listed_twice():
+    hosts = [
+        url.split("/")[2] for chains in providers.PUBLIC_RPC.values() for url in chains.values()
+    ]
+    assert len(set(hosts)) == len(hosts)
+    for chains in providers.PUBLIC_RPC.values():
+        # The registered domain, such as publicnode.com, is the same on every chain.
+        assert len({".".join(url.split("/")[2].split(".")[-2:]) for url in chains.values()}) == 1
+
+
+def test_the_option_help_names_each_endpoint_and_both_uses(capsys):
+    for command in (["ax", "balance"], ["ax", "supply"]):
+        with pytest.raises(SystemExit):
+            parse(*command, "--help")
+        text = " ".join(capsys.readouterr().out.split())
+        assert "a public endpoint that needs no key, for reads and direct actions" in text
+        for name in providers.PUBLIC_RPC:
+            assert f"{name}: eip155:" in text
+
+
+def test_the_operating_guide_lists_the_endpoints_the_code_lists():
+    guide = (Path(__file__).parents[1] / "docs/operating.md").read_text()
+    section = guide.split("#### Public endpoints")[1].split("\n#### ")[0]
+    rows = re.findall(r"^\| `([a-z0-9-]+)` \| [^|]+ \| (.+) \|$", section, flags=re.MULTILINE)
+    documented = {name: re.findall(r"`(eip155:\d+)`", chains) for name, chains in rows}
+    assert documented == {
+        name: [str(chain) for chain in chains] for name, chains in providers.PUBLIC_RPC.items()
+    }
+    # The chains with one endpoint are named as such, and HyperEVM as having none.
+    serving = [chain for chains in providers.PUBLIC_RPC.values() for chain in chains]
+    single = {str(chain) for chain in serving if serving.count(chain) == 1}
+    stated = section.split("have two endpoints.")[1].split("have one")[0]
+    assert set(re.findall(r"`(eip155:\d+)`", stated)) == single
+    assert "HyperEVM (`eip155:999`) has none" in section
 
 
 def test_a_name_resolves_only_on_a_chain_it_serves(monkeypatch):

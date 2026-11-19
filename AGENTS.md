@@ -233,9 +233,15 @@ independently.
 - Accepted: a named public endpoint (`--public-rpc`) serves `almanak ax` reads
   and direct actions, previewed, executed or recovered, without a provider key.
   The caller names it; it is never a default and never a fallback. The reviewed
-  list is in code, covers Ethereum and Avalanche, and excludes HyperEVM. Each
-  reader verifies the chain number, the pinned genesis block and a recent head.
-  Strategy runs, forks, checks and backtests refuse it.
+  list is in code and covers every supported chain except HyperEVM, which has
+  no public endpoint. Each reader verifies the chain number, the pinned genesis
+  block and a recent head. Strategy runs, forks, checks and backtests refuse it.
+- Accepted: a (name, chain) pair is listed only after
+  `scripts/qualify_public_rpc.py` passes every check on that endpoint, live. A
+  shared provider is left out of a chain where its keyless tier fails one, and
+  a chain operator's own endpoint may be listed under the operator's name.
+  HyperEVM stays without a public endpoint. Never relax the genesis or head
+  proof to admit an endpoint.
 - Accepted risk: a direct action executed through a public endpoint signs what
   that one endpoint's reads resolve, including the market's contract, and the
   endpoint's operator sees each transaction before it is mined. A false report

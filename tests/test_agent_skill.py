@@ -132,4 +132,23 @@ def test_setup_runs_first_whatever_the_user_asked():
     # Stated before the support table, so it is read before any reason to skip it.
     assert opening < text.index("## What is supported") < on_load
     assert "still finish the setup" in text
-    assert "a public endpoint covers Ethereum and Avalanche only" in text
+
+
+def test_the_skill_names_the_public_endpoints_of_each_chain():
+    """The table of reads on other chains is the reviewed list, chain by chain."""
+    from almanak.gateway.providers import ALCHEMY_NETWORKS, PUBLIC_RPC
+
+    text = SKILL.read_text()
+    assert "A public endpoint serves reads on every supported chain except HyperEVM" in text
+    section = text.split("## Reads on other chains")[1].split("\n## ")[0]
+    rows = re.findall(r"^\| [A-Za-z]+ \(`(eip155:\d+)`\) \| (.+) \|$", section, flags=re.MULTILINE)
+    named = {chain: set(re.findall(r"`([a-z0-9-]+)`", names)) for chain, names in rows}
+    listed = {
+        str(chain): {name for name, chains in PUBLIC_RPC.items() if chain in chains}
+        for chain in ALCHEMY_NETWORKS
+    }
+    assert named == listed
+    assert named["eip155:999"] == set()
+    # The setup transport is one of the names that serve both chains with actions.
+    for chain in ("eip155:1", "eip155:43114"):
+        assert PLACEHOLDERS["<transport>"].split()[1] in named[chain]

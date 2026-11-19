@@ -33,6 +33,12 @@ ALCHEMY_NETWORKS = {
 # log ranges, and each operator sees the addresses a command reads and the
 # transactions it sends. Nobody answers for what one reports, and a direct action
 # signs what its reads resolve: that risk is the caller's when they name one.
+#
+# A pair is listed only after `scripts/qualify_public_rpc.py` passed every check on it:
+# the pinned genesis, state at `finalized`, `latest` and a numbered block, and the fee
+# quote and receipt reads of a direct action. A shared provider is therefore absent from
+# a chain where its keyless tier refuses one of those reads, and a chain operator's own
+# endpoint is listed under the operator's name. HyperEVM has no entry.
 PUBLIC_RPC: dict[str, dict[ChainId, str]] = {
     "publicnode": {
         ChainId("eip155:1"): "https://ethereum-rpc.publicnode.com",
@@ -40,8 +46,15 @@ PUBLIC_RPC: dict[str, dict[ChainId, str]] = {
     },
     "drpc": {
         ChainId("eip155:1"): "https://eth.drpc.org",
-        ChainId("eip155:43114"): "https://avalanche.drpc.org",
+        ChainId("eip155:8453"): "https://base.drpc.org",
+        ChainId("eip155:10"): "https://optimism.drpc.org",
+        ChainId("eip155:137"): "https://polygon.drpc.org",
+        ChainId("eip155:4663"): "https://robinhood.drpc.org",
     },
+    "base": {ChainId("eip155:8453"): "https://mainnet.base.org"},
+    "arbitrum": {ChainId("eip155:42161"): "https://arb1.arbitrum.io/rpc"},
+    "bnbchain": {ChainId("eip155:56"): "https://bsc-dataseed.bnbchain.org"},
+    "optimism": {ChainId("eip155:10"): "https://mainnet.optimism.io"},
 }
 
 
