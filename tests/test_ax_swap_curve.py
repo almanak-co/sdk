@@ -23,7 +23,8 @@ from almanak.cli_arguments import build_parser, parse_validated
 from almanak.connectors import direct
 from almanak.connectors.composition import connector_from_wire
 from almanak.connectors.curve import direct as curve_direct
-from almanak.connectors.curve.observations import Snapshot
+from almanak.connectors.curve import receipts, reconciliation
+from almanak.connectors.curve.observations import Snapshot, held_shares
 from almanak.connectors.curve.positions import Position, Quote
 from almanak.connectors.curve.state import Checkpoint
 from almanak.connectors.curve.tricrypto_observation import TriCryptoObservation
@@ -187,14 +188,18 @@ def amounts(target, held):
     )
 
 
-def observation(market, config, owned, *, wallet=5000, allowance=0, **fields):
-    """An on-chain observation of the deployment's one position at the retained block."""
+def observation(market, config, owned, *, wallet=5000, allowance=0, held=None, spent=0, **fields):
+    """An on-chain observation of the deployment's one position at the retained block.
+
+    `held` states every wallet balance instead of the sold coin's alone, and `spent` is
+    the gas the payer has paid, in base units of the native asset.
+    """
     target = config.target(ALLOCATION)
     return Snapshot(
         target=target,
         pool=market.observed,
         owned=owned,
-        wallets=amounts(target, {market.sold: wallet}),
+        wallets=amounts(target, {market.sold: wallet} if held is None else held),
         allowances=tuple(
             {
                 "asset": coin,
@@ -204,11 +209,16 @@ def observation(market, config, owned, *, wallet=5000, allowance=0, **fields):
             for coin in target.assets
         ),
         native_balance=AssetAmount(
-            asset=evm_network(market.pool.chain.chain_id).native_asset, amount=10**18
+            asset=evm_network(market.pool.chain.chain_id).native_asset, amount=10**18 - spent
         ),
         payer=target.fund,
         **{"position": None, **fields},
     )
+
+
+def dust(market, amount=5):
+    """LP shares of the pool, as an observation records them beside a trading-only target."""
+    return AssetAmount(asset=market.pool.shares_asset, amount=amount)
 
 
 def quote(market, owned, amount=AMOUNT, output=QUOTED, *, bought=None):
@@ -343,7 +353,7 @@ def test_both_coins_are_named_distinct_and_of_the_pool_and_the_request_complete(
 def test_a_wallet_that_holds_the_pools_lp_token_is_refused_before_a_deployment_exists(market):
     reader = Shares(held=5)
     resolved = SimpleNamespace(pool=market.pool)
-    with pytest.raises(DataError, match="the wallet holds 5 base units") as refusal:
+    with pytest.raises(DataError, match="the fund wallet holds 5 base units") as refusal:
         curve_direct.positions(reader, market.block, resolved, WALLET, request(market))
     assert refusal.value.kind == "ownership"
     assert str(market.pool.shares_asset) in str(refusal.value)
@@ -356,13 +366,45 @@ def test_a_wallet_that_holds_the_pools_lp_token_is_refused_before_a_deployment_e
     assert unread.asked == []
 
 
-def test_the_connector_observes_no_lp_shares_beside_a_trading_allocation(market):
-    """Why the wallet is refused: such an observation cannot be built at all."""
+def test_lp_shares_beside_a_trading_allocation_are_observed_as_unowned_never_as_a_position(
+    market,
+):
     config = operator_config(market)
+    target = config.target(ALLOCATION)
     owned = created(config).owned[0]
-    shares = Position(shares=AssetAmount(asset=market.pool.shares_asset, amount=5))
+    # The fund's LP balance is read the same way; what it means follows the target.
+    assert held_shares(Shares(0), target, market.block) == {"position": None}
+    assert held_shares(Shares(5), target, market.block) == {
+        "position": None,
+        "unowned_shares": dust(market),
+    }
+    providing = target.model_copy(update={"liquidity_enabled": True})
+    assert held_shares(Shares(5), providing, market.block) == {
+        "position": Position(shares=dust(market))
+    }
+
+    seen = observation(market, config, owned, unowned_shares=dust(market))
+    assert (seen.position, seen.unowned_shares) == (None, dust(market))
+    # Absent, the snapshot keeps the shape it always had.
+    assert "unowned_shares" in seen.model_dump() and "unowned_shares" not in (
+        observation(market, config, owned).model_dump()
+    )
+    assert Snapshot.model_validate_json(seen.model_dump_json()) == seen
     with pytest.raises(ValueError, match="liquidity authority"):
-        observation(market, config, owned, position=shares)
+        observation(market, config, owned, position=Position(shares=dust(market)))
+    for wrong in (dust(market, 0), AssetAmount(asset=market.sold, amount=5)):
+        with pytest.raises(ValueError, match="unowned Curve LP shares"):
+            observation(market, config, owned, unowned_shares=wrong)
+    document = positions(market)
+    document["allocations"][0]["liquidity_enabled"] = True
+    providing_config = configuration(market, document)
+    with pytest.raises(ValueError, match="beside a trading-only target"):
+        observation(
+            market,
+            providing_config,
+            created(providing_config).owned[0],
+            unowned_shares=dust(market),
+        )
 
 
 @pytest.mark.parametrize("family", tuple(RESOLVED_POOLS))
@@ -424,17 +466,18 @@ def test_adoption_keeps_the_stated_inventory_only_when_the_wallet_covers_it(mark
 
 
 def test_adoption_never_takes_lp_shares_into_an_operator_deployment(market):
-    """An allocation with liquidity authority can observe shares; an operator adopts none."""
-    document = positions(market)
-    document["allocations"][0]["liquidity_enabled"] = True
-    config = configuration(market, document)
+    """LP tokens that arrive between resolution and the first observation refuse the start."""
+    config = operator_config(market)
     found = connector_from_wire({"connector": "curve"})
     owned = created(config).owned
-    shares = Position(shares=AssetAmount(asset=market.pool.shares_asset, amount=5))
-    holding = observation(market, config, owned[0], position=shares)
-    with pytest.raises(DataError, match="a direct action adopts no LP shares") as refusal:
+    holding = observation(market, config, owned[0], unowned_shares=dust(market))
+    with pytest.raises(DataError, match="the fund wallet holds 5 base units") as refusal:
         found.lifecycle.adopt(owned, (holding,))
-    assert refusal.value.kind == "ownership" and "holds 5 base units" in str(refusal.value)
+    assert refusal.value.kind == "ownership"
+    assert str(market.pool.shares_asset) in str(refusal.value)
+    # A strategy deployment is refused its start the same way.
+    with pytest.raises(DataError, match="the fund wallet holds 5 base units"):
+        found.lifecycle.validate_initial(SimpleNamespace(owned=owned), (holding,))
 
 
 def test_the_intent_follows_the_quote_of_the_observation_it_is_admitted_with(market):
@@ -574,6 +617,78 @@ def test_the_stated_seconds_bound_signing_and_nothing_after_it(market):
     # its age and never reports one as past a protocol deadline.
     assert not hasattr(found.execution, "expired")
     assert EvmGateway.enforces_deadline(SimpleNamespace(connector=found), swap) is False
+
+
+def test_unowned_lp_shares_refuse_everything_before_a_signature_and_nothing_after_it(market):
+    config, state, seen = admitted(market)
+    intent = curve_direct.intent(config, (seen,), request(market))
+    deciding, step = planning(config, state, intent, seen)
+    owned = state.owned[0]
+    found = connector_from_wire({"connector": "curve"})
+    approved = observation(market, config, owned, allowance=AMOUNT)
+    dusted = observation(market, config, owned, allowance=AMOUNT, unowned_shares=dust(market, 1))
+    swap = step(approved)
+
+    # Admission of a request, planning and signing all refuse the same way.
+    idle = SimpleNamespace(owned=state.owned)
+    unsigned = SimpleNamespace(operation=swap, before=approved, decision=deciding.decision)
+    backend = SimpleNamespace(config=config)
+    for refused in (
+        lambda: found.lifecycle.validate_owned(idle, (dusted,)),
+        lambda: step(dusted),
+        lambda: validate_current(backend, unsigned, dusted),
+    ):
+        with pytest.raises(DataError, match="the fund wallet holds 1 base units") as refusal:
+            refused()
+        assert refusal.value.kind == "ownership"
+
+    # Signed bytes cannot be recalled, so the shares do not hold them back.
+    validate_current(backend, SimpleNamespace(**vars(unsigned), raw_transaction="0x01"), dusted)
+    # What the signed swap must still meet is unchanged: the allowance it spends.
+    revoked = observation(market, config, owned, unowned_shares=dust(market, 1))
+    with pytest.raises(DataError, match="spending authority changed"):
+        validate_current(
+            backend, SimpleNamespace(**vars(unsigned), raw_transaction="0x01"), revoked
+        )
+
+
+def test_lp_shares_at_the_mined_block_are_an_accounting_issue_on_a_reconciled_swap(market):
+    config, state, seen = admitted(market)
+    intent = curve_direct.intent(config, (seen,), request(market))
+    _, step = planning(config, state, intent, seen)
+    target, gas = config.target(ALLOCATION), 21000
+    approved = observation(market, config, state.owned[0], allowance=AMOUNT)
+    swap = step(approved)
+    moved = [0] * len(target.assets)
+    moved[market.sell], moved[market.buy] = -AMOUNT, QUOTED
+    effects = receipts.effects(target, moved)
+    owned = reconciliation.owned_after(approved, swap, effects, True)
+    assert owned.position is None and owned.amount(market.bought) == QUOTED
+
+    def mined(**fields):
+        held = {market.sold: 5000 - AMOUNT, market.bought: QUOTED}
+        return observation(market, config, owned, held=held, spent=gas, **fields)
+
+    pending = SimpleNamespace(before=approved, operation=swap)
+    assert reconciliation.validate_balances(pending, mined(), effects, gas, True) == ()
+    (issue,) = reconciliation.validate_balances(
+        pending, mined(unowned_shares=dust(market, 1)), effects, gas, True
+    )
+    assert issue == (
+        f"{market.pool.shares_asset}: wallet holds 1 base units of the pool's LP token "
+        "that this allocation does not own"
+    )
+    # The swap's own effects are checked as before: a wrong balance is still reported.
+    short = observation(
+        market,
+        config,
+        owned,
+        held={market.sold: 5000 - AMOUNT, market.bought: QUOTED - 1},
+        spent=gas,
+        unowned_shares=dust(market, 1),
+    )
+    issues = reconciliation.validate_balances(pending, short, effects, gas, True)
+    assert len(issues) == 2 and "unexplained external movements" in issues[0]
 
 
 def test_the_position_is_the_attributed_inventory_and_the_allowances_last_observed(market):

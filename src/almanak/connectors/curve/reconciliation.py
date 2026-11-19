@@ -74,7 +74,23 @@ def validate_balances(pending, after, effects, gas, success):
         raise DataError("receipt", "Curve settlement is missing native payer balances")
     if before.payer != after.payer or before.native_balance.asset != after.native_balance.asset:
         raise DataError("receipt", "native gas payer scope changed across Curve execution")
-    return wallet_movement_issues(before, after, effects, gas)
+    return (*wallet_movement_issues(before, after, effects, gas), *unowned_share_issues(after))
+
+
+def unowned_share_issues(after):
+    """LP shares the fund holds beside a trading-only target, which no step of it minted.
+
+    The step is reconciled from its own receipt all the same: the shares are another
+    account's transfer, and refusing the outcome over them would leave a mined step
+    unresolved for as long as the receipt block is read.
+    """
+    held = after.unowned_shares
+    if held is None:
+        return ()
+    return (
+        f"{held.asset}: wallet holds {held.amount} base units of the pool's LP token "
+        "that this allocation does not own",
+    )
 
 
 def wallet_movement_issues(before, after, effects, gas):

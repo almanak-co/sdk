@@ -33,6 +33,11 @@ class Snapshot(Model):
     # Why no entry quote is offered although an entry slice remains, when the market
     # cannot fill it at this block; absent otherwise so other snapshots keep their shape.
     entry_quote_error: str | None = Field(default=None, exclude_if=lambda v: v is None)
+    # LP shares of the pool that the fund holds beside a target without liquidity
+    # authority. They are outside the allocation and never owned; absent unless held,
+    # so other snapshots keep their shape. They refuse work that is not yet signed
+    # (`ownership.refuse_unowned_shares`) and are an accounting issue on an outcome.
+    unowned_shares: AssetAmount | None = Field(default=None, exclude_if=lambda v: v is None)
     quotes_included: bool = True
     simulated: bool = False
 
@@ -70,11 +75,21 @@ class Snapshot(Model):
             raise ValueError("Curve submitter must retain the observed execution chain")
         if self.position is not None:
             self.position.validate_target(self.target)
+        self.validate_unowned()
         expected = tuple((asset, self.target.pool.pool) for asset in self.target.assets)
         if tuple((value.asset, value.spender) for value in self.allowances) != expected:
             raise ValueError("Curve allowances must retain ordered pool coins and their spender")
         self.validate_quotes()
         return self
+
+    def validate_unowned(self):
+        held = self.unowned_shares
+        if held is None:
+            return
+        if self.target.liquidity_enabled or held.asset != self.target.pool.shares_asset:
+            raise ValueError("unowned Curve LP shares belong beside a trading-only target")
+        if not 0 < held.amount < 2**256:
+            raise ValueError("unowned Curve LP shares are recorded only when held")
 
     def validate_quotes(self):
         offered = (
@@ -139,13 +154,16 @@ def token_balance(reader, asset, owner, block):
     )[0]
 
 
-def position(reader, target, block):
+def held_shares(reader, target, block):
+    """The fund's balance of the pool's LP token: the position of a target with liquidity
+    authority, and unowned shares beside one without. Each is absent at zero."""
     value = reads.fund_shares(reader, target.pool, target.fund, block)
-    return (
-        None
-        if value == 0
-        else Position(shares=AssetAmount(asset=target.pool.shares_asset, amount=value))
-    )
+    if value == 0:
+        return {"position": None}
+    shares = AssetAmount(asset=target.pool.shares_asset, amount=value)
+    if target.liquidity_enabled:
+        return {"position": Position(shares=shares)}
+    return {"position": None, "unowned_shares": shares}
 
 
 def allowances(reader, target, block):
@@ -272,8 +290,8 @@ def snapshot(backend, name, block, reference=None, *, quotes=True, residual=Fals
         allowances=allowances(reader, target, block),
         native_balance=AssetAmount(asset=config.allocation(name).native_asset, amount=native),
         payer=profile.submitter,
-        position=position(reader, target, block),
         quotes_included=quotes,
+        **held_shares(reader, target, block),
         **snapshot_quotes(
             config,
             owned,

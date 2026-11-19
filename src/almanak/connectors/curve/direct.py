@@ -8,9 +8,12 @@ exactly the stated amount, into the coin bought, and admits the swap only along 
 quote. The inventory attributed to the deployment is that amount and no more of the
 wallet, so nothing in the deployment can sell more than the operator stated.
 
-The allocation has no liquidity authority and owns no LP shares. The connector refuses
-to observe LP shares for such an allocation, so a wallet that holds the pool's LP token
-is refused here, before a deployment exists. The shares themselves are never moved.
+The allocation has no liquidity authority and owns no LP shares. A wallet that holds
+the pool's LP token is refused while nothing is signed: here, before a deployment
+exists, and at every later observation up to the signature. LP tokens that reach the
+wallet after a signature stop nothing, since anyone can send them: the signed step is
+still sent and reconciled from its own receipt, and its outcome lists the shares as an
+accounting issue. The shares themselves are never moved.
 
 The steps are the approval of exactly the stated amount to the pool itself, then the
 pool's `exchange`, which spends that approval whole: a completed swap leaves the pool
@@ -90,20 +93,14 @@ def require_pair(request: ActionRequest, coins: tuple[str, ...]) -> None:
 def require_no_shares(reader, block, pool, wallet: Wallet) -> None:
     """Refuse a wallet that holds the pool's LP token, at the block the pool resolved at."""
     from almanak.caip import AccountReference
+    from almanak.connectors.curve.ownership import unowned_shares
     from almanak.connectors.curve.reader import fund_shares
-    from almanak.gateway.ethereum import DataError
-    from almanak.models import Account
+    from almanak.models import Account, AssetAmount
 
     fund = Account(chain=pool.chain, address=AccountReference(wallet.address))
     held = fund_shares(reader, pool, fund, block)
     if held:
-        raise DataError(
-            "ownership",
-            f"the wallet holds {held} base units of this pool's LP token "
-            f"{pool.shares_asset}. A direct swap owns no LP shares and the connector does "
-            "not observe a trading position beside them; swap from a wallet that holds "
-            "none of this pool's LP token",
-        )
+        raise unowned_shares(AssetAmount(asset=pool.shares_asset, amount=held))
 
 
 def intent(config, observed, request: ActionRequest):

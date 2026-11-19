@@ -5,8 +5,8 @@ from typing import ClassVar
 from uuid import uuid4
 
 from almanak.connectors.curve.observations import initial_owned, unsettled
+from almanak.connectors.curve.ownership import refuse_unowned_shares, validate_owned
 from almanak.connectors.curve.ownership import validate_initial as validate_initial_snapshot
-from almanak.connectors.curve.ownership import validate_owned
 from almanak.connectors.curve.state import Checkpoint, Work
 from almanak.connectors.ownership import protocol_ownership
 from almanak.dex_intents import IncreasePoolLiquidity, OpenPoolLiquidity, SwapExactInput
@@ -40,16 +40,11 @@ def adopt_owned(owned, observed):
 
     Nothing is read into ownership. The stated coin amounts are attributed only when
     the wallet covers each of them. LP shares are never adopted: a wallet that holds
-    this pool's LP token is refused here, before anything is planned, because every
-    later ownership check requires the observed shares to equal the owned ones.
+    this pool's LP token beside a trading-only allocation is refused here, before
+    anything is planned.
     """
     for item, seen in zip(owned, observed, strict=True):
-        if seen.position is not None:
-            raise DataError(
-                "ownership",
-                f"the wallet holds {seen.position.shares.amount} base units of this pool's "
-                f"LP token {seen.position.shares.asset}; a direct action adopts no LP shares",
-            )
+        refuse_unowned_shares(seen)
         for held, attributed in zip(seen.wallets.root, item.inventory.root, strict=True):
             if held.amount < attributed.amount:
                 raise DataError(
