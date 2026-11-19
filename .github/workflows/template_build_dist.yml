@@ -46,6 +46,9 @@ jobs:
       - name: Download Almanak Code binaries
         env:
           GH_TOKEN: ${{ secrets.ALMANAK_CODE_TOKEN }}
+          # The repository that holds the Almanak Code releases. Unset, the script
+          # uses its default; the token must be able to read the one named here.
+          ALMANAK_CODE_REPO: ${{ vars.ALMANAK_CODE_REPO }}
         run: make binaries
 
       - name: Bundle LLM docs
