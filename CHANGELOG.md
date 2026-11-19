@@ -37,7 +37,8 @@ its changelog is on the `v2` branch.
   Slipstream, in a tick range and from amounts the operator states. An existing
   position is named by `--token-id`, whoever opened it. Nothing is swapped inside a
   liquidity action. A mint or an increase reverts when mined at a price further than
-  `--slippage-bps` from the observed one in either direction. `ax revoke-exchange`
+  `--slippage-bps` from the observed one in either direction, within what the range
+  itself holds. `ax revoke-exchange`
   sets the allowances a command left to zero, and `ax liquidity-position` reads a
   position.
 - A liquidity step mined after another account added to the position's NFT is

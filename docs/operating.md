@@ -709,16 +709,23 @@ The ticks are the operator's own and must be multiples of the pool's tick spacin
 there are no bands. `--amount0` and `--amount1` are base units of the pool's
 currency0 and currency1, at least one above zero, and the wallet must hold both
 stated amounts. Nothing is swapped inside a liquidity action: the mint uses what the
-range takes at the mined price, never more than it takes within `--slippage-bps` of
-the observed price, and the rest stays in the wallet and is not approved. Swap first
-with `ax swap` when the wallet holds only one side. `--slippage-bps` is required. A
-mint or an increase is not signed when the pool price moved more than this since the
-observed block, and the signed call offers and requires what the range takes at the
-edges of that tolerance, so it reverts when mined at a price beyond it in either
-direction. For a decrease or a close, each payout may fall at most this far below
-the principal at the observed block. `--deadline-seconds` is 300 unless stated; the
-position manager's call carries the deadline, and an approval before it carries
-none.
+range takes at the mined price, never more than the liquidity the stated amounts buy
+at the observed price takes within `--slippage-bps` of it, and the rest stays in the
+wallet and is not approved. Swap first with `ax swap` when the wallet holds only one
+side.
+
+`--slippage-bps` is required. A mint or an increase is neither planned nor signed
+while the pool price is further than this from the price at the block the command
+first observed. The signed call offers no more than the liquidity the stated amounts
+buy at that price takes at the edges of the tolerance, and requires what that offer
+yields there, so while the tolerance stays inside the range it reverts when mined at
+a price beyond the tolerance of that observed price in either direction. Where the
+tolerance reaches an edge of the range, and for a range beside the price, no price
+beyond that edge reverts the call: it takes there only the one currency the range
+holds, at most the offered amount. For a decrease or a close, each payout may fall
+at most this far below the principal at the observed block. `--deadline-seconds` is
+300 unless stated; the position manager's call carries the deadline, and an approval
+before it carries none.
 
 A position is named by `--token-id`, the position manager's NFT. The command reads
 it at its pinned block and refuses an NFT the wallet does not own or one of another
