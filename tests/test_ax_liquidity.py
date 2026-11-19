@@ -23,7 +23,14 @@ from almanak.caip import AssetId, ChainId
 from almanak.chains import evm_network
 from almanak.cli_arguments import build_parser, parse_validated
 from almanak.configuration.composed import Parameters as ComposedParameters
-from almanak.connectors import direct, v3_pool_direct, v3_pool_reconciliation, v3_pool_request
+from almanak.connectors import (
+    direct,
+    v3_pool_direct,
+    v3_pool_planning,
+    v3_pool_reconciliation,
+    v3_pool_request,
+    v3_pool_validation,
+)
 from almanak.connectors import v3_pool_liquidity_direct as liquidity
 from almanak.connectors.composition import connector_from_wire
 from almanak.connectors.concentrated_math import (
@@ -1247,11 +1254,12 @@ WIDE = (-500, 500)
 BIG, SMALL = 20 * 10**9, 10**9
 
 
-def planned_addition(connector, market, stated, token=None):
+def planned_addition(connector, market, stated, token=None, drift=0):
     """The addition the connector's own planner prepares, and the approvals before it.
 
-    Each step is checked as the gateway checks it. The approvals are the pool currency
-    index and amount of each, in order.
+    The request is decided at tick zero and every step is planned at tick `drift`, each
+    checked as the gateway checks it. The approvals are the pool currency index and
+    amount of each, in order.
     """
     nfts = None if token is None else {TOKEN: token}
     config, state, seen = started(connector, market, stated, nfts, wallets=(BIG, BIG))
@@ -1266,6 +1274,7 @@ def planned_addition(connector, market, stated, token=None):
             wallets=(BIG, BIG),
             allowed=allowed,
             position=seen.position,
+            tick=drift,
         )
         operation = step(before)
         if operation.kind != "approve":
@@ -1304,38 +1313,44 @@ def whole(addition, stated):
     )
 
 
+# Each step may be planned anywhere within the tolerance of the decided price: 50 basis
+# points are 50 ticks, and tick 49 is the last a step is still planned at.
+DRIFTS = (-50, 0, 49)
+
+
+@pytest.mark.parametrize("drift", DRIFTS)
 @pytest.mark.parametrize(
     ("stated", "offered", "minimums", "exposed"),
     [
         # Twenty times the currency0 the range takes: unbounded below when offered whole.
-        ((BIG, SMALL), (1225935577, SMALL), (816538207, 999999997), (-451, 49)),
+        ((BIG, SMALL), (1101641523, SMALL), (816538207, 898612897), (-456, 49)),
         # The mirror image, unbounded above when offered whole.
-        ((SMALL, BIG), (SMALL, 1224682432), (999999997, 815703546), (-50, 451)),
+        ((SMALL, BIG), (SMALL, 1101133949), (899117941, 815703546), (-50, 456)),
         # In the range's own ratio nothing is trimmed and nothing was exposed.
         ((SMALL, SMALL), (SMALL, SMALL), (816538207, 815703546), (-50, 49)),
     ],
 )
-def test_a_mint_is_bounded_in_price_on_both_sides_whatever_the_statement(
-    connector, stated, offered, minimums, exposed
+def test_a_mint_is_mined_only_within_the_tolerance_of_the_decided_price(
+    connector, stated, offered, minimums, exposed, drift
 ):
     market = resolved(connector)
     opened = opening(
         market, tick_lower=WIDE[0], tick_upper=WIDE[1], amount0=stated[0], amount1=stated[1]
     )
-    mint, approved = planned_addition(connector, market, opened)
+    mint, approved = planned_addition(connector, market, opened, drift=drift)
+    # Offer and minimums come from the decided price, wherever the step was planned.
     assert (mint.kind, mint.maximum0.amount, mint.maximum1.amount) == ("mint", *offered)
     assert (mint.minimum0.amount, mint.minimum1.amount) == minimums
     # Only the offer is approved, never the surplus of the statement.
     assert approved == [(0, offered[0]), (1, offered[1])]
 
-    # 50 basis points of price are 50 ticks: the mint is mined inside them and nowhere else.
+    # The mint is mined within 50 ticks of the decided price and nowhere else: at most
+    # the tolerance from that price, and so at most twice it from the planned one.
     span = range(WIDE[0] + 1, WIDE[1])
     assert mined_at(mint, WIDE, span) == list(range(-50, 50))
     for tick in range(-50, 50):
         used = taken(mint, WIDE, tick)
         assert used[0] <= offered[0] and used[1] <= offered[1]
-        # Inside the tolerance the trimmed offer takes what the whole statement would.
-        assert used == taken(whole(mint, stated), WIDE, tick)
 
     # Offered whole, the same statement and minimums were mined far outside it, taking
     # the surplus at the moved price.
@@ -1343,6 +1358,107 @@ def test_a_mint_is_bounded_in_price_on_both_sides_whatever_the_statement(
     assert (unbounded[0], unbounded[-1]) == exposed
     worst = taken(whole(mint, stated), WIDE, exposed[0] if stated[0] > stated[1] else exposed[1])
     assert max(worst) > 19 * SMALL or stated[0] == stated[1]
+
+
+def test_a_step_is_not_planned_beyond_the_tolerance_of_the_decided_price(connector):
+    market = resolved(connector)
+    opened = opening(market, tick_lower=WIDE[0], tick_upper=WIDE[1], amount0=BIG, amount1=SMALL)
+    for beyond in (-51, 50):
+        with pytest.raises(DataError, match="moved beyond the retained liquidity tolerance") as no:
+            planned_addition(connector, market, opened, drift=beyond)
+        assert no.value.kind == "price_movement"
+
+
+def test_a_direct_mint_is_not_signed_beyond_the_tolerance_of_its_decided_price(connector):
+    market = resolved(connector)
+    opened = opening(market, tick_lower=WIDE[0], tick_upper=WIDE[1], amount0=BIG, amount1=SMALL)
+    config, state, seen = started(connector, market, opened, wallets=(BIG, BIG))
+    intent = v3_pool_direct.intent(config, (seen,), opened)
+    mint, approved = planned_addition(connector, market, opened, drift=49)
+    spender = config.target(ALLOCATION).contracts.position_manager
+    allowed = {(index, spender): amount for index, amount in approved}
+
+    def at(tick):
+        return observation(
+            connector,
+            config,
+            state.owned[0],
+            market,
+            wallets=(BIG, BIG),
+            allowed=allowed,
+            tick=tick,
+        )
+
+    plan = SimpleNamespace(
+        before=at(49),
+        operation=mint,
+        decision=SimpleNamespace(intent=intent, observations=(seen,)),
+    )
+    execution = connector_from_wire({"connector": connector}).execution
+    backend = SimpleNamespace(config=config)
+    for tick in (0, 20, 49):
+        execution.validate_current(backend, plan, at(tick))
+    # Tick 98 is within the tolerance of the step's own observation, and beyond that of
+    # the decided price, where the mint could only revert.
+    v3_pool_validation.price_movement(plan.before, at(98), 50)
+    with pytest.raises(DataError, match="moved beyond the retained liquidity tolerance"):
+        v3_pool_validation.price_movement(seen, at(98), 50)
+    with pytest.raises(DataError, match="moved beyond the retained liquidity tolerance") as no:
+        execution.validate_current(backend, plan, at(98))
+    assert no.value.kind == "price_movement"
+
+
+def test_a_strategy_addition_is_still_bounded_around_its_own_step(connector):
+    market = resolved(connector)
+    opened = opening(market, tick_lower=WIDE[0], tick_upper=WIDE[1], amount0=BIG, amount1=SMALL)
+    config, state, seen = started(connector, market, opened, wallets=(BIG, BIG))
+    intent = v3_pool_direct.intent(config, (seen,), opened)
+    drifted = observation(connector, config, state.owned[0], market, wallets=(BIG, BIG), tick=49)
+    deciding = SimpleNamespace(decision=SimpleNamespace(observations=(seen,)))
+    direct_price = v3_pool_planning.bounding_price(config, deciding, intent, drifted)
+    assert direct_price == seen.pool.sqrt_price_x96 == sqrt_at_tick(0)
+    # Without an adoption the allocation is a strategy's: the step's own price bounds it.
+    funded = SimpleNamespace(allocation=lambda name: SimpleNamespace(adopt=None))
+    assert v3_pool_planning.bounding_price(funded, None, intent, drifted) == sqrt_at_tick(49)
+
+
+@pytest.mark.parametrize(
+    ("bounds", "stated", "offered", "surplus", "mined"),
+    [
+        # The price is 50 ticks above the range's lower edge, and 100 basis points reach
+        # 99 ticks: beyond that edge the range takes currency0 alone.
+        ((-50, 450), (BIG, SMALL), (9913141578, SMALL), 0, (-999, 99)),
+        # The mirror image at the upper edge.
+        ((-450, 50), (SMALL, BIG), (SMALL, 9913141578), 1, (-100, 999)),
+    ],
+)
+def test_a_tolerance_that_reaches_a_range_edge_bounds_no_price_beyond_it_but_caps_the_offer(
+    connector, bounds, stated, offered, surplus, mined
+):
+    market = resolved(connector)
+    opened = opening(
+        market,
+        tick_lower=bounds[0],
+        tick_upper=bounds[1],
+        amount0=stated[0],
+        amount1=stated[1],
+        slippage_bps=100,
+    )
+    mint, approved = planned_addition(connector, market, opened)
+    assert (mint.maximum0.amount, mint.maximum1.amount) == offered
+    assert approved == [(0, offered[0]), (1, offered[1])]
+    # Bounded at the tolerance on the side inside the range, and by nothing on the side
+    # where the tolerance reaches the range's edge.
+    ticks_mined = mined_at(mint, bounds, range(-999, 1000))
+    assert (ticks_mined[0], ticks_mined[-1]) == mined
+    assert ticks_mined == list(range(mined[0], mined[1] + 1))
+    # Beyond the edge it takes the one currency the range holds there: what the liquidity
+    # bought at the decided price takes, where the whole statement would take it all.
+    beyond = bounds[0] - 100 if surplus == 0 else bounds[1] + 100
+    single = [0, 0]
+    single[surplus] = offered[surplus]
+    assert taken(mint, bounds, beyond) == tuple(single)
+    assert taken(whole(mint, stated), bounds, beyond)[surplus] > 2 * offered[surplus]
 
 
 def test_a_single_sided_open_offers_and_approves_only_the_currency_its_range_takes(connector):
@@ -1380,11 +1496,12 @@ def test_a_range_beside_the_price_but_inside_the_tolerance_is_bounded_on_its_nea
     )
     mint, approved = planned_addition(connector, market, opened)
     # 100 basis points reach 99 ticks, into the range: the offer holds the little
-    # currency1 the range takes there, and the mint is mined up to that tick only.
-    assert (mint.maximum0.amount, mint.maximum1.amount) == (5 * 10**9, 560566028)
-    assert approved == [(0, 5 * 10**9), (1, 560566028)]
-    assert mined_at(mint, (50, 550), range(-400, 550)) == list(range(-400, 100))
-    assert taken(whole(mint, (5 * 10**9, 7 * 10**9)), (50, 550), 300) is not None
+    # currency1 its liquidity takes there, and the mint is mined up to that tick only.
+    # Below the range nothing bounds the price, and it takes the same currency0 there.
+    assert (mint.maximum0.amount, mint.maximum1.amount) == (5 * 10**9, 504433533)
+    assert approved == [(0, 5 * 10**9), (1, 504433533)]
+    assert mined_at(mint, (50, 550), range(-999, 550)) == list(range(-999, 100))
+    assert {taken(mint, (50, 550), tick) for tick in range(-999, 51)} == {(5 * 10**9, 0)}
 
 
 def test_an_increase_is_bounded_as_a_mint_is(connector):
@@ -1393,9 +1510,12 @@ def test_an_increase_is_bounded_as_a_mint_is(connector):
     stated = naming("increase-liquidity", amount0=BIG, amount1=SMALL)
     increase, approved = planned_addition(connector, market, stated, adopted)
     assert (increase.kind, increase.nft) == ("increase", nft_id(market))
-    assert (increase.maximum0.amount, increase.maximum1.amount) == (1225935577, SMALL)
-    assert approved == [(0, 1225935577), (1, SMALL)]
+    assert (increase.maximum0.amount, increase.maximum1.amount) == (1101641523, SMALL)
+    assert approved == [(0, 1101641523), (1, SMALL)]
     assert mined_at(increase, WIDE, range(-499, 500)) == list(range(-50, 50))
+    # Planned at the edge of the tolerance, it is the same step.
+    drifted, _ = planned_addition(connector, market, stated, adopted, drift=49)
+    assert drifted == increase
 
 
 def test_an_increase_that_states_no_amount_is_refused_before_any_read(connector):

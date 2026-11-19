@@ -10,14 +10,20 @@ amount of currency0 and `adopt.counter` the stated amount of currency1, attribut
 when the wallet covers both. The gateway admits the mint only into the stated range and
 only up to that inventory.
 
-A mint or an increase offers the position manager no more of either currency than the
-range takes at a price within `--slippage-bps` of the observed one
-(`concentrated_math.addition_maximums`), and its minimum amounts are derived from that
-offer. Together they bound the price it can be mined at in both directions: beyond the
-tolerance one of the two amounts falls below its minimum and the step reverts. Offering
-the stated amounts whole would leave the price unbounded on the side of the currency
-stated in surplus. The stated amounts stay the deployment's inventory; what the offer
-leaves out is never approved.
+A mint or an increase is sized for one liquidity: the most the stated amounts buy at
+the price the request was decided at. It offers the position manager no more of either
+currency than that liquidity takes at the edges of `--slippage-bps` around that price
+(`concentrated_math.addition_maximums`), and the planner derives its minimum amounts
+from the offer around the same decided price (`v3_pool_planning.bounding_price`),
+wherever within the tolerance the step itself is planned. While the tolerance lies
+inside the range, the step reverts when mined at a price beyond the tolerance of the
+decided price, in either direction, and the gateway neither plans nor signs it while
+the pool is beyond that tolerance. Where the tolerance reaches an edge of the range, and
+for a range beside the price, no price beyond that edge reverts the step: it takes there
+only the currency the range holds beyond the edge, at most the offered amount of it.
+Offering the stated amounts whole would leave the price unbounded on the side of the
+currency stated in surplus. The stated amounts stay the deployment's inventory; what
+the offer leaves out is never approved.
 
 The other position commands name an NFT by its token ID. The command reads the NFT at
 its pinned block and refuses one the wallet does not own or one of another pool. The
@@ -224,13 +230,15 @@ def increase_liquidity(actions, allocation, seen, request):
 
 
 def bounded(addition, allocation, seen):
-    """The addition, offering no more than the range takes within the price tolerance.
+    """The addition, offering what its liquidity takes at the edges of the tolerance.
 
-    The planner derives the step's minimum amounts from the offered maximums. With the
-    maximums trimmed to the most the range takes at either edge of the tolerance window
-    around the observed price, a price beyond the window makes the trimmed currency the
+    `seen` is the observation the request is decided with. The offer is what the
+    liquidity the stated amounts buy at its price takes at either edge of the tolerance
+    window, and the planner derives the step's minimum amounts from that offer around
+    the same price. A price beyond the window then makes the trimmed currency the
     limiting one and the other falls below its minimum, so the step reverts in either
-    direction. Inside the window the step takes exactly what the untrimmed offer would.
+    direction, unless the window reaches an edge of the range: beyond that edge the
+    range holds one currency, the minimum of the other is zero, and nothing reverts.
     """
     from almanak.connectors.concentrated_math import addition_maximums
     from almanak.connectors.v3_pool_planning import sqrt_bounds

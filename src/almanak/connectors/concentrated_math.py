@@ -84,23 +84,27 @@ def tolerance_edges(price: int, tolerance_bps: int) -> tuple[int, int]:
 def addition_maximums(
     amount0: int, amount1: int, price: int, lower: int, upper: int, tolerance_bps: int
 ) -> tuple[int, int]:
-    """The most of each currency an addition takes at any price within `tolerance_bps`.
+    """What the liquidity the amounts buy at `price` takes at the edges of the tolerance.
 
-    A position manager takes the liquidity both offered amounts cover at the execution
-    price. The currency that is not the limiting one is taken in proportion, and that
-    proportion grows without bound as the price moves against it: token0 as the price
-    falls, token1 as it rises. So the most token0 is taken at the low edge of the
-    window and the most token1 at the high edge. Offering no more than these two
-    amounts changes nothing inside the window, and outside it the trimmed currency
-    becomes the limiting one, so the other falls below the floor `addition_minimums`
+    A position manager adds the liquidity both offered amounts cover at the execution
+    price. Offered whole, the currency in surplus is taken in a proportion that grows
+    without bound as the price moves against it: token0 as the price falls, token1 as
+    it rises. The offer returned here is sized for one liquidity, the most the amounts
+    buy at `price`: the token0 that liquidity takes at the low edge of the window and
+    the token1 it takes at the high edge, never more than the amounts themselves.
+
+    While the window lies inside the range, a price beyond it makes the trimmed
+    currency the limiting one, so the other falls below the floor `addition_minimums`
     derives from the same pair: the addition is bounded in both price directions.
+    Where the window reaches an edge of the range, no price beyond that edge reverts
+    the addition, but the offer still caps it at that one liquidity, held there in the
+    single currency the range takes beyond the edge.
     """
     low, high = tolerance_edges(price, tolerance_bps)
-    at_low = liquidity_for(amount0, amount1, low, lower, upper)
-    at_high = liquidity_for(amount0, amount1, high, lower, upper)
+    liquidity = liquidity_for(amount0, amount1, price, lower, upper)
     return (
-        min(amount0, amounts(at_low, low, lower, upper, up=True)[0]),
-        min(amount1, amounts(at_high, high, lower, upper, up=True)[1]),
+        min(amount0, amounts(liquidity, low, lower, upper, up=True)[0]),
+        min(amount1, amounts(liquidity, high, lower, upper, up=True)[1]),
     )
 
 

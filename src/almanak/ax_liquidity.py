@@ -154,10 +154,15 @@ def bound_arguments(name: str, action) -> None:
 
     if name in ADDITIONS:
         bound = (
-            "the step is not signed when the pool price moved more than this since the"
-            " observed block, and a mint or an increase in a tick range reverts when mined at"
-            " a price beyond that tolerance in either direction: it offers and requires what"
-            " the range takes at its edges; a curve deposit reverts when it would mint more"
+            "a uniswap_v3, pancakeswap_v3 or aerodrome_slipstream mint or increase is neither"
+            " planned nor signed while the pool price is further than this from the price at"
+            " the observed block; it offers no more than the liquidity its amounts buy at that"
+            " price takes at the edges of the tolerance and requires what that offer yields"
+            " there, so it reverts when mined at a price beyond the tolerance of the observed"
+            " price in either direction, unless the tolerance reaches an edge of the range:"
+            " beyond that edge, and for a range beside the price, no price reverts it and it"
+            " takes only the one currency the range holds there, at most the offered amount;"
+            " a curve deposit reverts when it would mint more"
             " than this far below the LP shares its amounts were worth at the observed block,"
             " and an aerodrome deposit when it would take or mint that much less than its"
             " amounts were worth there"
