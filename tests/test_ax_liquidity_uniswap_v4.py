@@ -6,6 +6,7 @@ the whole commands is tests/fork/test_ax_liquidity_uniswap_v4.py.
 """
 
 import json
+from math import isqrt
 from types import SimpleNamespace
 
 import pytest
@@ -27,6 +28,7 @@ from almanak.connectors.uniswap_v4 import (
     reconciliation,
 )
 from almanak.connectors.uniswap_v4 import reader as reads
+from almanak.connectors.uniswap_v4.authoring import open_liquidity as open_as_authored
 from almanak.connectors.uniswap_v4.domain import PoolObservation
 from almanak.connectors.uniswap_v4.math import amounts as principal_of
 from almanak.connectors.uniswap_v4.math import liquidity_for, sqrt_at_tick
@@ -388,11 +390,25 @@ def test_the_first_observation_reads_the_nft_to_adopt_and_verifies_it(monkeypatc
     )
 
 
-def test_the_open_intent_offers_exactly_the_stated_amounts_into_the_stated_range():
+def needed(liquidity, bps):
+    """What `liquidity` in the tested range takes of each token at the observed price
+    moved by `bps`, rounded up as the PoolManager charges it."""
+    price = isqrt(2**192 * (10000 + bps) // 10000)
+    return principal_of(liquidity, price, sqrt_at_tick(LOWER), sqrt_at_tick(UPPER), up=True)
+
+
+# The liquidity the tested amounts cover at the observed price, limited by the first
+# token, and the most of the second the mint may take: its need at the +50 bps edge.
+MINTED = liquidity_for(AMOUNT0, AMOUNT1, 2**96, sqrt_at_tick(LOWER), sqrt_at_tick(UPPER))
+MOST1 = needed(MINTED, 50)[1]
+
+
+def test_the_open_intent_offers_the_stated_amounts_trimmed_to_the_price_tolerance():
     market, config, state, seen = opening()
     intent = liquidity_direct.intent(config, (seen,), stated("open-liquidity"))
     assert (intent.kind, intent.range) == ("open_liquidity", None)
-    assert (intent.maximum0.amount, intent.maximum1.amount) == (AMOUNT0, AMOUNT1)
+    assert (intent.maximum0.amount, intent.maximum1.amount) == (AMOUNT0, MOST1)
+    assert needed(MINTED, 0)[1] < MOST1 < AMOUNT1
     assert intent.deadline == market.block.timestamp + 300
     with pytest.raises(ValueError, match="does not own the position the command names"):
         liquidity_direct.intent(config, (seen,), stated("close-liquidity"))
@@ -425,12 +441,50 @@ def test_an_open_is_two_approvals_per_token_then_the_mint():
     assert (second.amount, second.expiration) == (AMOUNT0, deadline)
     half = ((AMOUNT0, deadline), (0, 0))
     third = step(observed(config, owned, market, tokens=(AMOUNT0, 0), permits=half))
-    assert (third.kind, str(third.asset), third.amount) == ("approve_erc20", WETH, AMOUNT1)
-    both = ((AMOUNT0, deadline), (AMOUNT1, deadline))
-    mint = step(observed(config, owned, market, tokens=(AMOUNT0, AMOUNT1), permits=both))
-    assert (mint.kind, mint.maximum0.amount, mint.maximum1.amount) == ("mint", AMOUNT0, AMOUNT1)
-    expected = liquidity_for(AMOUNT0, AMOUNT1, 2**96, sqrt_at_tick(LOWER), sqrt_at_tick(UPPER))
-    assert mint.liquidity == expected > 0
+    assert (third.kind, str(third.asset), third.amount) == ("approve_erc20", WETH, MOST1)
+    both = ((AMOUNT0, deadline), (MOST1, deadline))
+    mint = step(observed(config, owned, market, tokens=(AMOUNT0, MOST1), permits=both))
+    assert (mint.kind, mint.maximum0.amount, mint.maximum1.amount) == ("mint", AMOUNT0, MOST1)
+    assert mint.liquidity == MINTED > 0
+
+
+def test_a_mint_cannot_take_the_stated_surplus_beyond_the_price_tolerance():
+    # Far more of the second token is stated than the range takes beside the first.
+    surplus = AMOUNT1 * 1000
+    market = swaps.resolved()
+    config = config_for(market, "open-liquidity", amount1=surplus)
+    state = swaps.created(config)
+    seen = observed(config, state.owned[0], market, wallets=(AMOUNT0, surplus))
+    whole = ((UNLIMITED_PERMIT, FAR), (UNLIMITED_PERMIT, FAR))
+    ready = observed(
+        config,
+        state.owned[0],
+        market,
+        wallets=(AMOUNT0, surplus),
+        tokens=(UNLIMITED_TOKEN, UNLIMITED_TOKEN),
+        permits=whole,
+    )
+    allocation = config.allocation(ALLOCATION)
+
+    # As a strategy states it, the whole inventory is the maximum: the PositionManager
+    # would let this mint take all the range can hold of the second token, whatever
+    # price it is mined at.
+    unbounded = open_as_authored(allocation, seen)
+    deciding, step = validating(config, state, unbounded, seen)
+    loose = step(ready)
+    assert (loose.liquidity, loose.maximum1.amount) == (MINTED, surplus)
+    assert needed(MINTED, 10**6)[1] < surplus
+
+    # The direct open mints the same liquidity with the second token's maximum at the
+    # edge of the tolerance: inside it the mint fits, beyond it the mint reverts.
+    bounded = liquidity_direct.intent(config, (seen,), stated("open-liquidity", amount1=surplus))
+    deciding.decision = SimpleNamespace(intent=bounded, observations=(seen,))
+    mint = step(ready)
+    assert (mint.liquidity, mint.maximum0.amount, mint.maximum1.amount) == (MINTED, AMOUNT0, MOST1)
+    assert needed(MINTED, 49)[1] <= MOST1 < needed(MINTED, 51)[1]
+    # The first token limits the liquidity: any price below the observed one needs more
+    # of it than its maximum, so that direction reverts as well.
+    assert needed(MINTED, 0)[0] <= AMOUNT0 < needed(MINTED, -1)[0]
 
 
 def test_standing_unlimited_approvals_serve_the_mint_and_a_lapsing_one_is_renewed():

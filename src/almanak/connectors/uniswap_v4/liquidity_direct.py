@@ -24,9 +24,15 @@ token, and receives the wrapped token back: the PositionManager unwraps and wrap
 inside the call, and no call carries value. `--amount0` and `--amount1` follow the
 key's order, with the wrapped token in the native coin's place.
 
-A mint approves Permit2 for exactly the stated amount of each token and gives the
-PositionManager a Permit2 allowance of that amount that expires at the mint's deadline.
-The mint takes at most that, and what it does not take stays approved: the Permit2
+A mint is for a fixed liquidity, the most the stated amounts cover at the observed
+price. Each amount the mint may take is the stated one, trimmed to what that liquidity
+takes at the edge of the stated slippage around the observed price, so a price moved
+further than that in either direction after signing reverts the mint instead of
+spending the amount stated beyond the range's ratio (`bounded`).
+
+A mint approves Permit2 for exactly that most of each token and gives the
+PositionManager a Permit2 allowance of it that expires at the mint's deadline. The
+mint takes at most that, and what it does not take stays approved: the Permit2
 allowance until it expires, the ERC-20 approval to Permit2 without limit of time. An
 approval the wallet already gave that covers the amount is used as it stands. Nothing
 here revokes either; the result lists both. A collection and a close approve nothing.
@@ -193,7 +199,46 @@ def open_liquidity(allocation, seen):
     from almanak.connectors.uniswap_v4.authoring import open_liquidity as build
 
     require_liquidity(seen)
-    return build(allocation, seen)
+    return bounded(allocation, seen, build(allocation, seen))
+
+
+def bounded(allocation, seen, intent):
+    """The mint with each maximum trimmed to what its liquidity takes inside the price
+    tolerance, so the stated slippage bounds the mined price in both directions.
+
+    A mint is for a fixed liquidity, the most the stated amounts cover at the observed
+    price, and the PositionManager only refuses one that needs more than a maximum. The
+    amount stated beyond the range's ratio would otherwise be a maximum far above what
+    that liquidity takes: a price pushed after signing could make the mint take up to
+    all of it at the pushed price. Each maximum is therefore at most what the liquidity
+    takes at the edge of the tolerance window where it takes the most of that token:
+    the lowest price for the first token, the highest for the second. The token that
+    limits the liquidity keeps its stated amount, which already reverts the mint when
+    the price moves against it. The planner derives the same liquidity from the trimmed
+    maximums, since each still covers what that liquidity takes at the observed price.
+    """
+    from math import isqrt
+
+    from almanak.connectors.uniswap_v4.math import amounts, liquidity_for
+    from almanak.connectors.uniswap_v4.reader import sqrt_bounds
+
+    lower, upper = sqrt_bounds(seen.target)
+    price = seen.pool.sqrt_price_x96
+    stated = intent.maximum0, intent.maximum1
+    liquidity = liquidity_for(stated[0].amount, stated[1].amount, price, lower, upper)
+    # Square-root prices at the observed price less and plus the tolerance.
+    low, high = (
+        isqrt(price * price * (10000 + sign * allocation.slippage_bps) // 10000) for sign in (-1, 1)
+    )
+    most = (
+        amounts(liquidity, low, lower, upper, up=True)[0],
+        amounts(liquidity, high, lower, upper, up=True)[1],
+    )
+    trimmed = [
+        value.model_copy(update={"amount": min(value.amount, limit)})
+        for value, limit in zip(stated, most, strict=True)
+    ]
+    return intent.model_copy(update={"maximum0": trimmed[0], "maximum1": trimmed[1]})
 
 
 def require_liquidity(seen) -> None:

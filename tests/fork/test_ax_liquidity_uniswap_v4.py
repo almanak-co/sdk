@@ -13,6 +13,7 @@ from dataclasses import replace
 import pytest
 
 from almanak import ax_actions
+from almanak import state as durable
 from almanak.connectors.composition import connector_from_wire
 from almanak.connectors.direct import ALLOCATION, ActionRequest
 from almanak.connectors.uniswap_v4 import abi
@@ -90,12 +91,11 @@ class Pool:
 
     def request(self, action, **stated):
         priced = action in PRICED
-        return ActionRequest(
-            action,
-            slippage_bps=SLIPPAGE_BPS if priced else None,
-            deadline_seconds=300 if priced else None,
-            **stated,
-        )
+        bounds = {
+            "slippage_bps": SLIPPAGE_BPS if priced else None,
+            "deadline_seconds": 300 if priced else None,
+        }
+        return ActionRequest(action, **{**bounds, **stated})
 
     def __call__(self, action, *, execute=True, limits=LIMITS, **stated):
         request = self.request(action, **stated)
@@ -155,6 +155,27 @@ class Pool:
             tick = read_pool(reader, self.pool, reader.pin_block("latest")).tick
         floor = tick // spacing * spacing
         return {"tick_lower": floor - spacing, "tick_upper": floor + 2 * spacing}
+
+    def wide(self):
+        """Two hundred tick spacings either side of the pool's tick: a range far wider
+        than any price tolerance, so the amount it takes keeps growing as the price moves."""
+        spacing = self.pool.tick_spacing
+        floor = self.price()[1] // spacing * spacing
+        return {"tick_lower": floor - 200 * spacing, "tick_upper": floor + 200 * spacing}
+
+    def price(self):
+        """The pool's square-root price and tick at the fork's head."""
+        with self.reader() as reader:
+            seen = read_pool(reader, self.pool, reader.pin_block("latest"))
+        return seen.sqrt_price_x96, seen.tick
+
+    def surplus(self):
+        """A quarter of the funded token beside a thousandth of that share of the other:
+        far more of the funded token than the range takes beside the other."""
+        held = self.balances()
+        amounts = [value // 4000 for value in held]
+        amounts[self.funded] = held[self.funded] // 4
+        return {"amount0": amounts[0], "amount1": amounts[1]}
 
     def stated(self):
         """A quarter of what the wallet holds of each token, as the mint's most."""
@@ -301,14 +322,14 @@ def unspent(setting, stated, used):
 
 
 def assert_unused_stays_approved(setting, stated, used):
-    """What the mint did not take of each stated amount stays approved to Permit2, and
-    to the position manager through Permit2 until the mint's deadline."""
-    rest = unspent(setting, stated, used)
-    listed = setting.allowances()
-    amounts = [int(row["amount"]) for row in listed]
-    assert sorted(amounts) == sorted(value for value in rest for _ in (0, 1) if value)
-    assert all(0 <= value <= most for value, most in zip(used, stated.values(), strict=True))
-    assert {row["spender"] for row in listed} <= {setting.contracts.permit2, setting.manager}
+    """What the mint did not take of the most it was offered stays approved to Permit2,
+    and as much to the position manager through Permit2 until the mint's deadline. The
+    offer is the stated amount or less, so neither is above what was stated and not taken."""
+    left = granted(setting)
+    permit2, manager = setting.contracts.permit2, setting.manager
+    for asset, most in zip(map(str, setting.assets), unspent(setting, stated, used), strict=True):
+        assert left.get((asset, permit2), 0) == left.get((asset, manager), 0) <= most
+    assert {spender for _, spender in left} <= {permit2, manager}
 
 
 def assert_read(setting, token_id, ticks):
@@ -447,6 +468,47 @@ def test_an_interrupted_open_is_recovered_from_its_receipt(setting, monkeypatch,
     assert (ax_actions.kept_records(), record.exists()) == ([], False)
     assert_moved(setting, recovered, start)
     close_position(setting, int(recovered["position_after"]["position"]["token_id"]))
+
+
+def assert_reverts_when_mined(setting, record):
+    """Send the mint a kept record signed, outside the command: it is mined and reverts."""
+    pending = durable.Journal(record / "state.sqlite").load().pending
+    sent = setting.fork.rpc("eth_sendRawTransaction", [pending.raw_transaction])
+    with pytest.raises(RuntimeError, match="fork fixture transaction reverted"):
+        setting.fork.rpc.wait_receipt(sent)
+
+
+def pushed_bps(before, after):
+    """How far the pool price moved, in basis points of the earlier price."""
+    return abs(after * after - before * before) * 10000 / (before * before)
+
+
+def assert_reverted_and_recorded(setting, recovered, record, start):
+    """Recovery records the reverted mint: no position, nothing moved, the wallet free."""
+    last = recovered["outcomes"][-1]
+    assert (family.operations(recovered), last["success"]) == (OPENING, False)
+    assert (recovered["resolved"], recovered["position_after"]["position"]) == (True, None)
+    assert (ax_actions.kept_records(), record.exists()) == ([], False)
+    assert setting.balances() == start
+
+
+def test_a_price_pushed_after_signing_reverts_the_mint_and_spends_no_surplus(
+    setting, monkeypatch, capsys
+):
+    setting.halve()
+    ticks, stated = setting.wide(), setting.surplus()
+    start, before = setting.balances(), setting.price()[0]
+
+    def opening(*, execute):
+        # One basis point of tolerance: the mint may take what its liquidity takes there.
+        return setting("open-liquidity", execute=execute, slippage_bps=1, **ticks, **stated)
+
+    record = family.stopped_while_waiting_for("mint", opening, monkeypatch, capsys)
+    # The trader sells the token stated in surplus, so the range would take more of it.
+    setting.trade()
+    assert pushed_bps(before, setting.price()[0]) > 1
+    assert_reverts_when_mined(setting, record)
+    assert_reverted_and_recorded(setting, setting.recover(record), record, start)
 
 
 def test_a_native_pool_position_holds_the_wrapped_token_and_moves_no_native_value(native):
