@@ -291,7 +291,13 @@ def test_a_preview_on_a_public_endpoint_proves_the_endpoint_before_resolving(mon
         "almanak.connectors.lending_lookup.resolve",
         lambda *arguments: pytest.fail("resolved a market from an unproven endpoint"),
     )
-    args = SimpleNamespace(public_rpc="publicnode", connector="aave_v4")
+    args = SimpleNamespace(
+        public_rpc="publicnode",
+        connector="aave_v4",
+        max_gas_price_wei=5,
+        max_transaction_fee=9,
+        max_gas_limit=None,
+    )
     request = SimpleNamespace(chain=ETHEREUM)
     wallet = {"account": "wallet", "address": "0x" + "ab" * 20}
     with pytest.raises(DataError, match="500 seconds old"):

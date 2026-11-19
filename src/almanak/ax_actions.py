@@ -169,6 +169,15 @@ def production_backend(config, endpoint, wallet):
 
 
 def action_config(args, request, action, wallet, provider, endpoint):
+    """The operator deployment a command's arguments state."""
+    limits = FeeLimits(args.max_gas_price_wei, args.max_transaction_fee, args.max_gas_limit)
+    public = args.public_rpc is not None
+    return deployment(
+        args.connector, request, action, wallet, provider, endpoint, limits, public=public
+    )
+
+
+def deployment(connector, request, action, wallet, provider, endpoint, limits, *, public=False):
     """The operator deployment of one account in one resolved market, with explicit fees."""
     from almanak.connectors.direct import Wallet, binding
     from almanak.connectors.lending_lookup import family, resolve
@@ -178,17 +187,16 @@ def action_config(args, request, action, wallet, provider, endpoint):
     chain = Chain(chain_id=request.chain, environment="mainnet")
     account = Wallet(account=wallet["account"], address=wallet["address"].lower())
     with EthereumReader(chain, endpoint) as reader:
-        if args.public_rpc is not None:
+        if public:
             from almanak.gateway.read_endpoints import verify_public
 
             # The same genesis and head-age proof a public read gives.
             reader.verify_chain()
             verify_public(reader)
         block = reader.pin_block("latest")
-        resolved = resolve(reader, family(args.connector), request, block)
-        positions = binding(args.connector).positions(reader, block, resolved, account, action)
-    limits = FeeLimits(args.max_gas_price_wei, args.max_transaction_fee, args.max_gas_limit)
-    return configuration(args.connector, positions, account, provider, chain, limits)
+        resolved = resolve(reader, family(connector), request, block)
+        positions = binding(connector).positions(reader, block, resolved, account, action)
+    return configuration(connector, positions, account, provider, chain, limits)
 
 
 def configuration(connector: str, positions: dict, wallet, provider, chain, limits: FeeLimits):
@@ -762,8 +770,9 @@ def arguments(commands, lending_source) -> None:
         )
         action.add_argument(
             "--max-gas-limit",
-            type=base_units,
-            help="refuse a step whose gas, with its buffer, is above this (default 1200000)",
+            type=gas_units,
+            help="refuse a step whose gas, with its buffer, is above this"
+            " (default: an author gas policy's own, 1200000)",
         )
         action.add_argument(
             "--execute",
@@ -773,8 +782,16 @@ def arguments(commands, lending_source) -> None:
 
 
 def base_units(value: str) -> int:
+    return positive(value, "base units")
+
+
+def gas_units(value: str) -> int:
+    return positive(value, "gas units")
+
+
+def positive(value: str, unit: str) -> int:
     import argparse
 
     if not (value.isascii() and value.isdigit()) or int(value) <= 0:
-        raise argparse.ArgumentTypeError("expected a positive whole number of base units")
+        raise argparse.ArgumentTypeError(f"expected a positive whole number of {unit}")
     return int(value)

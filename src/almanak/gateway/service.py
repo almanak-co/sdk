@@ -652,6 +652,15 @@ class GatewayService:
             raise ValueError("operator request was already executed")
         if increases and accounting_blocked(before.outcomes):
             raise ValueError(accounting_refusal(before.outcomes))
+        self.require_direct(decision.intent)
+
+    def require_direct(self, intent):
+        """An operator request is admitted only for an action its chain declares direct."""
+        from almanak.connectors.target_routing import connector_for_target
+        from almanak.gateway.environments import origin_chain
+
+        chain = origin_chain(self.config, intent.target.fund.chain).chain_id
+        connector_for_target(intent.target).support_for(chain).require_direct(intent.kind)
 
     def validate_recorded_evidence(self, before, after):
         immutable = (

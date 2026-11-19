@@ -9,7 +9,7 @@ import pytest
 
 from almanak import ax_actions
 from almanak.caip import ChainId
-from almanak.cli_arguments import build_parser
+from almanak.cli_arguments import build_parser, parse_validated
 from almanak.connectors import direct
 from almanak.connectors.composition import CONNECTOR_IDS, installed_connectors
 from almanak.connectors.support import ConnectorChainSupport, EconomicAction, RunMode
@@ -42,7 +42,14 @@ def test_a_connector_serves_exactly_the_actions_its_chains_declare():
     for name, connector in installed_connectors():
         cells = {str(a) for support in connector.chain_support for a in support.direct_actions}
         found = direct.direct_actions().get(str(name))
-        assert cells == set(() if found is None else found.actions), name
+        commands = () if found is None else found.actions
+        assert cells == {kind for c in commands for kind in direct.COMMAND_INTENTS[c]}, name
+
+
+def test_every_command_names_the_intents_it_admits():
+    assert set(direct.COMMAND_INTENTS) == set(direct.served_actions())
+    kinds = {str(action) for action in EconomicAction}
+    assert all(set(admitted) <= kinds for admitted in direct.COMMAND_INTENTS.values())
 
 
 def test_every_served_action_is_a_command_with_its_connectors():
@@ -68,9 +75,9 @@ def test_a_direct_action_is_a_supported_production_action_for_a_plain_account():
         cell(account_profiles=("safe_roles",))
 
 
-def test_a_command_is_refused_before_any_read_where_it_is_not_declared():
+def test_a_connector_chain_or_action_that_is_not_declared_is_refused():
     direct.require_direct("aave_v4", ETHEREUM, "supply")
-    with pytest.raises(ValueError, match="does not support eip155:8453"):
+    with pytest.raises(ValueError, match="aave_v4 serves no direct supply on eip155:8453"):
         direct.require_direct("aave_v4", BASE, "supply")
     with pytest.raises(ValueError, match="aave_v4 serves no direct borrow"):
         direct.require_direct("aave_v4", ETHEREUM, "borrow")
@@ -80,10 +87,70 @@ def test_a_command_is_refused_before_any_read_where_it_is_not_declared():
         cell().require_direct("withdraw")
 
 
+def action_arguments(*extra):
+    return parse_validated(
+        build_parser(),
+        [
+            "ax",
+            "supply",
+            "--connector",
+            "aave_v4",
+            "--spoke",
+            "0x94e7a5dcbe816e498b89ab752661904e2f56c485",
+            "--reserve-id",
+            "0",
+            "--amount",
+            "5",
+            "--wallet",
+            "wallet",
+            "--env-file",
+            ".env",
+            "--max-gas-price-wei",
+            "7",
+            "--max-transaction-fee",
+            "9",
+            *extra,
+        ],
+    )
+
+
+def test_the_command_refuses_an_undeclared_chain_before_it_reads_anything(monkeypatch):
+    def unreachable(*arguments):
+        raise AssertionError("the command read before refusing")
+
+    monkeypatch.setattr(ax_actions, "read_wallet", unreachable)
+    monkeypatch.setattr(ax_actions, "transport", unreachable)
+    with pytest.raises(ValueError, match="aave_v4 serves no direct supply on eip155:8453"):
+        ax_actions.command(action_arguments("--chain", "eip155:8453"))
+
+
+def test_the_stated_ceilings_reach_the_gas_policy(monkeypatch, capsys):
+    seen = {}
+
+    def deployment(connector, request, action, wallet, provider, endpoint, limits, **options):
+        seen.update(connector=connector, action=action, limits=limits, **options)
+        raise StopIteration
+
+    monkeypatch.setattr(ax_actions, "read_wallet", lambda directory: {})
+    monkeypatch.setattr(ax_actions, "transport", lambda args, chain: (None, "endpoint"))
+    monkeypatch.setattr(ax_actions, "deployment", deployment)
+    with pytest.raises(StopIteration):
+        ax_actions.command(action_arguments("--chain", "eip155:1", "--max-gas-limit", "2000000"))
+    assert seen["limits"] == ax_actions.FeeLimits(7, 9, 2_000_000)
+    assert (seen["connector"], seen["action"]) == ("aave_v4", direct.ActionRequest("supply", 5))
+    assert seen["public"] is False
+    assert action_arguments("--chain", "eip155:1").max_gas_limit is None
+    with pytest.raises(SystemExit):
+        action_arguments("--chain", "eip155:1", "--max-gas-limit", "0")
+    assert "positive whole number of gas units" in capsys.readouterr().err
+
+
 def test_a_configuration_names_its_connector_binding(recorded):
     assert direct.binding_for(recorded.config) is direct.binding("aave_v4")
     named = SimpleNamespace(connector="aave_v4")
     assert direct.binding_for(named) is direct.binding("aave_v4")
+    with pytest.raises(ValueError, match="composed configuration serves no direct action"):
+        direct.binding_for(SimpleNamespace(connector=None))
     with pytest.raises(ValueError, match="no direct actions for nothing: unknown connector"):
         direct.binding("nothing")
 

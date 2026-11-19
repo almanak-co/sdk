@@ -473,8 +473,10 @@ revokes, can spend up to twice `--max-transaction-fee`. A step bids as an author
 [gas policy](configuration.md) defaults on the chain: the quoted gas price is twice
 the base fee plus the tip, or 1.25 times the base fee plus the tip on Arbitrum and
 Robinhood Chain, so `--max-gas-price-wei` refuses a step once the base fee passes
-that share of it. The gas limit is the estimate with a 25% buffer and at most
-`--max-gas-limit`, 1,200,000 unless stated. Reads are no older than 120 seconds.
+that share of it. On Avalanche the base fee is the observed block's, because its fee
+history may not report the next one. The gas limit is the estimate with a 25% buffer
+and at most `--max-gas-limit`, 1,200,000 unless stated. Reads are no older than 120
+seconds.
 
 | Option | Meaning |
 | --- | --- |
@@ -489,7 +491,7 @@ that share of it. The gas limit is the estimate with a 25% buffer and at most
 Each connector declares the actions it serves directly, and `almanak support` lists
 them per chain as `direct_actions`. A command for a connector, chain or action that
 is not declared is refused before any read, and the gateway refuses the same request
-again when it plans. Operator actions run for an EOA wallet; Safe/Roles accounts are
+again when it admits it and when it plans a step. Operator actions run for an EOA wallet; Safe/Roles accounts are
 not supported. Aave V4 serves supply and full withdrawal.
 
 The action runs through the same planning, simulation, signing and receipt

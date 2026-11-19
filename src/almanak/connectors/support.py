@@ -91,8 +91,8 @@ class ConnectorChainSupport(Model):
     historical: tuple[HistoricalSupport, ...] = ()
     variants: tuple[ProtocolVariant, ...] = ()
     # Actions `almanak ax` runs as direct operator commands on this chain: production,
-    # for an EOA wallet, without a strategy. The gateway admits an operator request
-    # only for an action listed here.
+    # for an EOA wallet, without a strategy. The gateway admits and plans an operator
+    # request only for an action listed here.
     direct_actions: tuple[EconomicAction, ...] = Field(default=(), exclude_if=lambda v: not v)
 
     @model_validator(mode="after")
@@ -363,6 +363,8 @@ def uniswap_candidate_entry(template, chain, start):
             **template.model_dump(),
             "chain": ChainId(chain),
             "modes": (RunMode.FORK, RunMode.BACKTEST),
+            # A candidate is not a production cell, so it serves no direct action.
+            "direct_actions": (),
             "historical": tuple(
                 {**historical.model_dump(), "backtest_start_at": start}
                 for historical in template.historical

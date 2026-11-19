@@ -12,8 +12,8 @@ its changelog is on the `v2` branch.
 - Each connector declares the direct operator actions it serves, and `almanak support`
   lists them per chain as `direct_actions`. `ax supply` and `ax withdraw` take their
   connector choices from these declarations, refuse an undeclared connector, chain or
-  action before any read, and the gateway admits an operator request only for a
-  declared action.
+  action before any read, and the gateway admits and plans an operator request only
+  for a declared action.
 - `ax supply` and `ax withdraw` take an optional `--max-gas-limit`.
 
 ### Changed

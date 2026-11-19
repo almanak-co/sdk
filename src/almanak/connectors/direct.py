@@ -1,11 +1,11 @@
 """What `almanak ax` runs as a direct operator action, as each connector declares it.
 
 A connector package that serves direct actions holds a `direct.py` with a `DIRECT`
-declaration; `ax` builds its command choices from these instead of keeping its own
-lists. Every other installed connector is named in `NOT_DIRECT` with the reason, and a
-test holds the two together, so adding a connector without deciding its direct actions
-fails. Which chains serve an action is the connector's support declaration
-(`ConnectorChainSupport.direct_actions`), which the gateway enforces as well.
+declaration, and `ax` builds its command choices from these. Every other installed
+connector is named in `NOT_DIRECT` with the reason, and a test holds the two together,
+so adding a connector without deciding its direct actions fails. Which chains serve an
+action is the connector's support declaration (`ConnectorChainSupport.direct_actions`),
+which the gateway enforces as well.
 """
 
 from collections.abc import Callable
@@ -14,6 +14,14 @@ from functools import cache
 
 # The name every direct deployment gives its one requested position.
 ALLOCATION = "position"
+
+# The intent kinds each `ax` command can admit. A chain serves a command when its
+# support declares one of them as a direct action; the gateway admits only a declared
+# kind.
+COMMAND_INTENTS: dict[str, tuple[str, ...]] = {
+    "supply": ("supply",),
+    "withdraw": ("withdraw",),
+}
 
 
 @dataclass(frozen=True)
@@ -35,7 +43,7 @@ class Wallet:
 
 @dataclass(frozen=True)
 class DirectActions:
-    # The `ax` commands the connector serves, named by the intent kind each one admits.
+    # The `ax` commands the connector serves; `COMMAND_INTENTS` names what each admits.
     actions: tuple[str, ...]
     # `positions(reader, block, resolved, wallet, request)`: the connector's own part of
     # the deployment configuration for the resolved market, such as its allocations.
@@ -94,8 +102,12 @@ def binding(connector: str) -> DirectActions:
 
 def binding_for(config) -> DirectActions:
     """The declaration of the connector a deployment configuration belongs to."""
-    # Aave V4 configurations carry no discriminator, as on the wire.
-    return binding(str(getattr(config, "connector", None) or "aave_v4"))
+    # Only an Aave V4 configuration carries no discriminator, as on the wire. A composed
+    # configuration carries an empty one and belongs to no single connector.
+    name = getattr(config, "connector", "aave_v4")
+    if name is None:
+        raise ValueError("a composed configuration serves no direct action")
+    return binding(str(name))
 
 
 def require_direct(connector: str, chain, action: str) -> None:
@@ -104,4 +116,7 @@ def require_direct(connector: str, chain, action: str) -> None:
 
     if action not in binding(connector).actions:
         raise ValueError(f"{connector} serves no direct {action}")
-    connector_from_wire({"connector": connector}).support_for(chain).require_direct(action)
+    cells = connector_from_wire({"connector": connector}).chain_support
+    declared = {str(kind) for cell in cells if cell.chain == chain for kind in cell.direct_actions}
+    if not declared & set(COMMAND_INTENTS[action]):
+        raise ValueError(f"{connector} serves no direct {action} on {chain}")

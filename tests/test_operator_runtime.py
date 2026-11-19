@@ -154,13 +154,39 @@ def test_a_request_may_be_built_from_the_observations_it_is_admitted_with(desk):
     seen = []
 
     def build(state, observed):
-        seen.append((state.decision, tuple(item.allocation for item in observed)))
+        seen.append((state.decision, observed))
         return desk.intent("supply")
 
     record = runtime.submit(build, REQUEST)
     assert record.intent == desk.intent("supply")
     # Built once, before admission, against the observations the record retains.
-    assert seen == [(None, tuple(item.allocation for item in record.observations))]
+    assert seen == [(None, record.observations)]
+
+
+def test_a_refusal_that_needs_no_observation_makes_no_read(desk):
+    runtime = desk.runtime()
+    runtime.submit(desk.intent("supply"), REQUEST)
+    runtime.execute()
+
+    def unread():
+        raise AssertionError("refused only after reading the chain")
+
+    desk.gateway.observe = unread
+    # Whether the intent is stated or built, an executed request is refused unread.
+    for intent in (desk.intent("supply"), lambda state, observed: desk.intent("supply")):
+        with pytest.raises(ValueError, match="already executed"):
+            runtime.submit(intent, REQUEST)
+    desk.store.teardown()
+    with pytest.raises(ValueError, match="teardown admits only"):
+        runtime.submit(desk.intent("supply"))
+
+
+def test_a_built_request_is_refused_new_exposure_after_it_is_built(desk):
+    runtime = desk.runtime()
+    desk.store.teardown()
+    with pytest.raises(ValueError, match="teardown admits only"):
+        runtime.submit(lambda state, observed: desk.intent("supply"))
+    assert desk.store.load().decision is None
 
 
 def test_declined_preview_leaves_no_effect(desk):

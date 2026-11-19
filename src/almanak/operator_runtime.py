@@ -98,7 +98,8 @@ class OperatorRuntime(Runtime):
         `intent` is the intent itself, or a function of the checkpoint and the
         observations the request is admitted with that returns it. An intent whose
         bounds come from an observed quote is built that way, so the gateway checks
-        it against the same observations.
+        it against the same observations. Every refusal that needs no observation
+        comes before the read; a built intent is checked for new exposure after it.
         """
         state = self.recover()
         if state.mode == "closed":
@@ -107,21 +108,17 @@ class OperatorRuntime(Runtime):
             raise ValueError("an earlier operator request is unfinished; resume or discard it")
         if state.work:
             raise ValueError("multi-chain operator deployments are not supported")
-        observed = self.gateway.observe()
-        validate_observed_ownership(state, observed)
-        if callable(intent):
-            intent = intent(state, observed)
-        increases = self.connector.lifecycle.increases_exposure(intent)
-        if state.mode == "teardown" and increases:
-            raise ValueError("teardown admits only operator requests that reduce exposure")
-        if increases and accounting_blocked(state.outcomes):
-            raise DataError(
-                "accounting",
-                f"{accounting_refusal(state.outcomes)}; reducing requests remain",
-            )
+        built = callable(intent)
+        if not built:
+            self.refuse_new_exposure(state, intent)
         event = OperatorEvent(started_at=self.clock(), request=request or uuid4().hex)
         if request_executed(state.outcomes, event):
             raise ValueError("operator request was already executed")
+        observed = self.gateway.observe()
+        validate_observed_ownership(state, observed)
+        if built:
+            intent = intent(state, observed)
+            self.refuse_new_exposure(state, intent)
         self.connector.codec.capability.admit(state.capabilities, intent)
         if intent.target != state.config.target(intent.target.allocation):
             raise ValueError("operator request names an unbound position")
@@ -142,6 +139,18 @@ class OperatorRuntime(Runtime):
             raise DataError("conflict", "deployment changed; the operator request was not admitted")
         self.fault("decision_committed", event)
         return record
+
+    def refuse_new_exposure(self, state, intent) -> None:
+        """Refuse a request that adds exposure in teardown or over an accounting issue."""
+        if not self.connector.lifecycle.increases_exposure(intent):
+            return
+        if state.mode == "teardown":
+            raise ValueError("teardown admits only operator requests that reduce exposure")
+        if accounting_blocked(state.outcomes):
+            raise DataError(
+                "accounting",
+                f"{accounting_refusal(state.outcomes)}; reducing requests remain",
+            )
 
     def preview(self):
         """Plan the active request's next step and return it, unsigned."""

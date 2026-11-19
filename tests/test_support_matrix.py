@@ -16,7 +16,17 @@ SAMPLE = {
             "restrictions": [],
             "historical": [],
             "variants": [],
-        }
+        },
+        {
+            "chain": "eip155:10",
+            "modes": ["fork", "production"],
+            "actions": ["supply", "withdraw"],
+            "direct_actions": ["supply"],
+            "account_profiles": ["eoa"],
+            "restrictions": [],
+            "historical": [],
+            "variants": [],
+        },
     ],
     "alpha": [
         {
@@ -36,11 +46,13 @@ def test_render_orders_connectors_and_fills_cells():
     text = matrix.render(SAMPLE)
     lines = text.splitlines()
     assert lines[0] == matrix.HEADER
-    assert "| `alpha` |  | fork, backtest |" in text
-    assert "| `beta` | fork |  |" in text
+    assert "| `alpha` |  |  | fork, backtest |" in text
+    assert "| `beta` | fork | fork, production |  |" in text
     assert text.index("## alpha") < text.index("## beta")
     assert "`m-v1` (economic)" in text
-    assert "| `eip155:1` | fork | supply | eoa | none | none | none |" in text
+    assert "| `eip155:1` | fork | supply | none | eoa | none | none | none |" in text
+    direct = "| `eip155:10` | fork, production | supply, withdraw | supply | eoa |"
+    assert direct in text
     assert text.endswith("do not edit by hand.\n")
 
 
