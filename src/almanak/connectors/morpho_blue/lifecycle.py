@@ -69,6 +69,17 @@ def validate_initial(state, observations):
         )
 
 
+def adopt_ownership(retained, observations):
+    """Ownership of each position as its observation states it, for an operator deployment."""
+    if tuple(observation.target for observation in observations) != tuple(
+        item.target for item in retained
+    ):
+        raise DataError(
+            "ownership_mismatch", "observations must cover every configured Morpho allocation"
+        )
+    return tuple(owned(observation) for observation in observations)
+
+
 def commit_owned(retained, outcome):
     if not outcome.success:
         return retained
@@ -128,6 +139,7 @@ class MorphoLifecycle:
     validate_owned = staticmethod(validate_owned)
     commit_owned = staticmethod(commit_owned)
     validate_closure = staticmethod(validate_closure)
+    adopt = staticmethod(adopt_ownership)
 
     @staticmethod
     def increases_exposure(intent):
@@ -143,6 +155,7 @@ class MorphoLifecycle:
             deployment_id=uuid4().hex,
             config=config,
             strategy=strategy,
+            operator=strategy is None,
             capabilities=capabilities,
             permissions=permissions,
             mode="running",
