@@ -447,7 +447,7 @@ independently.
   of those exact files to PyPI. A PyPI version can never be uploaded again. The
   `PYPI_API_TOKEN` and `ALMANAK_CODE_TOKEN` secrets must exist first. The
   build downloads the pinned Almanak Code release from the repository named
-  by the `ALMANAK_CODE_REPO` repository variable, or from the script's default
+  by the `ALMANAK_CODE_REPO` repository secret, or from the script's default
   when it is unset; the token must be able to read that repository.
 
 ## Working practices
