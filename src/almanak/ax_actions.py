@@ -193,15 +193,20 @@ def deployment(connector, request, action, wallet, provider, endpoint, limits, *
     account = Wallet(account=wallet["account"], address=wallet["address"].lower())
     with EthereumReader(chain, endpoint) as reader:
         if public:
-            from almanak.gateway.read_endpoints import verify_public
-
-            # The same genesis and head-age proof a public read gives.
-            reader.verify_chain()
-            verify_public(reader)
+            prove_public(reader)
         block = reader.pin_block("latest")
         resolved = resolve(reader, family(connector), request, block)
         positions = binding(connector).positions(reader, block, resolved, account, action)
     return configuration(connector, positions, account, provider, chain, limits)
+
+
+def prove_public(reader) -> None:
+    """The genesis and head-age proof a public read gives, before an action or a
+    recovery uses a named public endpoint."""
+    from almanak.gateway.read_endpoints import verify_public
+
+    reader.verify_chain()
+    verify_public(reader)
 
 
 def configuration(connector: str, positions: dict, wallet, provider, chain, limits: FeeLimits):
@@ -642,23 +647,50 @@ def recover_command(args) -> int:
         return 0
 
     def backend_for(config):
-        return production_backend(config, record_endpoint(config, args.env_file), None)
+        endpoint = record_endpoint(config, args.env_file, args.public_rpc)
+        return production_backend(config, endpoint, None)
 
     result = recover(args.record, backend_for)
     print(json.dumps(result, indent=2))
     return 0 if result["resolved"] else 1
 
 
-def record_endpoint(config, env_file: Path | None) -> str:
-    """The endpoint of the provider the record's action ran on."""
-    from almanak.gateway.providers import PublicProvider, provider_endpoint, public_endpoint
+def record_endpoint(config, env_file: Path | None, public_rpc: str | None = None) -> str:
+    """The endpoint a record is resolved through: the transport the caller names, or
+    else the provider the record's action ran on.
+
+    The signed bytes name their chain, and the adapter proves the chain and its genesis
+    on the endpoint it is given and reconciles from canonical receipts, so any endpoint
+    of the record's chain resolves the same step. A named public endpoint gives the
+    public proof first. A pair that left the reviewed list has no endpoint of its own
+    any more, so its record needs a named transport.
+    """
+    from almanak.gateway import providers
 
     network = config.production.networks[0]
-    if isinstance(network.provider, PublicProvider):
-        return public_endpoint(network.provider.name, network.chain.chain_id)
-    if env_file is None:
-        raise ValueError("--env-file is required: this record's action used a provider key")
-    return provider_endpoint(network.provider, env_file)
+    chain, recorded = network.chain.chain_id, network.provider
+    if public_rpc is not None:
+        return proven_public(network.chain, providers.public_endpoint(public_rpc, chain))
+    if not isinstance(recorded, providers.PublicProvider):
+        if env_file is None:
+            raise ValueError("--env-file is required: this record's action used a provider key")
+        return providers.provider_endpoint(recorded, env_file)
+    if env_file is not None:
+        return providers.provider_endpoint(alchemy(chain), env_file)
+    if chain not in providers.PUBLIC_RPC.get(recorded.name, {}):
+        raise ValueError(
+            f"the public endpoint {recorded.name} this record's action ran on no longer"
+            f" serves {chain}; name a transport with --public-rpc or --env-file"
+        )
+    return providers.public_endpoint(recorded.name, chain)
+
+
+def proven_public(chain, endpoint: str) -> str:
+    from almanak.gateway.ethereum import EthereumReader
+
+    with EthereumReader(chain, endpoint) as reader:
+        prove_public(reader)
+    return endpoint
 
 
 def executed_result(state, outcomes, refusal) -> dict:
@@ -716,6 +748,8 @@ RECOVER = "list kept action records, or resolve the signed step one of them hold
 
 
 def recover_arguments(commands) -> None:
+    from almanak.cli_arguments import public_rpc_option
+
     command = commands.add_parser("recover", help=RECOVER, description=RECOVER)
     command.set_defaults(product="operator-recover")
     command.add_argument(
@@ -723,11 +757,15 @@ def recover_arguments(commands) -> None:
         type=Path,
         help="the kept record to resolve; without it the kept records are listed",
     )
-    command.add_argument(
+    # Without one the record is resolved through the endpoint its action ran on.
+    transport = command.add_mutually_exclusive_group()
+    transport.add_argument(
         "--env-file",
         type=Path,
-        help="private provider credentials, for a record whose action used a provider key",
+        help="private provider credentials to resolve the record through; required for"
+        " a record whose action used a provider key",
     )
+    public_rpc_option(transport)
 
 
 def arguments(commands, lending_source) -> None:

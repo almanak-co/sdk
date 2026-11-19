@@ -37,12 +37,13 @@ address and each transaction before it is mined, and nobody answers for what the
 endpoint reports. A user who prefers their own provider can give the agent an
 Alchemy API key.
 
-The agent can also read a balance, a market or a position on any other supported
-chain at an address the user names. Public endpoints cover every supported chain
-except HyperEVM, which needs a provider key; the
-[list](operating.md#public-endpoints) names the endpoints of each chain. Finding a
-token or a pool by name (`ax resolve`, `ax dex-pools`) needs a vendor key, so
-without one the agent asks the user for the address.
+The agent can also read a balance, a market or a position on the other supported
+chains at an address the user names. The reviewed public endpoints cover each of
+them except HyperEVM, which needs a provider key; the
+[list](operating.md#public-endpoints) names the endpoints of each chain and what
+was measured through them. Finding a token or a pool by name (`ax resolve`,
+`ax dex-pools`) needs a vendor key, so without one the agent asks the user for the
+address.
 
 The agent keeps its files in `~/.almanak/agent/`: the wallet directory, the env
 file with the provider key once there is one, and a `settings.json` with fee ceilings and the markets

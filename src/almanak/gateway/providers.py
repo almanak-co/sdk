@@ -34,11 +34,15 @@ ALCHEMY_NETWORKS = {
 # transactions it sends. Nobody answers for what one reports, and a direct action
 # signs what its reads resolve: that risk is the caller's when they name one.
 #
-# A pair is listed only after `scripts/qualify_public_rpc.py` passed every check on it:
-# the pinned genesis, state at `finalized`, `latest` and a numbered block, and the fee
-# quote and receipt reads of a direct action. A shared provider is therefore absent from
-# a chain where its keyless tier refuses one of those reads, and a chain operator's own
-# endpoint is listed under the operator's name. HyperEVM has no entry.
+# A pair is listed only after it passed every check of `scripts/qualify_public_rpc.py`
+# in repeated full runs: the pinned genesis, state at `finalized`, `latest` and a
+# numbered block, and the fee quote and receipt reads of a direct action. A pass is a
+# point-in-time result, and a transient refusal fails a run as it would fail a command,
+# so a listed endpoint can still refuse a read. A shared provider is absent from a chain
+# where its keyless tier refused one of those reads in those runs, and a chain
+# operator's own endpoint is listed under the operator's name. HyperEVM has no entry.
+# Removing a pair strands no kept action record: `ax recover` takes a named transport
+# when the record's own endpoint is no longer listed.
 PUBLIC_RPC: dict[str, dict[ChainId, str]] = {
     "publicnode": {
         ChainId("eip155:1"): "https://ethereum-rpc.publicnode.com",
