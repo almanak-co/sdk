@@ -33,10 +33,10 @@ block. They take no key, no wallet and no funds.
 ### 1. See the plan
 
 ```bash
-uv run --locked python -m scripts.live_qa reads --list --output artifacts/live-reads
+uv run --locked python -m scripts.live_qa reads --list
 ```
 
-This contacts nothing. Each line is an endpoint and a case.
+This contacts nothing and writes nothing. Each line is an endpoint and a case.
 
 ### 2. Run
 
@@ -117,7 +117,10 @@ Ask for, and wait for, each of these. Do not fill any in yourself:
 - That they want to spend real funds now, after you repeated the warning above.
 - The wallet directory (written by `almanak wallet create`), funded with gas and
   with the market's asset. The wallet must hold no position in that market: the
-  withdrawal takes the whole supplied balance.
+  withdrawal takes the whole supplied balance. It must have been created with
+  `--generate-password` or `--password-file`: you have no terminal to type a
+  keystore password at, and the check refuses a wallet that would ask for one.
+  You never read that password file.
 - The market and amount. Suggested sizes, with the largest the check accepts:
 
 | `--market` | Chain | Asset | Suggested `--amount` | Largest accepted |
@@ -144,8 +147,9 @@ ALMANAK_QA_SPEND_REAL_FUNDS=1 uv run --locked python -m scripts.live_qa writes -
 ```
 
 The check refuses to start, and runs nothing, unless every gate holds: the
-`ALMANAK_QA_SPEND_REAL_FUNDS=1` flag, the wallet directory, both fee ceilings, a
-reviewed market, a tiny amount and one transport. It also refuses when `CI` or
+`ALMANAK_QA_SPEND_REAL_FUNDS=1` flag, the wallet directory with its password
+file, both fee ceilings, a reviewed market, a tiny amount, one transport and a new
+output directory. It also refuses when `CI` or
 `GITHUB_ACTIONS` is set. If it refuses, report the reasons and stop; do not work
 around a gate.
 
@@ -163,7 +167,7 @@ confirmation covers one round trip.
 ### 4. Execute
 
 Only after the user confirms, run the same command, on the same transport, with
-`--execute` and the phrase:
+another new output directory, `--execute` and the phrase:
 
 ```bash
 ALMANAK_QA_SPEND_REAL_FUNDS=1 uv run --locked python -m scripts.live_qa writes --market <market> --amount <base units> --wallet <wallet directory> --public-rpc publicnode --max-gas-price-wei <wei> --max-transaction-fee <fee> --output <new directory> --execute --confirm "<phrase>"
