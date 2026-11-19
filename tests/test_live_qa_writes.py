@@ -22,10 +22,15 @@ PHRASE = "supply 100000 ethereum-usdc and withdraw"
 
 @pytest.fixture
 def wallet(tmp_path):
-    """A wallet directory as the gates see it: only the presence of wallet.json is checked."""
+    """A wallet directory as the gates see it: wallet.json and the password file it names.
+
+    The gates read the path from wallet.json and check the file exists; nothing opens it.
+    """
     directory = tmp_path / "wallet"
     directory.mkdir()
-    (directory / "wallet.json").write_text("{}")
+    password = directory / "keystore-password"
+    password.write_text("not a real password")
+    (directory / "wallet.json").write_text(json.dumps({"password_file": str(password)}))
     return directory
 
 
@@ -100,7 +105,8 @@ def round_trip(**changes):
 
 def check(request, environment, run, tmp_path, ask=None):
     said = []
-    output = tmp_path / "report"
+    # A new directory for every run, as the check itself requires.
+    output = tmp_path / f"report-{len(list(tmp_path.iterdir()))}"
     code = writes.run_writes(request, environment, run, output, ask=ask, say=said.append)
     return code, "\n".join(said), output
 
@@ -120,6 +126,46 @@ def test_it_refuses_without_a_wallet_the_operator_supplied(wallet, tmp_path):
     assert code == 2 and "--wallet is required" in said
     code, said, _ = check(request_for(tmp_path / "missing"), SPEND, never, tmp_path)
     assert code == 2 and "holds no wallet.json" in said
+
+
+def test_without_a_terminal_it_refuses_a_wallet_that_would_ask_for_its_password(wallet, tmp_path):
+    """`almanak ax` would ask for the password after the confirmation, with nobody to answer."""
+    named = json.loads((wallet / "wallet.json").read_text())["password_file"]
+    for record in ("{}", "not json", "[]", json.dumps({"password_file": named + ".gone"})):
+        (wallet / "wallet.json").write_text(record)
+        code, said, _ = check(request_for(wallet), SPEND, never, tmp_path)
+        assert code == 2 and "must name an existing password file" in said, record
+    # At a terminal the person can type it, so the same wallet is accepted.
+    (wallet / "wallet.json").write_text("{}")
+    almanak = round_trip()
+    code, _, _ = check(request_for(wallet), SPEND, almanak, tmp_path, ask=lambda prompt: "")
+    assert code == 0 and len(almanak.commands) == 1
+
+
+def test_the_gates_never_open_the_password_file_or_a_keystore(wallet, monkeypatch):
+    opened = []
+    real_open = Path.open
+
+    def recording(path, *args, **kwargs):
+        opened.append(path.name)
+        return real_open(path, *args, **kwargs)
+
+    (wallet / "keystores.json").write_text("{}")
+    monkeypatch.setattr(Path, "open", recording)
+    assert writes.gates(request_for(wallet), SPEND, interactive=False) == []
+    assert opened == ["wallet.json"]
+
+
+def test_it_refuses_an_output_directory_that_already_holds_a_report(wallet, tmp_path):
+    """An earlier report may hold the only record of the transactions a run sent."""
+    earlier = tmp_path / "earlier"
+    earlier.mkdir()
+    (earlier / "summary.md").write_text("transactions")
+    said = []
+    code = writes.run_writes(request_for(wallet), SPEND, never, earlier, say=said.append)
+    assert code == 2 and "is not empty; use a new output directory" in said[0]
+    assert (earlier / "summary.md").read_text() == "transactions"
+    assert writes.output_gates(tmp_path / "missing") == []
 
 
 @pytest.mark.parametrize(
