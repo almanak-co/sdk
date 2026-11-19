@@ -8,6 +8,18 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Added
+- Opt-in live QA under `scripts/live_qa`, outside default pytest and CI. The read
+  level runs `almanak ax` reads on the public endpoints without a key, compares them
+  with direct reads and reports each case as pass, fail or blocked. The write level
+  runs a tiny Aave V4 supply and full withdrawal with real funds, behind
+  `ALMANAK_QA_SPEND_REAL_FUNDS=1`, an operator's own wallet, fee ceilings and a typed
+  confirmation of the preview. `skills/almanak-qa` teaches an agent both.
+
+### Fixed
+- The `--public-rpc` help no longer says a public endpoint serves reads and previews
+  only; `ax supply` and `ax withdraw` execute through one since 3.2.1.
+
 ## [3.2.1] - 2026-11-19
 
 ### Changed
