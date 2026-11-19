@@ -49,9 +49,14 @@ def state_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def desk(tmp_path, recorded, monkeypatch):
-    desk = Desk(tmp_path, recorded)
+def named(recorded, monkeypatch):
+    """The capture's allocation under the name a direct deployment gives its position."""
     monkeypatch.setattr(aave_direct, "ALLOCATION", recorded.config.allocations[0].name)
+
+
+@pytest.fixture
+def desk(tmp_path, recorded, monkeypatch, named):
+    desk = Desk(tmp_path, recorded)
 
     def coordinator(*, gateway, create):
         runtime = desk.runtime()
@@ -399,6 +404,7 @@ def finished(recorded, outcomes, refused=None):
     return ax_actions.executed_result(recorded, outcomes, refused)
 
 
+@pytest.mark.usefixtures("named")
 def test_only_the_finished_request_completes_the_action(recorded):
     from almanak.gateway.ethereum import DataError
 
@@ -414,6 +420,7 @@ def test_only_the_finished_request_completes_the_action(recorded):
     assert unsent["refused"]["kind"] == "deadline_margin"
 
 
+@pytest.mark.usefixtures("named")
 def test_a_withdrawal_is_complete_only_once_no_allowance_remains(recorded):
     (withdraw,) = outcomes_of(recorded, "withdraw")
     assert finished(recorded, [withdraw])["completed"] is True
@@ -754,6 +761,7 @@ def test_a_new_record_is_never_visible_to_a_sweep_before_it_is_locked(state_home
     lock.close()
 
 
+@pytest.mark.usefixtures("named")
 def test_a_signed_step_without_an_outcome_is_reported_as_unresolved(recorded, capsys):
     (approve,) = outcomes_of(recorded, "approve")
     pending = SimpleNamespace(operation=SimpleNamespace(kind="supply"), tx_hash="0xabc")

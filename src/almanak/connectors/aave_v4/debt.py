@@ -15,9 +15,15 @@ from almanak.gateway.safe_fixture import calldata
 
 
 def position_components(reader, target, block) -> tuple[dict[str, Any], int]:
-    args = (target.reserve.reserve_id, target.fund.address)
+    reserve = target.reserve
+    return reserve_components(reader, reserve.spoke, reserve.reserve_id, target.fund.address, block)
+
+
+def reserve_components(reader, spoke, reserve_id, account, block) -> tuple[dict[str, Any], int]:
+    """One account's debt shares and collateral flag in one reserve, and its supply shares."""
+    args = (reserve_id, account)
     drawn, premium, offset, supplied, _ = reader.call(
-        target.reserve.spoke,
+        spoke,
         "getUserPosition(uint256,address)",
         block,
         inputs=("uint256", "address"),
@@ -25,7 +31,7 @@ def position_components(reader, target, block) -> tuple[dict[str, Any], int]:
         outputs=("uint120", "uint120", "int200", "uint120", "uint32"),
     )
     enabled, _ = reader.call(
-        target.reserve.spoke,
+        spoke,
         "getUserReserveStatus(uint256,address)",
         block,
         inputs=("uint256", "address"),
