@@ -40,6 +40,8 @@ class FakeRpc:
     def call(self, to, signature, block, outputs, args=()):
         if self.down:
             raise RpcUnavailable("down")
+        if signature in self.reverting:
+            raise RpcReverted(f"eth_call {signature}: execution reverted")
         return self.answers[signature]
 
     def reverts(self, to, signature, block):
@@ -113,6 +115,25 @@ def test_a_block_the_endpoint_reports_differently_fails():
 def test_an_unanswered_direct_read_blocks_instead_of_failing():
     verdict = reads.judge(CASE, succeeded(native_output()), FakeRpc(down=True))
     assert verdict == reads.Verdict("transient", "cross-check blocked: down")
+
+
+def test_a_direct_read_that_reverts_is_an_answer_so_the_case_fails_without_a_retry():
+    """The endpoint answered. Only a read it did not answer is blocked."""
+    output = {"observations": [{**native_output()["observations"][0], "asset": USDC}]}
+    case = reads.ReadCase("balance/erc20", "eip155:1", ("balance",), checks.erc20_balance)
+    run, calls = scripted(succeeded(output))
+    rpc = FakeRpc(reverting=("balanceOf(address)",))
+    result = reads.run_case(case, "publicnode", run, rpc, Path("."), sleep=pytest.fail)
+    assert (result.status, result.attempts, len(calls)) == ("fail", 1, 1)
+    assert "a direct read of what the command reported reverted" in result.detail
+    assert reads.expectation(result)[0] == "fail"
+
+
+def test_a_balance_read_without_observations_compares_nothing_and_fails():
+    for check in (checks.native_balance, checks.erc20_balance):
+        case = reads.ReadCase("balance", "eip155:1", ("balance",), check)
+        verdict = reads.judge(case, succeeded({"observations": []}), FakeRpc())
+        assert verdict.status == "fail" and "no observations" in verdict.detail
 
 
 def test_output_the_check_cannot_read_fails():
@@ -210,6 +231,44 @@ def test_a_known_issue_still_fails_and_the_report_says_whether_it_reproduced():
     assert result(KNOWN, "fail", "abi: other").known.startswith("not observed this run")
     assert result(KNOWN, "blocked").known.startswith("not observed this run")
     assert result(CASE, "fail").known == ""
+
+
+def test_a_new_finding_beside_a_known_issue_is_not_excused_by_the_marker():
+    """Only a failure made of nothing but the known issue reproduces it."""
+    known, new = "8 Spokes revert getReserveCount()", "market 0 asset: CLI 'a', direct read 'b'"
+    issue = reads.KnownIssue("empty Spokes", "revert getReserveCount()")
+    case = reads.ReadCase("listing", "eip155:43114", ("lending-markets",), known_issue=issue)
+
+    def failed(*findings):
+        return reads.Result(case, "publicnode", "fail", 1, 0.1, "; ".join(findings), "", findings)
+
+    alone, mixed = failed(known), failed(known, new)
+    assert alone.known == "reproduces: empty Spokes"
+    assert mixed.known == "other failures beside the known issue: empty Spokes"
+    assert reads.expectation(alone)[0] == "xfail" and reads.expectation(mixed)[0] == "fail"
+    assert reads.exit_code([alone], known_issues_ok=True) == 0
+    assert reads.exit_code([mixed], known_issues_ok=True) == 1
+    # Every finding being the known issue still reproduces it, as an Aave V3 listing does.
+    assert failed(known, known).known.startswith("reproduces")
+    assert failed(new).known.startswith("not observed this run")
+
+
+def test_a_check_reports_its_findings_separately_to_the_result():
+    listed = listing(
+        [market(spoke="0xspoke", reserve_id=3, hub=HUB)],
+        [{"spoke": "0x1", "reason": "rpc: eth_call: RPC rejected the requested read"}],
+    )
+    issue = reads.KnownIssue("empty Spokes", "revert getReserveCount()")
+    case = reads.ReadCase(
+        "listing", "eip155:43114", ("lending-markets",), checks.aave_v4_listing, known_issue=issue
+    )
+    wrong_asset = {"getReserve(uint256)": ("0x" + "c3" * 20, HUB, 4, 18)}
+    run, _ = scripted(succeeded(listed))
+    rpc = FakeRpc(wrong_asset)
+    rpc.reverts = lambda to, signature, block: True
+    result = reads.run_case(case, "publicnode", run, rpc, Path("."))
+    assert len(result.findings) == 2 and result.detail == "; ".join(result.findings)
+    assert result.known.startswith("other failures beside the known issue")
 
 
 def test_the_plan_runs_a_case_where_the_endpoint_serves_its_chain():
@@ -670,6 +729,8 @@ def test_progress_lines_name_the_reason_only_when_a_case_did_not_pass(capsys):
 
 
 class Config:
+    """The pytest configuration as the live conftest asks it for the opt-in flag."""
+
     def __init__(self, live):
         self.live = live
 
@@ -683,6 +744,17 @@ def test_the_live_directory_is_not_collected_without_the_flag():
     assert live_conftest.pytest_ignore_collect(ROOT / "tests/live", Config(True)) is None
     assert live_conftest.served("publicnode", "eip155:1")
     assert not live_conftest.served("publicnode", "eip155:999")
+
+
+def test_a_live_test_named_by_its_path_is_skipped_without_the_flag():
+    """pytest collects a file named on its command line without asking the ignore hook."""
+    with pytest.raises(pytest.skip.Exception, match="need --live-public"):
+        live_conftest.require_opt_in(Config(False))
+    assert live_conftest.require_opt_in(Config(True)) is None
+    source = (ROOT / "tests/live/conftest.py").read_text()
+    fixture = source.split("def live_session(")[1]
+    # The check comes before anything that could reach an endpoint.
+    assert fixture.index("require_opt_in(request.config)") < fixture.index("reads.Session(")
 
 
 def test_default_runs_and_the_makefile_never_pass_the_live_flag():
