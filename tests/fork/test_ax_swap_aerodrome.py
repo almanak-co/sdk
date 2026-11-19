@@ -229,34 +229,40 @@ def test_a_wallet_that_holds_the_pools_shares_is_refused_before_anything_is_plan
     assert (shares(setting)[1:], setting.router_allowance()) == ((1, 0), 0)
 
 
-def share_sender(setting):
+def share_sender(setting, asset):
     """Another account that holds one base unit of the pool's shares and can pay to send it."""
     sender = "0x" + "5e" * 20
     setting.fork.rpc("anvil_setBalance", [sender, hex(10**18)])
-    fund_erc20(setting.fork, sender, shares(setting)[0], 1)
+    fund_erc20(setting.fork, sender, asset, 1)
     setting.fork.rpc("anvil_impersonateAccount", [sender])
     return sender
 
 
 def share_sent_with_the_swap(setting, monkeypatch, *, stop=False):
-    """Make the next swap share its block with a transfer of one pool share to the wallet.
+    """Make the next swap share its block with a transfer of one pool share to the wallet."""
+    share_sent_with("swap", setting, shares(setting)[0], monkeypatch, stop=stop)
 
-    The share arrives after the swap was signed and sent, so no observation before the
-    signature could see it; the swap is reconciled at the block that holds both. With
+
+def share_sent_with(kind, setting, asset, monkeypatch, *, stop=False):
+    """Make the next step of this kind share its block with a transfer of one share of
+    the pool, `asset`, to the wallet.
+
+    The share arrives after the step was signed and sent, so no observation before the
+    signature could see it; the step is reconciled at the block that holds both. With
     `stop`, the command is interrupted once that block is mined.
     """
     from almanak.operator_runtime import OperatorRuntime
 
-    rpc, sender = setting.fork.rpc, share_sender(setting)
-    token = erc20_address(shares(setting)[0], setting.cell.chain)
+    rpc, sender = setting.fork.rpc, share_sender(setting, asset)
+    token = erc20_address(asset, setting.cell.chain)
     transfer = calldata("transfer(address,uint256)", ("address", "uint256"), (setting.owner, 1))
 
     def wait(self, state):
         pending = state.pending
-        if pending is None or pending.operation.kind != "swap":
+        if pending is None or pending.operation.kind != kind:
             return
         if pending.unsent:
-            # Signed, with its last check before the send still to come: the swap then
+            # Signed, with its last check before the send still to come: the step then
             # stays in the node's pool until the share has been sent as well.
             rpc("evm_setAutomine", [False])
             return
