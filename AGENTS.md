@@ -1510,7 +1510,7 @@ independently.
 - Accepted: live mainnet checks are opt-in (`scripts/live_qa`, `docs/qa.md`). They
   never run in default pytest, `make test`, `make check` or any pull request,
   `main` or release workflow, and their result never gates a merge. `tests/live`
-  is collected only with `--live-public`. A case a public endpoint did not answer
+  runs only with `--live-public`. A case a public endpoint did not answer
   is blocked: not a pass and not an SDK finding.
 - Accepted: the live write check spends real funds and refuses to start without
   `ALMANAK_QA_SPEND_REAL_FUNDS=1`, an operator-supplied funded wallet and both

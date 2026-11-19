@@ -65,7 +65,7 @@ def test_the_read_level_needs_no_flag_wallet_or_key():
         assert "--wallet" not in line and "--env-file" not in line and "--execute" not in line
 
 
-def test_the_write_level_previews_first_and_executes_only_with_the_phrase():
+def test_the_write_level_previews_first_and_executes_only_with_the_phrase(tmp_path):
     lines = [line for line in commands() if RUNNER + "writes" in line]
     assert len(lines) == 2 and all(line.startswith(SPEND) for line in lines)
     preview, execute = (entry.build_parser().parse_args(runner_arguments(line)) for line in lines)
@@ -75,7 +75,8 @@ def test_the_write_level_previews_first_and_executes_only_with_the_phrase():
         request = writes.WriteRequest(
             market=args.market,
             amount=args.amount,
-            wallet=args.wallet,
+            # Under tmp_path, so a wallet directory in the checkout cannot change the outcome.
+            wallet=tmp_path / args.wallet,
             max_gas_price_wei=args.max_gas_price_wei,
             max_transaction_fee=args.max_transaction_fee,
             public_rpc=args.public_rpc,

@@ -499,7 +499,8 @@ refuse; `ax resolve` and `ax dex-pools` need a vendor key; and `ax perp-position
 takes a fully resolved GMX market document that no `ax` command prints.
 
 The same cases run under pytest with an explicit flag. Without `--live-public`
-the `tests/live` directory is not collected at all. Run it serially, since
+the `tests/live` directory is not collected at all, and a test file named by its
+path is skipped. Run it serially, since
 parallel workers share each endpoint's rate limit. A blocked case is reported as
 skipped, with the same three-case breaker as the script. A known issue that
 reproduces is an expected failure (`xfail`); one that no longer reproduces fails
@@ -544,8 +545,8 @@ these hold. Every unmet gate is named at once.
 4. `--market` is one of the reviewed markets below and `--amount` is at most its
    largest accepted size.
 5. Exactly one of `--public-rpc` and `--env-file` names the transport.
-6. Neither `CI` nor `GITHUB_ACTIONS` is set.
-7. `--output` is a new or empty directory. A report is never written over an
+6. Neither `CI` nor `GITHUB_ACTIONS` is set, to any value, an empty one included.
+7. `--output` is a new or empty directory that can be created. A report is never written over an
    earlier one, which may hold the only record of the transactions a run sent.
 
 | `--market` | Chain | Asset | Suggested `--amount` | Largest accepted |
@@ -595,8 +596,18 @@ It stops and exits 1, leaving the rest to you, when:
 - the supply did not complete. Its approval may have been sent. Do not run the
   check again: read `outcomes` and `refused`, and resolve a kept record with
   `almanak ax recover` as [Operating](operating.md#operator-actions) describes.
-- the withdrawal was refused or did not complete. The supplied amount is then
-  still in the market; `almanak ax withdraw` for that market returns it.
+- the wallet's position changed between the preview and the supply. The
+  withdrawal is not run, since it would take more than the check supplied. The
+  supplied amount is still in the market.
+- the withdrawal preview was refused. Nothing more was signed and the supplied
+  amount is still in the market; `almanak ax withdraw` for that market returns it
+  once the reason is resolved.
+- the withdrawal was executed but did not complete. Its outcome is not known:
+  the amount may still be supplied, or the withdrawal may have been mined. Do
+  not request another withdrawal yet. A signed step left unresolved keeps its
+  record, which refuses later actions for the wallet: list the kept records with
+  `almanak ax recover`, resolve one if kept, then read the position with
+  `ax lending-position` before deciding anything.
 
 Only the gates and the flow have tests, offline and against a fake command
 (`tests/test_live_qa_writes.py`). No test and no workflow runs the write level for

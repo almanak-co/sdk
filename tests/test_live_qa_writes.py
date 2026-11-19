@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from almanak.caip import ChainId
 from almanak.cli_arguments import build_parser, parse_validated
 from scripts.live_qa import __main__ as entry
 from scripts.live_qa import cli, writes
@@ -168,6 +169,31 @@ def test_it_refuses_an_output_directory_that_already_holds_a_report(wallet, tmp_
     assert writes.output_gates(tmp_path / "missing") == []
 
 
+def test_it_refuses_an_output_it_could_not_write_a_report_into(wallet, tmp_path):
+    """Found before the first command, not after the transactions were sent."""
+    said = []
+    regular = tmp_path / "report.md"
+    regular.write_text("")
+    code = writes.run_writes(request_for(wallet), SPEND, never, regular, say=said.append)
+    assert code == 2 and "is not a directory" in said[0] and regular.read_text() == ""
+    # A path that passes the gates but cannot be made is refused as well.
+    beneath = regular / "nested"
+    code = writes.run_writes(request_for(wallet), SPEND, never, beneath, say=said.append)
+    assert code == 2 and "cannot be created" in said[-1]
+
+
+def test_the_report_directory_exists_before_the_first_command(wallet, tmp_path):
+    output = tmp_path / "new" / "report"
+    seen = []
+
+    def run(arguments, timeout=None):
+        seen.append(output.is_dir())
+        return round_trip()(arguments, timeout)
+
+    assert writes.run_writes(request_for(wallet), SPEND, run, output, say=lambda text: None) == 0
+    assert seen == [True]
+
+
 @pytest.mark.parametrize(
     ("field", "option"),
     [
@@ -184,9 +210,11 @@ def test_it_refuses_without_each_fee_ceiling(wallet, tmp_path, field, option):
 
 
 @pytest.mark.parametrize("name", writes.CI_ENV)
-def test_it_refuses_in_ci_whatever_else_is_set(wallet, tmp_path, name):
-    code, said, _ = check(request_for(wallet), {**SPEND, name: "true"}, never, tmp_path)
-    assert code == 2 and "never runs in CI" in said
+@pytest.mark.parametrize("value", ["true", "1", "false", ""])
+def test_it_refuses_in_ci_whatever_else_is_set(wallet, tmp_path, name, value):
+    """Set to anything, an empty value included: the gate fails closed."""
+    code, said, _ = check(request_for(wallet), {**SPEND, name: value}, never, tmp_path)
+    assert code == 2 and f"{name} is set: the write check never runs in CI" in said
 
 
 def test_it_refuses_anything_but_a_tiny_amount_in_a_reviewed_market(wallet, tmp_path):
@@ -224,6 +252,14 @@ def test_the_entry_point_refuses_before_running_anything(tmp_path, monkeypatch, 
     stderr = capsys.readouterr().err
     for reason in ("ALMANAK_QA_SPEND_REAL_FUNDS=1", "--wallet", "--max-gas-price-wei"):
         assert reason in stderr
+
+
+def test_a_market_carries_a_validated_chain_and_its_fee_limit_is_found_by_it():
+    for market in writes.MARKETS.values():
+        assert isinstance(market.chain, ChainId) and market.chain in writes.FEE_LIMITS
+    assert all(isinstance(chain, ChainId) for chain in writes.FEE_LIMITS)
+    with pytest.raises(ValueError):
+        ChainId("ethereum")
 
 
 def test_the_limits_keep_every_market_tiny():
@@ -288,6 +324,18 @@ def test_a_wallet_that_already_holds_a_position_is_refused(wallet, tmp_path):
     assert code == 1 and almanak.sent == [] and "already holds a position" in said
 
 
+def test_a_position_that_appeared_after_the_preview_is_never_withdrawn(wallet, tmp_path):
+    """The supply adopts what the wallet holds when it runs; the withdrawal takes it all."""
+    adopted = executed(["approve", "supply"], POSITION_HELD)
+    adopted["position_before"] = POSITION_HELD
+    almanak = round_trip(supply_execute=adopted)
+    request = request_for(wallet, execute=True, confirm=PHRASE)
+    code, said, _ = check(request, SPEND, almanak, tmp_path)
+    assert code == 1 and almanak.sent == ["supply"] and len(almanak.commands) == 2
+    assert "position changed between the preview and the supply" in said
+    assert "THE SUPPLIED AMOUNT IS STILL IN THE MARKET" in said
+
+
 def test_a_refused_preview_stops_before_the_confirmation(wallet, tmp_path):
     almanak = round_trip(supply_preview=None)
     request = request_for(wallet, execute=True, confirm=PHRASE)
@@ -311,7 +359,7 @@ def test_a_failed_withdrawal_says_the_funds_may_still_be_supplied(wallet, tmp_pa
         ({"withdraw_preview": None}, "THE SUPPLIED AMOUNT IS STILL IN THE MARKET"),
         (
             {"withdraw_execute": executed([], POSITION_HELD, completed=False)},
-            "THE SUPPLIED AMOUNT MAY STILL BE IN THE MARKET",
+            "Do not withdraw again yet",
         ),
         (
             {"withdraw_execute": executed(["withdraw"], POSITION_HELD)},
