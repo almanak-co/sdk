@@ -10,6 +10,7 @@ from almanak.connectors.curve.ownership import validate_owned
 from almanak.connectors.curve.state import Checkpoint, Work
 from almanak.connectors.ownership import protocol_ownership
 from almanak.dex_intents import IncreasePoolLiquidity, OpenPoolLiquidity, SwapExactInput
+from almanak.gateway.ethereum import DataError
 from almanak.work import initial_work
 
 
@@ -32,6 +33,31 @@ def validate_initial(state, observed):
         validate_initial_snapshot(value)
     if any(o.needs_cleanup for o in observed):
         raise ValueError("new deployment cannot adopt pre-existing spending authority")
+
+
+def adopt_owned(owned, observed):
+    """Ownership of an operator deployment at its start: the inventory its allocation states.
+
+    Nothing is read into ownership. The stated coin amounts are attributed only when
+    the wallet covers each of them. LP shares are never adopted: a wallet that holds
+    this pool's LP token is refused here, before anything is planned, because every
+    later ownership check requires the observed shares to equal the owned ones.
+    """
+    for item, seen in zip(owned, observed, strict=True):
+        if seen.position is not None:
+            raise DataError(
+                "ownership",
+                f"the wallet holds {seen.position.shares.amount} base units of this pool's "
+                f"LP token {seen.position.shares.asset}; a direct action adopts no LP shares",
+            )
+        for held, attributed in zip(seen.wallets.root, item.inventory.root, strict=True):
+            if held.amount < attributed.amount:
+                raise DataError(
+                    "inventory",
+                    f"the wallet holds {held.amount} base units of {held.asset}, "
+                    f"less than the {attributed.amount} the action needs",
+                )
+    return owned
 
 
 def commit_owned(owned, outcome):
@@ -69,6 +95,7 @@ class CurveLifecycle:
     validate_initial = staticmethod(validate_initial)
     validate_owned = staticmethod(validate_observed)
     commit_owned = staticmethod(commit_owned)
+    adopt = staticmethod(adopt_owned)
     validate_closure = staticmethod(validate_closure)
 
     @classmethod
@@ -81,6 +108,7 @@ class CurveLifecycle:
             deployment_id=uuid4().hex,
             config=config,
             strategy=strategy,
+            operator=strategy is None,
             capabilities=capabilities,
             permissions=permissions,
             mode="running",
