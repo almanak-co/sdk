@@ -21,7 +21,7 @@ its changelog is on the `v2` branch.
   whole position in the venue: the Pool reserves the account uses as collateral or
   has borrowed, and every leg it holds in a Comet or a Morpho market. An action the
   protocol would check against a health floor is refused while the wallet has debt
-  there, and the refusal names the debt.
+  there, and the refusal says so.
 - `--public-rpc` serves `almanak ax` reads on Base, Arbitrum, BNB, Optimism, Polygon and
   Robinhood beside Ethereum and Avalanche. `drpc` adds Base, Optimism, Polygon and
   Robinhood, and four chain operators' own endpoints are named `base`, `arbitrum`,

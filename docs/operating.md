@@ -478,20 +478,24 @@ protocol's own units, as strings; `ax lending-position` reports amounts in asset
 The deployment covers the wallet's whole position in the venue, read when the command
 starts, not only the requested market:
 
-- Aave V3 and SparkLend bind every reserve of the Pool that the account uses as
-  collateral or has borrowed, each with the price source the Pool uses for it now,
-  because the Pool risk check must account for all of them.
+- A supply on Aave V3 or SparkLend binds every reserve of the Pool that the account
+  uses as collateral or has borrowed, each with the price source the Pool uses for
+  it now, because the Pool risk check must account for all of them. A withdrawal
+  binds its own reserve only.
 - Compound V3 binds the base asset and every collateral asset the wallet holds in
   the Comet, and Morpho Blue binds the other leg of the market when the wallet
   holds it.
 
-A position that appears in the venue between that read and the first step is refused
-with `ownership_mismatch`; running the command again reads it. A Compound V3 Comet
+A position that appears in the venue between that read and the first step is refused:
+with `ownership_mismatch` on Compound V3 and Morpho Blue, and a supply on Aave V3 or
+SparkLend with `risk_unavailable`. Running the command again reads it. A supply into
+a reserve that is isolated collateral, or by a wallet that holds isolated collateral
+in the Pool, is refused on Aave V3 and SparkLend. A Compound V3 Comet
 with many collateral assets takes many reads, so a preview through a public endpoint
 can take minutes.
 
 These commands state no health floor, so what the protocol would check against one
-is refused while the wallet has debt in the venue, and the refusal names the debt:
+is refused while the wallet has debt in the venue, and the refusal says so:
 a supply and a withdrawal of collateral on Aave V3 and SparkLend, a withdrawal of
 collateral on Compound V3 and Morpho Blue, and a supply of the Compound V3 base
 asset, which would repay the debt. Supplying collateral on Compound V3 or Morpho

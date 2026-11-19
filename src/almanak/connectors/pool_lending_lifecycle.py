@@ -61,6 +61,10 @@ def commit_owned(owned, outcome):
 
 def adopt(owned, observed):
     """Ownership of each position as its observation states it, for an operator deployment."""
+    if tuple(seen.target for seen in observed) != tuple(item.target for item in owned):
+        raise DataError(
+            "ownership_mismatch", "observations do not cover the configured Pool positions"
+        )
     return tuple(
         type(item)(
             target=item.target,

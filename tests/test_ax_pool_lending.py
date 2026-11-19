@@ -14,6 +14,7 @@ from almanak.connectors import pool_lending_direct as pool
 from almanak.connectors.composition import connector_from_wire
 from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet, binding
 from almanak.connectors.pool_lending_lifecycle import adopt, commit_owned
+from almanak.gateway.ethereum import DataError
 from almanak.operator_deployment import supports_operator
 from tests.aave_v3_helpers import recorded_v3  # noqa: F401
 from tests.lending_captures import read_capture
@@ -26,23 +27,34 @@ SUPPLY, WITHDRAW = ActionRequest("supply", 5), ActionRequest("withdraw")
 
 
 class Reader:
-    """A Pool with three listed reserves and one account's user bitmap."""
+    """A Pool with three reserves, one account's user bitmap, and reserve configurations.
 
-    def __init__(self, bitmap):
-        self.bitmap = bitmap
+    Reserve IDs are 0, 1 and 3: ID 2 was dropped, so the Pool's reserve list, which
+    closes that gap, is no index of IDs.
+    """
+
+    assets = {0: WETH, 1: USDC, 3: DAI}
+
+    def __init__(self, bitmap, isolated=()):
+        self.bitmap, self.isolated = bitmap, isolated
 
     def call(self, target, signature, block, **options):
         assert target == POOL
         if signature == "getUserConfiguration(address)":
             assert options["args"] == (WALLET.address,)
             return (((self.bitmap,)),)
-        assert signature == "getReservesList()"
-        return ((WETH, USDC, DAI),)
+        if signature == "getConfiguration(address)":
+            (asset,) = options["args"]
+            # An LTV in the low bits, and a debt ceiling at bit 212 for an isolated reserve.
+            return (((8000 | (5 << 212 if asset in self.isolated else 0),)),)
+        assert signature == "getReserveAddressById(uint16)"
+        (reserve_id,) = options["args"]
+        return (self.assets[reserve_id].upper().replace("0X", "0x"),)
 
 
-def bits(**flags):
-    """A user bitmap from flags per reserve ID: debt is 1, collateral is 2."""
-    return sum(value << (2 * reserve_id) for reserve_id, value in enumerate(flags.values()))
+def bits(weth=0, usdc=0, dai=0):
+    """A user bitmap from the flags of each reserve, at its ID: debt is 1, collateral is 2."""
+    return weth | usdc << 2 | dai << 6
 
 
 @pytest.fixture(params=["aave_v3", "sparklend"])
@@ -102,8 +114,12 @@ def test_adoption_takes_ownership_from_the_observed_position(recorded):
     adopted = adopt(empty[index : index + 1], (supply.after,))
     assert adopted == commit_owned(empty[index : index + 1], supply)
     assert adopted[0].supply_scaled == supply.after.position.supplied_scaled > 0
-    with pytest.raises(ValueError):
+    with pytest.raises(DataError, match="do not cover the configured Pool positions"):
         adopt(empty, (supply.after,) * (len(empty) + 1))
+    # An observation of another position cannot be adopted as this one.
+    other = next(item for item in empty if item.target != supply.operation.target)
+    with pytest.raises(DataError, match="do not cover the configured Pool positions"):
+        adopt((other,), (supply.after,))
 
 
 def test_the_user_bitmap_names_the_reserves_the_account_holds():
@@ -114,13 +130,19 @@ def test_the_user_bitmap_names_the_reserves_the_account_holds():
         DAI: pool.DEBT,
     }
     assert pool.held_reserves(Reader(0), None, POOL, WALLET.address) == {}
+    # DAI sits at ID 3, past a dropped reserve: the bitmap is read by ID, not by position
+    # in the Pool's reserve list.
+    assert pool.held_reserves(Reader(pool.DEBT << 6), None, POOL, WALLET.address) == {
+        DAI: pool.DEBT
+    }
 
 
 def test_an_action_the_pool_risk_checks_is_refused_while_the_account_has_debt():
     debt = {WETH: pool.COLLATERAL, DAI: pool.DEBT}
-    with pytest.raises(ValueError, match="has debt in this Pool: a supply"):
+    # The refusal names the reserve the wallet owes.
+    with pytest.raises(ValueError, match=rf"has debt in this Pool \({DAI}\): a supply"):
         pool.refuse_unbounded_risk(SUPPLY, debt, USDC)
-    with pytest.raises(ValueError, match="has debt in this Pool: a withdraw"):
+    with pytest.raises(ValueError, match="a withdraw there is risk-checked"):
         pool.refuse_unbounded_risk(WITHDRAW, debt, WETH)
     # Releasing a reserve that backs nothing is not risk-checked, and neither is
     # anything on an account without debt.
@@ -185,11 +207,11 @@ def test_a_wallet_with_nothing_in_the_pool_binds_only_the_requested_reserve(mark
 
 def test_a_wallet_that_holds_the_requested_reserve_binds_it_once(market):
     reader = Reader(bits(weth=pool.COLLATERAL))
-    document = pool.positions("sparklend", reader, None, market(WETH), WALLET, WITHDRAW)
+    document = pool.positions("sparklend", reader, None, market(WETH), WALLET, SUPPLY)
     assert names(document) == [(ALLOCATION, WETH, True)]
 
 
-def test_every_other_reserve_the_account_holds_is_bound_beside_the_requested_one(market):
+def test_a_supply_binds_every_other_reserve_the_account_holds(market):
     reader = Reader(bits(weth=pool.COLLATERAL, usdc=0, dai=pool.COLLATERAL))
     document = pool.positions("aave_v3", reader, None, market(USDC, POOL), WALLET, SUPPLY)
     assert names(document) == [
@@ -203,16 +225,36 @@ def test_every_other_reserve_the_account_holds_is_bound_beside_the_requested_one
     ]
 
 
-def test_a_held_debt_reserve_is_bound_without_collateral_authority(market):
+def test_a_withdrawal_binds_its_own_reserve_only(market, monkeypatch):
+    """No held reserve is resolved, so one the connector cannot verify blocks no exit."""
+    from almanak.connectors import lending_lookup
+
+    monkeypatch.setattr(
+        lending_lookup, "resolve", lambda *a: pytest.fail("resolved a reserve it does not bind")
+    )
     reader = Reader(bits(weth=pool.COLLATERAL, usdc=0, dai=pool.DEBT))
     document = pool.positions("aave_v3", reader, None, market(USDC), WALLET, WITHDRAW)
-    assert names(document) == [
-        (ALLOCATION, USDC, True),
-        ("held_0", WETH, True),
-        ("held_1", DAI, False),
-    ]
+    assert names(document) == [(ALLOCATION, USDC, True)]
     with pytest.raises(ValueError, match="has debt in this Pool"):
         pool.positions("aave_v3", reader, None, market(USDC), WALLET, SUPPLY)
+
+
+def test_a_supply_involving_isolated_collateral_is_refused(market):
+    """The Pool would not enable it as the connector accounts a first supply."""
+    held = bits(weth=pool.COLLATERAL)
+    with pytest.raises(ValueError, match="this reserve is isolated collateral in its Pool"):
+        pool.positions("aave_v3", Reader(0, isolated=(USDC,)), None, market(USDC), WALLET, SUPPLY)
+    with pytest.raises(ValueError, match=f"holds isolated collateral \\({WETH}\\)"):
+        pool.positions(
+            "aave_v3", Reader(held, isolated=(WETH,)), None, market(USDC), WALLET, SUPPLY
+        )
+    # Leaving an isolated reserve is served, and so is a supply beside ordinary collateral.
+    document = pool.positions(
+        "aave_v3", Reader(held, isolated=(WETH,)), None, market(WETH), WALLET, WITHDRAW
+    )
+    assert names(document) == [(ALLOCATION, WETH, True)]
+    beside = pool.positions("aave_v3", Reader(held), None, market(USDC), WALLET, SUPPLY)
+    assert names(beside) == [(ALLOCATION, USDC, True), ("held_0", WETH, True)]
 
 
 def test_an_action_states_its_amount_exactly_once(recorded):
