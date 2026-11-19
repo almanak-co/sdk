@@ -158,25 +158,36 @@ def supplied(result, moment):
     return int(result[moment]["supplied_scaled"])
 
 
+def ran(result, *steps):
+    """Whether a command completed by running exactly these steps, in order."""
+    return (operations(result), result["completed"]) == (list(steps), True)
+
+
 def assert_supplied(result, before):
-    assert operations(result) == ["approve", "supply"] and result["completed"]
-    assert supplied(result, "position_before") == before
-    assert supplied(result, "position_after") > before
+    assert ran(result, "approve", "supply")
+    assert supplied(result, "position_before") == before < supplied(result, "position_after")
+
+
+def assert_preview(preview):
+    assert (preview["executed"], "outcomes" in preview) == (False, False)
+    assert preview["first_step"]["operation"]["kind"] == "approve"
+    assert supplied(preview, "position_before") == 0
+
+
+def assert_withdrawn(result):
+    """A full withdrawal leaves nothing supplied and the reserve no longer collateral."""
+    assert ran(result, "withdraw")
+    after = result["position_after"]
+    assert (int(after["supplied_scaled"]), after["collateral_enabled"]) == (0, False)
 
 
 def test_supply_then_withdraw_each_as_one_command(desk):
-    preview = desk("supply", AMOUNT, execute=False)
-    assert preview["executed"] is False and "outcomes" not in preview
-    assert preview["first_step"]["operation"]["kind"] == "approve"
-    assert supplied(preview, "position_before") == 0
+    assert_preview(desk("supply", AMOUNT, execute=False))
     first = desk("supply", AMOUNT, execute=True)
     assert_supplied(first, 0)
     # A later command adopts the position the account already holds and adds to it.
     assert_supplied(desk("supply", AMOUNT, execute=True), supplied(first, "position_after"))
-    withdrawn = desk("withdraw", execute=True)
-    assert operations(withdrawn) == ["withdraw"] and withdrawn["completed"]
-    assert supplied(withdrawn, "position_after") == 0
-    assert withdrawn["position_after"]["collateral_enabled"] is False
+    assert_withdrawn(desk("withdraw", execute=True))
 
 
 def test_a_wallet_that_holds_another_reserve_of_the_pool_supplies_and_withdraws(desk):
@@ -185,12 +196,9 @@ def test_a_wallet_that_holds_another_reserve_of_the_pool_supplies_and_withdraws(
     assert_supplied(desk("supply", AMOUNT, execute=True), 0)
     amount = 10**5
     desk.fund_second(amount)
-    other = desk("supply", amount, execute=True, asset=desk.second)
-    assert_supplied(other, 0)
-    withdrawn = desk("withdraw", execute=True)
-    assert operations(withdrawn) == ["withdraw"] and withdrawn["completed"]
-    again = desk("withdraw", execute=True, asset=desk.second)
-    assert operations(again) == ["withdraw"] and supplied(again, "position_after") == 0
+    assert_supplied(desk("supply", amount, execute=True, asset=desk.second), 0)
+    assert_withdrawn(desk("withdraw", execute=True))
+    assert_withdrawn(desk("withdraw", execute=True, asset=desk.second))
 
 
 def stopped_after_the_first_send(desk, monkeypatch, capsys):
@@ -210,17 +218,23 @@ def stopped_after_the_first_send(desk, monkeypatch, capsys):
     return Path(kept["path"])
 
 
-def test_an_interrupted_supply_is_recovered_and_the_wallet_is_freed(desk, monkeypatch, capsys):
-    record = stopped_after_the_first_send(desk, monkeypatch, capsys)
+def assert_blocked(desk, record):
+    """The kept record names its signed step and blocks the wallet until it is resolved."""
     (listed,) = ax_actions.kept_records()
     assert (listed["path"], listed["unresolved"]["operation"]) == (str(record), "approve")
-    # The kept record blocks the wallet until its signed step is resolved.
     with pytest.raises(RuntimeError, match="already claimed"):
         desk("supply", AMOUNT, execute=False)
-    recovered = desk.recover(record)
+
+
+def assert_recovered(recovered, record):
     assert (recovered["resolved"], recovered["discarded_request"]) == (True, True)
     assert (operations(recovered), "unresolved" in recovered) == (["approve"], False)
     assert (ax_actions.kept_records(), record.exists()) == ([], False)
+
+
+def test_an_interrupted_supply_is_recovered_and_the_wallet_is_freed(desk, monkeypatch, capsys):
+    record = stopped_after_the_first_send(desk, monkeypatch, capsys)
+    assert_blocked(desk, record)
+    assert_recovered(desk.recover(record), record)
     # The approval stands, so restating the same supply needs only its own step.
-    again = desk("supply", AMOUNT, execute=True)
-    assert (operations(again), again["completed"]) == (["supply"], True)
+    assert ran(desk("supply", AMOUNT, execute=True), "supply")
