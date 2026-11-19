@@ -520,16 +520,20 @@ while the wallet has debt in the venue, and the refusal says to state it:
 | Connector | Projected against the floor |
 | --- | --- |
 | `aave_v3`, `sparklend` | a borrow, a supply, a collateral change, and a withdrawal of a reserve used as collateral |
-| `compound_v3`, `morpho_blue` | a borrow, and a withdrawal of collateral in part |
+| `compound_v3` | a borrow, and a withdrawal of collateral, in full or in part |
+| `morpho_blue` | a borrow, and a withdrawal of collateral in part |
 | `aave_v4` | a borrow |
 
 A repayment is never projected, so no floor can refuse it, and it takes no
 `--min-health-factor`. Stated on an action the connector does not project, the floor
-has no effect.
+has no effect. Aave V3 and SparkLend project a supply and enabling collateral too,
+so an account already below the stated floor is refused even those: state a floor
+the account meets.
 
-What a connector does not project it refuses while the debt is open: Compound V3
-and Morpho Blue refuse to withdraw collateral in full, and Aave V4 refuses to
-withdraw a reserve that backs the wallet's debt. Repay first. A supply of the
+What a connector does not project it refuses while the debt is open: Morpho Blue
+refuses to withdraw collateral in full, and Aave V4 refuses to withdraw a reserve
+that backs the wallet's debt. Repay first. On Compound V3 the last collateral asset
+cannot leave either, since nothing would cover the debt. A supply of the
 Compound V3 base asset while the wallet owes it is refused, since it would repay the
 debt: use `repay`. A withdrawal of the base asset above the supplied balance is
 refused too, since it would borrow: use `borrow`.
@@ -541,9 +545,13 @@ refuses can therefore leave its collateral steps mined: a repayment with no debt
 releases them, and a withdrawal works either way. Aave V4 serves one debt reserve
 per wallet and Spoke.
 
-A full repayment approves the debt asset, repays with the protocol's full-repay
-form and revokes what is left of the approval, so the wallet must hold the whole
-debt with its interest; a shortfall is refused with the amount missing.
+A full repayment approves the wallet's whole balance of the debt asset, repays with
+the protocol's full-repay form and revokes what is left of the approval, so the
+wallet must hold the whole debt with its interest; a shortfall is refused with the
+amount missing. When it stops after the repayment and before the revocation, the
+approval of the rest of that balance stands: `repay` again revokes it. On Compound
+V3 that works while the wallet still holds collateral in the Comet; otherwise the
+refusal names the allowance, and `withdraw` on the base asset revokes it.
 
 A supply plans against the wallet's allowance to the protocol: zero, or exactly the
 requested amount left by an earlier approval. Any other allowance is refused, and
@@ -552,8 +560,10 @@ allowance first. A withdrawal clears it: when an allowance remains, the withdraw
 is followed by a revocation, and with nothing supplied the revocation is its only
 step.
 
-Each fee ceiling applies to one transaction, so a supply, or a withdrawal that also
-revokes, can spend up to twice `--max-transaction-fee`. A step bids as an author's
+Each fee ceiling applies to one transaction, and an action can take several: a
+supply two, a full repayment three, an Aave V4 borrow one for each collateral reserve
+it enables and one more. So an action can spend `--max-transaction-fee` once per
+step, and a preview shows only the first. A step bids as an author's
 [gas policy](configuration.md) defaults on the chain: the quoted gas price is twice
 the base fee plus the tip, or 1.25 times the base fee plus the tip on Arbitrum and
 Robinhood Chain, so `--max-gas-price-wei` refuses a step once the base fee passes
