@@ -120,14 +120,16 @@ def stated_amounts(request: ActionRequest, coins: tuple[str, ...]) -> dict[str, 
     stated = dict.fromkeys(coins, 0)
     if request.action not in ADDITIONS:
         return stated
+    named = set()
     for coin, amount in request.amounts or ():
         if coin not in coins:
             raise ValueError(
                 f"--amount names {coin}, which is not a coin of the pool: {', '.join(coins)}; "
                 "the native coin is deposited as its wrapped token"
             )
-        if stated[coin]:
+        if coin in named:
             raise ValueError(f"--amount names {coin} more than once")
+        named.add(coin)
         stated[coin] = amount
     if not any(stated.values()):
         raise ValueError(f"{request.action} requires an --amount above zero")

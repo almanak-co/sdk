@@ -769,7 +769,10 @@ proportions, and a coin of the pool pays that coin alone, which trades against t
 pool and pays its fee. The deployment owns the wallet's whole LP balance in the
 pool, whoever deposited it. `--deadline-seconds` bounds only how late a step may be
 signed, since Curve calls carry no deadline. A deposit approves the pool for
-exactly each stated amount, so a completed one leaves no allowance. The read takes
+exactly each stated amount, so a completed one leaves no allowance on the coins it
+deposited. A deposit in other proportions than the pool's, like a one-coin burn,
+trades against the pool and pays its fee; `--slippage-bps` bounds how far the LP
+shares minted may fall below what the amounts were worth at the observed block. The read takes
 the account instead of a token ID and reports its LP shares, the total supply and
 what a balanced burn would pay:
 

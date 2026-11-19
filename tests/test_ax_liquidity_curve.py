@@ -281,6 +281,10 @@ def test_a_command_states_its_amounts_its_payout_and_its_bounds(market):
             )
         # A statement that is wrong by itself is refused before any read.
         assert reader.asked == []
+    # A coin stated twice is refused whatever its first amount.
+    twice = request("open-liquidity", amounts=((coins[0], 0), (coins[0], 5)))
+    with pytest.raises(ValueError, match="more than once"):
+        liquidity.stated_amounts(twice, tuple(coins))
     # A command that deposits nothing brings none of any coin.
     assert liquidity.stated_amounts(request("close-liquidity"), tuple(coins)) == dict.fromkeys(
         coins, 0
