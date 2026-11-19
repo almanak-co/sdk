@@ -701,7 +701,8 @@ almanak ax open-liquidity --connector uniswap_v3 --chain eip155:8453 \
   --wallet /private/operator --public-rpc base \
   --max-gas-price-wei 1000000000 --max-transaction-fee 2000000000000000
 almanak ax liquidity-position --connector uniswap_v3 --chain eip155:8453 \
-  --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 --token-id 5947663 --public-rpc base
+  --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 --token-id 5947663 \
+  --block latest --public-rpc base
 ```
 
 The ticks are the operator's own and must be multiples of the pool's tick spacing;
@@ -723,12 +724,14 @@ refused before anything is signed; increasing one is served.
 `ax liquidity-position` is the read for a position: its `owner`, `range`,
 `liquidity`, whether the pool price is in range, the `principal` it would return at
 the current price, and what it is `owed`, which is what a collect pays. It takes
-the same transports and `--block` as the other reads.
+the same transports and `--block` as the other reads; `--block` defaults to
+`finalized`, so read a position that was just opened at `--block latest`.
 
 `position_before` and `position_after` of a liquidity action hold the `position`
 (its `token_id`, `range` and `liquidity`, or null), what `moved` in and out of the
-wallet in each currency over the mined steps, the `inventory` still unused, and the
-nonzero `allowances`. An open or an increase approves the position manager for the
+wallet in each currency over the mined steps, the `inventory` the action holds
+beside the position (what a mint left unused, or what a collect, a decrease or a
+close paid out), and the nonzero `allowances`. An open or an increase approves the position manager for the
 stated amounts and uses what the mint takes, so the unused part of each approval
 remains afterwards; `revoke-exchange` clears it. A mint is the largest step: with
 its 25% buffer it stays under the default gas limit on the forks rehearsed, and the
