@@ -36,12 +36,12 @@ BACKTEST_STARTS = {
 }
 
 
-# Chains that serve direct supply and full withdrawal. Each one is rehearsed on a fork
-# by tests/fork/test_ax_morpho_blue.py, which refuses a chain it does not cover.
-# HyperEVM is left out: a direct action reads at the head, where the chain's provider
-# runs a pinned read at a later block and the reader refuses it as `provider_context`.
+# Chains that serve direct actions: every action a strategy may take there. Each one is
+# rehearsed on a fork by tests/fork/test_ax_morpho_blue.py, which refuses a chain it
+# does not cover. HyperEVM is left out: a direct action reads at the head, where the
+# chain's provider runs a pinned read at a later block and the reader refuses it as
+# `provider_context`.
 DIRECT_CHAINS = frozenset(BACKTEST_STARTS) - {"eip155:999"}
-DIRECT_ACTIONS = (EconomicAction.SUPPLY, EconomicAction.WITHDRAW)
 
 
 def candidate_support():
@@ -79,7 +79,7 @@ def candidate_support():
                 "health and ownership remain gateway checks",
             )
             + op_fee_restrictions(ChainId(chain)),
-            direct_actions=DIRECT_ACTIONS if chain in DIRECT_CHAINS else (),
+            direct_actions=actions if chain in DIRECT_CHAINS else (),
         )
         for chain, start in BACKTEST_STARTS.items()
     )
