@@ -525,14 +525,19 @@ while the wallet has debt in the venue, and the refusal says to state it:
 | `aave_v4` | a borrow |
 
 A repayment is never projected, so no floor can refuse it, and it takes no
-`--min-health-factor`. Stated on an action the connector does not project, the floor
+`--min-health-factor`. Aave V4 refuses a floor on a supply or a withdrawal, which it
+would not check. Stated on any other action a connector does not project, the floor
 has no effect. Aave V3 and SparkLend project a supply and enabling collateral too,
 so an account already below the stated floor is refused even those: state a floor
 the account meets.
 
 What a connector does not project it refuses while the debt is open: Morpho Blue
 refuses to withdraw collateral in full, and Aave V4 refuses to withdraw a reserve
-that backs the wallet's debt. Repay first. On Compound V3 the last collateral asset
+that is enabled as collateral while the account owes anything on the Spoke. The Aave
+V4 check runs again when the step is planned and when it is signed, so a debt that
+appears after the command's first read still refuses the withdrawal; what the chain
+changes between signing and inclusion is not seen. Repay first. On Compound V3 the
+last collateral asset
 cannot leave either, since nothing would cover the debt. A supply of the
 Compound V3 base asset while the wallet owes it is refused, since it would repay the
 debt: use `repay`. A withdrawal of the base asset above the supplied balance is
@@ -540,10 +545,13 @@ refused too, since it would borrow: use `borrow`.
 
 On Aave V4 a supply backs nothing until it is enabled as collateral. A borrow
 enables each supplied reserve that can back debt first, one `collateral` step each,
-and a full repayment disables them again after the debt is gone. A borrow the floor
-refuses can therefore leave its collateral steps mined: a repayment with no debt
-releases them, and a withdrawal works either way. Aave V4 serves one debt reserve
-per wallet and Spoke.
+so a preview of a first borrow shows a `collateral` step and has not yet tested the
+floor: the floor is projected when the borrow step itself is planned. A borrow the
+floor refuses can therefore leave its collateral steps mined; a repayment with no
+debt releases them, and a withdrawal works either way. A borrow is served for one
+debt reserve per wallet and Spoke. A repayment is served for any reserve the wallet
+owes: it disables the wallet's collateral after the debt is gone only when no other
+debt remains on the Spoke, and otherwise ends with the revocation.
 
 A full repayment approves the wallet's whole balance of the debt asset, repays with
 the protocol's full-repay form and revokes what is left of the approval, so the
