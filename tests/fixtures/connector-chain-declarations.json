@@ -780,6 +780,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -2683,6 +2686,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -2753,6 +2759,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -2824,6 +2833,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -2894,6 +2906,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3036,6 +3051,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3107,6 +3125,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3177,6 +3198,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3248,6 +3272,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3318,6 +3345,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3388,6 +3418,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3458,6 +3491,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3528,6 +3564,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3610,6 +3649,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -3692,6 +3734,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -3775,6 +3820,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -3857,6 +3905,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -3940,6 +3991,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -4008,6 +4062,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -4075,6 +4132,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -4142,6 +4202,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
