@@ -266,8 +266,10 @@ def share_sent_with(kind, setting, asset, monkeypatch, *, stop=False):
             # stays in the node's pool until the share has been sent as well.
             rpc("evm_setAutomine", [False])
             return
-        priced = {"from": sender, "to": token, "data": transfer, "gasPrice": rpc("eth_gasPrice")}
-        rpc("eth_sendTransaction", [priced])
+        # A stated gas limit: an estimate made before the step is mined is too low once
+        # the step has emptied the wallet's balance of the share.
+        priced = {"gas": hex(300_000), "gasPrice": rpc("eth_gasPrice")}
+        rpc("eth_sendTransaction", [{"from": sender, "to": token, "data": transfer, **priced}])
         rpc("evm_mine")
         rpc("evm_setAutomine", [True])
         interrupt_if(stop)

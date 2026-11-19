@@ -14,6 +14,7 @@ import yaml
 
 from almanak import ax_actions
 from almanak.caip import AssetType, ChainId
+from almanak.connectors.aerodrome import math
 from almanak.connectors.aerodrome.position_request import (
     PositionRequest,
     read_liquidity_position,
@@ -35,8 +36,10 @@ from tests.fork.test_ax_liquidity import (
     WALLET_MULTIPLE,
     Reference,
     amounts,
+    approved,
     assert_blocked,
     assert_clean,
+    assert_mint_reverted,
     assert_moved,
     assert_released,
     assert_unused,
@@ -52,7 +55,7 @@ from tests.fork.test_ax_liquidity import (
     troubled,
 )
 from tests.fork.test_ax_liquidity import Setting as RangedSetting
-from tests.fork.test_ax_swap_aerodrome import as_mainnet, share_sent_with
+from tests.fork.test_ax_swap_aerodrome import as_mainnet, share_sender, share_sent_with
 
 pytestmark = pytest.mark.fork
 ROOT = Path(__file__).parents[2]
@@ -146,6 +149,18 @@ class Setting(RangedSetting):
         """The same pool for another wallet on the same fork."""
         return Setting(self.fork, self.cell, wallet, signer, self.identity)
 
+    def offered(self, stated):
+        """What a deposit of the stated amounts offers at the pool's reserves: what it
+        takes of each currency in their proportion."""
+        pool = self.pool_state()
+        most = stated["amount0"], stated["amount1"]
+        return math.proportional(pool.reserve0, pool.reserve1, pool.total_supply, *most)
+
+    def proportion(self):
+        """The pool's reserves of currency0 and currency1."""
+        pool = self.pool_state()
+        return pool.reserve0, pool.reserve1
+
     def shares(self):
         """The wallet's balance of the pool's share token, in base units."""
         return balance(self.fork.rpc, self.pool.pool, self.owner)
@@ -225,19 +240,26 @@ def assert_previewed(setting, stated):
 
 def open_position(setting, stated):
     """Make the first deposit; returns the shares it minted and what it used."""
-    start = setting.balances()
+    start, offer = setting.balances(), setting.offered(stated)
     opened = setting("open-liquidity", **stated)
     assert_clean(opened, ["approve", "approve", "mint"])
     used = [-moved for moved in assert_moved(setting, opened, start)]
     assert held_shares(opened) == setting.shares() > 0
-    assert_unused(setting, opened, stated, used)
+    # Mined at the proportion it was offered at, the deposit takes its whole offer:
+    # the rest of the statement is unused and nothing stays approved.
+    assert_unused(setting, opened, stated, offer, used)
+    assert (tuple(used), setting.allowances()) == (offer, {})
     return held_shares(opened), used
 
 
-def share_worth(seen):
-    """Base units of each currency that one share is worth, rounded up."""
+def rounding(seen):
+    """The most a deposit puts in of each currency beyond the principal its shares
+    return, in base units: what two shares are worth, for the shares a mint and a burn
+    round away, and what one base unit of the other currency is worth, since the offer
+    of one currency is a whole number of the other's proportion."""
     supply = int(seen["pool"]["total_supply"])
-    return [int(item["amount"]) // supply + 1 for item in seen["pool"]["balances"]]
+    held = [int(item["amount"]) for item in seen["pool"]["balances"]]
+    return [2 * (own // supply + 1) + own // other + 1 for own, other in (held, held[::-1])]
 
 
 def assert_read(setting, shares, used):
@@ -245,10 +267,9 @@ def assert_read(setting, shares, used):
     seen = setting.read()
     assert (seen["owner"], int(seen["position"]["shares"]["amount"])) == (setting.owner, shares)
     assert seen["position"]["liquidity"] == str(shares)
-    # A burn rounds what it pays down to whole shares, so the principal is the deposit
-    # less at most what two shares are worth.
+    # The principal is the deposit less what whole shares and whole base units round away.
     short = shortfalls(used, seen["principal"])
-    assert all(0 <= lost <= 2 * worth for lost, worth in zip(short, share_worth(seen), strict=True))
+    assert all(0 <= lost <= most for lost, most in zip(short, rounding(seen), strict=True))
     assert [int(item["amount"]) for item in seen["owed"]] == [0, 0]
 
 
@@ -318,7 +339,10 @@ def test_shares_are_opened_read_increased_collected_decreased_closed_and_revoked
     # A trade since the claim: the burn pays principal, then the close claims the fees.
     earn_fees(setting)
     close_position(setting, ["approve", "close", "collect"])
-    revoke_everything(setting)
+    # Each deposit took its whole offer and each burn its whole approval.
+    assert setting.allowances() == {}
+    with pytest.raises(ValueError, match="no allowance in either pool currency"):
+        setting("revoke-exchange")
 
 
 def deposit_outside(setting):
@@ -419,6 +443,165 @@ def test_a_share_sent_to_the_wallet_with_its_deposit_is_owned_and_reported(setti
     assert_share_adopted(setting, opened, start, "mint")
     # The next command adopts the whole balance again and burns all of it cleanly.
     close_position(setting, ["approve", "close"])
+
+
+def unbalanced(setting, bps):
+    """A statement of all the wallet's funded asset and a twentieth of the other
+    currency: about twenty times the funded asset the deposit takes."""
+    held = setting.balances()
+    stated = setting.stated(held[setting.funded], held[1 - setting.funded] // 20)
+    return {**stated, "slippage_bps": bps}
+
+
+def moved_by(before, after):
+    """How far the proportion of the reserves moved, in basis points of what it was."""
+    old, new = before[1] * after[0], after[1] * before[0]
+    return abs(new - old) * 10000 // old
+
+
+def proportion_move(setting, amount):
+    """How far the trader's sale of `amount` moves the proportion of the pool's
+    reserves, in basis points. The sale is measured on the fork and undone."""
+    rpc, before = setting.fork.rpc, setting.proportion()
+    snapshot = rpc("evm_snapshot")
+    setting.trader.sell_outside(amount)()
+    after = setting.proportion()
+    assert rpc("evm_revert", [snapshot]) is True
+    return moved_by(before, after)
+
+
+def sized_sale(setting):
+    """An amount of the funded asset whose sale by the trader moves the proportion by a
+    few percent at most, and that move in basis points. A thin pool takes less."""
+    amount = setting.trader.balances()[setting.funded]
+    move = proportion_move(setting, amount)
+    while move > 300:
+        amount //= 4
+        move = proportion_move(setting, amount)
+    return amount, move
+
+
+def assert_surplus_was_exposed(setting, stated, offer):
+    """Offered whole, the same statement would be mined at the moved proportion: the
+    router would take all of the other currency and more of the surplus than the
+    bounded offer holds."""
+    pool = setting.pool_state()
+    whole = stated["amount0"], stated["amount1"]
+    taken = math.addition(pool.reserve0, pool.reserve1, pool.total_supply, *whole)
+    funded, other = setting.funded, 1 - setting.funded
+    assert (taken[funded] > offer[funded], taken[other]) == (True, whole[other])
+
+
+def test_a_deposit_mined_after_the_proportion_left_its_tolerance_reverts_and_takes_no_surplus(
+    setting,
+):
+    halves(setting)
+    selling, move = sized_sale(setting)
+    # The tolerance is a third of what the sale moves the proportion by.
+    tolerance = move // 3
+    stated = unbalanced(setting, tolerance)
+    offer, start, before = setting.offered(stated), setting.balances(), setting.proportion()
+    # Another account sells the surplus currency once the deposit is signed: the
+    # direction in which the router would take ever more of it.
+    push = setting.trader.sell_outside(selling)
+    result = setting("open-liquidity", before_send=("mint", push), **stated)
+    assert (tolerance >= 1, moved_by(before, setting.proportion()) > tolerance) == (True, True)
+    assert_mint_reverted(setting, result, offer, start)
+    assert_surplus_was_exposed(setting, stated, offer)
+
+
+def assert_took_within(setting, offer, used, tolerance):
+    """The deposit took at most its offer of each currency and at least that less the
+    tolerance. What it left of the offer stays approved, and nothing else is."""
+    least = [most * (10000 - tolerance) // 10000 for most in offer]
+    assert all(low <= spent <= most for low, spent, most in zip(least, used, offer, strict=True))
+    left = [most - spent for most, spent in zip(offer, used, strict=True)]
+    assert setting.allowances() == approved(setting, left)
+
+
+def test_a_deposit_mined_after_a_move_inside_its_tolerance_takes_no_more_than_it_offered(setting):
+    halves(setting)
+    selling, move = sized_sale(setting)
+    # The sale moves the proportion by a third of the tolerance.
+    tolerance = max(move, 1) * 3
+    stated = unbalanced(setting, tolerance)
+    offer, start = setting.offered(stated), setting.balances()
+    push = setting.trader.sell_outside(selling)
+    result = setting("open-liquidity", before_send=("mint", push), **stated)
+    assert_clean(result, ["approve", "approve", "mint"])
+    used = [-moved for moved in assert_moved(setting, result, start)]
+    assert_took_within(setting, offer, used, tolerance)
+
+
+def share_sent_before(kind, setting, monkeypatch):
+    """Send the wallet one share of the pool once its next step of this kind is signed
+    and before the gateway's checks for sending it."""
+    from almanak.operator_runtime import OperatorRuntime
+
+    rpc, asset = setting.fork.rpc, setting.pool.shares_asset
+    sender = share_sender(setting, asset)
+    transfer = calldata("transfer(address,uint256)", ("address", "uint256"), (setting.owner, 1))
+    sent = []
+
+    def wait(self, state):
+        pending = state.pending
+        if sent or pending is None or pending.operation.kind != kind or not pending.unsent:
+            return
+        sent.append(pending.tx_hash)
+        moved = {"from": sender, "to": setting.pool.pool, "data": transfer}
+        rpc("eth_sendTransaction", [{**moved, "gasPrice": rpc("eth_gasPrice")}])
+
+    monkeypatch.setattr(OperatorRuntime, "wait", wait)
+
+
+def test_a_share_sent_before_a_signed_claim_is_sent_does_not_hold_the_claim_back(
+    setting, monkeypatch
+):
+    shares = deposit_outside(setting)
+    earn_fees(setting)
+    start = setting.balances()
+    with monkeypatch.context() as patched:
+        share_sent_before("collect", setting, patched)
+        collected = setting("collect-liquidity-fees")
+    # The claim carries no deadline: held back, it could never be sent or released.
+    assert_share_adopted(setting, collected, start, "collect")
+    assert (setting.shares(), ax_actions.kept_records()) == (shares + 1, [])
+
+
+def test_a_share_sent_before_a_signed_share_approval_is_sent_does_not_hold_the_close_back(
+    setting, monkeypatch
+):
+    deposit_outside(setting)
+    start = setting.balances()
+    with monkeypatch.context() as patched:
+        share_sent_before("approve", setting, patched)
+        closed = setting("close-liquidity")
+    # The approval is sent and recorded with the arrival. The deployment owns the whole
+    # balance, so the close then burns the share that arrived with the rest.
+    (odd,) = troubled(closed)
+    assert (closed["completed"], odd["operation"], operations(closed)[-1]) == (
+        True,
+        "approve",
+        "close",
+    )
+    assert (closed["position_after"]["position"], setting.shares()) == (None, 0)
+    assert_released(setting, closed, start)
+    assert ax_actions.kept_records() == []
+
+
+def test_a_share_sent_with_the_burn_leaves_the_close_complete_for_what_it_burned(
+    setting, monkeypatch
+):
+    deposit_outside(setting)
+    start = setting.balances()
+    with monkeypatch.context() as patched:
+        share_sent_with("close", setting, setting.pool.shares_asset, patched)
+        closed = setting("close-liquidity")
+    # Every share the close stated is burned. The one that arrived is not this
+    # request's: it stays, reported once, with no second approval for it.
+    assert_share_adopted(setting, closed, start, "close")
+    assert (operations(closed), held_shares(closed)) == (["approve", "close"], 1)
+    assert str(setting.pool.shares_asset) not in {asset for asset, _ in setting.allowances()}
 
 
 def state_of(setting):
