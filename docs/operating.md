@@ -640,7 +640,7 @@ it bought, and the nonzero `allowances` left to the venue:
 
 | Connector | Steps | Allowance after a completed swap |
 | --- | --- | --- |
-| V3 family | `approve` for exactly the amount, after a reset to zero when another allowance stands, then `swap` | none |
+| `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome` | `approve` to the router for exactly the amount, after a reset to zero when another allowance stands, then `swap` | none |
 | `uniswap_v4` | `approve_erc20` to Permit2, `approve_permit2` to the router until the deadline, then `swap` | none from a wallet with none; allowances that already cover the amount are used as they stand and what the swap does not spend remains |
 | `curve` | `approve` to the pool for exactly the amount, then the exchange | none |
 
@@ -653,8 +653,10 @@ that the pool would now pay below its minimum is neither sent nor released: reco
 reports `signed_attempt_unsendable` and the record and the wallet's claim stay until
 the market returns or the nonce is used.
 
-A swap deployment trades one pool and holds no liquidity position. On Curve a wallet
-that holds the pool's LP token is refused.
+A swap deployment trades one pool and holds no liquidity position. On Aerodrome and
+Curve a wallet that holds the pool's LP shares, however few, is refused, as a
+trading-only strategy there is. Anyone can send such shares to a wallet, and no
+direct command removes them.
 
 The action runs through the same planning, simulation, signing and receipt
 reconciliation as a strategy's, as an operator deployment that exists only for the

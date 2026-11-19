@@ -232,11 +232,11 @@ def test_the_connector_supports_operator_deployments_and_serves_the_swap(variant
     assert [str(action) for action in cell.direct_actions] == ["swap_exact_input"]
     # The one production cell serves the swap in the pool's own invariant.
     assert cell.chain == BASE and resolved(variant).pool.variant in cell.variants
-    direct.require_direct(CONNECTOR, BASE, "swap")
+    direct.require_direct(CONNECTOR, BASE, direct.ActionRequest("swap", 5))
     with pytest.raises(ValueError, match="aerodrome serves no direct swap on eip155:31337"):
-        direct.require_direct(CONNECTOR, ChainId("eip155:31337"), "swap")
+        direct.require_direct(CONNECTOR, ChainId("eip155:31337"), direct.ActionRequest("swap", 5))
     with pytest.raises(ValueError, match="aerodrome serves no direct supply"):
-        direct.require_direct(CONNECTOR, BASE, "supply")
+        direct.require_direct(CONNECTOR, BASE, direct.ActionRequest("supply", 5))
 
 
 def test_the_swap_is_the_only_action_an_operator_request_is_admitted_for(variant):

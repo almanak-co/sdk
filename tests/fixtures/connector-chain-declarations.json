@@ -709,6 +709,9 @@
     "stable",
     "volatile"
    ],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
