@@ -3,7 +3,7 @@
 from almanak.connectors.aerodrome_slipstream.economic_data import CONNECTOR
 from almanak.connectors.aerodrome_slipstream.economic_state import EconomicPosition, State
 from almanak.connectors.aerodrome_slipstream.models import Parameters
-from almanak.connectors.aerodrome_slipstream.observations import initial_owned
+from almanak.connectors.aerodrome_slipstream.observations import funded_owned
 from almanak.connectors.dex_economic_parameters import ParametersBinding
 from almanak.connectors.dex_economic_parameters import payer_wallet as payer_wallet
 from almanak.connectors.dex_economic_parameters import wallet as wallet
@@ -15,7 +15,7 @@ _binding = ParametersBinding(
     parameters_type=Parameters,
     position_type=EconomicPosition,
     state_type=State,
-    initial_owned=initial_owned,
+    initial_owned=funded_owned,
     position_record_type=Position[EconomicPosition],
     portfolio_type=Portfolio[EconomicPosition],
     effects_type=Effects[EconomicPosition],

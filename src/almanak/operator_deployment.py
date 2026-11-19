@@ -25,6 +25,17 @@ def adopts(before, after) -> bool:
     return is_operator(before) and not before.initialized and after.initialized
 
 
+def refuse_adoption(positions) -> None:
+    """Refuse positions that state what a deployment adopts at its start.
+
+    Only a direct action's operator deployment may carry that statement. A strategy
+    deployment and a backtest start from funded capital alone, so every path that
+    builds one from a configuration calls this.
+    """
+    if any(getattr(position, "adopt", None) is not None for position in positions):
+        raise ValueError("only an operator deployment adopts inventory or a position")
+
+
 def validate_origin(state) -> None:
     if state.operator and state.strategy is not None:
         raise ValueError("an operator deployment retains no strategy")
@@ -39,6 +50,8 @@ def validate_exclusive_origin(state) -> None:
     validate_origin(state)
     if not state.operator and state.strategy is None:
         raise ValueError("a strategy deployment retains its strategy")
+    if not state.operator:
+        refuse_adoption(getattr(state.config, "positions", ()))
 
 
 def request_executed(outcomes, event) -> bool:

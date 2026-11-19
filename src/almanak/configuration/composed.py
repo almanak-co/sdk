@@ -30,6 +30,7 @@ from almanak.connectors.uniswap_v3.models import Allocation as ExchangeAllocatio
 from almanak.connectors.uniswap_v4.models import Allocation as V4Allocation
 from almanak.effects import Balance
 from almanak.models import AssetMetadata, StrategyAccounts
+from almanak.operator_deployment import refuse_adoption
 from almanak.triggers import IntervalTrigger
 
 Allocation = (
@@ -129,6 +130,8 @@ class Parameters(AuthorGas):
             raise ValueError("allocation names must be unique across connectors")
         if {a.account for a in self.allocations} != {b.name for b in self.accounts.bindings}:
             raise ValueError("configured markets must identify every named fund")
+        # A composed configuration is a strategy's or a backtest's, never a direct action's.
+        refuse_adoption(self.allocations)
         # These immutable views share the validated allocation objects. They are
         # never separately persisted or passed to additional strategy hooks.
         _ = self.parameter_components

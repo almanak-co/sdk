@@ -222,6 +222,13 @@ class Observations:
             adopts=None if adopt is None else adopt.nft,
         )
 
+    def funded_owned(self, config, name):
+        """Initial ownership of a backtest: funded capital, never an adoption."""
+        from almanak.operator_deployment import refuse_adoption
+
+        refuse_adoption((config.allocation(name),))
+        return self.initial_owned(config, name)
+
     def ownership(self, config, name, reference):
         if reference is None:
             return self.initial_owned(config, name)
