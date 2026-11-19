@@ -8,6 +8,8 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+## [3.2.1] - 2026-11-19
+
 ### Changed
 - `ax supply` and `ax withdraw` execute through a named public endpoint
   (`--public-rpc`), so a direct action needs no provider key. `ax recover` uses the

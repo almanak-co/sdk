@@ -1,6 +1,6 @@
 [project]
 name = "almanak"
-version = "3.2.0"
+version = "3.2.1"
 description = "Almanak SDK: explicit protocol inputs for autonomous DeFi strategies"
 readme = "PYPI.md"
 license = "Apache-2.0"
