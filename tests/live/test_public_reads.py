@@ -2,8 +2,10 @@
 
 Opt-in: `pytest tests/live --live-public -p no:xdist`. Run it serially; parallel
 workers share each endpoint's rate limit. A case the endpoint did not answer is
-skipped as blocked, which is not a pass. `python -m scripts.live_qa reads` runs the
-same cases and writes the CSV and Markdown report.
+skipped as blocked, which is not a pass. A known issue that reproduces is an
+expected failure; one that no longer reproduces fails until its marker is removed.
+`python -m scripts.live_qa reads` runs the same cases and writes the CSV and
+Markdown report.
 """
 
 import pytest
@@ -21,7 +23,9 @@ PLAN = reads.planned(CASES, ENDPOINTS, served)
     ("case", "endpoint"), PLAN, ids=[f"{endpoint}:{case.id}" for case, endpoint in PLAN]
 )
 def test_read_on_public_endpoint(case, endpoint, live_session):
-    result = live_session.one(case, endpoint)
-    if result.status == "blocked":
-        pytest.skip(f"blocked after {result.attempts} attempts: {result.detail}")
-    assert result.status == "pass", f"{result.known or 'unexpected'}: {result.detail}"
+    outcome, reason = reads.expectation(live_session.one(case, endpoint))
+    if outcome == "skip":
+        pytest.skip(reason)
+    if outcome == "xfail":
+        pytest.xfail(reason)
+    assert outcome == "pass", reason

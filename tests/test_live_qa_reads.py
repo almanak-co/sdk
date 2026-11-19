@@ -18,7 +18,7 @@ from almanak.gateway.providers import PUBLIC_RPC
 from scripts.live_qa import __main__ as entry
 from scripts.live_qa import checks, cli, reads
 from scripts.live_qa.read_cases import CASES
-from scripts.live_qa.rpc import Rpc, RpcUnavailable, asset_address, endpoint_url
+from scripts.live_qa.rpc import Rpc, RpcReverted, RpcUnavailable, asset_address, endpoint_url
 from tests.live import conftest as live_conftest
 
 ROOT = Path(__file__).parents[1]
@@ -30,8 +30,9 @@ ACCOUNT = "0x" + "11" * 20
 class FakeRpc:
     """Direct reads answered from a table keyed by the call's signature."""
 
-    def __init__(self, answers=None, balance=5, block_hash="0xaa", down=False):
+    def __init__(self, answers=None, balance=5, block_hash="0xaa", down=False, reverting=()):
         self.answers = answers or {}
+        self.reverting = reverting
         self.native = balance
         self.hash = block_hash
         self.down = down
@@ -40,6 +41,11 @@ class FakeRpc:
         if self.down:
             raise RpcUnavailable("down")
         return self.answers[signature]
+
+    def reverts(self, to, signature, block):
+        if self.down:
+            raise RpcUnavailable("down")
+        return to in self.reverting
 
     def balance(self, account, block):
         if self.down:
@@ -181,6 +187,9 @@ def test_a_config_case_writes_its_request_file(tmp_path):
     arguments = reads.case_arguments(case, "publicnode", tmp_path)
     path = Path(arguments[arguments.index("--config") + 1])
     assert json.loads(path.read_text()) == {"a": 1} and path.parent == tmp_path
+    # Endpoints run side by side, so each writes its own request file.
+    other = reads.case_arguments(case, "drpc", tmp_path)
+    assert path.name.startswith("publicnode-") and other[other.index("--config") + 1] != str(path)
     assert arguments[-2:] == ("--public-rpc", "publicnode")
 
 
@@ -267,6 +276,42 @@ def test_the_exit_code_separates_failed_from_blocked_from_passed():
     assert reads.exit_code([]) == 1
 
 
+def test_known_issues_can_be_kept_out_of_the_exit_code_but_nothing_else_can():
+    reproduced = result(KNOWN, "fail", "deployment_changed: unverified revision")
+    other = result(KNOWN, "fail", "abi: something new")
+    passed, blocked = result(CASE, "pass"), result(CASE, "blocked")
+    assert reads.exit_code([passed, reproduced]) == 1
+    assert reads.exit_code([passed, reproduced], known_issues_ok=True) == 0
+    assert reads.exit_code([blocked, reproduced], known_issues_ok=True) == 2
+    # A known-issue case that fails another way, and any other failure, still count.
+    assert reads.exit_code([passed, other], known_issues_ok=True) == 1
+    assert reads.exit_code([reproduced, result(CASE, "fail")], known_issues_ok=True) == 1
+    assert reads.exit_code([], known_issues_ok=True) == 1
+
+
+def test_a_test_lane_expects_a_known_failure_and_refuses_a_stale_marker():
+    reproduced = result(KNOWN, "fail", "deployment_changed: unverified revision")
+    assert reads.expectation(reproduced)[0] == "xfail"
+    stale = reads.expectation(result(KNOWN, "pass"))
+    assert stale[0] == "fail" and "remove the marker" in stale[1]
+    assert reads.expectation(result(KNOWN, "fail", "abi: new"))[0] == "fail"
+    assert reads.expectation(result(CASE, "fail", "abi: new")) == ("fail", "unexpected: abi: new")
+    assert reads.expectation(result(CASE, "pass", "ok")) == ("pass", "ok")
+    assert reads.expectation(result(KNOWN, "blocked", "http: HTTP 429"))[0] == "skip"
+
+
+def test_the_breaker_is_shared_by_every_case_a_session_runs(tmp_path):
+    """The pytest lane runs cases one by one through the session, with the same breaker."""
+    run, calls = scripted(refused("http", "HTTP 429"))
+    shared = session(run, tmp_path)
+    case = reads.ReadCase("case", "eip155:43114", ("balance",))
+    attempts = [shared.one(case, "drpc").attempts for _ in range(5)]
+    assert attempts == [1, 1, 1, 0, 0] and len(calls) == 3
+    # Another endpoint, and another chain on the same endpoint, are still asked.
+    assert shared.one(case, "publicnode").attempts == 1
+    assert shared.one(CASE, "drpc").attempts == 1
+
+
 def test_the_report_is_written_as_csv_and_markdown(tmp_path):
     results = [
         result(CASE, "pass", "read succeeded"),
@@ -312,6 +357,7 @@ def test_the_bugs_found_by_hand_stay_in_the_catalog_as_known_issues():
     aave = [issue for name, issue in known.items() if "/aave_v3/" in name]
     gmx = [name for name in known if name.startswith("perp-markets/gmx_v2/avalanche")]
     assert len(aave) >= 2 and {issue.signature for issue in aave} == {"deployment_changed"}
+    assert known["lending-markets/aave_v4/avalanche"].signature == "revert getReserveCount()"
     assert len(gmx) >= 2
     queries = {case.arguments[-1] for case in CASES if case.id in gmx}
     assert {"BTC/USD", "AVAX/USD"} <= queries
@@ -346,36 +392,102 @@ def test_an_erc20_balance_is_compared_with_balance_of_and_decimals():
     assert checks.erc20_balance(output, differing) == ["decimals: CLI 6, direct read 18"]
 
 
+MARKET_ASSET = "0x" + "a1" * 20
+HUB = "0x" + "b2" * 20
+
+
 def listing(markets, unreadable=()):
     source = {"contract": "0xpool", "listed": 2, "unreadable": list(unreadable)}
     return {"source": source, "block": BLOCK, "markets": list(markets)}
 
 
+def market(status="verified", **fields):
+    asset = {"asset": f"eip155:1/erc20:{MARKET_ASSET}", "symbol": "TKN"}
+    return {"status": status, "asset": asset, **fields}
+
+
 def test_a_listing_is_complete_or_it_is_blocked_or_failed():
-    verified = {"status": "verified"}
-    refused_market = {"status": "refused", "reason": "deployment_changed: unverified revision"}
-    assert checks.listed_markets(listing([verified]), FakeRpc()) == []
+    refused_market = market("refused", reason="deployment_changed: unverified revision")
+    assert checks.listed_markets(listing([market()]), FakeRpc()) == []
     assert checks.listed_markets(listing([]), FakeRpc()) == ["the listing reports no markets"]
-    assert checks.listed_markets(listing([verified, refused_market]), FakeRpc()) == [
+    assert checks.listed_markets(listing([market(), refused_market]), FakeRpc()) == [
         "market 1 is refused: deployment_changed: unverified revision"
     ]
-    assert checks.some_verified_markets(listing([verified, refused_market]), FakeRpc()) == []
-    assert checks.some_verified_markets(listing([refused_market]), FakeRpc()) != []
     # What the endpoint did not answer is not a finding about the listing.
     for partial in (
-        listing([verified], [{"spoke": "0x1", "reason": "rpc: eth_call: rejected"}]),
-        listing([{"status": "refused", "reason": "http: HTTP 429"}]),
+        listing([market()], [{"spoke": "0x1", "reason": "rpc: eth_call: rejected"}]),
+        listing([market()], [{"hub": "0x2", "reason": "rpc: eth_call: rejected"}]),
+        listing([market("refused", reason="http: HTTP 429")]),
     ):
         with pytest.raises(RpcUnavailable, match="1 entries unreadable"):
             checks.listed_markets(partial, FakeRpc())
 
 
-def test_a_pool_listing_counts_the_reserves_the_pool_itself_lists():
-    output = listing([{"status": "verified"}])
-    two = FakeRpc({"getReservesList()": (("0xa", "0xb"),)})
+def test_a_spoke_called_unreadable_that_reverts_on_a_direct_read_is_a_finding():
+    """The endpoint answered: the Spoke holds no reserves. That is not a blocked read."""
+    unreadable = [
+        {"spoke": "0x1", "reason": "rpc: eth_call: RPC rejected the requested read"},
+        {"spoke": "0x2", "reason": "rpc: eth_call: RPC rejected the requested read"},
+    ]
+    partial = listing([market()], unreadable)
+    (finding,) = checks.listed_markets(partial, FakeRpc(reverting=("0x1", "0x2")))
+    assert finding.startswith("2 Spokes are reported unreadable, but they revert getReserveCount()")
+    assert finding.endswith("0x1, 0x2")
+    # One Spoke the endpoint really did not answer still blocks the case.
+    with pytest.raises(RpcUnavailable, match="1 entries unreadable"):
+        checks.listed_markets(partial, FakeRpc(reverting=("0x1",)))
+    with pytest.raises(RpcUnavailable):
+        checks.listed_markets(partial, FakeRpc(down=True))
+
+
+def test_a_pool_listing_is_held_to_the_reserves_the_pool_itself_lists():
+    output = listing([market()])
+    two = FakeRpc({"getReservesList()": ((MARKET_ASSET.upper().replace("0X", "0x"), "0xb"),)})
     assert checks.pool_reserve_listing(output, two) == []
     three = FakeRpc({"getReservesList()": (("0xa", "0xb", "0xc"),)})
-    assert checks.pool_reserve_listing(output, three) == ["listed reserves: CLI 2, direct read 3"]
+    assert checks.pool_reserve_listing(output, three) == [
+        "listed reserves: CLI 2, direct read 3",
+        f"market 0 asset eip155:1/erc20:{MARKET_ASSET} is not on the Pool's reserve list",
+    ]
+
+
+def test_an_aave_v4_market_is_held_to_what_its_spoke_records():
+    """A listing or reserve naming the wrong Spoke or reserve ID does not pass on decimals."""
+    listed = listing([market(spoke="0xspoke", reserve_id=3, hub=HUB)])
+    agreeing = FakeRpc({"getReserve(uint256)": (MARKET_ASSET, HUB, 4, 18), "decimals()": (18,)})
+    other = FakeRpc({"getReserve(uint256)": ("0x" + "c3" * 20, HUB, 4, 18), "decimals()": (18,)})
+    assert checks.aave_v4_listing(listed, agreeing) == []
+    (difference,) = checks.aave_v4_listing(listed, other)
+    assert difference.startswith("market 0 asset: CLI")
+    reserve = {
+        "resolution": {
+            "selection": {"spoke": "0xspoke", "reserve_id": 3},
+            "asset": f"eip155:1/erc20:{MARKET_ASSET}",
+            "hub": HUB,
+            "hub_asset_id": 4,
+            "decimals": 18,
+        },
+        "observation": {"block": BLOCK},
+    }
+    assert checks.aave_v4_reserve(reserve, agreeing) == []
+    (difference,) = checks.aave_v4_reserve(reserve, other)
+    assert difference.startswith("asset: CLI")
+    wrong_slot = FakeRpc({"getReserve(uint256)": (MARKET_ASSET, HUB, 9, 18), "decimals()": (18,)})
+    assert checks.aave_v4_reserve(reserve, wrong_slot) == ["hub_asset_id: CLI 4, direct read 9"]
+
+
+def test_a_morpho_listing_is_held_to_the_core_and_may_refuse_some_markets_not_all():
+    check = checks.morpho_listing("0xcore")
+    verified = market(market_id="0x" + "0d" * 32, loan_asset=market()["asset"])
+    refused_market = market("refused", reason="revision: runtime differs")
+    agreeing = FakeRpc({"idToMarketParams(bytes32)": (MARKET_ASSET,)})
+    assert check(listing([verified, refused_market]), agreeing) == []
+    assert check(listing([refused_market]), agreeing) == ["the listing reports no verified market"]
+    other = FakeRpc({"idToMarketParams(bytes32)": ("0x" + "c3" * 20,)})
+    (difference,) = check(listing([verified]), other)
+    assert difference.startswith("loan asset of 0x0d0d0d0d: CLI")
+    with pytest.raises(RpcUnavailable):
+        check(listing([market("refused", reason="http: HTTP 429")]), agreeing)
 
 
 def test_a_gmx_lookup_must_name_the_expected_share_and_symbol():
@@ -447,6 +559,32 @@ def test_an_endpoint_that_does_not_answer_is_unavailable_not_wrong(response):
         rpc_client(lambda request: response).call("0xtoken", "decimals()", 1, ("uint8",))
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        # Avalanche's own API, then publicnode and dRPC, for the same reverting call.
+        {"code": 3, "message": "execution reverted", "data": "0x"},
+        {"code": -32000, "message": "execution reverted"},
+    ],
+)
+def test_a_revert_is_an_answer_whichever_code_the_endpoint_gives_it(error):
+    answer = httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "error": error})
+    rpc = rpc_client(lambda request: answer)
+    with pytest.raises(RpcReverted):
+        rpc.call("0xspoke", "getReserveCount()", 1, ("uint256",))
+    assert rpc.reverts("0xspoke", "getReserveCount()", 1) is True
+
+
+def test_only_a_revert_counts_as_reverting():
+    count = httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": "0x" + "00" * 32})
+    assert rpc_client(lambda request: count).reverts("0xspoke", "getReserveCount()", 1) is False
+    limited = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "rate limited"}}
+    throttled = rpc_client(lambda request: httpx.Response(200, json=limited))
+    with pytest.raises(RpcUnavailable) as raised:
+        throttled.reverts("0xspoke", "getReserveCount()", 1)
+    assert not isinstance(raised.value, RpcReverted)
+
+
 def test_a_chain_the_endpoint_does_not_serve_has_no_direct_client():
     assert endpoint_url("publicnode", "eip155:1") == "https://ethereum-rpc.publicnode.com"
     assert endpoint_url("publicnode", "eip155:8453") is None
@@ -478,6 +616,11 @@ def test_listing_the_plan_contacts_nothing_and_writes_nothing(tmp_path, capsys, 
     code = entry.main(["reads", "--list", "--output", str(output), "--case", "gmx_v2"])
     lines = capsys.readouterr().out.splitlines()
     assert code == 0 and not output.exists()
+    # The plan writes nothing, so it needs no output directory; a run does.
+    assert entry.main(["reads", "--list", "--case", "gmx_v2"]) == 0
+    assert capsys.readouterr().out.splitlines() == lines
+    with pytest.raises(SystemExit, match="--output is required"):
+        entry.main(["reads", "--case", "gmx_v2"])
     assert lines and all("gmx_v2" in line for line in lines)
     assert {line.split()[0] for line in lines} == set(PUBLIC_RPC)
 
@@ -502,6 +645,17 @@ def test_a_run_writes_its_report_into_a_new_directory_only(tmp_path, capsys, mon
     assert entry.command_label(["uvx", "almanak"]) == "`uvx almanak`"
     with pytest.raises(SystemExit, match="is not empty"):
         entry.main(arguments)
+
+
+def test_the_entry_point_can_leave_known_issues_out_of_its_exit_code(tmp_path, monkeypatch):
+    reproduced = result(KNOWN, "fail", "deployment_changed: unverified revision")
+    monkeypatch.setattr(reads, "run_plan", lambda plan, session: [reproduced])
+    arguments = ["reads", "--case", "balance/native"]
+    assert entry.main([*arguments, "--output", str(tmp_path / "strict")]) == 1
+    lenient = tmp_path / "lenient"
+    assert entry.main([*arguments, "--output", str(lenient), "--known-issues-ok"]) == 0
+    # The report does not hide what the exit code leaves out.
+    assert "1 fail (1 with a known issue)" in (lenient / "summary.md").read_text()
 
 
 def test_progress_lines_name_the_reason_only_when_a_case_did_not_pass(capsys):
@@ -554,6 +708,8 @@ def test_the_optional_workflow_is_manual_only_and_reads_only():
     triggers = yaml.load(text, Loader=yaml.BaseLoader)["on"]
     assert set(triggers) == {"workflow_dispatch"}
     assert "scripts.live_qa reads" in text
+    # A dispatched run is red for a new failure, not for the known ones it also reports.
+    assert text.count("--known-issues-ok") == text.count("scripts.live_qa reads") == 2
     # No write level, no spend flag, no wallet and no secret reaches a hosted runner.
     for forbidden in ("live_qa writes", "ALMANAK_QA_SPEND_REAL_FUNDS", "--wallet", "secrets."):
         assert forbidden not in text, forbidden

@@ -43,6 +43,8 @@ AAVE_V4_AVALANCHE_SPOKE = "0x435272ceff93a1e657e8abfdf0a13e95900a3a56"
 COMET_USDC = "0xc3d688b66703497daa19211eedff47f25384cdc3"
 MORPHO_CBBTC_USDC = "0x64d65c9a2d91c36d56fbc42d69e979335320169b3df63bf92789e2c8883fcc64"
 
+MORPHO_CORE = "0xbbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb"
+
 GMX_BTC_USDC = "0xfb02132333a79c8b5bd0b64e3abcca5f7faf2937"
 GMX_WAVAX_USDC = "0x913c1f46b48b3ed35e7dc3cf754d4ae8499f31cf"
 
@@ -50,6 +52,12 @@ AAVE_V3_REVISION = KnownIssue(
     "Aave V3 reads refuse with deployment_changed after the on-chain Pool upgrade;"
     " the SDK pins the earlier revision's code hashes",
     "deployment_changed",
+)
+AAVE_V4_EMPTY_SPOKES = KnownIssue(
+    "the Aave V4 listing reports Avalanche Spokes without reserves as unreadable: both"
+    " public endpoints answer their getReserveCount() revert with JSON-RPC -32000, and"
+    " the listing recognizes a revert only by code 3",
+    "revert getReserveCount()",
 )
 GMX_AVALANCHE_LABELS = KnownIssue(
     "GMX Avalanche markets are indexed by BTC.b and WAVAX, so the BTC/USD and"
@@ -101,7 +109,7 @@ ETHEREUM_CASES = (
         "lending-reserve/aave_v4/ethereum-weth",
         ETHEREUM,
         aave_v4("lending-reserve", ETHEREUM, AAVE_V4_ETHEREUM_SPOKE, 0),
-        checks.reserve_decimals,
+        checks.aave_v4_reserve,
     ),
     ReadCase(
         "lending-position/aave_v4/ethereum-weth",
@@ -117,7 +125,7 @@ ETHEREUM_CASES = (
         "lending-markets/aave_v4/ethereum",
         ETHEREUM,
         markets("aave_v4", ETHEREUM),
-        checks.listed_markets,
+        checks.aave_v4_listing,
     ),
     ReadCase(
         "lending-reserve/aave_v3/ethereum-weth",
@@ -161,7 +169,7 @@ ETHEREUM_CASES = (
         "lending-markets/morpho_blue/ethereum-usdc",
         ETHEREUM,
         markets("morpho_blue", ETHEREUM, "--asset", USDC),
-        checks.some_verified_markets,
+        checks.morpho_listing(MORPHO_CORE),
     ),
     ReadCase(
         "pool/uniswap_v3/ethereum-usdc-weth",
@@ -208,7 +216,7 @@ AVALANCHE_CASES = (
         "lending-reserve/aave_v4/avalanche-usdc",
         AVALANCHE,
         aave_v4("lending-reserve", AVALANCHE, AAVE_V4_AVALANCHE_SPOKE, 2),
-        checks.reserve_decimals,
+        checks.aave_v4_reserve,
     ),
     ReadCase(
         "lending-position/aave_v4/avalanche-usdc",
@@ -224,7 +232,8 @@ AVALANCHE_CASES = (
         "lending-markets/aave_v4/avalanche",
         AVALANCHE,
         markets("aave_v4", AVALANCHE),
-        checks.listed_markets,
+        checks.aave_v4_listing,
+        known_issue=AAVE_V4_EMPTY_SPOKES,
     ),
     ReadCase(
         "lending-reserve/aave_v3/avalanche-usdc",

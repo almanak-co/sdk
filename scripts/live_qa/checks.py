@@ -119,6 +119,32 @@ def reserve_decimals(output: Output, rpc: Rpc) -> list[str]:
     )
 
 
+# The leading static words of a Spoke's reserve record.
+SPOKE_RESERVE = ("address", "address", "uint16", "uint8")
+
+
+def spoke_reserve(rpc: Rpc, spoke: str, reserve_id: int, block: int) -> tuple[Any, ...]:
+    """The underlying token, Hub, Hub asset ID and decimals a Spoke records for a reserve."""
+    return rpc.call(spoke, "getReserve(uint256)", block, SPOKE_RESERVE, (reserve_id,))
+
+
+def aave_v4_reserve(output: Output, rpc: Rpc) -> list[str]:
+    """An Aave V4 reserve: what the Spoke itself records under the selected reserve ID."""
+    resolution, number = output["resolution"], output["observation"]["block"]["number"]
+    selection = resolution["selection"]
+    underlying, hub, hub_asset_id, decimals = spoke_reserve(
+        rpc, selection["spoke"], selection["reserve_id"], number
+    )
+    return differences(
+        (
+            ("asset", asset_address(resolution["asset"]), underlying.lower()),
+            ("hub", resolution["hub"], hub.lower()),
+            ("hub_asset_id", resolution["hub_asset_id"], hub_asset_id),
+            ("spoke decimals", resolution["decimals"], decimals),
+        )
+    ) + reserve_decimals(output, rpc)
+
+
 def pooled_reserve(output: Output, rpc: Rpc) -> list[str]:
     """An Aave V3 or SparkLend reserve: the aToken the Pool itself records."""
     resolution, number = output["resolution"], output["observation"]["block"]["number"]
@@ -193,19 +219,31 @@ def gmx_market(share: str, symbol: str) -> Check:
     return check
 
 
-def readable_markets(output: Output) -> list[Output]:
-    """The listing's markets, once nothing in it went unread because of the endpoint."""
+def empty_spokes(output: Output, rpc: Rpc) -> list[str]:
+    """Spokes the listing calls unreadable although the endpoint answered: they revert.
+
+    A Spoke without reserves reverts `getReserveCount()`. Any other unreadable entry,
+    and any market refused for an endpoint reason, blocks the case instead.
+    """
     unreadable = output["source"].get("unreadable") or []
-    reasons = [item.get("reason", "") for item in (*unreadable, *output["markets"])]
-    blocked = [reason for reason in reasons if reason.startswith(ENDPOINT_REASONS)]
-    if blocked:
-        raise RpcUnavailable(f"{len(blocked)} entries unreadable, first: {blocked[0]}")
-    return list(output["markets"])
+    block = output["block"]["number"]
+    empty = [
+        item["spoke"]
+        for item in unreadable
+        if "spoke" in item and rpc.reverts(item["spoke"], "getReserveCount()", block)
+    ]
+    unanswered = [item.get("reason", "") for item in unreadable if item.get("spoke") not in empty]
+    unanswered += [
+        market["reason"]
+        for market in output["markets"]
+        if market.get("reason", "").startswith(ENDPOINT_REASONS)
+    ]
+    if unanswered:
+        raise RpcUnavailable(f"{len(unanswered)} entries unreadable, first: {unanswered[0]}")
+    return empty
 
 
-def listed_markets(output: Output, rpc: Rpc) -> list[str]:
-    """A listing of reviewed deployments: every reported market is verified."""
-    markets = readable_markets(output)
+def unverified(markets: list[Output]) -> list[str]:
     if not markets:
         return ["the listing reports no markets"]
     return [
@@ -215,21 +253,72 @@ def listed_markets(output: Output, rpc: Rpc) -> list[str]:
     ]
 
 
-def some_verified_markets(output: Output, rpc: Rpc) -> list[str]:
-    """A listing of permissionless markets: the connector may refuse some, never all."""
-    if any(market["status"] == "verified" for market in readable_markets(output)):
-        return []
-    return ["the listing reports no verified market"]
+def listed_markets(output: Output, rpc: Rpc) -> list[str]:
+    """A listing of reviewed deployments: nothing unreadable, every market verified."""
+    empty = empty_spokes(output, rpc)
+    misread = (
+        [
+            f"{len(empty)} Spokes are reported unreadable, but they revert getReserveCount()"
+            f" on a direct read, as a Spoke without reserves does: {', '.join(empty)}"
+        ]
+        if empty
+        else []
+    )
+    return misread + unverified(output["markets"])
+
+
+def aave_v4_listing(output: Output, rpc: Rpc) -> list[str]:
+    """An Aave V4 listing: each market is the reserve its Spoke records under that ID."""
+    block = output["block"]["number"]
+    pairs = []
+    for index, market in enumerate(output["markets"]):
+        underlying, hub, _, _ = spoke_reserve(rpc, market["spoke"], market["reserve_id"], block)
+        asset = asset_address(market["asset"]["asset"])
+        pairs.append((f"market {index} asset", asset, underlying.lower()))
+        pairs.append((f"market {index} hub", market["hub"], hub.lower()))
+    return differences(pairs) + listed_markets(output, rpc)
+
+
+def morpho_listing(core: str) -> Check:
+    """A Morpho Blue listing: the connector may refuse some markets, never all, and each
+    verified market's loan asset is the one the core records under its ID."""
+
+    def check(output: Output, rpc: Rpc) -> list[str]:
+        empty_spokes(output, rpc)
+        verified = [market for market in output["markets"] if market["status"] == "verified"]
+        if not verified:
+            return ["the listing reports no verified market"]
+        pairs = []
+        for market in verified:
+            (loan,) = rpc.call(
+                core,
+                "idToMarketParams(bytes32)",
+                output["block"]["number"],
+                ("address",),
+                (bytes.fromhex(market["market_id"][2:]),),
+            )
+            reported = asset_address(market["loan_asset"]["asset"])
+            pairs.append((f"loan asset of {market['market_id'][:10]}", reported, loan.lower()))
+        return differences(pairs)
+
+    return check
 
 
 def pool_reserve_listing(output: Output, rpc: Rpc) -> list[str]:
-    """An Aave V3 or SparkLend listing: as many reserves as the Pool's own list."""
+    """An Aave V3 or SparkLend listing against the Pool's own reserve list: the same
+    count, and every reported market an asset on that list."""
     source = output["source"]
     (reserves,) = rpc.call(
         source["contract"], "getReservesList()", output["block"]["number"], ("address[]",)
     )
+    onchain = {reserve.lower() for reserve in reserves}
     counted = differences((("listed reserves", source["listed"], len(reserves)),))
-    return counted + listed_markets(output, rpc)
+    strangers = [
+        f"market {index} asset {market['asset']['asset']} is not on the Pool's reserve list"
+        for index, market in enumerate(output["markets"])
+        if asset_address(market["asset"]["asset"]) not in onchain
+    ]
+    return counted + strangers + listed_markets(output, rpc)
 
 
 def hypercore_market(coin: str) -> Check:

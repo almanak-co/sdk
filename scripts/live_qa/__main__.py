@@ -21,7 +21,7 @@ def whole(value: str) -> int:
     return int(value)
 
 
-def command_option(parser: argparse.ArgumentParser) -> None:
+def command_option(parser: argparse.ArgumentParser, *, output_required: bool) -> None:
     parser.add_argument(
         "--almanak-command",
         type=shlex.split,
@@ -29,7 +29,9 @@ def command_option(parser: argparse.ArgumentParser) -> None:
         help="how to start the CLI under test; default is this checkout's `almanak`."
         ' For the published package: "uvx --from almanak==<version> almanak"',
     )
-    parser.add_argument("--output", type=Path, required=True, help="a new directory for the report")
+    parser.add_argument(
+        "--output", type=Path, required=output_required, help="a new directory for the report"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,7 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     read = levels.add_parser(
         "reads", help="free read checks on public endpoints; no key, wallet or funds"
     )
-    command_option(read)
+    # A run needs --output; --list writes nothing and takes none.
+    command_option(read, output_required=False)
     read.add_argument(
         "--endpoint",
         action="append",
@@ -53,6 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
     read.add_argument(
         "--timeout-seconds", type=float, default=90.0, help="longest one command may take"
     )
+    read.add_argument(
+        "--known-issues-ok",
+        action="store_true",
+        help="exit 0 or 2 when the only failures reproduce known issues; they stay in the report",
+    )
     read.add_argument("--list", action="store_true", help="print the planned cases and exit")
     write = levels.add_parser(
         "writes",
@@ -60,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=writes.WARNING,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    command_option(write)
+    command_option(write, output_required=True)
     # None of these is required by the parser: a missing one is a gate with its own reason.
     write.add_argument("--market", help=f"one of {', '.join(sorted(writes.MARKETS))}")
     write.add_argument("--amount", type=whole, help="base units of the market's asset; tiny")
@@ -112,6 +120,8 @@ def read_level(args: argparse.Namespace) -> int:
     if args.list:
         print("\n".join(f"{endpoint:10} {case.id}" for case, endpoint in plan))
         return 0
+    if args.output is None:
+        raise SystemExit("--output is required: a new directory for the report")
     output = new_directory(args.output)
     workdir = output / "work"
     workdir.mkdir()
@@ -135,7 +145,7 @@ def read_level(args: argparse.Namespace) -> int:
         f"{tally['pass']} pass, {tally['fail']} fail, {tally['blocked']} blocked;"
         f" report in {output}"
     )
-    return reads.exit_code(results)
+    return reads.exit_code(results, args.known_issues_ok)
 
 
 def write_level(args: argparse.Namespace) -> int:

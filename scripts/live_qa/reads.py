@@ -11,7 +11,7 @@ import json
 import time
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -156,7 +156,9 @@ def judge(case: ReadCase, invocation: Invocation, rpc: Rpc) -> Verdict:
 def case_arguments(case: ReadCase, endpoint: str, workdir: Path) -> tuple[str, ...]:
     arguments = ("ax", *case.arguments)
     if case.config is not None:
-        path = workdir / (case.id.replace("/", "-").replace(":", "-") + ".json")
+        # Endpoints run side by side in one directory, so each writes its own file.
+        name = f"{endpoint}-{case.id}".replace("/", "-").replace(":", "-")
+        path = workdir / f"{name}.json"
         path.write_text(json.dumps(case.config))
         arguments = (*arguments, "--config", str(path))
     return (*arguments, "--public-rpc", endpoint)
@@ -209,6 +211,20 @@ def planned(
 BREAKER_LIMIT = 3
 
 
+class Breaker:
+    """Consecutive blocked cases per endpoint and chain."""
+
+    def __init__(self) -> None:
+        self.streak: dict[tuple[str, str], int] = {}
+
+    def open(self, endpoint: str, chain: str) -> bool:
+        return self.streak.get((endpoint, chain), 0) >= BREAKER_LIMIT
+
+    def record(self, result: "Result") -> None:
+        key = (result.endpoint, result.case.chain)
+        self.streak[key] = self.streak.get(key, 0) + 1 if result.status == "blocked" else 0
+
+
 @dataclass
 class Session:
     """What a run needs besides its plan: the command, direct clients and retry policy."""
@@ -218,11 +234,19 @@ class Session:
     workdir: Path
     policy: RetryPolicy = DEFAULT_POLICY
     report: Callable[[Result], None] = lambda result: None
+    breaker: Breaker = field(default_factory=Breaker)
 
     def one(self, case: ReadCase, endpoint: str) -> Result:
-        return run_case(
-            case, endpoint, self.run, self.rpc(endpoint, case.chain), self.workdir, self.policy
-        )
+        """Run the case unless the breaker is open for its endpoint and chain."""
+        if self.breaker.open(endpoint, case.chain):
+            result = not_run(case, endpoint)
+        else:
+            result = run_case(
+                case, endpoint, self.run, self.rpc(endpoint, case.chain), self.workdir, self.policy
+            )
+            self.breaker.record(result)
+        self.report(result)
+        return result
 
 
 def not_run(case: ReadCase, endpoint: str) -> Result:
@@ -231,18 +255,8 @@ def not_run(case: ReadCase, endpoint: str) -> Result:
 
 
 def run_lane(cases: Sequence[ReadCase], endpoint: str, session: Session) -> list[Result]:
-    """One endpoint's cases, one after another, with the breaker per chain."""
-    streak: dict[str, int] = {}
-    results = []
-    for case in cases:
-        if streak.get(case.chain, 0) >= BREAKER_LIMIT:
-            result = not_run(case, endpoint)
-        else:
-            result = session.one(case, endpoint)
-            streak[case.chain] = streak.get(case.chain, 0) + 1 if result.status == "blocked" else 0
-        session.report(result)
-        results.append(result)
-    return results
+    """One endpoint's cases, one after another."""
+    return [session.one(case, endpoint) for case in cases]
 
 
 def run_plan(plan: Sequence[tuple[ReadCase, str]], session: Session) -> list[Result]:
@@ -265,12 +279,41 @@ def counts(results: Sequence[Result]) -> dict[str, int]:
     return {status: sum(result.status == status for result in results) for status in STATUSES}
 
 
-def exit_code(results: Sequence[Result]) -> int:
-    """0: every case passed. 1: a case failed. 2: none failed, but one was blocked."""
-    tally = counts(results)
-    if tally["fail"] or not results:
+def exit_code(results: Sequence[Result], known_issues_ok: bool = False) -> int:
+    """0: every case passed. 1: a case failed. 2: none failed, but one was blocked.
+
+    With `known_issues_ok`, a failure that reproduces its case's known issue does not
+    count as failed here; the report still lists it as a failure.
+    """
+    failed = [
+        result
+        for result in results
+        if result.status == "fail"
+        and not (known_issues_ok and result.known.startswith("reproduces"))
+    ]
+    if failed or not results:
         return 1
-    return 2 if tally["blocked"] else 0
+    return 2 if counts(results)["blocked"] else 0
+
+
+Expectation = Literal["pass", "skip", "xfail", "fail"]
+
+
+def expectation(result: Result) -> tuple[Expectation, str]:
+    """How a test lane treats a result, strictly about known issues.
+
+    A known issue that reproduces is an expected failure. One that no longer
+    reproduces fails, so that its marker is removed. Blocked is a skip, never a pass.
+    """
+    if result.status == "blocked":
+        return "skip", f"blocked after {result.attempts} attempts: {result.detail}"
+    if result.known.startswith("reproduces"):
+        return "xfail", f"{result.known}: {result.detail}"
+    if result.known.startswith("no longer reproduces"):
+        return "fail", result.known
+    if result.status == "pass":
+        return "pass", result.detail
+    return "fail", f"{result.known or 'unexpected'}: {result.detail}"
 
 
 COLUMNS = (
