@@ -31,10 +31,11 @@ For each request it finds the market, converts the amount to base units, runs th
 action without `--execute`, shows the user the preview, and executes only after
 they confirm.
 
-No provider key is needed to start. Without one the agent reads and previews
-through a named public endpoint (`--public-rpc`), whose operator can see the wallet
-address it reads. It asks for an Alchemy API key when the user first confirms an
-action, because execution does not run on a public endpoint.
+No provider key is needed. The agent reads, previews and executes through a named
+public endpoint (`--public-rpc`). That endpoint's operator can see the wallet
+address and each transaction before it is mined, and nobody answers for what the
+endpoint reports. A user who prefers their own provider can give the agent an
+Alchemy API key.
 
 The agent keeps its files in `~/.almanak/agent/`: the wallet directory, the env
 file with the provider key once there is one, and a `settings.json` with fee ceilings and the markets

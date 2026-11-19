@@ -105,18 +105,12 @@ def command(args) -> int:
 
 
 def transport(args, chain):
-    """The provider an action names and its endpoint: a key, or a public endpoint.
-
-    A public endpoint serves the preview only. Nobody answers for what it reports, and
-    the plan a transaction is signed from comes from its reads.
-    """
+    """The provider an action names and its endpoint: a key, or a public endpoint."""
     from almanak.gateway.providers import PublicProvider, provider_endpoint, public_endpoint
 
     if args.public_rpc is None:
         provider = alchemy(chain)
         return provider, provider_endpoint(provider, args.env_file)
-    if args.execute:
-        raise ValueError("--execute needs --env-file; a public endpoint serves previews only")
     return (
         PublicProvider(kind="public_rpc", name=args.public_rpc),
         public_endpoint(args.public_rpc, chain),
@@ -621,18 +615,25 @@ def recover_command(args) -> int:
     if args.record is None:
         print(json.dumps({"records": kept_records()}, indent=2))
         return 0
-    if args.env_file is None:
-        raise ValueError("--env-file is required with --record")
 
     def backend_for(config):
-        from almanak.gateway.providers import provider_endpoint
-
-        endpoint = provider_endpoint(config.production.networks[0].provider, args.env_file)
-        return production_backend(config, endpoint, None)
+        return production_backend(config, record_endpoint(config, args.env_file), None)
 
     result = recover(args.record, backend_for)
     print(json.dumps(result, indent=2))
     return 0 if result["resolved"] else 1
+
+
+def record_endpoint(config, env_file: Path | None) -> str:
+    """The endpoint of the provider the record's action ran on."""
+    from almanak.gateway.providers import PublicProvider, provider_endpoint, public_endpoint
+
+    network = config.production.networks[0]
+    if isinstance(network.provider, PublicProvider):
+        return public_endpoint(network.provider.name, network.chain.chain_id)
+    if env_file is None:
+        raise ValueError("--env-file is required: this record's action used a provider key")
+    return provider_endpoint(network.provider, env_file)
 
 
 def executed_result(state, outcomes, refusal) -> dict:
@@ -697,7 +698,9 @@ def recover_arguments(commands) -> None:
         help="the kept record to resolve; without it the kept records are listed",
     )
     command.add_argument(
-        "--env-file", type=Path, help="private provider credentials; required with --record"
+        "--env-file",
+        type=Path,
+        help="private provider credentials, for a record whose action used a provider key",
     )
 
 

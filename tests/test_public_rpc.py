@@ -81,10 +81,10 @@ def test_a_name_resolves_only_on_a_chain_it_serves(monkeypatch):
         public_endpoint("one", ChainId("eip155:999"))
 
 
-def test_a_public_provider_is_refused_wherever_an_endpoint_is_resolved_for_execution(tmp_path):
-    """Production, fork, check and backtest paths all resolve through this function."""
+def test_a_public_provider_is_refused_outside_ax(tmp_path):
+    """Production strategy, fork, check and backtest paths all resolve through this function."""
     provider = PublicProvider(kind="public_rpc", name="publicnode")
-    with pytest.raises(ValueError, match="only `almanak ax` reads and action previews"):
+    with pytest.raises(ValueError, match="only `almanak ax` reads and direct actions"):
         provider_endpoint(provider, tmp_path / "missing.env")
 
 
@@ -181,15 +181,15 @@ def test_a_lookup_that_needs_a_vendor_key_is_refused_only_when_it_is_made():
     assert refused.value.kind == "unavailable"
 
 
-def test_an_action_takes_a_key_or_a_public_endpoint_and_previews_only_on_the_latter(capsys):
+def test_an_action_takes_a_key_or_a_public_endpoint_to_preview_and_to_execute(capsys):
     preview = parse(*ACTION, "--public-rpc", "publicnode")
     assert (preview.public_rpc, preview.env_file, preview.execute) == ("publicnode", None, False)
-    provider, endpoint = ax_actions.transport(preview, ETHEREUM)
-    assert provider == PublicProvider(kind="public_rpc", name="publicnode")
-    assert endpoint == providers.PUBLIC_RPC["publicnode"][ETHEREUM]
     executing = parse(*ACTION, "--public-rpc", "publicnode", "--execute")
-    with pytest.raises(ValueError, match="--execute needs --env-file"):
-        ax_actions.transport(executing, ETHEREUM)
+    assert executing.execute
+    for args in (preview, executing):
+        provider, endpoint = ax_actions.transport(args, ETHEREUM)
+        assert provider == PublicProvider(kind="public_rpc", name="publicnode")
+        assert endpoint == providers.PUBLIC_RPC["publicnode"][ETHEREUM]
     for arguments in (ACTION, [*ACTION, "--public-rpc", "publicnode", "--env-file", ".env"]):
         with pytest.raises(SystemExit):
             parse(*arguments)
@@ -219,9 +219,23 @@ def test_a_preview_configuration_records_the_public_provider_it_used(recorded):
     )
     provider = config.production.networks[0].provider
     assert provider == PublicProvider(kind="public_rpc", name="publicnode")
-    # Whatever later resolves this configuration's endpoint for execution refuses it.
-    with pytest.raises(ValueError, match="reads and action previews"):
+    # A strategy, fork or backtest path resolving this configuration's endpoint refuses it.
+    with pytest.raises(ValueError, match="reads and direct actions"):
         provider_endpoint(provider, Path(".env"))
+    # Recovery reaches the endpoint the action ran on, with no credentials.
+    assert ax_actions.record_endpoint(config, None) == providers.PUBLIC_RPC["publicnode"][ETHEREUM]
+
+
+def test_recovering_a_keyed_record_needs_the_env_file(tmp_path):
+    network = SimpleNamespace(
+        provider=ax_actions.alchemy(ETHEREUM), chain=SimpleNamespace(chain_id=ETHEREUM)
+    )
+    config = SimpleNamespace(production=SimpleNamespace(networks=[network]))
+    with pytest.raises(ValueError, match="--env-file is required"):
+        ax_actions.record_endpoint(config, None)
+    env = tmp_path / ".env"
+    env.write_text("ALCHEMY_API_KEY=k\n")
+    assert ax_actions.record_endpoint(config, env).endswith("/v2/k")
 
 
 def test_head_age_counts_the_time_the_read_itself_took():

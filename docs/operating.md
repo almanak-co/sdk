@@ -479,8 +479,8 @@ base fee passes about half of it. The command also uses a gas limit of at most
 | market selection | The same flags or `--config` file as `ax lending-reserve`. |
 | `--amount` | Base units of the reserve asset. `withdraw` takes none: it withdraws the whole supplied balance. |
 | `--wallet` | The directory `almanak wallet create` wrote, under any account name. The keystore is unlocked with the recorded `password_file` or by asking. |
-| `--env-file` | The provider key (`ALCHEMY_API_KEY`). Required with `--execute`. |
-| `--public-rpc` | A named public endpoint instead of `--env-file`, for a preview only. |
+| `--env-file` | The provider key (`ALCHEMY_API_KEY`). |
+| `--public-rpc` | A named public endpoint instead of `--env-file`. |
 | `--max-gas-price-wei`, `--max-transaction-fee` | Required ceilings; a step quoted above either is refused. |
 
 Operator actions support Aave V4 with an EOA wallet. Safe/Roles accounts are not
@@ -515,7 +515,9 @@ almanak ax recover --record ~/.local/state/almanak-v3/actions/<record> --env-fil
 Without `--record` it lists the kept records: each one's `path`, `chain`, `account`
 and `unresolved` step. With `--record` it resolves that record's signed step: from
 its receipt when the transaction was mined, otherwise by sending the same signed
-bytes again and waiting. It plans and signs nothing, and needs no wallet. Once the
+bytes again and waiting. It plans and signs nothing, and needs no wallet. It uses
+the provider the record's action ran on: `--env-file` is needed only when that was
+a provider key. Once the
 step has its outcome, whatever the request had not yet signed is dropped
 (`discarded_request`), the record is removed and the claim released; state the
 action again against the position as it now is. A step that cannot be resolved
@@ -597,16 +599,20 @@ with neither the command is refused. A public endpoint is never chosen for the
 caller.
 
 `--public-rpc <name>` reads through one named public endpoint; `--help` lists the
-names and the chains each serves. It is for `ax` reads and for previews of
-`ax supply` and `ax withdraw`. Before any read the endpoint must report the chain's
+names and the chains each serves. It is for `ax` reads and for `ax supply` and
+`ax withdraw`, previewed or executed. Before any read the endpoint must report the chain's
 number and its pinned genesis block and a head no older than 120 seconds; otherwise
 the command is refused with `chain_mismatch` or `stale`. One endpoint serves a
 command, and a failure fails the read: nothing falls back to another endpoint.
 Nobody answers for a public endpoint. It gives no promise of availability, archive
 state or wide log ranges, it rate limits without notice, and its operator sees the
-addresses a command reads. `--execute`, `ax recover`, strategy runs, forks, checks
-and backtests do not accept one and need a provider key or an operator RPC URL. A
-lookup that uses a vendor key is refused when it is made. The
+addresses a command reads and the transactions it sends before they are mined. An
+action executed through one signs what that endpoint's reads resolve, including
+the market's contract, so an endpoint that reports falsely can direct an approval
+or a supply elsewhere, up to the amount of the action. Naming a public endpoint
+accepts that. `ax recover` uses the endpoint its record's action ran on. Strategy
+runs, forks, checks and backtests do not accept a public endpoint and need a
+provider key or an operator RPC URL. A lookup that uses a vendor key is refused when it is made. The
 inline `pool-price` key names a pool on the reviewed deployment for the chain,
 hookless unless `--hooks` names a reviewed hook (whose dynamic-fee profiles take
 `--fee 8388608`). Use each command's `--help` for the complete argument list.

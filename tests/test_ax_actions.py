@@ -913,8 +913,6 @@ def test_recover_lists_kept_records_and_needs_credentials_only_to_resolve(
             }
         ]
     }
-    with pytest.raises(ValueError, match="--env-file is required"):
-        ax_actions.recover_command(SimpleNamespace(record=record, env_file=None))
     monkeypatch.setattr(ax_actions, "recover", lambda record, backend_for: {"resolved": False})
     args = SimpleNamespace(record=record, env_file=Path(".env"))
     assert ax_actions.recover_command(args) == 1
