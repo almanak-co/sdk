@@ -51,6 +51,11 @@ class FeeLimits:
     max_gas_limit: int | None = None
 
 
+# The longest a step's observation may age before it is refused;
+# `scripts/qualify_public_rpc.py` holds a public endpoint's head to the same.
+MAX_OBSERVATION_AGE_SECONDS = 120
+
+
 class LocalGateway(GatewayClient):
     """The coordinator's gateway client, with the gateway service in this process.
 
@@ -224,7 +229,7 @@ def configuration(connector: str, positions: dict, wallet, provider, chain, limi
                 {
                     "chain": scope,
                     "provider": provider.model_dump(mode="json"),
-                    "max_observation_age_seconds": 120,
+                    "max_observation_age_seconds": MAX_OBSERVATION_AGE_SECONDS,
                 }
             ],
             "gas": [gas_policy(wallet.account, chain.chain_id, limits)],
