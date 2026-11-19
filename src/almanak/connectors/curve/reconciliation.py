@@ -3,6 +3,7 @@
 from almanak.asset_amounts import AssetAmounts
 from almanak.connectors.curve import operations as ops
 from almanak.connectors.curve.observations import snapshot
+from almanak.connectors.curve.ownership import amount
 from almanak.connectors.curve.positions import Position
 from almanak.connectors.curve.receipts import movement, zero
 from almanak.gateway.ethereum import DataError
@@ -66,30 +67,36 @@ def settled_allowance(value, operation, effects):
 
 def validate_balances(pending, after, effects, gas, success):
     before = pending.before
-    if after.position != after.owned.position:
-        raise DataError("ownership", "observed Curve LP shares differ from reconciled ownership")
     if after.allowances != allowances_after(before, pending.operation, effects, success):
         raise DataError("receipt", "ERC-20 allowance differs from executed Curve settlement")
     if before.native_balance is None or after.native_balance is None:
         raise DataError("receipt", "Curve settlement is missing native payer balances")
     if before.payer != after.payer or before.native_balance.asset != after.native_balance.asset:
         raise DataError("receipt", "native gas payer scope changed across Curve execution")
-    return (*wallet_movement_issues(before, after, effects, gas), *unowned_share_issues(after))
+    return (*wallet_movement_issues(before, after, effects, gas), *share_issues(after))
 
 
-def unowned_share_issues(after):
-    """LP shares the fund holds beside a trading-only target, which no step of it minted.
+def share_issues(after):
+    """LP shares of the pool in the fund that the allocation's own steps do not explain.
 
-    The step is reconciled from its own receipt all the same: the shares are another
-    account's transfer, and refusing the outcome over them would leave a mined step
-    unresolved for as long as the receipt block is read.
+    The step is reconciled from its own receipt all the same, and ownership follows the
+    receipt. The fund's LP token balance can differ only by another account's transfer
+    or by a transfer of the fund's that is no step of this allocation, and refusing the
+    outcome over either would leave a mined step unresolved for as long as the receipt
+    block is read.
     """
     held = after.unowned_shares
-    if held is None:
+    if held is not None:
+        return (
+            f"{held.asset}: wallet holds {held.amount} base units of the pool's LP token "
+            "that this allocation does not own",
+        )
+    observed, owned = amount(after.position), amount(after.owned.position)
+    if observed == owned:
         return ()
     return (
-        f"{held.asset}: wallet holds {held.amount} base units of the pool's LP token "
-        "that this allocation does not own",
+        f"{after.target.pool.shares_asset}: wallet holds {observed} base units of the "
+        f"pool's LP token where this allocation's steps account for {owned}",
     )
 
 

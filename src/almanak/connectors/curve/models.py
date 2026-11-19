@@ -64,6 +64,12 @@ class Allocation(Model):
     liquidity_enabled: bool
     single_coin_exit: AssetType | None = None
     capital: AssetAmounts
+    # Stated by a direct liquidity action only, and absent on the wire otherwise, so a
+    # strategy allocation keeps its form. The operator deployment takes the fund's whole
+    # balance of the pool's LP token as its position, brings `capital` as its only
+    # inventory, possibly none, and trades nothing: it has no entry swap and its
+    # observations carry no quote.
+    adopt: bool = Field(default=False, exclude_if=lambda v: not v)
     entry_swap_bps: EntrySwapBps
     hold_seconds: PositiveSeconds | None = Field(
         default=None, exclude_if=lambda v: v is None, description=HOLD_SECONDS_DESCRIPTION
@@ -80,7 +86,10 @@ class Allocation(Model):
     @model_validator(mode="after")
     def units(self):
         self.capital.in_order(self.pool.coins)
-        self.capital.require_inventory()
+        if not self.adopt:
+            self.capital.require_inventory()
+        elif not self.liquidity_enabled or self.entry_swap_bps:
+            raise ValueError("an adopting Curve allocation provides liquidity and swaps nothing")
         if self.native_asset != native_asset(self.chain.chain_id):
             raise ValueError("Curve payer policy must identify the chain's native asset")
         require_trading_entry(self.liquidity_enabled, self.entry_swap_bps)

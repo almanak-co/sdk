@@ -36,23 +36,33 @@ def validate_initial(state, observed):
 
 
 def adopt_owned(owned, observed):
-    """Ownership of an operator deployment at its start: the inventory its allocation states.
+    """Ownership of an operator deployment at its start.
 
-    Nothing is read into ownership. The stated coin amounts are attributed only when
-    the wallet covers each of them. LP shares are never adopted: a wallet that holds
-    this pool's LP token beside a trading-only allocation is refused here, before
-    anything is planned.
+    The coin amounts its allocation states are attributed only when the wallet covers
+    each of them. A target with liquidity authority also takes the fund's whole balance
+    of the pool's LP token as its position, exactly as the observation read it: LP
+    tokens are fungible, so there is no part of the balance the wallet does not own.
+    Beside a trading-only target the same balance is not owned, and the wallet is
+    refused before anything is planned.
     """
-    for item, seen in zip(owned, observed, strict=True):
-        refuse_unowned_shares(seen)
-        for held, attributed in zip(seen.wallets.root, item.inventory.root, strict=True):
-            if held.amount < attributed.amount:
-                raise DataError(
-                    "inventory",
-                    f"the wallet holds {held.amount} base units of {held.asset}, "
-                    f"less than the {attributed.amount} the action needs",
-                )
-    return owned
+    return tuple(adopted(item, seen) for item, seen in zip(owned, observed, strict=True))
+
+
+def adopted(item, seen):
+    refuse_unowned_shares(seen)
+    for held, attributed in zip(seen.wallets.root, item.inventory.root, strict=True):
+        if held.amount < attributed.amount:
+            raise DataError(
+                "inventory",
+                f"the wallet holds {held.amount} base units of {held.asset}, "
+                f"less than the {attributed.amount} the action needs",
+            )
+    if seen.position is None:
+        return item
+    # The shares were minted before this deployment, so its entry is already made.
+    return type(item)(
+        target=item.target, inventory=item.inventory, position=seen.position, entry_complete=True
+    )
 
 
 def commit_owned(owned, outcome):
@@ -97,6 +107,8 @@ class CurveLifecycle:
     def initial(cls, config, strategy, capabilities, permissions):
         from almanak.triggers import DecisionSchedule
 
+        if strategy is not None and any(a.adopt for a in config.allocations):
+            raise ValueError("only an operator deployment adopts the fund's LP shares")
         return cls.checkpoint_type(
             schedule=DecisionSchedule(),
             work=initial_work(config, cls.work_type),
