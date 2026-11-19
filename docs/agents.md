@@ -72,15 +72,23 @@ it never picks one silently:
 - **The range or the payout of a liquidity position.** For a position in a tick
   range the agent reads the pool's tick and tick spacing, proposes aligned ticks
   only as a suggestion, and explains that the position earns fees only while the
-  price is in its range. On Uniswap V4, which serves an open, a collect and a
-  close, the signed mint reverts when the price moved further than the slippage
-  in either direction; on the other tick-range connectors only the least of each
-  amount is in the signed mint, and the agent warns that amounts far from the
-  range's ratio can be filled at a worse price. A Uniswap V4 open leaves an approval to Permit2 that no command here
-  revokes, which the agent says before the open. On Curve and Aerodrome classic
-  the position is the wallet's balance of the pool's LP token, and on Curve the
-  user chooses whether a burn pays every coin or one. Nothing is swapped inside a
-  liquidity action.
+  price is in its range. A mint or an increase can use less than the stated
+  amounts, and the rest stays in the wallet. The signed call reverts when mined
+  at a price further than the slippage, in either direction, from the price the
+  command first read, or on Uniswap V4 from the price the mint step is planned
+  at. The agent also states the exception: where that tolerance reaches an edge
+  of the range, or the range lies beside the price, no price beyond the edge
+  reverts the call, which takes there only the one currency the range holds.
+  Uniswap V4 serves an open, a collect and a close, and its open leaves an
+  approval to Permit2 that no command here revokes, which the agent says before
+  the open. On Curve and Aerodrome classic the position is the wallet's balance
+  of the pool's LP token. A Curve deposit uses exactly the stated amounts, and on
+  Curve the user chooses whether a burn pays every coin or one. An Aerodrome
+  deposit offers the stated amounts in the proportion of the pool's reserves and
+  reverts when that proportion moved further than the slippage in either
+  direction. Nothing is swapped inside a liquidity action. A step mined after
+  another account added liquidity to the NFT, or sent the wallet LP shares, is
+  reported with its accounting issues, not as a failure.
 - **The fee ceilings.** Each applies to one step, and an action takes several;
   the agent states the ceiling for one step, states no total it cannot count, and
   never raises a ceiling itself.
@@ -125,9 +133,10 @@ opened elsewhere is read when the user names its market or token ID.
 - An action has no amount ceiling. The fee ceilings and the wallet balance bound
   it, and the confirmation before `--execute` is an instruction to the agent, not
   an enforced control.
-- The minimum a swap, a deposit or a burn accepts, the deadline where the call
-  carries one, and the gas price and gas limit are in the signed transaction, so
-  the chain enforces them. The health floor is a check before signing only.
+- The least a swap or a burn accepts, the bounds of a mint or a deposit, the
+  deadline where the call carries one, and the gas price and gas limit are in the
+  signed transaction, so the chain enforces them. The health floor, and what the
+  gateway checks while it plans and signs, hold before signing only.
   Nothing protects a position after its step is mined, and the agent does not
   watch positions.
 - A public endpoint's operator sees the addresses read and the transactions sent,

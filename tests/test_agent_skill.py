@@ -784,27 +784,99 @@ def test_the_skill_says_what_the_chain_enforces_and_what_it_does_not():
     from almanak.connectors.direct import connectors_for, direct_actions
 
     rules = " ".join(section("Rules").split())
-    enforced, checked = rules.split("The health floor is checked before signing only.")
+    enforced, checked = rules.split("The health floor, and what the gateway checks")
     assert "The signed transaction carries, and the chain enforces" in enforced
-    for bound in ("the minimum a swap, a deposit or a burn accepts", "the deadline", "gas limit"):
+    for bound in (
+        "the least a swap or a burn accepts",
+        "the bounds of a mint or a deposit",
+        "the deadline",
+        "gas limit",
+    ):
         assert bound in enforced, bound
     assert "health floor" not in enforced.split("Say exactly what each bounds")[1]
+    assert "while it plans and signs, hold before signing only" in checked
     assert "Nothing protects a position once its step is mined" in checked
-    # A mint is bounded in both price directions on Uniswap V4 only, and the approval
-    # it leaves to Permit2 is one no command here revokes. Text, not code: the test
-    # only checks that the revocation does not serve the connector.
+    # What each kind of mint or deposit is bounded by. The command's own help states
+    # the same bounds, so the two are held together here; neither is derived from the
+    # planners.
     ranged = " ".join(subsection("A position in a tick range").split())
-    for statement in (
-        "On Uniswap V4 the signed mint reverts when the price moved further than "
-        "`--slippage-bps` in either direction",
-        "On the other three only the least of each amount is in the signed mint",
-        "can be filled at a worse price than the pool showed when you read it",
-        "Nothing here revokes the approval to Permit2",
-        "tell the user that before an open there, and that you cannot clear it",
+    shares = " ".join(subsection("A position held as LP tokens").split())
+    stated = next(
+        " ".join(action.help.split())
+        for action in ax_parsers()["open-liquidity"]._actions
+        if "--slippage-bps" in action.option_strings
+    )
+    for claim, source, passage in (
+        (
+            "`--slippage-bps` is in the signed mint or increase: it reverts when mined at "
+            "a price further than that, in either direction, from the price the command "
+            "first read",
+            "it reverts when mined at a price beyond the tolerance of the observed price "
+            "in either direction",
+            ranged,
+        ),
+        (
+            "On Uniswap V4 that is the price the mint step is planned at",
+            "a uniswap_v4 mint is bounded the same way around the price its mint step is "
+            "planned at",
+            ranged,
+        ),
+        (
+            "where the tolerance reaches an edge of the range, or the range lies beside "
+            "the price, no price beyond that edge reverts the call, which takes there only "
+            "the one currency the range holds, at most what it offered",
+            "unless the tolerance reaches an edge of the range: beyond that edge, and for "
+            "a range beside the price, no price reverts it",
+            ranged,
+        ),
+        (
+            "`--slippage-bps` is in the signed deposit: it reverts when it would take less "
+            "of either currency than that far below the offer",
+            "reverts when mined, when it would take less of either currency than this far "
+            "below that offer",
+            shares,
+        ),
+        (
+            "It states no minimum of shares: too few are refused before signing, and only "
+            "reported once mined",
+            "its call states no minimum of pool shares",
+            shares,
+        ),
+        (
+            "`--slippage-bps` is in the signed call, as the least LP shares it may mint",
+            "a curve deposit reverts when it would mint more than this far below the LP shares",
+            shares,
+        ),
     ):
-        assert statement in ranged, statement
+        assert claim in passage, claim
+        assert source in stated, source
+    # What a mint or a deposit uses and approves, what an open tells the user about
+    # Permit2, and the outcomes an agent reports instead of treating as failures.
+    for statement, passage in (
+        ("tell the user it can use less than stated and that the rest stays in the wallet", ranged),
+        ("Only what a mint offers is approved", ranged),
+        ("Nothing here revokes the approval to Permit2", ranged),
+        ("tell the user that before an open there, and that you cannot clear it", ranged),
+        ("except on Uniswap V4, it is refused when nothing is owed", ranged),
+        ("Only that offer is approved, and the rest stays in the wallet", shares),
+        ("what the router did not take of the offer stays approved", shares),
+        ("is refused when there are none", shares),
+        ("it trades against the pool and pays its fee", shares),
+        ("report them, they are not a failure", " ".join(section("Liquidity").split())),
+    ):
+        assert statement in passage, statement
     assert "uniswap_v4" not in connectors_for("revoke-exchange")
     assert "except on Uniswap V4, which it does not serve" in flat()
+    # The refused empty collect and the staked flag are the code's own words.
+    from almanak.connectors import v3_pool_liquidity_direct, v3_pool_position_request
+    from almanak.connectors.aerodrome import liquidity_direct as aerodrome
+
+    def literals(module) -> list[str]:
+        return strings(ast.parse(Path(module.__file__).read_text()))
+
+    assert any("there is nothing to collect" in part for part in literals(v3_pool_liquidity_direct))
+    assert any("no fees to claim" in part for part in literals(aerodrome))
+    assert "staked" in literals(v3_pool_position_request) and "`staked` true" in ranged
     # Connectors with no `expired` rule carry no deadline: the lending ones and Curve.
     without = {
         name

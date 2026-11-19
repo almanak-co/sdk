@@ -491,11 +491,14 @@ it returns depends on the pool when it is closed, so it can be worth less than
 the tokens put in; tell the user that before they confirm, with what its kind of
 position adds below. For every kind:
 
-- `--slippage-bps` is required to open, increase, decrease and close. It bounds
-  the step against the pool's own state at the block the action reads, as for a
-  swap. Ask the user for it.
+- `--slippage-bps` is required to open, increase, decrease and close; each kind
+  below says what it bounds. Ask the user for it.
 - Nothing is swapped inside a liquidity action: when the wallet lacks a currency,
   the user decides on an `ax swap` first.
+- A step mined after another account added liquidity to the NFT, or sent the
+  wallet LP shares, still completes, with `accounting_issues` in its outcome:
+  report them, they are not a failure. A tick-range close mined that way
+  reverts; preview it again.
 - `ax revoke-exchange` sets every allowance the wallet gave the pool's contracts
   to zero, except on Uniswap V4, which it does not serve. Offer it when
   `position_after.allowances` lists any:
@@ -531,29 +534,34 @@ earns nothing.
   the pool's spacing: `resolution.tick_spacing`, or the one the Uniswap V4 key
   states. A tick is a price step of 0.01%, so about 100 ticks are 1%. You may
   propose aligned ticks, as a suggestion only.
-- `--amount0` and `--amount1` are the most of the pool's currency0 and currency1
-  the step may use, and the wallet must hold both; for a native coin in a Uniswap
-  V4 key, that is its wrapped token. The mint takes the two in the ratio the range
-  needs at the current price and leaves the rest in the wallet. State amounts
-  close to that ratio: with s = 1.0001^(tick/2) at the current, lower and upper
-  tick, amount1 over amount0 is (s - s_lower) / (1/s - 1/s_upper) in base units;
-  below the range only currency0 is taken, above it only currency1.
-- On Uniswap V4 the signed mint reverts when the price moved further than
-  `--slippage-bps` in either direction. On the other three only the least of each
-  amount is in the signed mint, so warn the user that amounts far from the ratio
-  can be filled at a worse price than the pool showed when you read it.
-- An open leaves the unused part of each amount approved: to the position
-  manager, or on Uniswap V4 to Permit2, with no expiry. Nothing here revokes the
-  approval to Permit2: tell the user that before an open there, and that you
-  cannot clear it.
+- `--amount0` and `--amount1` are the most of currency0 and currency1 the step
+  may use, and the wallet must hold both; for a native coin in a Uniswap V4 key,
+  its wrapped token. The mint takes the two in the ratio the range needs at the
+  mined price, so tell the user it can use less than stated and that the rest
+  stays in the wallet; amounts near that ratio leave the least unused. Below the
+  range only currency0 is taken, above it only currency1.
+- `--slippage-bps` is in the signed mint or increase: it reverts when mined at a
+  price further than that, in either direction, from the price the command first
+  read. On Uniswap V4 that is the price the mint step is planned at. Tell the
+  user the exception: where the tolerance reaches an edge of the range, or the
+  range lies beside the price, no price beyond that edge reverts the call, which
+  takes there only the one currency the range holds, at most what it offered.
+- Only what a mint offers is approved, and what it does not take of that stays
+  approved: to the position manager, or on Uniswap V4 to Permit2, with no expiry.
+  Nothing here revokes the approval to Permit2: tell the user that before an
+  open there, and that you cannot clear it. A Uniswap V4 open can repeat an
+  approval before its mint.
 - For a position you have no record of, ask the user for the token ID; the wallet
   must own the NFT, whoever opened it.
 - `ax decrease-liquidity` removes `--liquidity`, in the position's own units and
   below the `position.liquidity` the read reports, and collects what is owed.
   `ax close-liquidity` removes everything, collects and burns the NFT.
-  `ax collect-liquidity-fees` pays what the position is `owed`.
+  `ax collect-liquidity-fees` pays what the position is `owed`; except on
+  Uniswap V4, it is refused when nothing is owed.
 - In the read, `pool.in_range` says whether the position earns now, and an
-  `owner` other than your wallet means the position was moved.
+  `owner` other than your wallet means the position was moved. `staked` true is
+  an Aerodrome Slipstream NFT held by its gauge: it earns no trading fees there,
+  and `owed` is only what was recorded.
 
 ### A position held as LP tokens
 
@@ -568,11 +576,8 @@ deposited it: there is no range and no token ID. Tell the user: a share of the
 pool is a share of all its currencies, in the proportions the pool holds when the
 share is burned, so they can get back another mix than they put in.
 
-- `ax open-liquidity` serves a wallet that holds none of the pool's LP token,
-  `ax increase-liquidity` one that does.
 - `ax decrease-liquidity` burns `--liquidity` LP shares, in base units and fewer
   than the `position.shares` the read reports; `ax close-liquidity` burns all.
-  Under `principal` the read reports what burning all of them would pay now.
 - While the wallet holds the pool's LP shares, a swap in that pool is refused.
   Anyone can send it such shares. You cannot move them; `ax close-liquidity` burns
   them, if the user decides so.
@@ -587,7 +592,9 @@ almanak ax close-liquidity --connector <connector> --chain <chain> <market> --re
 ```
 
 - `--amount <coin>=<base units>` is given once per coin deposited, and the
-  deposit uses exactly the stated amounts.
+  deposit uses exactly the stated amounts. In other proportions than the pool's
+  it trades against the pool and pays its fee. `--slippage-bps` is in the signed
+  call, as the least LP shares it may mint.
 - A burn states `--receive`, which is the user's decision: `balanced` pays every
   coin in the pool's current proportions, and a coin of the pool pays that coin
   alone, which trades against the pool and pays its fee.
@@ -602,12 +609,17 @@ almanak ax collect-liquidity-fees --connector <connector> --chain <chain> <marke
 almanak ax close-liquidity --connector <connector> --chain <chain> <market> --slippage-bps <bps> <wallet and ceilings>
 ```
 
-- `--amount0` and `--amount1` are the most of each currency a deposit may use,
-  both above zero. The pool takes the two in its own proportion, which the
-  `reserves` of `ax pool` show: all of one amount and at most the other. The
-  unused part of each stays approved to the router.
-- A burn pays principal. `ax collect-liquidity-fees` claims the fees, which the
-  read reports as `owed`, and a close claims them too.
+- `--amount0` and `--amount1`, both above zero, are the most a deposit may use.
+  It offers them in the proportion of the pool's `reserves`, which `ax pool`
+  shows: all of one and the matching share of the other. Only that offer is
+  approved, and the rest stays in the wallet.
+- `--slippage-bps` is in the signed deposit: it reverts when it would take less
+  of either currency than that far below the offer, which bounds a move of the
+  proportion in either direction. It states no minimum of shares: too few are
+  refused before signing, and only reported once mined. After a move inside the
+  slippage, what the router did not take of the offer stays approved.
+- A burn pays principal. `ax collect-liquidity-fees` claims the fees the read
+  reports as `owed`, and is refused when there are none; a close claims them too.
 
 ## When something is refused
 
@@ -688,10 +700,11 @@ report `refused` and stop; do not try anything else to free the wallet.
 - The floor, the slippage, the range, the payout and the fee ceilings are the
   user's decisions: suggest, explain and ask, and never set one yourself.
 - Say exactly what each bounds. The signed transaction carries, and the chain
-  enforces, the minimum a swap, a deposit or a burn accepts, the deadline where
-  the call has one (not on Curve, not in lending), and the gas price and gas
-  limit the fee ceilings admitted; on Base and Optimism an L1 data fee comes on
-  top and is only estimated. The health floor is checked before signing only.
-  Nothing protects a position once its step is mined, and none of this is a
-  guarantee.
+  enforces, the least a swap or a burn accepts, the bounds of a mint or a deposit
+  as "Liquidity" states them, the deadline where the call has one (not on Curve,
+  not in lending), and the gas price and gas limit the fee ceilings admitted; on
+  Base and Optimism an L1 data fee comes on top and is only estimated. The
+  health floor, and what the gateway checks while it plans and signs, hold
+  before signing only. Nothing protects a position once its step is mined, and
+  none of this is a guarantee.
 - When unsure what a command accepts, run it with `--help`. Do not invent flags.
