@@ -43,12 +43,13 @@ def test_generated_password_unlocks_the_keystore_and_stays_private(tmp_path):
     assert keystore_password(password_file) not in json.dumps(result)
 
 
-def test_named_password_file_is_used_and_not_copied(tmp_path):
+def test_named_password_file_is_used_and_named_but_not_copied(tmp_path):
     secret = tmp_path / "secret"
     secret.write_text("correct horse\n")
     secret.chmod(0o600)
     result = create_wallet(tmp_path / "operator", "treasury", password_file=secret)
-    assert "password_file" not in result
+    # The record names the operator's file, so the keystore unlocks without a terminal.
+    assert result["password_file"] == str(secret.resolve())
     assert not (tmp_path / "operator/keystore-password").exists()
     assert unlocked(result, "correct horse").address == result["address"]
 

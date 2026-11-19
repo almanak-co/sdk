@@ -84,6 +84,9 @@ def create_wallet(
     as a private file, for a caller that must unlock it without a terminal.
     """
     validate_key_path(directory, readable_paths())
+    if directory.exists():
+        # Refuse before asking for a password that could not be used.
+        raise FileExistsError(f"wallet directory already exists: {directory}")
     generated = secrets.token_urlsafe(32) if generate_password else None
     if generated is not None:
         password = generated
@@ -97,7 +100,7 @@ def create_wallet(
     encrypted = Signer.encrypt(signer.key, password)
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
     try:
-        return write_wallet(directory, account, signer.address, encrypted, generated)
+        return write_wallet(directory, account, signer.address, encrypted, generated, password_file)
     except BaseException as failure:
         # A partial directory would hold a keystore without its record or password, and
         # would refuse a retry at the same path.
@@ -111,7 +114,7 @@ def create_wallet(
         raise
 
 
-def write_wallet(directory, account, address, encrypted, generated):
+def write_wallet(directory, account, address, encrypted, generated, password_file=None):
     write_private(directory / "keystores.json", json.dumps({account: encrypted}))
     write_private(directory / "gateway-auth.token", secrets.token_hex(32))
     result = {
@@ -123,5 +126,9 @@ def write_wallet(directory, account, address, encrypted, generated):
     if generated is not None:
         write_private(directory / "keystore-password", generated)
         result["password_file"] = str((directory / "keystore-password").resolve())
+    elif password_file is not None:
+        # The operator's own file stays where it is; the record only names it, so the
+        # keystore can be unlocked without a terminal.
+        result["password_file"] = str(password_file.resolve())
     write_private(directory / "wallet.json", json.dumps(result, indent=2))
     return result

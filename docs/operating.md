@@ -375,8 +375,9 @@ are never a fallback signer.
 `wallet create` asks for the keystore password twice. Without a terminal, name
 the password with `--password-file` (an operator-owned private file, which is not
 copied), or pass `--generate-password` to have one generated into
-`keystore-password` beside the keystore; the printed result then names it as
-`password_file`. The result never contains the password or the key.
+`keystore-password` beside the keystore. Either way the printed result and
+`wallet.json` name the file as `password_file`, so a later command can unlock the
+keystore without a terminal. The result never contains the password or the key.
 
 Encrypted keystores must match the named submitters. Interactive passwords are
 passed ephemerally and are not saved in manifests. An explicit private
@@ -437,15 +438,27 @@ not opened. With `--execute` it signs and sends each step, waits for its receipt
 prints the outcomes with the position before and after. A supply is an approval
 followed by the supply, so the preview shows the approval.
 
-An executed action reports `completed`, true only when the action's own step
-succeeded, and the command exits 1 when it is false. A supply is not atomic: its
-approval can be mined and the supply then be refused, for example on a fee quote
-above the ceiling, or revert. The position is then unchanged and the allowance stays
-on chain; `outcomes` lists the steps that ran and `refused` names the refusal. Check
-the allowance as well as the position before retrying. A first step refused at
-planning fails the command with that refusal and signs nothing. Each fee ceiling
-applies to one transaction, so a supply can spend up to twice
-`--max-transaction-fee`.
+An executed action reports `completed`, true only when the whole request finished,
+and the command exits 1 when it is false. A supply is not atomic: its approval can
+be mined and the supply then be refused, for example on a fee quote above the
+ceiling, or revert. The position is then unchanged and the allowance stays on chain;
+`outcomes` lists the steps that ran and `refused` names the refusal. A failure that
+is not a refusal prints the steps already sent as one
+`{"event": "steps_sent", "outcomes": ...}` line before its error. A first step
+refused at planning fails the command with that refusal and signs nothing.
+
+A supply plans against the wallet's allowance to the spoke: zero, or exactly the
+requested amount left by an earlier approval. Any other allowance is refused with
+"supply allowance differs from the requested amount". Retry a half-finished supply
+with the same amount, or clear the allowance first. A withdrawal clears it: when an
+allowance remains, the withdrawal is followed by a revocation, and with nothing
+supplied the revocation is its only step.
+
+Each fee ceiling applies to one transaction, so a supply, or a withdrawal that also
+revokes, can spend up to twice `--max-transaction-fee`. The quoted gas price is
+twice the base fee plus the tip, so `--max-gas-price-wei` refuses a step once the
+base fee passes about half of it. The command also uses a gas limit of at most
+1,000,000 with a 25% buffer over the estimate, and reads no older than 120 seconds.
 
 | Option | Meaning |
 | --- | --- |
@@ -460,21 +473,29 @@ supported.
 
 The action runs through the same planning, simulation, signing and receipt
 reconciliation as a strategy's, as an operator deployment that exists only for the
-command: its journal is a private temporary directory, removed when the command
-ends. The deployment adopts the position the wallet already holds, read at the start,
-so a later command sees what an earlier one did.
+command: its journal is a private record directory under
+`~/.local/state/almanak-v3/actions/`, removed when the command ends. The deployment
+adopts the position the wallet already holds, read at the start, so a later command
+sees what an earlier one did.
 
-Nothing is kept between commands, so an interrupted command is not resumed. If a
-command fails, is interrupted or receives SIGTERM while a signed step is unresolved,
-its directory is kept and the command prints
+Nothing is kept between finished commands, so an interrupted command is not
+resumed. If a command fails, is interrupted or receives SIGTERM or SIGHUP while a
+signed step is unresolved, its record is kept and the command prints
 `{"event": "record_kept", "path": ...}`. A process that is killed outright prints
-nothing, so the absence of that line does not mean nothing was kept: the record is
-then an `almanak-ax-*` directory under the system temporary directory. Either way
-the wallet stays claimed and later actions for it are refused with "fund is already
-claimed". Checking the transaction on chain does not release the claim, and there is
-no command that clears it yet, so the wallet stays blocked for operator actions on
-that machine. A wallet a running strategy uses is refused the same way. An action has no amount ceiling: it is bounded by the
-wallet's balance and the two fee ceilings.
+nothing, so the absence of that line does not mean nothing was kept. While a record
+holds a signed step the wallet stays claimed and later actions for it are refused
+with "fund is already claimed". Checking the transaction on chain does not release
+the claim, and there is no command that clears it yet, so the wallet stays blocked
+for operator actions on that machine. A wallet a running strategy uses is refused
+the same way.
+
+A record with no signed step holds nothing worth keeping. When a command is killed
+before it signs, the next operator action removes that record and releases its
+claim. Do not kill a command that runs with `--execute`: it waits for each receipt
+without a time limit, and stops between steps on SIGINT, SIGTERM or SIGHUP.
+
+An action has no amount ceiling: it is bounded by the wallet's balance and the two
+fee ceilings.
 
 ### Market resolution
 

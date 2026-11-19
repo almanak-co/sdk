@@ -1,23 +1,28 @@
 """`almanak ax supply` and `ax withdraw`: one operator action in one process.
 
 The command resolves the market, builds an operator deployment for exactly that
-account and market in a private temporary directory, and runs the action through the
+account and market in a private record directory, and runs the action through the
 shared planning, signing and reconciliation path with the gateway service in the same
-process. Nothing outlives the command: the account's existing position is adopted from
-the chain at the start, and the next command reads it again.
+process. Nothing outlives a finished command: the account's existing position is
+adopted from the chain at the start, and the next command reads it again. Only the
+record of a signed step that is still unresolved is kept.
 
 Without `--execute` the command plans the first step and signs nothing.
 """
 
+import fcntl
 import json
 import shutil
 import signal
+import sqlite3
 import tempfile
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 
+from almanak import state as durable
 from almanak.gateway.client import GatewayClient
+from almanak.gateway.ethereum import DataError
 from almanak.models import Model
 
 ACTIONS = {
@@ -32,7 +37,8 @@ class LocalGateway(GatewayClient):
     """The coordinator's gateway client, with the gateway service in this process.
 
     Requests keep their wire form, so the service validates exactly what it validates
-    over loopback.
+    over loopback. Storage and transport failures become `gateway_unavailable`, as the
+    loopback server reports them, because the inherited lease renewal retries only that.
     """
 
     def __init__(self, service):
@@ -51,9 +57,14 @@ class LocalGateway(GatewayClient):
             key: value.model_dump(mode="json") if isinstance(value, Model) else value
             for key, value in fields.items()
         }
-        with request_scope():
-            request = self.service.request_type.model_validate_json(json.dumps(body))
-            result = self.service.dispatch(method, request)
+        try:
+            with request_scope():
+                request = self.service.request_type.model_validate_json(json.dumps(body))
+                result = self.service.dispatch(method, request)
+        except (OSError, sqlite3.Error):
+            raise DataError(
+                "gateway_unavailable", "gateway storage unavailable; durable work is retained"
+            ) from None
         if isinstance(result, Model):
             return result.model_dump(mode="json")
         if isinstance(result, tuple):
@@ -65,8 +76,13 @@ class LocalGateway(GatewayClient):
         if self.heartbeat is not None:
             self.heartbeat.join(timeout=65)
         if self.coordinator is not None:
-            self.request("release", coordinator=self.coordinator, deployment_id=self.deployment_id)
-            self.coordinator = None
+            coordinator, self.coordinator = self.coordinator, None
+            try:
+                self.request("release", coordinator=coordinator, deployment_id=self.deployment_id)
+            except DataError:
+                # The lease expires by itself; a failed release must not replace the
+                # result of an action that already ran.
+                pass
 
 
 def command(args) -> int:
@@ -205,15 +221,18 @@ def intent(config, action: str, amount: int | None):
 
 
 class Terminated(SystemExit):
-    """SIGTERM during an action; it unwinds like an interrupt so the record is reported."""
+    """A termination signal during an action; it unwinds like an interrupt."""
+
+
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 @contextmanager
 def interruptible():
-    """Record SIGINT and SIGTERM during one action instead of acting on them at once.
+    """Record SIGINT, SIGTERM and SIGHUP during one action instead of acting at once.
 
-    Neither signal raises at an arbitrary instruction, so nothing can skip the report of
-    a retained record. The yielded check raises the recorded signal's exception; the
+    No signal raises at an arbitrary instruction, so nothing can skip the report of a
+    retained record. The yielded check raises the recorded signal's exception; the
     action calls it between its steps. A signal that arrives after the last check is
     dropped: the command is already ending and still reports what it did.
     """
@@ -232,7 +251,7 @@ def interruptible():
         if received is not None:
             raise Terminated(128 + received)
 
-    previous = {number: signal.signal(number, record) for number in (signal.SIGINT, signal.SIGTERM)}
+    previous = {number: signal.signal(number, record) for number in STOP_SIGNALS}
     try:
         yield check
     finally:
@@ -240,41 +259,96 @@ def interruptible():
             signal.signal(number, handler)
 
 
+def records_root() -> Path:
+    """Where action records live: durable storage beside the fund claims they own."""
+    return durable.claims_root().parent / "actions"
+
+
+def new_record():
+    """A private record directory, locked for as long as this process uses it."""
+    root = records_root()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory = Path(tempfile.mkdtemp(dir=root))
+    lock = (directory / "lock").open("w")
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    return directory, lock
+
+
+def clear_finished_records() -> None:
+    """Remove records, and their fund claims, that earlier commands left with nothing
+    signed pending.
+
+    A command that is killed outright never reaches its own cleanup, and its claim would
+    refuse every later action for the wallet. A record whose lock is free belongs to no
+    running command; it is kept only when it holds a signed step, or cannot be read.
+    """
+    root = records_root()
+    if not root.is_dir():
+        return
+    for directory in root.iterdir():
+        try:
+            with (directory / "lock").open("r") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    continue
+                if not in_flight(directory):
+                    discard(directory)
+        except (FileNotFoundError, NotADirectoryError):
+            # No lock yet: another command is creating it, or it is not a record.
+            continue
+
+
 def run(config, backend, action: str, amount: int | None, *, execute: bool) -> dict:
     """Plan one action against the account's current position, and execute it when asked."""
     from almanak.gateway.service import GatewayService
 
-    directory = Path(tempfile.mkdtemp(prefix="almanak-ax-"))
-    service = GatewayService(
-        config, directory / "state.sqlite", backend, lease_seconds=30, operator_actions=True
-    )
-    with interruptible() as check:
-        try:
-            result = perform(
-                service, action, amount, execute=execute, create=config, interrupt=check
-            )
-        except BaseException:
-            # A signed step may be in flight; its record is the only evidence of it.
-            settle(directory, kept=in_flight(service))
-            raise
-        settle(directory, kept=False)
-        return result
+    clear_finished_records()
+    directory, lock = new_record()
+    try:
+        with interruptible() as check:
+            try:
+                service = GatewayService(
+                    config,
+                    directory / "state.sqlite",
+                    backend,
+                    lease_seconds=30,
+                    operator_actions=True,
+                )
+                return perform(
+                    service, action, amount, execute=execute, create=config, interrupt=check
+                )
+            finally:
+                # However the action ended, a signed step may be in flight; its record
+                # is the only evidence of it.
+                settle(directory)
+    finally:
+        lock.close()
 
 
-def in_flight(service) -> bool:
-    return service.journal.path.exists() and service.journal.load().pending is not None
+def in_flight(directory: Path) -> bool:
+    """Whether the record holds a signed step; a record that cannot be read counts."""
+    database = directory / "state.sqlite"
+    if not database.exists():
+        return False
+    try:
+        return durable.Journal(database).load().pending is not None
+    except Exception:
+        return True
 
 
-def settle(directory: Path, *, kept: bool) -> None:
-    from almanak.state import release_claims
-
-    if kept:
+def settle(directory: Path) -> None:
+    if in_flight(directory):
         # The fund stays claimed by this record, so no later command can act on the
         # account until the operator has looked at the signed step.
         print(json.dumps({"event": "record_kept", "path": str(directory)}), flush=True)
     else:
-        release_claims(directory / "state.sqlite")
-        shutil.rmtree(directory, ignore_errors=True)
+        discard(directory)
+
+
+def discard(directory: Path) -> None:
+    durable.release_claims((directory / "state.sqlite").resolve())
+    shutil.rmtree(directory, ignore_errors=True)
 
 
 def perform(
@@ -301,28 +375,63 @@ def perform(
         }
         interrupt()
         if execute:
-            result.update(executed_result(runtime, action, runtime.execute(interrupt)))
+            result.update(executed(runtime, len(before.outcomes), interrupt))
         return result
     finally:
         runtime.close()
 
 
-def executed_result(runtime, action: str, outcomes) -> dict:
-    """What an execution did: `completed` only when the action's own step succeeded.
+def executed(runtime, start: int, interrupt) -> dict:
+    """Execute the admitted request and report every step it sent, however it ended.
 
-    A step refused at signing leaves no outcome, and an approval can succeed before its
-    supply is refused, so neither an empty nor a non-empty outcome list means success.
+    A refusal on a later step, such as a fee quote above the ceiling after the approval
+    was mined, is part of the result and never replaces it: the steps already sent stay
+    reported. Any other failure reports them as one event line before it propagates.
+    """
+    refusal = None
+    try:
+        runtime.execute(interrupt)
+    except DataError as exc:
+        refusal = exc
+    except BaseException:
+        report_sent(runtime, start)
+        raise
+    try:
+        state = runtime.journal.load()
+    except Exception:
+        if refusal is None:
+            raise
+        raise refusal from None
+    return executed_result(state, state.outcomes[start:], refusal or runtime.refused)
+
+
+def report_sent(runtime, start: int) -> None:
+    try:
+        outcomes = runtime.journal.load().outcomes[start:]
+    except Exception:
+        return
+    if outcomes:
+        sent = [outcome_summary(item) for item in outcomes]
+        print(json.dumps({"event": "steps_sent", "outcomes": sent}), flush=True)
+
+
+def executed_result(state, outcomes, refusal) -> dict:
+    """What an execution did: `completed` only when the request itself finished.
+
+    The connector decides that from the final outcome: an approval alone does not
+    complete a supply, and a withdrawal that leaves an allowance is followed by its
+    revocation. A step refused at signing leaves no outcome, so neither an empty nor a
+    non-empty outcome list means success.
     """
     final = outcomes[-1] if outcomes else None
     result = {
         "executed": bool(outcomes),
-        "completed": final is not None and final.success and final.operation.kind == action,
+        "completed": final is not None and final.strategy_result().complete,
         "outcomes": [outcome_summary(item) for item in outcomes],
-        "position_after": position(runtime.journal.load()),
+        "position_after": position(state),
     }
-    refused = getattr(runtime, "refused", None)
-    if refused is not None and not result["completed"]:
-        result["refused"] = {"kind": refused.kind, "message": str(refused)}
+    if refusal is not None and not result["completed"]:
+        result["refused"] = {"kind": refusal.kind, "message": str(refusal)}
     return result
 
 

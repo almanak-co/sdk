@@ -38,6 +38,14 @@ COMMON = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def state_home(tmp_path, monkeypatch):
+    """Records and fund claims of these tests stay out of the operator's own state."""
+    claims = tmp_path / "home/claims"
+    monkeypatch.setattr("almanak.state.claims_root", lambda: claims)
+    return claims.parent
+
+
 @pytest.fixture
 def desk(tmp_path, recorded, monkeypatch):
     desk = Desk(tmp_path, recorded)
@@ -194,74 +202,248 @@ def test_an_action_never_reads_through_the_session_read_gateway(monkeypatch):
 class Service:
     def __init__(self, config, database, backend, **options):
         self.options = options
-        self.journal = SimpleNamespace(path=database)
+        database.touch()
 
 
-def test_the_private_record_is_removed_when_nothing_is_in_flight(monkeypatch, tmp_path):
-    seen = {}
+class Stored:
+    """Stands in for the journal a record holds; `pending` is what its checkpoint says."""
+
+    pending = None
+
+    def __init__(self, path):
+        self.path = path
+
+    def load(self):
+        if isinstance(Stored.pending, Exception):
+            raise Stored.pending
+        return SimpleNamespace(pending=Stored.pending)
+
+
+@pytest.fixture
+def stored(monkeypatch):
     monkeypatch.setattr("almanak.gateway.service.GatewayService", Service)
-    monkeypatch.setattr(ax_actions.tempfile, "mkdtemp", lambda prefix: str(tmp_path / "record"))
-    (tmp_path / "record").mkdir()
+    monkeypatch.setattr("almanak.state.Journal", Stored)
+    monkeypatch.setattr(Stored, "pending", None)
+    return Stored
+
+
+def records(state_home):
+    root = state_home / "actions"
+    return sorted(root.iterdir()) if root.is_dir() else []
+
+
+def test_the_private_record_is_removed_when_nothing_is_in_flight(monkeypatch, stored, state_home):
+    seen = {}
 
     def perform(service, action, amount, *, execute, create, interrupt):
-        seen.update(service.options, create=create)
+        seen.update(service.options, create=create, records=len(records(state_home)))
         return {"action": action}
 
     monkeypatch.setattr(ax_actions, "perform", perform)
     assert ax_actions.run("config", None, "withdraw", None, execute=False) == {"action": "withdraw"}
-    assert seen == {"lease_seconds": 30, "operator_actions": True, "create": "config"}
-    assert not (tmp_path / "record").exists()
+    assert seen == {"lease_seconds": 30, "operator_actions": True, "create": "config", "records": 1}
+    assert records(state_home) == []
 
-    (tmp_path / "record").mkdir()
     monkeypatch.setattr(ax_actions, "perform", lambda *a, **k: (_ for _ in ()).throw(ValueError))
     with pytest.raises(ValueError):
         ax_actions.run("config", None, "withdraw", None, execute=True)
-    assert not (tmp_path / "record").exists()
+    assert records(state_home) == []
 
 
-def test_a_signed_step_in_flight_keeps_its_record(monkeypatch, tmp_path, capsys):
-    record = tmp_path / "record"
-    record.mkdir()
-    (record / "state.sqlite").touch()
+def test_a_service_that_cannot_start_leaves_no_record(monkeypatch, state_home):
+    def refuse(*arguments, **options):
+        raise ValueError("refused")
 
-    class Pending(Service):
-        def __init__(self, *arguments, **options):
-            super().__init__(*arguments, **options)
-            self.journal.load = lambda: SimpleNamespace(pending=object())
+    monkeypatch.setattr("almanak.gateway.service.GatewayService", refuse)
+    with pytest.raises(ValueError, match="refused"):
+        ax_actions.run("config", None, "withdraw", None, execute=False)
+    assert records(state_home) == []
 
-    monkeypatch.setattr("almanak.gateway.service.GatewayService", Pending)
-    monkeypatch.setattr(ax_actions.tempfile, "mkdtemp", lambda prefix: str(record))
+
+@pytest.mark.parametrize("pending", [object(), RuntimeError("unreadable")])
+def test_a_signed_step_in_flight_keeps_its_record(monkeypatch, stored, state_home, capsys, pending):
+    # A record that cannot be read is kept too: it may hold a signed step.
+    monkeypatch.setattr(stored, "pending", pending)
     monkeypatch.setattr(ax_actions, "perform", lambda *a, **k: (_ for _ in ()).throw(OSError))
     with pytest.raises(OSError):
         ax_actions.run("config", None, "supply", 5, execute=True)
-    assert record.exists()
+    (record,) = records(state_home)
     assert json.loads(capsys.readouterr().out) == {"event": "record_kept", "path": str(record)}
 
 
-def outcome(kind, success=True):
-    return SimpleNamespace(operation=SimpleNamespace(kind=kind), success=success, tx_hash="0x1")
+def test_a_result_returned_with_a_signed_step_pending_keeps_its_record(
+    monkeypatch, stored, state_home, capsys
+):
+    monkeypatch.setattr(stored, "pending", object())
+    monkeypatch.setattr(ax_actions, "perform", lambda *a, **k: {"completed": False})
+    assert ax_actions.run("config", None, "supply", 5, execute=True) == {"completed": False}
+    (record,) = records(state_home)
+    assert json.loads(capsys.readouterr().out)["path"] == str(record)
 
 
-def finished(outcomes, refused=None):
-    state = SimpleNamespace(owned=[SimpleNamespace(shares=0, drawn_shares=0)])
-    runtime = SimpleNamespace(journal=SimpleNamespace(load=lambda: state), refused=refused)
-    return ax_actions.executed_result(runtime, "supply", outcomes)
+def claim(state_home, database):
+    claims = state_home / "claims"
+    claims.mkdir(parents=True, exist_ok=True)
+    path = claims / (database.parent.name + ".claim")
+    path.write_text(json.dumps({"deployment_id": "d", "database": str(database.resolve())}))
+    return path
 
 
-def test_only_the_actions_own_successful_step_completes_it():
+def abandoned(state_home, name):
+    """The record of a command that was killed: unlocked, with its fund still claimed."""
+    record = state_home / "actions" / name
+    record.mkdir(parents=True)
+    (record / "lock").touch()
+    (record / "state.sqlite").touch()
+    return record, claim(state_home, record / "state.sqlite")
+
+
+def test_a_killed_commands_record_and_claim_are_cleared_unless_a_step_was_signed(
+    monkeypatch, stored, state_home
+):
+    import fcntl
+
+    record, claimed = abandoned(state_home, "killed")
+    running, running_claim = abandoned(state_home, "running")
+    (state_home / "actions/unrelated").mkdir()
+    with (running / "lock").open() as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        ax_actions.clear_finished_records()
+        # Another command's live record is left alone, with its claim.
+        assert running.exists() and running_claim.exists()
+    assert not record.exists() and not claimed.exists()
+    assert (state_home / "actions/unrelated").exists()
+
+    signed, signed_claim = abandoned(state_home, "signed")
+    monkeypatch.setattr(stored, "pending", object())
+    ax_actions.clear_finished_records()
+    assert signed.exists() and signed_claim.exists()
+
+
+def test_a_record_without_a_journal_holds_no_signed_step(tmp_path):
+    assert ax_actions.in_flight(tmp_path) is False
+
+
+def outcomes_of(recorded, *kinds):
+    return [next(o for o in recorded.outcomes if o.operation.kind == kind) for kind in kinds]
+
+
+def finished(recorded, outcomes, refused=None):
+    return ax_actions.executed_result(recorded, outcomes, refused)
+
+
+def test_only_the_finished_request_completes_the_action(recorded):
     from almanak.gateway.ethereum import DataError
 
-    assert finished([outcome("approve"), outcome("supply")])["completed"] is True
-    reverted = finished([outcome("approve"), outcome("supply", success=False)])
-    assert reverted["executed"] and not reverted["completed"]
+    assert finished(recorded, outcomes_of(recorded, "approve", "supply"))["completed"] is True
+    (approve,) = outcomes_of(recorded, "approve")
     # An approval can succeed before the supply is refused: sent, but not completed.
-    partial = finished([outcome("approve")], DataError("gas_fee_quote", "above the ceiling"))
+    partial = finished(recorded, [approve], DataError("gas_fee_quote", "above the ceiling"))
     assert partial["executed"] and not partial["completed"]
     assert partial["refused"] == {"kind": "gas_fee_quote", "message": "above the ceiling"}
     # A step refused at signing leaves no outcome at all.
-    unsent = finished([], DataError("deadline_margin", "too late"))
+    unsent = finished(recorded, [], DataError("deadline_margin", "too late"))
     assert (unsent["executed"], unsent["completed"]) == (False, False)
     assert unsent["refused"]["kind"] == "deadline_margin"
+
+
+def test_a_withdrawal_is_complete_only_once_no_allowance_remains(recorded):
+    (withdraw,) = outcomes_of(recorded, "withdraw")
+    assert finished(recorded, [withdraw])["completed"] is True
+    residual = withdraw.model_copy(
+        update={"after": withdraw.after.model_copy(update={"allowance": 5})}
+    )
+    # The withdrawal succeeded, but its revocation has not run yet.
+    assert finished(recorded, [residual])["completed"] is False
+    revoke = SimpleNamespace(
+        operation=SimpleNamespace(kind="revoke"),
+        success=True,
+        tx_hash="0x1",
+        strategy_result=lambda: SimpleNamespace(complete=True),
+    )
+    # The final step of a withdrawal can be the revocation, and it completes it.
+    assert finished(recorded, [residual, revoke])["completed"] is True
+
+
+def test_a_fee_refusal_on_a_later_step_still_reports_the_steps_sent(desk):
+    from almanak.gateway.ethereum import DataError
+
+    prepare = desk.gateway.prepare
+
+    def priced_out(state, intent, *arguments, **options):
+        if desk.kinds() == ["approve"]:
+            raise DataError("gas_fee_quote", "fee quote is above the ceiling")
+        return prepare(state, intent, *arguments, **options)
+
+    desk.gateway.prepare = priced_out
+    amount = desk.intent("supply").amount.amount
+    result = ax_actions.perform(desk.service, "supply", amount, execute=True)
+    assert [item["operation"] for item in result["outcomes"]] == ["approve"]
+    assert result["outcomes"][0]["transaction"]
+    assert result["executed"] and not result["completed"]
+    assert result["refused"] == {
+        "kind": "gas_fee_quote",
+        "message": "fee quote is above the ceiling",
+    }
+
+
+def test_an_unexpected_failure_reports_the_steps_already_sent(desk, capsys):
+    prepare = desk.gateway.prepare
+
+    def broken(state, intent, *arguments, **options):
+        if desk.kinds() == ["approve"]:
+            raise OSError("disk")
+        return prepare(state, intent, *arguments, **options)
+
+    desk.gateway.prepare = broken
+    amount = desk.intent("supply").amount.amount
+    with pytest.raises(OSError):
+        ax_actions.perform(desk.service, "supply", amount, execute=True)
+    event = json.loads(capsys.readouterr().out)
+    assert event["event"] == "steps_sent"
+    assert [item["operation"] for item in event["outcomes"]] == ["approve"]
+
+
+def test_a_refusal_is_raised_when_the_record_cannot_be_read_afterwards():
+    from almanak.gateway.ethereum import DataError
+
+    refusal = DataError("gas_price", "above the ceiling")
+
+    def unreadable():
+        raise OSError("disk")
+
+    def refuse(interrupt):
+        raise refusal
+
+    runtime = SimpleNamespace(execute=refuse, journal=SimpleNamespace(load=unreadable))
+    with pytest.raises(DataError) as raised:
+        ax_actions.executed(runtime, 0, lambda: None)
+    assert raised.value is refusal
+    runtime.execute = lambda interrupt: None
+    with pytest.raises(OSError):
+        ax_actions.executed(runtime, 0, lambda: None)
+    # Nothing can be reported from an unreadable record either.
+    ax_actions.report_sent(runtime, 0)
+
+
+def test_local_gateway_reports_storage_failures_as_the_loopback_server_does():
+    import sqlite3
+
+    from almanak.gateway.ethereum import DataError
+
+    def locked(method, request):
+        raise sqlite3.OperationalError("database is locked")
+
+    request_type = SimpleNamespace(model_validate_json=lambda body: body)
+    gateway = ax_actions.LocalGateway(SimpleNamespace(request_type=request_type, dispatch=locked))
+    # The inherited lease renewal retries exactly this kind and no other.
+    with pytest.raises(DataError) as raised:
+        gateway.request("renew")
+    assert raised.value.kind == "gateway_unavailable"
+    # A release that fails does not replace the result of the action that ran.
+    gateway.coordinator, gateway.deployment_id = "c", "d"
+    gateway.close()
+    assert gateway.coordinator is None
 
 
 @pytest.mark.parametrize(
@@ -336,15 +518,13 @@ def test_signals_are_recorded_and_raised_only_at_a_check():
     assert isinstance(stopped, ax_actions.Terminated)
     assert stopped.code == 128 + signal.SIGTERM
     assert isinstance(raised_by(signal.SIGINT), KeyboardInterrupt)
+    # A closed terminal stops the action the same way, with its record reported.
+    assert raised_by(signal.SIGHUP).code == 128 + signal.SIGHUP
 
 
-def test_a_signal_after_the_last_check_does_not_discard_the_result(monkeypatch, tmp_path):
+def test_a_signal_after_the_last_check_does_not_discard_the_result(monkeypatch, stored, state_home):
     import os
     import signal
-
-    monkeypatch.setattr("almanak.gateway.service.GatewayService", Service)
-    monkeypatch.setattr(ax_actions.tempfile, "mkdtemp", lambda prefix: str(tmp_path / "record"))
-    (tmp_path / "record").mkdir()
 
     def perform(service, action, amount, **options):
         os.kill(os.getpid(), signal.SIGTERM)
@@ -353,41 +533,31 @@ def test_a_signal_after_the_last_check_does_not_discard_the_result(monkeypatch, 
     monkeypatch.setattr(ax_actions, "perform", perform)
     result = ax_actions.run("config", None, "withdraw", None, execute=True)
     assert result == {"action": "withdraw", "completed": True}
-    assert not (tmp_path / "record").exists()
+    assert records(state_home) == []
 
 
 def test_a_signal_between_steps_stops_the_action_and_reports_its_kept_record(
-    monkeypatch, tmp_path, capsys
+    monkeypatch, stored, state_home, capsys
 ):
     import os
     import signal
-
-    record = tmp_path / "record"
-    record.mkdir()
-    (record / "state.sqlite").touch()
-
-    def inspected():
-        # A second signal while the record is inspected cannot skip the report either.
-        os.kill(os.getpid(), signal.SIGTERM)
-        return SimpleNamespace(pending=object())
-
-    class Pending(Service):
-        def __init__(self, *arguments, **options):
-            super().__init__(*arguments, **options)
-            self.journal.load = inspected
 
     def perform(service, action, amount, *, interrupt, **options):
         os.kill(os.getpid(), signal.SIGTERM)
         interrupt()
         raise AssertionError("the check did not stop the action")
 
-    monkeypatch.setattr("almanak.gateway.service.GatewayService", Pending)
-    monkeypatch.setattr(ax_actions.tempfile, "mkdtemp", lambda prefix: str(record))
+    def inspected(self):
+        # A second signal while the record is inspected cannot skip the report either.
+        os.kill(os.getpid(), signal.SIGTERM)
+        return SimpleNamespace(pending=object())
+
+    monkeypatch.setattr(stored, "load", inspected)
     monkeypatch.setattr(ax_actions, "perform", perform)
     with pytest.raises(ax_actions.Terminated):
         ax_actions.run("config", None, "supply", 5, execute=True)
+    (record,) = records(state_home)
     assert json.loads(capsys.readouterr().out) == {"event": "record_kept", "path": str(record)}
-    assert record.exists()
 
 
 def test_a_stop_requested_while_waiting_is_honoured_before_the_next_step(desk):
@@ -441,3 +611,35 @@ def test_sigterm_handling_is_left_alone_off_the_main_thread():
     worker.start()
     worker.join()
     assert seen == [signal.getsignal(signal.SIGTERM)]
+
+
+def adoption(desk, change=lambda owned: owned):
+    state = desk.store.load()
+    observed = desk.gateway.observe()
+    owned = change(adopt_ownership(state.owned, observed))
+    update = {"initialized": True, "baseline": observed, "owned": owned}
+    return desk.journal.update(lambda current: current.model_copy(update=update))
+
+
+def inflated(owned):
+    return (owned[0].model_copy(update={"shares": owned[0].shares + 1}), *owned[1:])
+
+
+def test_the_gateway_refuses_adopted_ownership_its_baseline_does_not_state(desk):
+    with pytest.raises(ValueError, match="ownership"):
+        adoption(desk, inflated)
+    assert not desk.store.load().initialized
+    assert adoption(desk).initialized
+    # Adoption is the first update only; afterwards ownership follows execution evidence.
+    state = desk.store.load()
+    with pytest.raises(ValueError, match="ownership"):
+        desk.journal.update(
+            lambda current: current.model_copy(update={"owned": inflated(state.owned)})
+        )
+
+
+def test_an_interrupted_action_is_not_described_as_resumable():
+    from almanak.cli import interrupted_message
+
+    assert "read the position" in interrupted_message(SimpleNamespace(product="operator-action"))
+    assert "resume" in interrupted_message(SimpleNamespace(product="run"))

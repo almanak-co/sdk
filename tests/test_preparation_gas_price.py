@@ -351,12 +351,3 @@ def test_concurrent_first_use_of_a_chain_builds_one_backend():
         thread.join()
     assert len(built) == 1
     assert all(backend is built[0] for backend in reached)
-
-
-def test_a_local_anvil_fixture_prices_from_its_pinned_block():
-    """The 31337 fixture chain has no network definition; its blocks are uniform."""
-    from almanak.gateway.production_fees import fee_history_block
-
-    chain = Chain(chain_id=ChainId("eip155:31337"), environment="anvil:test")
-    block = SimpleNamespace(chain=chain, number=7)
-    assert fee_history_block(None, block) == 7

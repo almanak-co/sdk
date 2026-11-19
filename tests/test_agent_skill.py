@@ -54,3 +54,19 @@ def test_the_skill_previews_before_it_executes():
     actions = [line for line in commands() if re.match(r"almanak ax (supply|withdraw) ", line)]
     assert {line.split()[2] for line in actions} == {"supply", "withdraw"}
     assert all("--execute" not in line for line in actions if "--help" not in line)
+
+
+def refusal_messages():
+    table = SKILL.read_text().split("## When something is refused")[1].split("\n## ")[0]
+    rows = [line.split("|")[1] for line in table.splitlines() if line.startswith("| `")]
+    return [message for row in rows for message in re.findall(r"`([^`]+)`", row)]
+
+
+def test_every_refusal_the_skill_names_is_one_the_sdk_emits():
+    source = "\n".join(
+        path.read_text() for path in (SKILL.parents[2] / "src/almanak").rglob("*.py")
+    )
+    messages = refusal_messages()
+    assert len(messages) >= 8
+    for message in messages:
+        assert message in source, message
