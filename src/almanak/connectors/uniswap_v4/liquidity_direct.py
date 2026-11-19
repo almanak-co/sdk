@@ -24,18 +24,30 @@ token, and receives the wrapped token back: the PositionManager unwraps and wrap
 inside the call, and no call carries value. `--amount0` and `--amount1` follow the
 key's order, with the wrapped token in the native coin's place.
 
-A mint is for a fixed liquidity, the most the stated amounts cover at the observed
-price. Each amount the mint may take is the stated one, trimmed to what that liquidity
-takes at the edge of the stated slippage around the observed price, so a price moved
-further than that in either direction after signing reverts the mint instead of
-spending the amount stated beyond the range's ratio (`bounded`).
+A mint is for a fixed liquidity: the most the stated amounts cover at the price of the
+observation its step is planned with. The most it may take of each token is the stated
+amount, trimmed to what that liquidity takes at the edge of the stated slippage around
+that same price (`planning.bounded_maximums`, which only an operator request's planning
+applies). The PositionManager reverts a mint that needs more than that, so a mint mined
+at a price further than the stated slippage from the price it was planned at reverts,
+instead of spending the amount stated beyond the range's ratio. Against the token that
+limits the liquidity it reverts on any move. The range bounds what the slippage cannot:
+where an edge of the slippage lies at or beyond a bound of the range, the mint may take
+all the range holds of that token and no price in that direction reverts it, and a
+range wholly beside the price takes one token only, the same amount at every price on
+that side. The gateway plans the mint only while the price is within the stated
+slippage of the price the command decided at, and does not send it once the price has
+left the slippage around the planned price; those two are its own checks, not the
+chain's.
 
-A mint approves Permit2 for exactly that most of each token and gives the
-PositionManager a Permit2 allowance of it that expires at the mint's deadline. The
-mint takes at most that, and what it does not take stays approved: the Permit2
-allowance until it expires, the ERC-20 approval to Permit2 without limit of time. An
-approval the wallet already gave that covers the amount is used as it stands. Nothing
-here revokes either; the result lists both. A collection and a close approve nothing.
+Each step approves Permit2 for exactly that most of a token as its own observation
+gives it, and gives the PositionManager a Permit2 allowance of it that expires at the
+mint's deadline. An approval mined at an earlier price for less than the mint now needs
+is planned again before the mint. The mint takes at most what is approved, and what it
+does not take stays approved: the Permit2 allowance until it expires, the ERC-20
+approval to Permit2 without limit of time. An approval the wallet already gave that
+covers the amount is used as it stands. Nothing here revokes either; the result lists
+both. A collection and a close approve nothing.
 
 The heavy imports stay inside the functions: the command line imports each connector's
 `direct` module to build its choices.
@@ -176,9 +188,10 @@ def named_record(reader, block, resolved, token: int):
 def intent(config, observed, request: ActionRequest):
     """The command's one intent, built from the observation it is admitted with.
 
-    A mint offers the whole attributed inventory, which is the stated amounts. A
-    close's minimum outputs are the principal at the observed price less the stated
-    slippage. Each deadline is the observed block time plus the allocation's seconds.
+    A mint states the whole attributed inventory, which is the stated amounts; the
+    planner bounds what each of its steps may take of it. A close's minimum outputs are
+    the principal at the observed price less the stated slippage. Each deadline is the
+    observed block time plus the allocation's seconds.
     """
     allocation = config.allocation(ALLOCATION)
     (seen,) = observed
@@ -199,46 +212,7 @@ def open_liquidity(allocation, seen):
     from almanak.connectors.uniswap_v4.authoring import open_liquidity as build
 
     require_liquidity(seen)
-    return bounded(allocation, seen, build(allocation, seen))
-
-
-def bounded(allocation, seen, intent):
-    """The mint with each maximum trimmed to what its liquidity takes inside the price
-    tolerance, so the stated slippage bounds the mined price in both directions.
-
-    A mint is for a fixed liquidity, the most the stated amounts cover at the observed
-    price, and the PositionManager only refuses one that needs more than a maximum. The
-    amount stated beyond the range's ratio would otherwise be a maximum far above what
-    that liquidity takes: a price pushed after signing could make the mint take up to
-    all of it at the pushed price. Each maximum is therefore at most what the liquidity
-    takes at the edge of the tolerance window where it takes the most of that token:
-    the lowest price for the first token, the highest for the second. The token that
-    limits the liquidity keeps its stated amount, which already reverts the mint when
-    the price moves against it. The planner derives the same liquidity from the trimmed
-    maximums, since each still covers what that liquidity takes at the observed price.
-    """
-    from math import isqrt
-
-    from almanak.connectors.uniswap_v4.math import amounts, liquidity_for
-    from almanak.connectors.uniswap_v4.reader import sqrt_bounds
-
-    lower, upper = sqrt_bounds(seen.target)
-    price = seen.pool.sqrt_price_x96
-    stated = intent.maximum0, intent.maximum1
-    liquidity = liquidity_for(stated[0].amount, stated[1].amount, price, lower, upper)
-    # Square-root prices at the observed price less and plus the tolerance.
-    low, high = (
-        isqrt(price * price * (10000 + sign * allocation.slippage_bps) // 10000) for sign in (-1, 1)
-    )
-    most = (
-        amounts(liquidity, low, lower, upper, up=True)[0],
-        amounts(liquidity, high, lower, upper, up=True)[1],
-    )
-    trimmed = [
-        value.model_copy(update={"amount": min(value.amount, limit)})
-        for value, limit in zip(stated, most, strict=True)
-    ]
-    return intent.model_copy(update={"maximum0": trimmed[0], "maximum1": trimmed[1]})
+    return build(allocation, seen)
 
 
 def require_liquidity(seen) -> None:

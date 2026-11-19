@@ -16,6 +16,7 @@ from almanak import ax, ax_actions
 from almanak.caip import AssetId, AssetType, ChainId
 from almanak.chains import evm_network
 from almanak.cli_arguments import build_parser, parse_validated
+from almanak.configuration.composed import Parameters as ComposedParameters
 from almanak.connectors import direct
 from almanak.connectors.composition import connector_from_wire
 from almanak.connectors.direct import ALLOCATION, ActionRequest
@@ -28,7 +29,6 @@ from almanak.connectors.uniswap_v4 import (
     reconciliation,
 )
 from almanak.connectors.uniswap_v4 import reader as reads
-from almanak.connectors.uniswap_v4.authoring import open_liquidity as open_as_authored
 from almanak.connectors.uniswap_v4.domain import PoolObservation
 from almanak.connectors.uniswap_v4.math import amounts as principal_of
 from almanak.connectors.uniswap_v4.math import liquidity_for, sqrt_at_tick
@@ -38,6 +38,7 @@ from almanak.connectors.uniswap_v4.state import Burn, Collect, Mint, Snapshot
 from almanak.dex_intents import SwapExactInput
 from almanak.gateway.ethereum import DataError, Reverted
 from almanak.models import AssetAmount
+from almanak.operator_deployment import refuse_adoption
 from almanak.strategy import StrategyDefinition
 from tests import test_ax_swap as family
 from tests import test_ax_swap_uniswap_v4 as swaps
@@ -125,7 +126,7 @@ def observed(config, owned, market, *, wallets=(9000, 9000), **stated_fields):
         block=market.block,
         currency0=market.asset0,
         currency1=market.asset1,
-        sqrt_price_x96=2**96,
+        sqrt_price_x96=stated_fields.pop("sqrt_price", 2**96),
         tick=0,
         liquidity=10**18,
         protocol_fee=0,
@@ -178,8 +179,9 @@ def adopting(action="collect-liquidity-fees", *, liquidity=900, growth=GROWTH):
     return market, config, state, seen
 
 
-def validating(config, state, intent, seen):
-    """The connector's own validation of one operation under one retained decision."""
+def validating(config, state, intent, seen, *, operator=True):
+    """The connector's own validation of one operation under one retained decision, of an
+    operator deployment or, with `operator=False`, of a strategy's."""
     execution = connector_from_wire({"connector": CONNECTOR}).execution
     deciding = SimpleNamespace(
         config=config,
@@ -188,7 +190,7 @@ def validating(config, state, intent, seen):
         decision=SimpleNamespace(intent=intent, observations=(seen,)),
         outcomes=(),
         mode="running",
-        operator=state.operator,
+        operator=operator,
     )
 
     def step(before, operation=None):
@@ -306,9 +308,33 @@ def test_an_adopting_allocation_trades_nothing_and_only_an_operator_states_one()
     plain = swaps.strategy_checkpoint()
     assert "adopt" not in plain.config.allocations[0].model_dump()
     assert "adopts" not in plain.owned[0].model_dump()
+
+
+def test_only_an_operator_deployment_carries_an_adoption_on_any_path():
+    market = swaps.resolved()
+    config = config_for(market, "open-liquidity")
     strategy = StrategyDefinition(filename="strategy.py", source="def decide(context):\n    pass\n")
-    with pytest.raises(ValueError, match="only an operator deployment adopts"):
-        swaps.created(config_for(market, "open-liquidity"), strategy)
+    refusal = "only an operator deployment adopts inventory or a position"
+    # A strategy checkpoint, created or decoded: the shared origin check refuses both.
+    with pytest.raises(ValueError, match=refusal):
+        swaps.created(config, strategy)
+    operator = swaps.created(config)
+    wire = {**json.loads(operator.model_dump_json()), "operator": False}
+    wire["strategy"] = strategy.model_dump()
+    with pytest.raises(ValueError, match=refusal):
+        type(operator).model_validate_json(json.dumps(wire))
+    # A composed configuration, which is a strategy's or a backtest's.
+    (allocation,) = config.allocations
+    composed = SimpleNamespace(
+        allocations=(allocation,),
+        accounts=SimpleNamespace(bindings=(SimpleNamespace(name=allocation.account),)),
+    )
+    with pytest.raises(ValueError, match=refusal):
+        ComposedParameters.scope(composed)
+    # The shared refusal is the one the connector's own allocation meets.
+    with pytest.raises(ValueError, match=refusal):
+        refuse_adoption(config.positions)
+    refuse_adoption(swaps.strategy_checkpoint().config.positions)
 
 
 def test_an_adopting_deployment_quotes_no_swap_and_its_validation_admits_none():
@@ -390,26 +416,41 @@ def test_the_first_observation_reads_the_nft_to_adopt_and_verifies_it(monkeypatc
     )
 
 
-def needed(liquidity, bps):
-    """What `liquidity` in the tested range takes of each token at the observed price
-    moved by `bps`, rounded up as the PoolManager charges it."""
-    price = isqrt(2**192 * (10000 + bps) // 10000)
-    return principal_of(liquidity, price, sqrt_at_tick(LOWER), sqrt_at_tick(UPPER), up=True)
+def shifted(price, bps):
+    """A square-root price moved by `bps` basis points of the price, as the planner moves it."""
+    return isqrt(price * price * (10000 + bps) // 10000)
+
+
+def needed(liquidity, bps, *, price=2**96, ticks=(LOWER, UPPER)):
+    """What `liquidity` in a range takes of each token at `price` moved by `bps`, rounded
+    up as the PoolManager charges it."""
+    bounds = sqrt_at_tick(ticks[0]), sqrt_at_tick(ticks[1])
+    return principal_of(liquidity, shifted(price, bps), *bounds, up=True)
 
 
 # The liquidity the tested amounts cover at the observed price, limited by the first
 # token, and the most of the second the mint may take: its need at the +50 bps edge.
 MINTED = liquidity_for(AMOUNT0, AMOUNT1, 2**96, sqrt_at_tick(LOWER), sqrt_at_tick(UPPER))
 MOST1 = needed(MINTED, 50)[1]
+WHOLE = ((UNLIMITED_PERMIT, FAR), (UNLIMITED_PERMIT, FAR))
 
 
-def test_the_open_intent_offers_the_stated_amounts_trimmed_to_the_price_tolerance():
+def approved(config, state, market, **fields):
+    """An observation over standing unlimited approvals, so the next step is the mint."""
+    tokens = (UNLIMITED_TOKEN, UNLIMITED_TOKEN)
+    return observed(config, state.owned[0], market, tokens=tokens, permits=WHOLE, **fields)
+
+
+def test_the_open_intent_states_the_whole_inventory_and_its_mint_takes_a_bounded_part():
     market, config, state, seen = opening()
     intent = liquidity_direct.intent(config, (seen,), stated("open-liquidity"))
     assert (intent.kind, intent.range) == ("open_liquidity", None)
-    assert (intent.maximum0.amount, intent.maximum1.amount) == (AMOUNT0, MOST1)
-    assert needed(MINTED, 0)[1] < MOST1 < AMOUNT1
+    assert (intent.maximum0.amount, intent.maximum1.amount) == (AMOUNT0, AMOUNT1)
     assert intent.deadline == market.block.timestamp + 300
+    _, step = validating(config, state, intent, seen)
+    mint = step(approved(config, state, market))
+    assert (mint.maximum0.amount, mint.maximum1.amount) == (AMOUNT0, MOST1)
+    assert needed(MINTED, 0)[1] < MOST1 < AMOUNT1
     with pytest.raises(ValueError, match="does not own the position the command names"):
         liquidity_direct.intent(config, (seen,), stated("close-liquidity"))
     # A range beside the price takes one token only; stating only the other adds nothing.
@@ -448,43 +489,115 @@ def test_an_open_is_two_approvals_per_token_then_the_mint():
     assert mint.liquidity == MINTED > 0
 
 
-def test_a_mint_cannot_take_the_stated_surplus_beyond_the_price_tolerance():
-    # Far more of the second token is stated than the range takes beside the first.
-    surplus = AMOUNT1 * 1000
+def surplus_deployment(amount0=AMOUNT0, amount1=AMOUNT1 * 1000, **ticks):
+    """An open with far more of the second token stated than the range takes."""
     market = swaps.resolved()
-    config = config_for(market, "open-liquidity", amount1=surplus)
+    request = stated("open-liquidity", amount0=amount0, amount1=amount1, **ticks)
+    config = config_for(market, "open-liquidity", amount0=amount0, amount1=amount1, **ticks)
     state = swaps.created(config)
-    seen = observed(config, state.owned[0], market, wallets=(AMOUNT0, surplus))
-    whole = ((UNLIMITED_PERMIT, FAR), (UNLIMITED_PERMIT, FAR))
-    ready = observed(
-        config,
-        state.owned[0],
-        market,
-        wallets=(AMOUNT0, surplus),
-        tokens=(UNLIMITED_TOKEN, UNLIMITED_TOKEN),
-        permits=whole,
-    )
-    allocation = config.allocation(ALLOCATION)
+    seen = observed(config, state.owned[0], market, wallets=(amount0, amount1))
+    intent = liquidity_direct.intent(config, (seen,), request)
+    return market, config, state, seen, intent
 
-    # As a strategy states it, the whole inventory is the maximum: the PositionManager
-    # would let this mint take all the range can hold of the second token, whatever
-    # price it is mined at.
-    unbounded = open_as_authored(allocation, seen)
-    deciding, step = validating(config, state, unbounded, seen)
-    loose = step(ready)
+
+def test_a_mint_cannot_take_the_stated_surplus_beyond_the_price_tolerance():
+    surplus = AMOUNT1 * 1000
+    market, config, state, seen, intent = surplus_deployment()
+    ready = approved(config, state, market, wallets=(AMOUNT0, surplus))
+
+    # A strategy's mint offers its whole inventory: the PositionManager would let it
+    # take all the range can hold of the second token, whatever price it is mined at.
+    _, plan = validating(config, state, intent, seen, operator=False)
+    loose = plan(ready)
     assert (loose.liquidity, loose.maximum1.amount) == (MINTED, surplus)
     assert needed(MINTED, 10**6)[1] < surplus
 
-    # The direct open mints the same liquidity with the second token's maximum at the
-    # edge of the tolerance: inside it the mint fits, beyond it the mint reverts.
-    bounded = liquidity_direct.intent(config, (seen,), stated("open-liquidity", amount1=surplus))
-    deciding.decision = SimpleNamespace(intent=bounded, observations=(seen,))
+    # An operator's mint of the same intent mints the same liquidity with the second
+    # token's maximum at the edge of the tolerance: inside it the mint fits, beyond it
+    # the mint reverts.
+    _, step = validating(config, state, intent, seen)
     mint = step(ready)
     assert (mint.liquidity, mint.maximum0.amount, mint.maximum1.amount) == (MINTED, AMOUNT0, MOST1)
     assert needed(MINTED, 49)[1] <= MOST1 < needed(MINTED, 51)[1]
     # The first token limits the liquidity: any price below the observed one needs more
     # of it than its maximum, so that direction reverts as well.
     assert needed(MINTED, 0)[0] <= AMOUNT0 < needed(MINTED, -1)[0]
+
+
+@pytest.mark.parametrize("drift", [-49, 49])
+def test_a_mint_planned_at_a_drifted_price_is_bounded_around_the_price_it_was_planned_at(drift):
+    # The decision is observed at one price and the mint step planned at another, at
+    # the edge of what the gateway's price-movement check still admits.
+    amounts = 10**18, 50 * 10**18
+    market, config, state, seen, intent = surplus_deployment(*amounts)
+    planned = shifted(2**96, drift)
+    _, step = validating(config, state, intent, seen)
+    mint = step(approved(config, state, market, wallets=amounts, sqrt_price=planned))
+    bounds = sqrt_at_tick(LOWER), sqrt_at_tick(UPPER)
+    liquidity = liquidity_for(*amounts, planned, *bounds)
+    assert mint.liquidity == liquidity
+
+    def takes(bps):
+        return needed(liquidity, bps, price=planned)
+
+    # Each maximum is the need at the edge of the tolerance around the planned price,
+    # not around the price the command decided at.
+    assert (mint.maximum0.amount, mint.maximum1.amount) == (amounts[0], takes(50)[1])
+    assert takes(49)[1] <= mint.maximum1.amount < takes(51)[1]
+    assert takes(0)[0] <= mint.maximum0.amount < takes(-1)[0]
+    # Trimmed at the decision's price instead, a mint planned at the low edge would
+    # still have fitted a whole tolerance further up.
+    decided = needed(liquidity_for(*amounts, 2**96, *bounds), 50)[1]
+    assert (decided >= takes(99)[1]) == (drift < 0)
+
+
+def test_an_approval_mined_for_an_earlier_price_is_planned_again_before_a_larger_mint():
+    market, config, state, seen, intent = surplus_deployment()
+    _, step = validating(config, state, intent, seen)
+    deadline, surplus = intent.deadline, AMOUNT1 * 1000
+    mined = {"tokens": (AMOUNT0, MOST1), "permits": ((AMOUNT0, deadline), (MOST1, deadline))}
+    wallets = (AMOUNT0, surplus)
+    assert step(observed(config, state.owned[0], market, wallets=wallets, **mined)).kind == "mint"
+    # At a higher price the same first-token amount covers more liquidity, which takes
+    # more of the second token than was approved: the approval is planned again first.
+    higher = shifted(2**96, 49)
+    drifted = observed(config, state.owned[0], market, wallets=wallets, sqrt_price=higher, **mined)
+    again = step(drifted)
+    liquidity = liquidity_for(AMOUNT0, surplus, higher, sqrt_at_tick(LOWER), sqrt_at_tick(UPPER))
+    larger = needed(liquidity, 50, price=higher)[1]
+    assert (again.kind, str(again.asset), again.amount) == ("approve_erc20", WETH, larger)
+    assert larger > MOST1
+
+
+def test_a_tolerance_that_reaches_a_range_bound_leaves_the_range_as_the_only_bound():
+    # A range of ten ticks either side, about ten basis points, inside the tolerance.
+    ticks = {"tick_lower": -10, "tick_upper": 10}
+    market, config, state, seen, intent = surplus_deployment(**ticks)
+    _, step = validating(config, state, intent, seen)
+    mint = step(approved(config, state, market, wallets=(AMOUNT0, AMOUNT1 * 1000)))
+    span = (-10, 10)
+    # The second token's maximum is all the range holds of it at this liquidity, which
+    # is what the mint takes at every price at or above the range: none reverts it.
+    assert mint.maximum1.amount == needed(mint.liquidity, 50, ticks=span)[1]
+    assert mint.maximum1.amount == needed(mint.liquidity, 10**6, ticks=span)[1]
+    assert mint.maximum1.amount < AMOUNT1 * 1000
+    # The first token still limits the liquidity, so a lower price reverts the mint.
+    assert mint.maximum0.amount == AMOUNT0 < needed(mint.liquidity, -1, ticks=span)[0]
+
+
+def test_a_range_beside_the_price_takes_one_token_and_reverts_only_once_the_price_enters():
+    ticks = {"tick_lower": 600, "tick_upper": 1200}
+    market, config, state, seen, intent = surplus_deployment(amount1=AMOUNT1, **ticks)
+    _, step = validating(config, state, intent, seen)
+    mint = step(approved(config, state, market, wallets=(AMOUNT0, AMOUNT1)))
+    span = (600, 1200)
+    # Below the range it takes the first token only, the same amount at every price
+    # there, so no lower price reverts it.
+    held = needed(mint.liquidity, 0, ticks=span)[0]
+    assert (mint.maximum0.amount, mint.maximum1.amount) == (held, 0)
+    assert needed(mint.liquidity, -5000, ticks=span)[0] == held <= AMOUNT0
+    # A price that enters the range needs some of the second token, of which it may take none.
+    assert needed(mint.liquidity, 700, ticks=span)[1] > 0
 
 
 def test_standing_unlimited_approvals_serve_the_mint_and_a_lapsing_one_is_renewed():

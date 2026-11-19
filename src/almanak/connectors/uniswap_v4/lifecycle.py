@@ -114,8 +114,6 @@ class UniswapLifecycle:
     def initial(config, strategy, capabilities, permissions):
         from almanak.triggers import DecisionSchedule
 
-        if strategy is not None and any(a.adopt is not None for a in config.allocations):
-            raise ValueError("only an operator deployment adopts inventory or a position")
         return Checkpoint(
             schedule=DecisionSchedule(),
             work=initial_work(config, Work),
