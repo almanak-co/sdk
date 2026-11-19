@@ -117,6 +117,12 @@ skipped test is not a pass. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
 checks and the pull request process, [docs/qa.md](docs/qa.md) for the QA bench,
 and [AGENTS.md](AGENTS.md) for the project's standing rules.
 
+Two opt-in levels check live mainnet and are never part of default pytest or CI:
+free `almanak ax` read checks on public endpoints, and a write check that
+**spends real gas** from your own wallet and is meant for releases or after a
+protocol upgrade, not for frequent use. See
+[Opt-in live checks](docs/qa.md#opt-in-live-checks).
+
 Fork and backtest proofs do not establish a funded production run. Nothing in
 this repository spends funds without an explicit operator invocation.
 

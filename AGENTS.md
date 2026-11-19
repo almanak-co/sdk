@@ -436,6 +436,16 @@ independently.
 - The daily QA bench derives required coverage from connector declarations.
   Missing proofs, skipped required tests and unavailable providers never
   produce a green run. See `docs/qa.md`.
+- Accepted: live mainnet checks are opt-in (`scripts/live_qa`, `docs/qa.md`). They
+  never run in default pytest, `make test`, `make check` or any pull request,
+  `main` or release workflow, and their result never gates a merge. `tests/live`
+  runs only with `--live-public`. A case a public endpoint did not answer
+  is blocked: not a pass and not an SDK finding.
+- Accepted: the live write check spends real funds and refuses to start without
+  `ALMANAK_QA_SPEND_REAL_FUNDS=1`, an operator-supplied funded wallet and both
+  fee ceilings. It previews first and executes only on a person's confirmation.
+  It uses tiny amounts in reviewed markets. No shared wallet or key exists in the
+  repository, and no workflow or schedule runs it.
 - Distinguish component tests from actual process and fork recovery evidence.
   Run the narrowest meaningful checks. Documentation changes need link and
   diff checks.

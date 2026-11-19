@@ -1,7 +1,8 @@
 """Named public endpoints: reads and action previews without a provider key.
 
 Offline: no test here opens a connection. The endpoints themselves are exercised by
-running the commands against them, which is not part of this suite.
+running the commands against them, which is not part of this suite: the opt-in live
+read checks (`python -m scripts.live_qa reads`, docs/qa.md) do that.
 """
 
 from contextlib import contextmanager
@@ -194,6 +195,16 @@ def test_an_action_takes_a_key_or_a_public_endpoint_to_preview_and_to_execute(ca
         with pytest.raises(SystemExit):
             parse(*arguments)
     capsys.readouterr()
+
+
+def test_the_help_does_not_say_a_public_endpoint_only_previews(capsys):
+    """An action executes through a public endpoint, so its help must not deny it."""
+    for command in ("supply", "withdraw", "balance"):
+        with pytest.raises(SystemExit):
+            parse("ax", command, "--help")
+        text = " ".join(capsys.readouterr().out.split())
+        assert "a public endpoint that needs no key, for reads and direct actions" in text
+        assert "previews only" not in text
 
 
 def test_an_action_with_a_key_resolves_the_keyed_provider(tmp_path):

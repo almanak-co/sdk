@@ -1,0 +1,78 @@
+name: Live Public Reads (optional)
+
+# Optional and manual. Runs the free live read checks: `almanak ax` reads against
+# the named public endpoints, as a user without a provider key, cross-checked
+# against direct reads. It uses no secret, no wallet and no funds.
+#
+# The run is red for a failure that is not a known issue; known issues stay in the
+# report and the summary. A blocked case exits 2.
+#
+# This is not a merge gate and must not become one. Public endpoints rate-limit
+# and stall, so a red or blocked run says nothing certain about a change. It is
+# never called from pr.yml, main.yml or a release workflow.
+#
+# It has no schedule. To run it weekly, uncomment the schedule below; scheduled
+# runs use the default branch.
+#
+# The costly write level of the live checks spends real funds from a
+# person's own wallet and is never run by any workflow. See docs/qa.md.
+on:
+  workflow_dispatch:
+    inputs:
+      almanak_command:
+        description: 'CLI under test. Empty runs the checkout; for the published package: uvx --from almanak==<version> almanak'
+        required: false
+        type: string
+        default: ""
+  # schedule:
+  #   # Mondays 05:23 UTC.
+  #   - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-public-reads
+  cancel-in-progress: false
+
+jobs:
+  reads:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-repo
+
+      # Exit 1 is a failure outside the known issues and 2 a blocked case; the report
+      # lists every failure, known or not.
+      - name: Live read checks
+        env:
+          ALMANAK_COMMAND: ${{ inputs.almanak_command }}
+        run: |
+          if [ -n "$ALMANAK_COMMAND" ]; then
+            uv run --locked python -m scripts.live_qa reads --known-issues-ok \
+              --output artifacts/live-reads --almanak-command "$ALMANAK_COMMAND"
+          else
+            uv run --locked python -m scripts.live_qa reads --known-issues-ok \
+              --output artifacts/live-reads
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f artifacts/live-reads/summary.md ]; then
+            cat artifacts/live-reads/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: live-public-reads
+          path: |
+            artifacts/live-reads/results.csv
+            artifacts/live-reads/summary.md
+          if-no-files-found: warn

@@ -52,3 +52,12 @@ it has acted in.
 - An action has no amount ceiling. The fee ceilings and the wallet balance bound
   it, and the confirmation before `--execute` is an instruction to the agent, not
   an enforced control.
+
+## The live QA skill
+
+A second skill,
+[`skills/almanak-qa/SKILL.md`](https://github.com/almanak-co/sdk/blob/main/skills/almanak-qa/SKILL.md),
+is for maintainers. It runs the [opt-in live checks](qa.md#opt-in-live-checks) from
+a checkout of the repository: the free read checks on public endpoints, and the
+write check, which spends real funds from a wallet the person names and runs only
+after they confirm its preview. It is not needed to manage positions.
