@@ -152,11 +152,14 @@ def production_backend(config, endpoint, wallet):
 def action_config(args, request, wallet, provider, endpoint):
     """The operator deployment of one account in one resolved market, with explicit fees."""
     from almanak.connectors.lending_lookup import family, resolve
-    from almanak.gateway.ethereum import EthereumReader
+    from almanak.gateway.ethereum import EXECUTION_RETRY_BUDGET, EthereumReader
     from almanak.models import Chain
 
     chain = Chain(chain_id=request.chain, environment="mainnet")
-    with EthereumReader(chain, endpoint) as reader:
+    # The market is resolved at the head, which a load-balanced endpoint can serve a
+    # moment late. These reads precede planning and signing, and re-send a transient
+    # failure within the budget execution reads have.
+    with EthereumReader(chain, endpoint, retry_budget=EXECUTION_RETRY_BUDGET) as reader:
         if args.public_rpc is not None:
             from almanak.gateway.read_endpoints import verify_public
 

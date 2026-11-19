@@ -21,6 +21,10 @@ its changelog is on the `v2` branch.
   `[LONG-SHORT]` collateral notation takes the same labels beside the on-chain symbols,
   for example `AVAX/USD [AVAX-USDC]`. Aliases are per chain, and a label that matches
   several markets is still refused with its candidates.
+- `ax supply` and `ax withdraw` re-send a transient read failure while resolving the
+  market, within the bounds execution reads have. A load-balanced endpoint that had not
+  yet served the head (`provider has not served the block`) ended the action before
+  planning. Nothing was signed, and no submission is ever re-sent.
 
 ## [3.2.1] - 2026-11-19
 

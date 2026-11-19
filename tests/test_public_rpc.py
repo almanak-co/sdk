@@ -4,10 +4,12 @@ Offline: no test here opens a connection. The endpoints themselves are exercised
 running the commands against them, which is not part of this suite.
 """
 
+import json
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from almanak import ax, ax_actions
@@ -259,7 +261,7 @@ def test_a_preview_on_a_public_endpoint_proves_the_endpoint_before_resolving(mon
     steps = []
 
     class Opened:
-        def __init__(self, chain, endpoint):
+        def __init__(self, chain, endpoint, **options):
             steps.append(("open", endpoint))
 
         def __enter__(self):
@@ -289,3 +291,61 @@ def test_a_preview_on_a_public_endpoint_proves_the_endpoint_before_resolving(mon
     with pytest.raises(DataError, match="500 seconds old"):
         ax_actions.action_config(args, request, {}, None, "https://public.example")
     assert steps == [("open", "https://public.example"), "chain", "public", "closed"]
+
+
+@pytest.mark.parametrize(
+    ("error", "resolves"),
+    [
+        # A backend that has not yet seen the head another backend just served.
+        ({"code": -32000, "message": "header not found"}, True),
+        # A refusal is not re-sent.
+        ({"code": -32000, "message": "execution aborted"}, False),
+    ],
+)
+def test_a_direct_action_resolves_its_market_through_a_late_served_head(
+    monkeypatch, error, resolves
+):
+    from almanak.gateway import ethereum
+
+    code_reads = []
+    header = {"number": "0x10", "hash": "0x" + "ab" * 32, "timestamp": "0x6553f100"}
+
+    def handle(request):
+        body = json.loads(request.content)
+        reply = {"jsonrpc": "2.0", "id": body["id"]}
+        if body["method"] == "eth_chainId":
+            return httpx.Response(200, json=reply | {"result": "0x1"})
+        if body["method"] == "eth_getBlockByNumber":
+            return httpx.Response(200, json=reply | {"result": header})
+        assert body["method"] == "eth_getCode"
+        code_reads.append(body["params"])
+        if len(code_reads) == 1:
+            return httpx.Response(200, json=reply | {"error": error})
+        return httpx.Response(200, json=reply | {"result": "0x6001"})
+
+    def resolve(reader, family, request, block):
+        code = reader._rpc("eth_getCode", ["0x" + "11" * 20, hex(block.number)])
+        return SimpleNamespace(reserve=code)
+
+    client = httpx.Client(transport=httpx.MockTransport(handle))
+    real = ethereum.EthereumReader
+    monkeypatch.setattr(
+        ethereum,
+        "EthereumReader",
+        lambda chain, endpoint, **options: real(chain, endpoint, client=client, **options),
+    )
+    monkeypatch.setattr(ethereum, "sleep", lambda seconds: None)
+    monkeypatch.setattr("almanak.connectors.lending_lookup.resolve", resolve)
+    monkeypatch.setattr(ax_actions, "lending_config", lambda reserve, *a, **k: reserve)
+    args = SimpleNamespace(
+        public_rpc=None, connector="aave_v4", max_gas_price_wei=1, max_transaction_fee=1
+    )
+    request = SimpleNamespace(chain=ETHEREUM)
+    if resolves:
+        config = ax_actions.action_config(args, request, {}, None, "https://rpc.invalid")
+        assert config == "0x6001" and len(code_reads) == 2
+    else:
+        with pytest.raises(DataError, match="eth_getCode"):
+            ax_actions.action_config(args, request, {}, None, "https://rpc.invalid")
+        assert len(code_reads) == 1
+    client.close()
