@@ -14,6 +14,9 @@ its changelog is on the `v2` branch.
   first step is planned and nothing is signed. They support Aave V4 with an EOA wallet,
   take required `--max-gas-price-wei` and `--max-transaction-fee` ceilings, and adopt the
   position the wallet already holds.
+- `almanak ax recover` lists the records of operator actions that stopped with a signed
+  step unresolved, and resolves one from its receipt or by sending the signed bytes
+  again. It plans and signs nothing, and releases the wallet's claim once resolved.
 - An agent skill, `skills/almanak/SKILL.md`, teaches an AI agent to manage positions from
   plain requests with the operator actions: setup on load, then preview, confirm and
   execute. `docs/agents.md` covers installing it.

@@ -40,7 +40,7 @@ def main() -> int:
 
 
 def interrupted_message(args) -> str:
-    if getattr(args, "product", None) == "operator-action":
+    if str(getattr(args, "product", "")).startswith("operator-"):
         # A direct action is never resumed; only the chain says what it did.
         return "Interrupted; read the position before acting again."
     return "Interrupted; the checkpoint is preserved for resume or teardown."
@@ -129,6 +129,10 @@ def dispatch(args) -> int:
         from almanak.ax_actions import command as operator_action
 
         return operator_action(args)
+    if args.product == "operator-recover":
+        from almanak.ax_actions import recover_command
+
+        return recover_command(args)
     if args.product.startswith("ax-"):
         from almanak.ax import command
 

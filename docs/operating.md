@@ -503,16 +503,30 @@ started meanwhile is refused the same way and can be run once the first exits.
 While a record
 holds a signed step the wallet stays claimed and later actions for it are refused
 with "fund is already claimed". Checking the transaction on chain does not release
-the claim, and there is no command that clears it yet, so the wallet stays blocked
-for operator actions on that machine. A wallet a running strategy uses is refused
+the claim; `almanak ax recover` does. A wallet a running strategy uses is refused
 the same way.
+
+```bash
+almanak ax recover
+almanak ax recover --record ~/.local/state/almanak-v3/actions/<record> --env-file /private/providers.env
+```
+
+Without `--record` it lists the kept records: each one's `path`, `chain`, `account`
+and `unresolved` step. With `--record` it resolves that record's signed step: from
+its receipt when the transaction was mined, otherwise by sending the same signed
+bytes again and waiting. It plans and signs nothing, and needs no wallet. Once the
+step has its outcome, whatever the request had not yet signed is dropped
+(`discarded_request`), the record is removed and the claim released; state the
+action again against the position as it now is. A step that cannot be resolved
+leaves `resolved` false with the reason under `refused`, keeps the record and exits
+1. A record a running command still uses is refused.
 
 A record with no signed step holds nothing worth keeping. When a command is killed
 before it signs, the next operator action removes that record and releases its
-claim, once it can read the record and see that nothing is signed. A record it
-cannot read is kept with its claim, and `record_kept` can name such a record: a
-command killed while it was creating its journal leaves one, although nothing was
-signed. Do not kill a command that runs with `--execute`: it waits for each receipt
+claim, once it can read the record and see that nothing is signed. That includes a
+journal with no checkpoint yet, left by a command killed while creating it. A
+record that cannot be read at all is kept with its claim, and `record_kept` can
+name such a record. Do not kill a command that runs with `--execute`: it waits for each receipt
 without a time limit, and stops between steps on SIGINT, SIGTERM or SIGHUP.
 
 An action has no amount ceiling: it is bounded by the wallet's balance and the two

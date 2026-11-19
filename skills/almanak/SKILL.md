@@ -23,6 +23,7 @@ unchanged.
 | --- | --- | --- | --- |
 | Supply an asset | `almanak ax supply` | Aave V4 | Ethereum (`eip155:1`), Avalanche (`eip155:43114`) |
 | Withdraw the whole supplied balance and clear any leftover allowance | `almanak ax withdraw` | Aave V4 | same |
+| Resolve an action that stopped with a transaction unresolved | `almanak ax recover` | Aave V4 | same |
 | Read balances, markets and positions | `almanak ax balance`, `ax lending-markets`, `ax lending-reserve`, `ax lending-position` | see `almanak ax --help` | see `almanak support` |
 
 Tell the user plainly when a request is outside this table. In particular:
@@ -225,7 +226,7 @@ the allowance, but it also withdraws everything supplied in that market, so say 
 
 | Message contains | Meaning | What to do |
 | --- | --- | --- |
-| `fund is already claimed` | Another command of yours for this wallet is still running, an earlier action stopped with a signed transaction unresolved, or a strategy is using the wallet. | If a command of yours was running, wait for it to exit and try once more. Otherwise do not retry. Tell the user, and give them the `record_kept` path if the earlier command reported one. There is no command that clears the claim; the user has to resolve it. |
+| `fund is already claimed` | Another command of yours for this wallet is still running, an earlier action stopped with a signed transaction unresolved, or a strategy is using the wallet. | If a command of yours was running, wait for it to exit and try once more. Otherwise follow "A blocked wallet" below. If no record is listed there, a strategy is using the wallet: tell the user and do not retry. |
 | `refused during planning` | The first step failed its simulation or a market check. Nothing was signed. | Report the reason in the message. |
 | `gas_price` or `gas_fee_quote` | The network fee is above the ceilings. The quoted price is twice the base fee plus a tip, so a 20 gwei ceiling refuses once the base fee passes about 10 gwei. | Tell the user the quote and ask whether to wait or raise the ceiling. Never raise it yourself. If `outcomes` lists an approval, say it was sent. |
 | `supply allowance differs from the requested amount` | The wallet already approved a different amount to this market, from an unfinished supply or from outside these commands. | Tell the user. Supplying exactly the approved amount works; so does a withdrawal, which revokes the allowance and withdraws everything supplied. |
@@ -240,8 +241,31 @@ position first: the action may have gone through. On standard error, a line with
 `"event": "steps_sent"` lists the transactions it sent before it failed, with any
 signed transaction still `unresolved`. A line with `"event": "record_kept"`, or a
 `record_kept` entry in the result, means a record was kept, normally because a
-signed transaction is unresolved, and the wallet is blocked; give the user its
-path and do not delete it.
+signed transaction is unresolved, and the wallet is blocked. Never delete a
+record.
+
+### A blocked wallet
+
+List the kept records:
+
+```bash
+almanak ax recover
+```
+
+Each entry has a `path`, the `account` and `chain`, and the `unresolved`
+transaction. Tell the user which transaction is unresolved, then resolve the record:
+
+```bash
+almanak ax recover --record <record> --env-file ~/.almanak/agent/.env
+```
+
+This signs nothing and sends nothing new: it reads the transaction's result, or
+sends the same signed transaction again and waits, so it needs no confirmation.
+Give it the same ten minutes as an execution. When `resolved` is true the wallet
+is free again; report `outcomes`. `discarded_request` true means the rest of the
+original action was dropped, not done: read the position, tell the user where
+things stand, and preview the action again if they still want it. When `resolved`
+is false, report `refused` and stop; do not try anything else to free the wallet.
 
 ## Rules
 

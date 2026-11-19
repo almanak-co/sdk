@@ -64,17 +64,19 @@ class OperatorRuntime(Runtime):
             self.fault("transition", outcome)
         return False
 
-    def recover(self):
+    def recover(self, interrupt=lambda: None):
         """Resolve signed steps and deliver recorded outcomes; never plan or sign a new one.
 
         A request that was admitted but not confirmed stays retained and unexecuted:
-        the caller resumes or discards it explicitly.
+        the caller resumes or discards it explicitly. `interrupt` is called before every
+        step and may raise to stop.
         """
         while True:
+            interrupt()
             state = self.journal.load()
             if state.mode == "closed" or not self.retained(state):
                 return state
-            self.tick()
+            self.held_tick()
             self.wait(state)
 
     @staticmethod
@@ -182,16 +184,19 @@ class OperatorRuntime(Runtime):
         before = len(state.outcomes)
         while True:
             interrupt()
-            try:
-                finished = self.tick()
-            except DataError as exc:
-                if not self.holds(exc):
-                    raise
-                finished = False
-            if finished:
+            if self.held_tick():
                 break
             self.wait(self.journal.load())
         return self.journal.load().outcomes[before:]
+
+    def held_tick(self) -> bool:
+        """One tick; a passing failure while a signed step waits is not an ending."""
+        try:
+            return self.tick()
+        except DataError as exc:
+            if not self.holds(exc):
+                raise
+            return False
 
     def holds(self, exc: DataError) -> bool:
         """Whether a failure is a passing one met while a signed step waits."""

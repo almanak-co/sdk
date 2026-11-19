@@ -353,10 +353,19 @@ def clear_if_finished(directory: Path) -> None:
 
 def run(config, backend, action: str, amount: int | None, *, execute: bool) -> dict:
     """Plan one action against the account's current position, and execute it when asked."""
-    from almanak.gateway.service import GatewayService
-
     clear_finished_records()
     directory, lock = new_record()
+
+    def act(service, check):
+        return perform(service, action, amount, execute=execute, create=config, interrupt=check)
+
+    return in_record(directory, lock, config, backend, act)
+
+
+def in_record(directory: Path, lock, config, backend, body) -> dict:
+    """Run `body` against the record's deployment, then remove or keep the record."""
+    from almanak.gateway.service import GatewayService
+
     try:
         with interruptible() as check:
             try:
@@ -367,9 +376,7 @@ def run(config, backend, action: str, amount: int | None, *, execute: bool) -> d
                     lease_seconds=30,
                     operator_actions=True,
                 )
-                result = perform(
-                    service, action, amount, execute=execute, create=config, interrupt=check
-                )
+                result = body(service, check)
             except BaseException:
                 kept = settle(directory)
                 if kept is not None:
@@ -390,9 +397,27 @@ def in_flight(directory: Path) -> bool:
     if not database.exists():
         return False
     try:
+        if never_written(database):
+            return False
         return durable.Journal(database).load().pending is not None
     except Exception:
         return True
+
+
+def never_written(database: Path) -> bool:
+    """Whether the journal holds no checkpoint at all.
+
+    The checkpoint is written when the deployment is created, before anything is
+    planned, so a journal without one belongs to a command that stopped before it
+    could sign.
+    """
+    with durable.Journal(database).connect() as connection:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='checkpoint'"
+        ).fetchone()
+        if table is None:
+            return True
+        return connection.execute("SELECT 1 FROM checkpoint WHERE id=1").fetchone() is None
 
 
 def settle(directory: Path) -> Path | None:
@@ -493,6 +518,100 @@ def unresolved(state) -> dict:
     return {"unresolved": {"operation": pending.operation.kind, "transaction": pending.tx_hash}}
 
 
+def kept_records() -> list[dict]:
+    """The records that hold a signed step, or cannot be read, with what each holds."""
+    root = records_root()
+    if not root.is_dir():
+        return []
+    paths = sorted(path for path in root.iterdir() if path.is_dir() and in_flight(path))
+    return [described(path) for path in paths]
+
+
+def described(directory: Path) -> dict:
+    try:
+        state = durable.Journal(directory / "state.sqlite").load()
+        fund = state.config.accounts.bindings[0].profile.fund
+    except Exception:
+        return {"path": str(directory), "readable": False}
+    return {
+        "path": str(directory),
+        "readable": True,
+        "chain": str(fund.chain.chain_id),
+        "account": fund.address,
+        **unresolved(state),
+    }
+
+
+def recover(record: Path, backend_for) -> dict:
+    """Resolve the signed step a kept record holds, then drop what it had not signed.
+
+    The step is reconciled from its receipt, or sent again as the bytes that were
+    signed; nothing new is planned or signed. `backend_for` builds the chain adapter
+    for the record's own configuration.
+    """
+    directory = record.resolve()
+    if directory.parent != records_root().resolve() or not directory.is_dir():
+        raise ValueError("not an action record; `almanak ax recover` lists them")
+    lock = (directory / "lock").open("a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        raise ValueError("a command is still using this record") from None
+    try:
+        config = durable.Journal(directory / "state.sqlite").load().config
+        backend = backend_for(config)
+    except BaseException:
+        lock.close()
+        raise
+    try:
+        return in_record(directory, lock, config, backend, resolve)
+    finally:
+        backend.close()
+
+
+def resolve(service, interrupt) -> dict:
+    from almanak.operator_runtime import OperatorRuntime
+
+    runtime = OperatorRuntime(gateway=LocalGateway(service), create=None)
+    try:
+        refusal = None
+        try:
+            runtime.recover(interrupt)
+        except DataError as exc:
+            refusal = exc
+        state = runtime.journal.load()
+        result = {"resolved": state.pending is None, "discarded_request": False}
+        if state.pending is None and state.decision is not None:
+            # What was left of the request was never signed; the operator states it
+            # again against the position as it is now.
+            runtime.discard()
+            result["discarded_request"] = True
+        result.update(executed_result(state, state.outcomes, refusal))
+        del result["executed"], result["completed"]
+        return result
+    finally:
+        runtime.close()
+
+
+def recover_command(args) -> int:
+    if args.record is None:
+        print(json.dumps({"records": kept_records()}, indent=2))
+        return 0
+    if args.env_file is None:
+        raise ValueError("--env-file is required with --record")
+
+    def backend_for(config):
+        from almanak.gateway.providers import provider_endpoint
+
+        endpoint = provider_endpoint(config.production.networks[0].provider, args.env_file)
+        return production_backend(config, endpoint, None)
+
+    result = recover(args.record, backend_for)
+    print(json.dumps(result, indent=2))
+    return 0 if result["resolved"] else 1
+
+
 def executed_result(state, outcomes, refusal) -> dict:
     """What an execution did: `completed` only when the request itself finished.
 
@@ -543,7 +662,24 @@ def outcome_summary(outcome) -> dict:
     return summary
 
 
+RECOVER = "list kept action records, or resolve the signed step one of them holds"
+
+
+def recover_arguments(commands) -> None:
+    command = commands.add_parser("recover", help=RECOVER, description=RECOVER)
+    command.set_defaults(product="operator-recover")
+    command.add_argument(
+        "--record",
+        type=Path,
+        help="the kept record to resolve; without it the kept records are listed",
+    )
+    command.add_argument(
+        "--env-file", type=Path, help="private provider credentials; required with --record"
+    )
+
+
 def arguments(commands, lending_source) -> None:
+    recover_arguments(commands)
     for name, text in ACTIONS.items():
         action = commands.add_parser(name, help=text, description=text)
         action.set_defaults(product="operator-action")

@@ -96,9 +96,14 @@ def setting(fork, tmp_path, monkeypatch):
         max_gas_price_wei=500 * 10**9,
         max_transaction_fee=10**17,
     )
-    return lambda action, amount=None, *, execute: act(
-        fork, config, wallet, identity, action, amount, execute=execute
+
+    def perform(action, amount=None, *, execute):
+        return act(fork, config, wallet, identity, action, amount, execute=execute)
+
+    perform.recover = lambda record: ax_actions.recover(
+        record, lambda stored: backend(fork, stored, wallet, identity)
     )
+    return perform
 
 
 def operations(result):
@@ -130,3 +135,36 @@ def test_supply_then_withdraw_each_as_one_command(setting):
     withdrawn = setting("withdraw", execute=True)
     assert operations(withdrawn) == ["withdraw"] and withdrawn["completed"]
     assert shares(withdrawn, "position_after") == 0
+
+
+def stopped_after_the_first_send(setting, monkeypatch, capsys):
+    """Run a supply that is interrupted while its approval waits for a receipt."""
+    from almanak.operator_runtime import OperatorRuntime
+
+    def stop(self, state):
+        if state.pending is not None:
+            raise KeyboardInterrupt
+
+    with monkeypatch.context() as patched:
+        patched.setattr(OperatorRuntime, "wait", stop)
+        with pytest.raises(KeyboardInterrupt):
+            setting("supply", AMOUNT, execute=True)
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines() if "event" in line]
+    (kept,) = [event for event in events if event.get("event") == "record_kept"]
+    return ax_actions.Path(kept["path"])
+
+
+def test_an_interrupted_supply_is_recovered_and_the_wallet_is_freed(setting, monkeypatch, capsys):
+    record = stopped_after_the_first_send(setting, monkeypatch, capsys)
+    (listed,) = ax_actions.kept_records()
+    assert listed["path"] == str(record) and listed["unresolved"]["operation"] == "approve"
+    # The kept record blocks the wallet until its signed step is resolved.
+    with pytest.raises(RuntimeError, match="already claimed"):
+        setting("supply", AMOUNT, execute=False)
+    recovered = setting.recover(record)
+    assert recovered["resolved"] and recovered["discarded_request"]
+    assert operations(recovered) == ["approve"] and "unresolved" not in recovered
+    assert ax_actions.kept_records() == [] and not record.exists()
+    # The approval stands, so restating the same supply needs only its own step.
+    again = setting("supply", AMOUNT, execute=True)
+    assert operations(again) == ["supply"] and again["completed"]

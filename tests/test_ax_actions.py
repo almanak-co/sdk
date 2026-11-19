@@ -223,6 +223,8 @@ class Stored:
 def stored(monkeypatch):
     monkeypatch.setattr("almanak.gateway.service.GatewayService", Service)
     monkeypatch.setattr("almanak.state.Journal", Stored)
+    # These journals are stand-ins with a written checkpoint; the real check is below.
+    monkeypatch.setattr(ax_actions, "never_written", lambda database: False)
     monkeypatch.setattr(Stored, "pending", None)
     return Stored
 
@@ -787,3 +789,140 @@ def test_the_in_process_gateway_takes_renews_and_releases_the_services_lease(tmp
     other = ax_actions.LocalGateway(desk.service)
     other.acquire()
     other.close()
+
+
+def test_a_journal_without_a_checkpoint_holds_no_signed_step(tmp_path, recorded):
+    """A command killed while it created its journal signed nothing."""
+    import sqlite3
+
+    (tmp_path / "empty").mkdir()
+    (tmp_path / "empty/state.sqlite").touch()
+    assert ax_actions.in_flight(tmp_path / "empty") is False
+    (tmp_path / "tabled").mkdir()
+    with sqlite3.connect(tmp_path / "tabled/state.sqlite") as connection:
+        connection.execute("CREATE TABLE checkpoint (id INTEGER PRIMARY KEY, body TEXT)")
+    assert ax_actions.in_flight(tmp_path / "tabled") is False
+    # A written checkpoint is read for its signed step, and an unreadable file is kept.
+    desk = Desk(tmp_path / "written", recorded)
+    assert ax_actions.in_flight(desk.store.path.parent) is False
+    (tmp_path / "corrupt").mkdir()
+    (tmp_path / "corrupt/state.sqlite").write_bytes(b"not a database" * 100)
+    assert ax_actions.in_flight(tmp_path / "corrupt") is True
+
+
+def signed_and_stopped(desk):
+    """A supply whose approval was signed and sent, then the command stopped."""
+    runtime = desk.runtime()
+    runtime.submit(desk.intent("supply"))
+    while desk.store.load().pending is None:
+        runtime.tick()
+    return desk.store.load().pending
+
+
+def test_recovery_resolves_the_signed_step_and_drops_the_unsigned_rest(desk):
+    pending = signed_and_stopped(desk)
+    sent = len(desk.gateway.broadcasts)
+    result = ax_actions.resolve(desk.service, lambda: None)
+    assert result["resolved"] and result["discarded_request"] and "unresolved" not in result
+    assert [item["operation"] for item in result["outcomes"]] == ["approve"]
+    assert result["outcomes"][0]["transaction"] == pending.tx_hash
+    state = desk.store.load()
+    # Nothing new was planned or signed: the supply itself is the operator's to restate.
+    assert state.pending is None and state.decision is None and state.plan is None
+    assert desk.kinds() == ["approve"] and len(desk.gateway.broadcasts) <= sent + 1
+
+
+def test_recovery_that_cannot_resolve_reports_the_step_and_keeps_it(desk, monkeypatch):
+    from almanak.gateway.ethereum import DataError
+
+    pending = signed_and_stopped(desk)
+    build = desk.runtime
+
+    def refusing():
+        runtime = build()
+
+        def refused(interrupt):
+            raise DataError("signed_attempt_unsendable", "current validation refuses it")
+
+        runtime.recover = refused
+        return runtime
+
+    monkeypatch.setattr(desk, "runtime", refusing)
+    result = ax_actions.resolve(desk.service, lambda: None)
+    assert result["resolved"] is False and result["discarded_request"] is False
+    assert result["unresolved"]["transaction"] == pending.tx_hash
+    assert result["refused"]["kind"] == "signed_attempt_unsendable"
+    assert desk.store.load().pending is not None
+
+
+def test_recover_refuses_what_is_not_a_free_action_record(stored, state_home, tmp_path):
+    import fcntl
+
+    with pytest.raises(ValueError, match="not an action record"):
+        ax_actions.recover(tmp_path, lambda config: None)
+    record, _ = abandoned(state_home, "kept")
+    with (record / "lock").open() as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with pytest.raises(ValueError, match="still using this record"):
+            ax_actions.recover(record, lambda config: None)
+
+
+def test_recover_runs_the_records_own_configuration_and_closes_its_backend(
+    monkeypatch, stored, state_home
+):
+    record, claimed = abandoned(state_home, "kept")
+    monkeypatch.setattr(stored, "load", lambda self: SimpleNamespace(config="stored", pending=None))
+    closed = []
+    backend = SimpleNamespace(close=lambda: closed.append(True))
+    seen = {}
+
+    def resolve(service, interrupt):
+        seen.update(service.options)
+        return {"resolved": True}
+
+    monkeypatch.setattr(ax_actions, "resolve", resolve)
+
+    def backend_for(config):
+        seen["config"] = config
+        return backend
+
+    assert ax_actions.recover(record, backend_for) == {"resolved": True}
+    assert seen == {"config": "stored", "lease_seconds": 30, "operator_actions": True}
+    # Resolved, so the record and the wallet's claim are gone.
+    assert closed == [True] and not record.exists() and not claimed.exists()
+
+
+def test_recover_lists_kept_records_and_needs_credentials_only_to_resolve(
+    monkeypatch, stored, state_home, capsys
+):
+    record, _ = abandoned(state_home, "kept")
+    fund = SimpleNamespace(chain=SimpleNamespace(chain_id="eip155:1"), address="0xabc")
+    binding = SimpleNamespace(profile=SimpleNamespace(fund=fund))
+    config = SimpleNamespace(accounts=SimpleNamespace(bindings=[binding]))
+    pending = SimpleNamespace(operation=SimpleNamespace(kind="approve"), tx_hash="0x1")
+    state = SimpleNamespace(config=config, pending=pending)
+    monkeypatch.setattr(stored, "load", lambda self: state)
+    assert ax_actions.recover_command(SimpleNamespace(record=None, env_file=None)) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "records": [
+            {
+                "path": str(record),
+                "readable": True,
+                "chain": "eip155:1",
+                "account": "0xabc",
+                "unresolved": {"operation": "approve", "transaction": "0x1"},
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="--env-file is required"):
+        ax_actions.recover_command(SimpleNamespace(record=record, env_file=None))
+    monkeypatch.setattr(ax_actions, "recover", lambda record, backend_for: {"resolved": False})
+    args = SimpleNamespace(record=record, env_file=Path(".env"))
+    assert ax_actions.recover_command(args) == 1
+
+
+def test_recover_parses_with_and_without_a_record():
+    listing = parse("recover")
+    assert (listing.product, listing.record) == ("operator-recover", None)
+    resolving = parse("recover", "--record", "kept", "--env-file", ".env")
+    assert resolving.record == Path("kept") and resolving.env_file == Path(".env")
