@@ -17,10 +17,14 @@ ALLOCATION = "position"
 
 # The intent kinds each `ax` command can admit. A chain serves a command when its
 # support declares one of them as a direct action; the gateway admits only a declared
-# kind.
+# kind. A command with two kinds admits the first without an amount, the whole balance
+# or debt, and the second with one.
 COMMAND_INTENTS: dict[str, tuple[str, ...]] = {
     "supply": ("supply",),
-    "withdraw": ("withdraw",),
+    "withdraw": ("withdraw", "withdraw_amount"),
+    "borrow": ("borrow",),
+    "repay": ("repay", "repay_amount"),
+    "collateral": ("collateral",),
 }
 
 
@@ -31,6 +35,17 @@ class ActionRequest:
     action: str
     # Base units of the asset the action moves; None where the action takes none.
     amount: int | None = None
+    # The lowest projected health factor a risk-checked action may leave, at wad
+    # precision. None states no floor, which tolerates no debt at all.
+    min_health_factor: int | None = None
+    # `collateral` only: whether the supplied balance is to back debt.
+    enable: bool | None = None
+
+    @property
+    def kind(self) -> str:
+        """The intent kind this request admits."""
+        kinds = COMMAND_INTENTS[self.action]
+        return kinds[1] if len(kinds) > 1 and self.amount is not None else kinds[0]
 
 
 @dataclass(frozen=True)
@@ -106,13 +121,13 @@ def binding_for(config) -> DirectActions:
     return binding(str(name))
 
 
-def require_direct(connector: str, chain, action: str) -> None:
-    """Refuse a command the connector does not declare for the chain, before any read."""
+def require_direct(connector: str, chain, request: ActionRequest) -> None:
+    """Refuse a request the connector does not declare for the chain, before any read."""
     from almanak.connectors.composition import connector_from_wire
 
-    if action not in binding(connector).actions:
-        raise ValueError(f"{connector} serves no direct {action}")
+    if request.action not in binding(connector).actions:
+        raise ValueError(f"{connector} serves no direct {request.action}")
     cells = connector_from_wire({"connector": connector}).chain_support
     declared = {str(kind) for cell in cells if cell.chain == chain for kind in cell.direct_actions}
-    if not declared & set(COMMAND_INTENTS[action]):
-        raise ValueError(f"{connector} serves no direct {action} on {chain}")
+    if request.kind not in declared:
+        raise ValueError(f"{connector} serves no direct {request.kind} on {chain}")

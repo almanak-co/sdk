@@ -48,7 +48,12 @@
    "variants": [],
    "direct_actions": [
     "supply",
-    "withdraw"
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
    ],
    "gas_lifecycle": {
     "lending": {
@@ -114,7 +119,12 @@
    "variants": [],
    "direct_actions": [
     "supply",
-    "withdraw"
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
    ],
    "gas_lifecycle": {
     "lending": {
@@ -180,7 +190,12 @@
    "variants": [],
    "direct_actions": [
     "supply",
-    "withdraw"
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
    ],
    "gas_lifecycle": {
     "lending": {
@@ -245,7 +260,12 @@
    "variants": [],
    "direct_actions": [
     "supply",
-    "withdraw"
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
    ],
    "gas_lifecycle": {
     "lending": {
@@ -310,7 +330,12 @@
    "variants": [],
    "direct_actions": [
     "supply",
-    "withdraw"
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
    ],
    "gas_lifecycle": {
     "lending": {
@@ -375,7 +400,12 @@
    "variants": [],
    "direct_actions": [
     "supply",
-    "withdraw"
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
    ],
    "gas_lifecycle": {
     "lending": {
@@ -440,7 +470,12 @@
    "variants": [],
    "direct_actions": [
     "supply",
-    "withdraw"
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
    ],
    "gas_lifecycle": {
     "lending": {
@@ -2877,7 +2912,12 @@
    "variants": [],
    "direct_actions": [
     "supply",
-    "withdraw"
+    "withdraw",
+    "withdraw_amount",
+    "borrow",
+    "repay",
+    "repay_amount",
+    "collateral"
    ],
    "gas_lifecycle": {
     "lending": {

@@ -16,7 +16,6 @@ PROMOTED_MODES = (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST)
 
 
 def candidate_support():
-    direct = (EconomicAction.SUPPLY, EconomicAction.WITHDRAW)
     actions = (
         EconomicAction.SUPPLY,
         EconomicAction.WITHDRAW,
@@ -32,7 +31,7 @@ def candidate_support():
             modes=PROMOTED_MODES,
             actions=actions,
             account_profiles=("eoa", "safe_roles"),
-            direct_actions=direct,
+            direct_actions=actions,
             restrictions=(
                 "Ethereum Pool revision 4 and token revision 1",
                 "ordinary collateral mode and variable-rate debt",

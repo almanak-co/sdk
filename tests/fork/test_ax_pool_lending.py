@@ -111,9 +111,9 @@ class Desk:
             fixture_clock=True,
         )
 
-    def __call__(self, action, amount=None, *, execute, asset=None):
+    def __call__(self, action, amount=None, *, execute, asset=None, floor=None, enable=None):
         market = {"chain": str(self.chain), "asset": str(asset or self.wrapped)}
-        request = ActionRequest(action, amount)
+        request = ActionRequest(action, amount, min_health_factor=floor, enable=enable)
         config = ax_actions.deployment(
             self.connector,
             selection(self.connector, market),
@@ -199,6 +199,45 @@ def test_a_wallet_that_holds_another_reserve_of_the_pool_supplies_and_withdraws(
     assert_supplied(desk("supply", amount, execute=True, asset=desk.second), 0)
     assert_withdrawn(desk("withdraw", execute=True))
     assert_withdrawn(desk("withdraw", execute=True, asset=desk.second))
+
+
+def debt(result, moment):
+    return int(result[moment]["debt_scaled"])
+
+
+def test_a_debt_is_opened_and_closed_by_separate_commands(desk):
+    """Borrow against supplied collateral, then every way out, each one command that
+    adopts what the earlier ones left."""
+    floor, borrowed = 15 * 10**17, 10**5
+    # The wallet holds the borrowed asset already, so a full repayment covers interest.
+    desk.fund_second(10 * borrowed)
+    assert_supplied(desk("supply", 2 * AMOUNT, execute=True), 0)
+    opened = desk("borrow", borrowed, execute=True, asset=desk.second, floor=floor)
+    assert operations(opened) == ["borrow"] and opened["completed"]
+    assert debt(opened, "position_before") == 0 < debt(opened, "position_after")
+
+    # With debt, an action the Pool risk-checks needs a stated floor.
+    with pytest.raises(ValueError, match="state --min-health-factor"):
+        desk("supply", AMOUNT, execute=False)
+    more = desk("supply", AMOUNT, execute=True, floor=floor)
+    assert operations(more) == ["approve", "supply"] and more["completed"]
+    assert 0 < supplied(more, "position_before") < supplied(more, "position_after")
+    part = desk("withdraw", AMOUNT, execute=True, floor=floor)
+    assert operations(part) == ["withdraw"] and part["completed"]
+    assert 0 < supplied(part, "position_after") < supplied(part, "position_before")
+
+    some = desk("repay", borrowed // 2, execute=True, asset=desk.second)
+    assert operations(some)[:2] == ["approve", "repay"] and some["completed"]
+    assert 0 < debt(some, "position_after") < debt(some, "position_before")
+    closed = desk("repay", execute=True, asset=desk.second)
+    assert closed["completed"] and debt(closed, "position_after") == 0
+    assert "repay" in operations(closed)
+
+    released = desk("collateral", execute=True, enable=False)
+    assert operations(released) == ["collateral"] and released["completed"]
+    assert released["position_after"]["collateral_enabled"] is False
+    withdrawn = desk("withdraw", execute=True)
+    assert operations(withdrawn) == ["withdraw"] and supplied(withdrawn, "position_after") == 0
 
 
 def stopped_after_the_first_send(desk, monkeypatch, capsys):

@@ -43,7 +43,9 @@ def test_a_connector_serves_exactly_the_actions_its_chains_declare():
         cells = {str(a) for support in connector.chain_support for a in support.direct_actions}
         found = direct.direct_actions().get(str(name))
         commands = () if found is None else found.actions
-        assert cells == {kind for c in commands for kind in direct.COMMAND_INTENTS[c]}, name
+        # Every declared kind has a command, and every command a declared kind somewhere.
+        assert cells <= {kind for c in commands for kind in direct.COMMAND_INTENTS[c]}, name
+        assert all(cells & set(direct.COMMAND_INTENTS[c]) for c in commands), name
 
 
 def test_every_command_names_the_intents_it_admits():
@@ -76,13 +78,18 @@ def test_a_direct_action_is_a_supported_production_action_for_a_plain_account():
 
 
 def test_a_connector_chain_or_action_that_is_not_declared_is_refused():
-    direct.require_direct("aave_v4", ETHEREUM, "supply")
+    supply, withdraw = direct.ActionRequest("supply", 5), direct.ActionRequest("withdraw")
+    direct.require_direct("aave_v4", ETHEREUM, supply)
+    direct.require_direct("aave_v4", ETHEREUM, withdraw)
     with pytest.raises(ValueError, match="aave_v4 serves no direct supply on eip155:8453"):
-        direct.require_direct("aave_v4", BASE, "supply")
+        direct.require_direct("aave_v4", BASE, supply)
     with pytest.raises(ValueError, match="aave_v4 serves no direct borrow"):
-        direct.require_direct("aave_v4", ETHEREUM, "borrow")
+        direct.require_direct("aave_v4", ETHEREUM, direct.ActionRequest("borrow", 5))
+    # A command the connector serves, in a form it does not: Aave V4 withdraws in full.
+    with pytest.raises(ValueError, match="aave_v4 serves no direct withdraw_amount on eip155:1"):
+        direct.require_direct("aave_v4", ETHEREUM, direct.ActionRequest("withdraw", 5))
     with pytest.raises(ValueError, match="no direct actions for gmx_v2: a GMX request"):
-        direct.require_direct("gmx_v2", ChainId("eip155:42161"), "supply")
+        direct.require_direct("gmx_v2", ChainId("eip155:42161"), supply)
     with pytest.raises(ValueError, match="unsupported as a direct action"):
         cell().require_direct("withdraw")
 
