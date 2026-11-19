@@ -41,7 +41,9 @@ its changelog is on the `v2` branch.
 - The liquidity commands also serve Curve, whose position is the wallet's balance of
   the pool's LP token: `open-liquidity` and `increase-liquidity` deposit an exact
   `--amount` per named coin, and `decrease-liquidity` and `close-liquidity` state with
-  `--receive` whether the burn pays every coin in proportion or one coin.
+  `--receive` whether the burn pays every coin in proportion or one coin. They serve
+  Aerodrome stable and volatile pools too, whose position is the wallet's balance of
+  the pool's share token.
 - `--public-rpc` serves `almanak ax` reads on Base, Arbitrum, BNB, Optimism, Polygon and
   Robinhood beside Ethereum and Avalanche. `drpc` adds Base, Optimism, Polygon and
   Robinhood, and four chain operators' own endpoints are named `base`, `arbitrum`,

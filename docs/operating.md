@@ -752,10 +752,28 @@ proportions, and a coin of the pool pays that coin alone, which trades against t
 pool and pays its fee. The deployment owns the wallet's whole LP balance in the
 pool, whoever deposited it. `--deadline-seconds` bounds only how late a step may be
 signed, since Curve calls carry no deadline. A deposit approves the pool for
-exactly each stated amount, so a completed one leaves no allowance.
-`ax liquidity-position --connector curve --chain <chain> --pool <pool> --account
-<address>` reads the account's LP shares, the total supply and what a balanced burn
-would pay.
+exactly each stated amount, so a completed one leaves no allowance. The read takes
+the account instead of a token ID and reports its LP shares, the total supply and
+what a balanced burn would pay:
+
+```bash
+almanak ax liquidity-position --connector curve --chain eip155:1 \
+  --pool 0x02950460e2b9529d0e00284a5fa2d7bdf3fa4d72 --account 0x... --block latest \
+  --public-rpc publicnode
+```
+
+On Aerodrome classic a position is the wallet's balance of the pool's share token.
+The commands are the V3 family's without a tick range or a token ID:
+`open-liquidity` and `increase-liquidity` take `--amount0` and `--amount1`, both
+above zero, and `decrease-liquidity` takes `--liquidity` in shares;
+`collect-liquidity-fees` claims the fees the shares earned, and `revoke-exchange`
+also clears the share approval a burn gave the router. The deployment owns the
+wallet's whole share position in the pool, whoever deposited it. A deposit approves
+the router for the stated amounts, so the unused part of each remains until
+revoked. The read is `ax liquidity-position --connector aerodrome` with `--account`.
+
+A wallet that holds a pool's LP shares on Curve or Aerodrome is refused an `ax swap`
+in that pool, which owns no liquidity: swap first, or in another pool.
 
 The action runs through the same planning, simulation, signing and receipt
 reconciliation as a strategy's, as an operator deployment that exists only for the
@@ -1048,8 +1066,8 @@ provider at the latest block.
 #### Public endpoints
 
 `--public-rpc <name>` reads through one named public endpoint that needs no key.
-It is for `ax` reads, for `ax supply` and `ax withdraw`, previewed or executed, and
-for `ax recover`. The reviewed list is in code, and each command's `--help` prints
+It is for `ax` reads, for every direct action, previewed or executed, and for
+`ax recover`. The reviewed list is in code, and each command's `--help` prints
 it:
 
 | Name | Operator | Chains |
@@ -1067,10 +1085,10 @@ Arbitrum (`eip155:42161`), BNB (`eip155:56`), Polygon (`eip155:137`) and Robinho
 HyperEVM (`eip155:999`) has none and needs a provider key. A name that does not
 serve the command's chain is refused with the names that do.
 
-An endpoint for a chain does not make an action available there. `ax supply` and
-`ax withdraw` run only for a connector and chain that declare the action, which
-`almanak support` lists as `direct_actions` and [Operator actions](#operator-actions)
-describes; they run through any endpoint listed for that chain. On a chain with a
+An endpoint for a chain does not make an action available there. A direct action
+runs only for a connector and chain that declare it, which `almanak support` lists
+as `direct_actions` and [Operator actions](#operator-actions) describes; it runs
+through any endpoint listed for that chain. On a chain with a
 public endpoint and no declared action, the endpoint serves reads only.
 
 Before any read the endpoint must report the chain's number and its pinned genesis
