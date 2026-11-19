@@ -20,7 +20,7 @@ from almanak.configuration.yaml import load
 from almanak.connectors.direct import ActionRequest
 from almanak.connectors.lending_lookup import selection
 from almanak.gateway.credentials import write_private
-from almanak.gateway.ethereum import EthereumReader
+from almanak.gateway.ethereum import DataError, EthereumReader
 from almanak.gateway.evm import chain_number, erc20_address
 from almanak.gateway.fork_config import ForkTarget
 from almanak.gateway.fork_fixture import Fork
@@ -68,7 +68,7 @@ def origin_block(env, chain, anchor):
 
 
 def funded_wallet(fork, token, directory):
-    signer = fork.funded_signer(to_checksum_address(token), 4 * AMOUNT, 100 * 10**18)
+    signer = fork.funded_signer(to_checksum_address(token), 100 * AMOUNT, 100 * 10**18)
     directory.mkdir(mode=0o700)
     stores = {"treasury": Signer.encrypt(signer.key, PASSWORD, kdf="pbkdf2", iterations=1000)}
     write_private(directory / "keystores.json", json.dumps(stores))
@@ -211,7 +211,11 @@ def test_a_debt_is_opened_and_closed_by_separate_commands(desk):
     floor, borrowed = 15 * 10**17, 10**5
     # The wallet holds the borrowed asset already, so a full repayment covers interest.
     desk.fund_second(10 * borrowed)
-    assert_supplied(desk("supply", 2 * AMOUNT, execute=True), 0)
+    # Enough of the cheapest wrapped native coin to back the debt above the floor.
+    assert_supplied(desk("supply", 50 * AMOUNT, execute=True), 0)
+    # A floor no position reaches, even where the borrowed amount is dust.
+    with pytest.raises(DataError, match="below the configured minimum"):
+        desk("borrow", borrowed, execute=False, asset=desk.second, floor=10**60)
     opened = desk("borrow", borrowed, execute=True, asset=desk.second, floor=floor)
     assert operations(opened) == ["borrow"] and opened["completed"]
     assert debt(opened, "position_before") == 0 < debt(opened, "position_after")
