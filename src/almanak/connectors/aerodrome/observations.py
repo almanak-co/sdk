@@ -18,6 +18,7 @@ from almanak.connectors.dex_residual import (
     validate_entry_error,
     validate_quotes,
 )
+from almanak.gateway.ethereum import DataError
 from almanak.models import Account, AssetAmount, Model
 
 
@@ -115,7 +116,17 @@ def ownership(config, name, reference):
 
 def position(reader, target, pool):
     value = stored_position(reader, target, pool)
-    return None if value.empty else value
+    if value.empty:
+        return None
+    if not target.liquidity_enabled:
+        # Shares and fee claims belong to the whole account. A trading allocation owns
+        # none, so it cannot keep the fund's own apart from its inventory.
+        raise DataError(
+            "ownership",
+            f"the fund holds LP shares or fee claims of pool {target.pool.pool}, "
+            "which a trading-only allocation cannot own",
+        )
+    return value
 
 
 def stored_position(reader, target, pool):
