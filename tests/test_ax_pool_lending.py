@@ -162,6 +162,31 @@ def test_a_risk_checked_action_needs_a_stated_floor_while_the_account_has_debt()
     pool.require_floor(ActionRequest("repay"), debt, DAI)
 
 
+def test_the_binding_binds_the_pool_exactly_where_the_connector_checks_risk():
+    """`risk_checked` restates the connector's `requires_risk` for a request: a supply, a
+    borrow and enabling collateral always; with debt, disabling collateral and
+    withdrawing a reserve used as collateral."""
+    free, debt = {WETH: pool.COLLATERAL}, {WETH: pool.COLLATERAL, DAI: pool.DEBT}
+    enable = ActionRequest("collateral", enable=True)
+    disable = ActionRequest("collateral", enable=False)
+    part = ActionRequest("withdraw", 3)
+    checked = {
+        (SUPPLY, USDC): (True, True),
+        (ActionRequest("borrow", 5), DAI): (True, True),
+        (enable, WETH): (True, True),
+        (disable, WETH): (False, True),
+        (WITHDRAW, WETH): (False, True),
+        (part, WETH): (False, True),
+        # A reserve that backs nothing, and a repayment, are never checked.
+        (WITHDRAW, USDC): (False, False),
+        (ActionRequest("repay"), DAI): (False, False),
+        (ActionRequest("repay", 3), DAI): (False, False),
+    }
+    for (request, asset), (without_debt, with_debt) in checked.items():
+        assert pool.risk_checked(request, free, asset) is without_debt, request
+        assert pool.risk_checked(request, debt, asset) is with_debt, request
+
+
 def test_one_health_floor_serves_the_whole_pool(market):
     reader = Reader(bits(weth=pool.COLLATERAL, usdc=0, dai=pool.DEBT))
     floor = 15 * 10**17

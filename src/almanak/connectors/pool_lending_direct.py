@@ -94,10 +94,16 @@ def refuse_isolation(reader, block, pool: str, requested: str, flags: dict[str, 
 
 
 def risk_checked(request: ActionRequest, flags: dict[str, int], requested: str) -> bool:
-    """Whether the Pool risk-checks the request against the account's health floor."""
-    if request.action in ("supply", "borrow", "collateral"):
+    """Whether the Pool risk-checks the request against the account's health floor.
+
+    The connector's own rule: a supply, a borrow and enabling collateral always; with
+    debt open, also disabling collateral and withdrawing a reserve used as collateral.
+    """
+    if request.action in ("supply", "borrow"):
         return True
     indebted = any(value & DEBT for value in flags.values())
+    if request.action == "collateral":
+        return bool(request.enable) or indebted
     releases = bool(flags.get(requested, 0) & COLLATERAL)
     return request.action == "withdraw" and indebted and releases
 
@@ -199,7 +205,9 @@ def intent(config, observed, request: ActionRequest):
     """The request as the Pool connector's intent; argparse has settled which flags it has."""
     amount = request.amount
     if request.action == "collateral":
-        return config.set_collateral(ALLOCATION, bool(request.enable))
+        if request.enable is None:
+            raise ValueError("collateral requires --enable or --disable")
+        return config.set_collateral(ALLOCATION, request.enable)
     if request.action in ("supply", "borrow"):
         if amount is None:
             raise ValueError(f"{request.action} requires --amount")

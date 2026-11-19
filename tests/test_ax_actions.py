@@ -245,6 +245,18 @@ def test_each_lending_command_states_its_own_request(capsys):
     capsys.readouterr()
 
 
+def test_a_health_floor_is_above_one_at_the_precision_the_protocols_report(capsys):
+    def floor(value):
+        return parse("borrow", *POOL, "--amount", "5", "--min-health-factor", value)
+
+    assert floor("1.000000000000000001").min_health_factor == 10**18 + 1
+    # Below wad precision the value would round down to the liquidation line itself.
+    for value in ("1.0000000000000000001", "1", "0.9", "1e60", "nan"):
+        with pytest.raises(SystemExit):
+            floor(value)
+    assert "health factor above 1" in capsys.readouterr().err
+
+
 def test_a_request_names_the_intent_it_admits():
     assert ActionRequest("supply", 5).kind == "supply"
     assert ActionRequest("withdraw").kind == "withdraw"

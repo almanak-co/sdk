@@ -860,9 +860,18 @@ def request_arguments(name: str, action) -> None:
 
 def health_factor(value: str) -> int:
     """A health factor above 1, at the wad precision the protocols report it in."""
+    import argparse
+
     from almanak.cli_arguments import health_floor
 
-    return int(health_floor(value) * 10**18)
+    wad = int(health_floor(value) * 10**18)
+    # A value that rounds down to 1 at wad precision is the liquidation line itself,
+    # and one a uint256 cannot hold is no health factor a protocol reports.
+    if not 10**18 < wad < 2**256:
+        raise argparse.ArgumentTypeError(
+            "expected a health factor above 1 at 18 decimals of precision"
+        )
+    return wad
 
 
 def base_units(value: str) -> int:
