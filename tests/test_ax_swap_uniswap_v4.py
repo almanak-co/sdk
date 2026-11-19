@@ -391,6 +391,7 @@ def planning(config, state, intent, seen):
         decision=None,
         outcomes=(),
         mode="running",
+        operator=state.operator,
     )
 
     def step(before, admitted=intent):
@@ -686,6 +687,10 @@ def test_a_standing_permit2_allowance_must_outlast_the_swap_it_serves():
     )
     assert step(standing(intent.deadline - 1)).kind == "approve_permit2"
     assert step(standing(intent.deadline)).kind == "swap"
+    # A strategy's allowance is its own, granted for the decision that spends it, and is
+    # relied on while it has not lapsed: its retained steps replay unchanged.
+    strategy = SimpleNamespace(operator=False)
+    assert v4_planning.operation(config, strategy, intent, standing(now + 5)).kind == "swap"
     # An exit leg takes its deadline from each observation, so the allowance its own
     # approval granted is relied on while it has not lapsed.
     asset, router = config.target(ALLOCATION).funding_currency, intent.target.contracts.router
