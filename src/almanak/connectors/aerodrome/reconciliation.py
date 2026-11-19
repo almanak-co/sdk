@@ -26,6 +26,35 @@ def retained_position(before, operation, effects, current, pool, success):
     return observed
 
 
+def adopted_position(config, before, operation, effects, current, pool, success):
+    """The position owned after a mined step, and what of it the step does not explain.
+
+    A strategy's allocation owns only what its own steps explain, so anything else is
+    refused. An adopting allocation owns the fund's whole position, and anyone can send
+    the fund a share. When the stored position is not what the step's own effects
+    imply, the position as the pool stores it stays owned and the difference is
+    reported as an accounting issue. Refusing it would leave a mined transaction
+    without its outcome for good: the block it is reconciled at never changes.
+    """
+    try:
+        return retained_position(before, operation, effects, current, pool, success), ()
+    except DataError as refusal:
+        adopting = config.allocation(operation.allocation).adopt is not None
+        if not adopting or refusal.kind != "ownership":
+            raise
+        issue = (
+            f"{current.shares.asset}: the fund's shares or fee claims are not what the step "
+            f"explains ({refusal}); the position as the pool stores it stays owned"
+        )
+        return (None if current.empty else current), (issue,)
+
+
+def with_position(owned, position, unexplained):
+    """Ownership after the step, holding the stored position where the step left a
+    difference unexplained: a reverted step otherwise keeps the position it had."""
+    return owned.model_copy(update={"position": position}) if unexplained else owned
+
+
 def unowned_holdings(target, current):
     """Pool shares or fee claims on the fund of a trading allocation, as accounting issues.
 
@@ -152,8 +181,11 @@ def reconcile(backend, pending, receipt, block):
     pool = read_pool(backend.reader, op.target.pool, block)
     effects = movement(receipt, op, pool.pool_fees) if success else Effects(delta0=0, delta1=0)
     current = stored_position(backend.reader, op.target, pool)
-    position = retained_position(pending.before, op, effects, current, pool, success)
+    position, unexplained = adopted_position(
+        backend.config, pending.before, op, effects, current, pool, success
+    )
     owned = owned_after(pending.before, op, effects, position, success)
+    owned = with_position(owned, position, unexplained)
     # An exit leg measures what counter inventory remains so the exit can complete
     # with residual dust; other operations record no quotes.
     exiting = pending.decision.intent.kind == "exit_exchange"
@@ -162,7 +194,7 @@ def reconcile(backend, pending, receipt, block):
     )
     gas_paid, fee_evidence = charged_fees(backend, pending, receipt, block)
     issues = validate_balances(pending, after, effects, gas_paid.amount, success)
-    issues += unowned_holdings(op.target, current)
+    issues += unowned_holdings(op.target, current) + unexplained
     if success and isinstance(op, ops.Addition) and effects.shares_delta < op.minimum_shares.amount:
         issues += ("mined LP shares fall below the retained simulation minimum",)
     return Outcome(

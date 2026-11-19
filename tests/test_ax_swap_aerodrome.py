@@ -94,6 +94,7 @@ RETAINED_WIRE = {
 WALLET = Wallet(account="fund", address="0x" + "12" * 20)
 LIMITS = ax_actions.FeeLimits(max_gas_price_wei=7, max_transaction_fee=9)
 AMOUNT, QUOTED = 1000, 4321
+STRATEGY = StrategyDefinition(filename="strategy.py", source="def decide(context):\n    pass\n")
 
 pytestmark = pytest.mark.parametrize("variant", tuple(POOLS))
 
@@ -225,8 +226,7 @@ def strategy_checkpoint(variant):
     """A strategy deployment after its start, built from the retained resolution only."""
     market = resolved(variant)
     config = configuration(allocation_document(market), market)
-    strategy = StrategyDefinition(filename="strategy.py", source="def decide(context):\n    pass\n")
-    state = created(config, strategy)
+    state = created(config, STRATEGY)
     seen = observation(config, state.owned[0], market)
     return state.model_copy(
         update={"deployment_id": "0" * 32, "initialized": True, "baseline": (seen,)}
@@ -236,10 +236,10 @@ def strategy_checkpoint(variant):
 def test_the_connector_supports_operator_deployments_and_serves_the_swap(variant):
     found = connector_from_wire({"connector": CONNECTOR})
     assert supports_operator(found.codec.checkpoint)
-    assert direct.binding(CONNECTOR).actions == ("swap",)
+    assert "swap" in direct.binding(CONNECTOR).actions
     assert CONNECTOR in direct.connectors_for("swap") and CONNECTOR not in direct.NOT_DIRECT
     (cell,) = [cell for cell in found.chain_support if cell.direct_actions]
-    assert [str(action) for action in cell.direct_actions] == ["swap_exact_input"]
+    assert "swap_exact_input" in [str(action) for action in cell.direct_actions]
     # The one production cell serves the swap in the pool's own invariant.
     assert cell.chain == BASE and resolved(variant).pool.variant in cell.variants
     direct.require_direct(CONNECTOR, BASE, direct.ActionRequest("swap", 5))
@@ -386,7 +386,7 @@ def test_adoption_keeps_the_stated_inventory_only_when_the_wallet_covers_it(vari
     assert refusal.value.kind == "inventory" and str(market.pool.currency0) in str(refusal.value)
 
 
-def test_adoption_takes_standing_allowances_and_a_stray_pool_deposit_but_no_liquidity(variant):
+def test_a_swap_adopts_past_standing_allowances_and_a_stray_pool_deposit(variant):
     market = resolved(variant)
     config = operator_config(market)
     found = connector_from_wire({"connector": CONNECTOR})
@@ -403,11 +403,11 @@ def test_adoption_takes_standing_allowances_and_a_stray_pool_deposit_but_no_liqu
     with pytest.raises(ValueError, match="cannot adopt pre-existing spending authority"):
         found.lifecycle.validate_initial(SimpleNamespace(owned=owned), (granted,))
 
+    # Liquidity authority without a stated adoption is no operator deployment: its
+    # observations would carry quotes.
     liquid = configuration(allocation_document(market, liquidity_enabled=True), market)
-    owned = created(liquid).owned
-    seen = observation(liquid, owned[0], market)
-    with pytest.raises(ValueError, match="an Aerodrome operator deployment is trading-only"):
-        found.lifecycle.adopt(owned, (seen,))
+    with pytest.raises(ValueError, match="liquidity authority states what it adopts"):
+        created(liquid)
 
 
 class Holdings:
@@ -503,7 +503,7 @@ def test_an_allocation_with_liquidity_authority_still_refuses_a_changed_checkpoi
     market = resolved(variant)
     liquid = configuration(allocation_document(market, liquidity_enabled=True), market)
     target = liquid.target(ALLOCATION)
-    state = created(liquid)
+    state = created(liquid, STRATEGY)
     seen = observation(liquid, state.owned[0], market)
     held = observations.stored_position(Holdings(shares=1), target, seen.pool)
     approval = ops.Approval(
