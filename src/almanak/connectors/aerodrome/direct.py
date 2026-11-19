@@ -26,42 +26,26 @@ The heavy imports stay inside the functions: the command line imports each conne
 `direct` module to build its choices.
 """
 
-from almanak.connectors.direct import ALLOCATION, ActionRequest, DirectActions, Wallet
-from almanak.connectors.v3_pool_direct import intent, position
+from almanak.connectors import v3_pool_direct
+from almanak.connectors.direct import ActionRequest, DirectActions, Wallet
 
 
 def positions(reader, block, resolved, wallet: Wallet, request: ActionRequest) -> dict:
-    """One trading allocation in the resolved pool, funded with exactly the amount sold."""
-    from almanak.chains import evm_network
+    """One trading allocation in the resolved pool, funded with exactly the amount sold.
 
-    pool = resolved.pool
-    currencies = (str(pool.currency0), str(pool.currency1))
-    if request.sell not in currencies:
-        raise ValueError(
-            f"--sell must name one of the pool's currencies, {currencies[0]} or "
-            f"{currencies[1]}; the native coin is sold as its wrapped token"
-        )
-    if None in (request.amount, request.slippage_bps, request.deadline_seconds):
-        raise ValueError("swap requires --amount, --slippage-bps and --deadline-seconds")
-    return {
-        "allocations": [
-            {
-                "name": ALLOCATION,
-                "account": wallet.account,
-                "pool": pool.model_dump(mode="json"),
-                "contracts": resolved.contracts.model_dump(mode="json"),
-                # No pool shares are minted, burned or approved.
-                "liquidity_enabled": False,
-                "capital": {"asset": request.sell, "amount": request.amount},
-                # The whole capital is one entry, so the entry quote is the stated swap.
-                "entry_swap_bps": 10000,
-                "slippage_bps": request.slippage_bps,
-                "deadline_seconds": request.deadline_seconds,
-                "native_asset": str(evm_network(pool.chain.chain_id).native_asset),
-                "minimum_native_balance": 0,
-            }
-        ]
-    }
+    The request checks and the allocation are the V3 pool family's. A classic pool has
+    no range to leave unset: its allocation states instead that it has no liquidity
+    authority, so no pool shares are minted, burned or approved.
+    """
+    document = v3_pool_direct.positions(reader, block, resolved, wallet, request)
+    (allocation,) = document["allocations"]
+    stated = {name: value for name, value in allocation.items() if name != "range"}
+    return {"allocations": [{**stated, "liquidity_enabled": False}]}
 
 
-DIRECT = DirectActions(actions=("swap",), positions=positions, intent=intent, position=position)
+DIRECT = DirectActions(
+    actions=("swap",),
+    positions=positions,
+    intent=v3_pool_direct.intent,
+    position=v3_pool_direct.position,
+)
