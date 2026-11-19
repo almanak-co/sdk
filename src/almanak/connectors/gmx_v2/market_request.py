@@ -22,11 +22,31 @@ from almanak.gateway.ethereum import DataError, EthereumReader
 from almanak.gateway.evm import chain_number
 from almanak.models import Address, Block, Model, address
 
-# GMX labels a market by its index token, and the two Arbitrum majors trade
-# under wrapped symbols; the alias maps the venue's public label to the token
-# symbol read on-chain rather than inventing a name the venue never published.
-WRAPPED_INDEX_ALIASES = {"BTC": "WBTC", "ETH": "WETH"}
-UNWRAPPED_INDEX_ALIASES = {wrapped: label for label, wrapped in WRAPPED_INDEX_ALIASES.items()}
+# GMX labels a market by its index asset, and each chain's majors trade under a
+# wrapped or bridged token: the venue publishes BTC/USD, ETH/USD and AVAX/USD, while
+# the tokens' own symbols are WBTC and WETH on Arbitrum and BTC.b, WETH.e and WAVAX
+# on Avalanche. Each chain's alias maps the venue's public label to the symbol read
+# on-chain rather than inventing a name the venue never published. A label selects
+# among the venue's registered markets only, and one that matches several is refused
+# as ambiguous, so an alias cannot bind a market silently.
+TOKEN_ALIASES = {
+    ChainId("eip155:42161"): {"BTC": "WBTC", "ETH": "WETH"},
+    ChainId("eip155:43114"): {"BTC": "BTC.b", "ETH": "WETH.e", "AVAX": "WAVAX"},
+}
+
+
+def names_token(chain: ChainId, label: str, symbol: str) -> bool:
+    """Whether a label is the token's on-chain symbol or the venue's alias of it."""
+    alias = TOKEN_ALIASES.get(chain, {}).get(label.upper())
+    return symbol.upper() in (label.upper(), None if alias is None else alias.upper())
+
+
+def venue_label(chain: ChainId, symbol: str) -> str | None:
+    """The venue's public label of a wrapped or bridged token symbol, if it has one."""
+    for label, wrapped in TOKEN_ALIASES.get(chain, {}).items():
+        if wrapped.upper() == symbol.upper():
+            return label
+    return None
 
 
 class GmxMarketRequest(Model):
@@ -120,7 +140,9 @@ def matching_markets(reader, contracts, request: GmxMarketRequest, block: Block)
     matches = []
     for listing in enumerate_markets(reader, contracts, block):
         symbol = matched_label(request.chain, base, listing)
-        if symbol is not None and collateral_matches(reader, collateral, listing, block):
+        if symbol is not None and collateral_matches(
+            reader, request.chain, collateral, listing, block
+        ):
             matches.append((listing, symbol))
     return matches
 
@@ -131,6 +153,7 @@ def parse_label(query: str) -> tuple[str, tuple[str, str] | None] | None:
     `BTC/USD` and `BTC` name the same index; `BTC/USD [WBTC-USDC]` and
     `BTC/USD [WBTC]` add the venue's own collateral notation, where a single
     symbol names a market whose long and short collateral are the same token.
+    A collateral is named by its on-chain symbol or by the venue's alias of it.
     A quote other than USD names no GMX market.
     """
     label, bracket, rest = query.strip().partition("[")
@@ -146,22 +169,20 @@ def parse_label(query: str) -> tuple[str, tuple[str, str] | None] | None:
     return base.strip(), (long.strip(), short.strip() if dash else long.strip())
 
 
-def collateral_matches(reader, collateral, listing: Listing, block: Block) -> bool:
+def collateral_matches(reader, chain: ChainId, collateral, listing: Listing, block: Block) -> bool:
     if collateral is None:
         return True
     observed = (read_symbol(reader, listing.long, block), read_symbol(reader, listing.short, block))
-    return tuple(symbol.upper() for symbol in observed) == tuple(
-        symbol.upper() for symbol in collateral
+    return all(
+        names_token(chain, label, symbol)
+        for label, symbol in zip(collateral, observed, strict=True)
     )
 
 
 def matched_label(chain: ChainId, base: str, listing: Listing) -> str | None:
     """The verified label the listing answers to, or None when it does not match."""
     if listing.index_symbol is not None:
-        symbol = listing.index_symbol.upper()
-        if base.upper() == symbol or WRAPPED_INDEX_ALIASES.get(base.upper()) == symbol:
-            return listing.index_symbol
-        return None
+        return listing.index_symbol if names_token(chain, base, listing.index_symbol) else None
     for candidate in dict.fromkeys((base, base.upper())):
         if synthetic_index(chain, candidate) == listing.index:
             return candidate
@@ -227,8 +248,9 @@ def verified_label(reader, resolved: ResolvedMarket, block: Block) -> tuple[str 
     if is_deployed(reader, block, index):
         return read_symbol(reader, index, block), False
     long = read_symbol(reader, resolved.market.long_asset.reference, block)
-    for candidate in dict.fromkeys((long, UNWRAPPED_INDEX_ALIASES.get(long.upper()))):
-        if candidate is not None and synthetic_index(resolved.selection.chain, candidate) == index:
+    chain = resolved.selection.chain
+    for candidate in dict.fromkeys((long, venue_label(chain, long))):
+        if candidate is not None and synthetic_index(chain, candidate) == index:
             return candidate, True
     return None, True
 

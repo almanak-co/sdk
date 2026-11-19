@@ -15,6 +15,12 @@ its changelog is on the `v2` branch.
   `execution reverted`, so every empty Spoke there was named in `source.unreadable`. A
   read the node refused or could not serve under the same code is still unreadable, and
   the read gateway passes the reader's revert verdict on beside the code.
+- `almanak ax perp-markets --connector gmx_v2` resolves the venue's Avalanche labels:
+  `BTC/USD`, `ETH/USD` and `AVAX/USD` name the markets indexed by BTC.b, WETH.e and
+  WAVAX, as `BTC/USD` and `ETH/USD` already named WBTC and WETH on Arbitrum. The
+  `[LONG-SHORT]` collateral notation takes the same labels beside the on-chain symbols,
+  for example `AVAX/USD [AVAX-USDC]`. Aliases are per chain, and a label that matches
+  several markets is still refused with its candidates.
 
 ## [3.2.1] - 2026-11-19
 
