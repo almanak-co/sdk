@@ -21,6 +21,23 @@ class RpcUnavailable(Exception):
     """The endpoint did not answer the direct read; the check is blocked, not failed."""
 
 
+class RpcReverted(RpcUnavailable):
+    """The endpoint answered that the call reverts: a fact about the chain, not a flake.
+
+    Endpoints disagree on the code they report a revert with (3 or -32000), so the
+    revert is recognized by either that code or the "execution reverted" message.
+    """
+
+
+REVERT_CODE = 3
+
+
+def reverted(error: object) -> bool:
+    if not isinstance(error, dict):
+        return False
+    return error.get("code") == REVERT_CODE or "execution reverted" in str(error.get("message"))
+
+
 def endpoint_url(endpoint: str, chain: str) -> str | None:
     """The named endpoint's URL for the chain, or None where it serves no such chain."""
     return PUBLIC_RPC.get(endpoint, {}).get(ChainId(chain))
@@ -49,7 +66,11 @@ class Rpc:
             document = response.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise RpcUnavailable(f"{method}: {type(exc).__name__}") from None
-        if not isinstance(document, dict) or document.get("result") is None:
+        if not isinstance(document, dict):
+            raise RpcUnavailable(f"{method}: no result")
+        if reverted(document.get("error")):
+            raise RpcReverted(f"{method}: execution reverted")
+        if document.get("result") is None:
             raise RpcUnavailable(f"{method}: no result")
         return document["result"]
 
@@ -70,6 +91,14 @@ class Rpc:
         except Exception:
             # An empty or short answer is what a pruned or rate-limited node returns.
             raise RpcUnavailable(f"eth_call {signature}: undecodable result") from None
+
+    def reverts(self, to: str, signature: str, block: int) -> bool:
+        """Whether a call without arguments reverts at the block, as the endpoint reports it."""
+        try:
+            self.call(to, signature, block, ())
+        except RpcReverted:
+            return True
+        return False
 
     def balance(self, account: str, block: int) -> int:
         return int(self.request("eth_getBalance", [account, hex(block)]), 16)
