@@ -4,10 +4,11 @@ THIS SPENDS REAL FUNDS. It is for a release or the days after a protocol upgrade
 run by a person at a terminal with their own funded wallet. It must not run in CI,
 on a schedule or often.
 
-Every gate is checked before anything else happens: no command runs, no endpoint
-is contacted and no wallet file is opened until all of them hold. The check never
-creates a wallet and never reads a keystore or its password; `almanak ax` does the
-signing, with the wallet directory the operator names.
+Every gate is checked before anything else happens: no command runs and no
+endpoint is contacted until all of them hold. The gates look at the wallet
+directory only as far as `wallet.json`, which holds the address and file paths.
+The check never creates a wallet and never opens a keystore or a password file;
+`almanak ax` does the signing, with the wallet directory the operator names.
 """
 
 import json
@@ -107,11 +108,37 @@ def environment_gates(environment: Mapping[str, str]) -> list[str]:
     return refusals
 
 
-def wallet_gates(request: WriteRequest) -> list[str]:
+def password_file(wallet: Path) -> Path | None:
+    """The password file `wallet.json` names, if any. The file itself is never opened."""
+    try:
+        record = json.loads((wallet / "wallet.json").read_text())
+    except (OSError, ValueError):
+        return None
+    named = record.get("password_file") if isinstance(record, dict) else None
+    return Path(named) if isinstance(named, str) and named else None
+
+
+def wallet_gates(request: WriteRequest, interactive: bool) -> list[str]:
     if request.wallet is None:
         return ["--wallet is required: the directory of your own funded wallet"]
     if not (request.wallet / "wallet.json").is_file():
         return ["--wallet holds no wallet.json from `almanak wallet create`"]
+    # `almanak ax` asks for the keystore password on the terminal when the wallet
+    # names no password file. Without a terminal that fails after the confirmation,
+    # in the middle of the round trip, so it is refused here instead.
+    named = password_file(request.wallet)
+    if not interactive and (named is None or not named.is_file()):
+        return [
+            "without a terminal the wallet must name an existing password file: create it"
+            " with `almanak wallet create --generate-password` or `--password-file`"
+        ]
+    return []
+
+
+def output_gates(output: Path | None) -> list[str]:
+    """A report is never written over an earlier run's, which may hold transaction hashes."""
+    if output is not None and output.is_dir() and any(output.iterdir()):
+        return [f"--output {output} is not empty; use a new output directory"]
     return []
 
 
@@ -153,14 +180,27 @@ def fee_gates(request: WriteRequest) -> list[str]:
     return refusals
 
 
-def gates(request: WriteRequest, environment: Mapping[str, str]) -> list[str]:
-    """Every reason the check may not start. Reads no file and contacts nothing."""
+def gates(
+    request: WriteRequest,
+    environment: Mapping[str, str],
+    output: Path | None = None,
+    *,
+    interactive: bool = True,
+) -> list[str]:
+    """Every reason the check may not start.
+
+    Runs no command and contacts nothing. On disk it lists the output directory and
+    reads `wallet.json` for the password file's path; it opens no keystore and no
+    password file. `interactive` says whether a terminal can be asked for the
+    keystore password.
+    """
     return [
         *environment_gates(environment),
-        *wallet_gates(request),
+        *wallet_gates(request, interactive),
         *fee_gates(request),
         *market_gates(request),
         *transport_gates(request),
+        *output_gates(output),
     ]
 
 
@@ -327,7 +367,7 @@ def run_writes(
     say: Callable[[str], None] = lambda text: print(text, file=sys.stderr, flush=True),
 ) -> int:
     """0: done as asked. 1: a step failed or was refused. 2: a gate or the confirmation."""
-    refusals = gates(request, environment)
+    refusals = gates(request, environment, output, interactive=ask is not None)
     if refusals:
         say("The write check refuses to start:\n" + "\n".join(f"- {line}" for line in refusals))
         return 2
