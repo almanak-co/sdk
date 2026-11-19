@@ -51,8 +51,9 @@ every protocol on the chain.
 | `ax supply` (`supply`), `ax withdraw` (`withdraw`, or `withdraw_amount` with `--amount`), `ax borrow` (`borrow`), `ax repay` (`repay`, or `repay_amount` with `--amount`) | `aave_v4`, `aave_v3`, `sparklend`, `compound_v3`, `morpho_blue` |
 | `ax collateral` (`collateral`) | `aave_v3`, `sparklend` |
 | `ax swap` (`swap_exact_input`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
-| `ax open-liquidity` (`open_liquidity`), `ax increase-liquidity` (`increase_liquidity`), `ax decrease-liquidity` (`decrease_liquidity`), `ax close-liquidity` (`close_liquidity`), `ax revoke-exchange` (`revoke_exchange`) | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
-| `ax collect-liquidity-fees` (`collect_liquidity_fees`) | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome` |
+| `ax open-liquidity` (`open_liquidity`), `ax close-liquidity` (`close_liquidity`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
+| `ax increase-liquidity` (`increase_liquidity`), `ax decrease-liquidity` (`decrease_liquidity`), `ax revoke-exchange` (`revoke_exchange`) | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
+| `ax collect-liquidity-fees` (`collect_liquidity_fees`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome` |
 
 Tell the user plainly when a request is outside what is served, and still finish
 the setup, so they see the wallet and what you can do with it. When the user names
@@ -102,13 +103,13 @@ Everything lives in `~/.almanak/agent/`, outside any project:
 }
 ```
 
-A `markets` entry is the connector, the chain and the connector's own selector
-fields, named as the flags under "Name the market or pool" with underscores
-(`--reserve-id` is `reserve_id`), plus a `symbol` for display; a lending read
-returns these fields under `config.market`. Keep one entry per asset you supply,
-post as collateral or borrow, one `liquidity` entry per position, with its
-`token_id` where the position has one, and one `assets` entry per token the
-wallet receives.
+An entry of `markets` or `liquidity` is the connector, the chain and the
+connector's own selector fields, named as the flags under "Name the market or
+pool" with underscores (`--reserve-id` is `reserve_id`); a lending read returns
+them under `config.market`. A `markets` entry adds a `symbol` for display, a
+`liquidity` entry the `token_id` where the position has one. Keep one entry per
+asset you supply, post as collateral or borrow, one per liquidity position, and
+one `assets` entry per token the wallet receives.
 
 ## On load
 
@@ -238,8 +239,7 @@ What a public endpoint does not serve:
 
 ## Handling a request
 
-One action is one command. Work through these steps for each action, one action
-at a time.
+One action is one command. Work through these steps for one action at a time.
 
 ### 1. Check that it is served
 
@@ -280,7 +280,7 @@ almanak ax pool-price --connector <connector> --chain <chain> <market> --block l
   `morpho_blue`, where it is the loan asset) and `--offset` to page. Use only rows
   with `"status": "verified"`, whose `config.market` holds the selector fields. On
   the Aave connectors leave out a reserve that is `frozen` or `paused`, or whose
-  `reserve` is null. When several markets hold the same asset, the user chooses.
+  `reserve` is null.
 - `ax pool` verifies a pool through its connector: `resolution` names its
   `currencies` (`coins` on Curve) and their `decimals`, and `price` its `base` and
   `quote`. `ax pool-price` verifies a Uniswap V4 pool key, with `base` and `quote`
@@ -331,8 +331,8 @@ almanak ax swap --connector <connector> --chain <chain> <market> --sell <asset> 
 
 `ax withdraw` and `ax repay` take `--amount <base units>` for a part, where the
 chain serves `withdraw_amount` or `repay_amount`. `ax collateral` takes `--enable`
-or `--disable`. `ax supply`, `ax withdraw` and `ax collateral` take
-`--min-health-factor` when the wallet has debt.
+or `--disable`. "Borrowing and the health floor" says which commands also take
+`--min-health-factor`.
 
 Nothing is signed. The result has `position_before` and `first_step`, the first
 transaction the action would send, often an approval. The preview plans only that
@@ -412,10 +412,9 @@ pool's. After an open in a tick range, add the token ID from
   endpoint.
 - **Aave V3 and SparkLend.** The Pool enables a first supply as collateral when the
   reserve has a loan-to-value. `ax collateral` turns that on or off.
-- **Aave V4.** A supply backs nothing until a borrow enables it as collateral. A
-  withdrawal and a repayment are whole. One reserve can be borrowed per Spoke. A
-  reserve that backs an open debt cannot be withdrawn: the debt is repaid in full
-  first, which releases the collateral.
+- **Aave V4.** A withdrawal and a repayment are whole. One reserve can be
+  borrowed per Spoke, and a reserve that backs an open debt cannot be withdrawn
+  until that debt is repaid in full, which releases the collateral.
 - **Compound V3.** Only the base asset is lent, borrowed and repaid; the other
   assets are collateral. A supply never repays, a withdrawal never borrows and a
   borrow never withdraws: each is refused and names the command to use.
@@ -433,9 +432,9 @@ of the debt and take collateral at a discount, and the user loses that collatera
 
 `--min-health-factor` is the lowest health factor the action may leave the
 account with, a decimal above 1, for the wallet's whole position in the venue.
-Ask the user for the floor. You may suggest one and say why, for example 1.5,
-which leaves room for the collateral to lose about a third of its value against
-the debt before liquidation; a volatile pair deserves more. Tell them it is a
+Ask the user for the floor. You may suggest one and say why: 1.5, for example,
+leaves room for the collateral to lose about a third of its value before
+liquidation, and a volatile pair deserves more. Tell them it is a
 check made before signing, not protection on chain: nothing holds the account
 above it afterwards, and you do not watch the position.
 
@@ -477,8 +476,8 @@ whether this pool looks out of line with it. Never present any of this as a
 guarantee.
 
 `--deadline-seconds`, 300 unless stated, is how long after the action's read a
-step may still be signed. A Curve call carries no deadline, so a signed Curve
-step stays valid until it is mined or its nonce is used.
+step may still be signed. A Curve call carries no deadline: once signed, it stays
+valid until it is mined or its nonce is used.
 
 A completed swap leaves no allowance from a wallet that had none. On Uniswap V4 an
 allowance that already stood, to Permit2 or through it, is used and what the swap
@@ -498,7 +497,8 @@ position adds below. For every kind:
 - Nothing is swapped inside a liquidity action: when the wallet lacks a currency,
   the user decides on an `ax swap` first.
 - `ax revoke-exchange` sets every allowance the wallet gave the pool's contracts
-  to zero. Offer it when `position_after.allowances` lists any:
+  to zero, except on Uniswap V4, which it does not serve. Offer it when
+  `position_after.allowances` lists any:
 
 ```bash
 almanak ax revoke-exchange --connector <connector> --chain <chain> <market> <wallet and ceilings>
@@ -506,43 +506,54 @@ almanak ax revoke-exchange --connector <connector> --chain <chain> <market> <wal
 
 ### A position in a tick range
 
-Connectors: `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`.
+Connectors: `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `uniswap_v4`.
 
 ```bash
 almanak ax open-liquidity --connector <connector> --chain <chain> <market> --tick-lower <lower tick> --tick-upper <upper tick> --amount0 <base units> --amount1 <base units> --slippage-bps <bps> <wallet and ceilings>
-almanak ax increase-liquidity --connector <connector> --chain <chain> <market> --token-id <token id> --amount0 <base units> --amount1 <base units> --slippage-bps <bps> <wallet and ceilings>
-almanak ax decrease-liquidity --connector <connector> --chain <chain> <market> --token-id <token id> --liquidity <liquidity> --slippage-bps <bps> <wallet and ceilings>
 almanak ax collect-liquidity-fees --connector <connector> --chain <chain> <market> --token-id <token id> <wallet and ceilings>
 almanak ax close-liquidity --connector <connector> --chain <chain> <market> --token-id <token id> --slippage-bps <bps> <wallet and ceilings>
-almanak ax liquidity-position --connector <connector> --chain <chain> --pool <pool> --token-id <token id> --block latest <transport>
+almanak ax liquidity-position --connector <connector> --chain <chain> <market> --token-id <token id> --block latest <transport>
+```
+
+Connectors: `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`.
+
+```bash
+almanak ax increase-liquidity --connector <connector> --chain <chain> <market> --token-id <token id> --amount0 <base units> --amount1 <base units> --slippage-bps <bps> <wallet and ceilings>
+almanak ax decrease-liquidity --connector <connector> --chain <chain> <market> --token-id <token id> --liquidity <liquidity> --slippage-bps <bps> <wallet and ceilings>
 ```
 
 The position is an NFT. Tell the user: it earns fees only while the pool price is
 inside its range, and outside it sits entirely in one of the two currencies and
 earns nothing.
 
-- The range is the user's decision. `ax pool` reports the current tick as
-  `observation.tick` and the spacing every tick must be a multiple of as
-  `resolution.tick_spacing`. A tick is a price step of 0.01%, so about 100 ticks
-  are 1%. You may propose aligned ticks, as a suggestion only.
+- The range is the user's decision. `ax pool`, or `ax pool-price` on Uniswap V4,
+  reports the current tick as `observation.tick`. Every tick must be a multiple of
+  the pool's spacing: `resolution.tick_spacing`, or the one the Uniswap V4 key
+  states. A tick is a price step of 0.01%, so about 100 ticks are 1%. You may
+  propose aligned ticks, as a suggestion only.
 - `--amount0` and `--amount1` are the most of the pool's currency0 and currency1
-  the step may use, and the wallet must hold both. The mint takes the two in the
-  ratio the range needs at the current price and leaves the rest in the wallet.
-  State amounts close to that ratio: with s = 1.0001^(tick/2) at the current,
-  lower and upper tick, amount1 over amount0 is (s - s_lower) / (1/s - 1/s_upper)
-  in base units; below the range only currency0 is taken, above it only currency1.
-  Warn the user that amounts far from the ratio can be filled at a worse price
-  than the pool showed when you read it.
+  the step may use, and the wallet must hold both; for a native coin in a Uniswap
+  V4 key, that is its wrapped token. The mint takes the two in the ratio the range
+  needs at the current price and leaves the rest in the wallet. State amounts
+  close to that ratio: with s = 1.0001^(tick/2) at the current, lower and upper
+  tick, amount1 over amount0 is (s - s_lower) / (1/s - 1/s_upper) in base units;
+  below the range only currency0 is taken, above it only currency1.
+- On Uniswap V4 the signed mint reverts when the price moved further than
+  `--slippage-bps` in either direction. On the other three only the least of each
+  amount is in the signed mint, so warn the user that amounts far from the ratio
+  can be filled at a worse price than the pool showed when you read it.
+- An open leaves the unused part of each amount approved: to the position
+  manager, or on Uniswap V4 to Permit2, with no expiry. Nothing here revokes the
+  approval to Permit2: tell the user that before an open there, and that you
+  cannot clear it.
 - For a position you have no record of, ask the user for the token ID; the wallet
   must own the NFT, whoever opened it.
 - `ax decrease-liquidity` removes `--liquidity`, in the position's own units and
   below the `position.liquidity` the read reports, and collects what is owed.
   `ax close-liquidity` removes everything, collects and burns the NFT.
   `ax collect-liquidity-fees` pays what the position is `owed`.
-- The unused part of each stated amount stays approved to the position manager.
-- The read reports `position.range`, `position.liquidity`, `pool.in_range`, the
-  `principal` the position would return now, what it is `owed` and its `owner`;
-  another owner than your wallet means the position was moved.
+- In the read, `pool.in_range` says whether the position earns now, and an
+  `owner` other than your wallet means the position was moved.
 
 ### A position held as LP tokens
 
@@ -580,7 +591,6 @@ almanak ax close-liquidity --connector <connector> --chain <chain> <market> --re
 - A burn states `--receive`, which is the user's decision: `balanced` pays every
   coin in the pool's current proportions, and a coin of the pool pays that coin
   alone, which trades against the pool and pays its fee.
-- Fees stay inside the share value, so nothing is collected.
 
 Connectors: `aerodrome`.
 
@@ -681,7 +691,7 @@ report `refused` and stop; do not try anything else to free the wallet.
   enforces, the minimum a swap, a deposit or a burn accepts, the deadline where
   the call has one (not on Curve, not in lending), and the gas price and gas
   limit the fee ceilings admitted; on Base and Optimism an L1 data fee comes on
-  top and is only estimated. The health floor, and how far the pool price moved
-  before a mint, are checked before signing only. Nothing protects a position
-  once its step is mined, and none of this is a guarantee.
+  top and is only estimated. The health floor is checked before signing only.
+  Nothing protects a position once its step is mined, and none of this is a
+  guarantee.
 - When unsure what a command accepts, run it with `--help`. Do not invent flags.

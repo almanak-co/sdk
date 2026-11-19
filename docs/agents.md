@@ -72,10 +72,15 @@ it never picks one silently:
 - **The range or the payout of a liquidity position.** For a position in a tick
   range the agent reads the pool's tick and tick spacing, proposes aligned ticks
   only as a suggestion, and explains that the position earns fees only while the
-  price is in its range. On Curve and Aerodrome classic the position is the
-  wallet's balance of the pool's LP token, and on Curve the user chooses whether a
-  burn pays every coin or one.
-  Nothing is swapped inside a liquidity action.
+  price is in its range. On Uniswap V4, which serves an open, a collect and a
+  close, the signed mint reverts when the price moved further than the slippage
+  in either direction; on the other tick-range connectors only the least of each
+  amount is in the signed mint, and the agent warns that amounts far from the
+  range's ratio can be filled at a worse price. A Uniswap V4 open leaves an approval to Permit2 that no command here
+  revokes, which the agent says before the open. On Curve and Aerodrome classic
+  the position is the wallet's balance of the pool's LP token, and on Curve the
+  user chooses whether a burn pays every coin or one. Nothing is swapped inside a
+  liquidity action.
 - **The fee ceilings.** Each applies to one step, and an action takes several;
   the agent states the ceiling for one step, states no total it cannot count, and
   never raises a ceiling itself.

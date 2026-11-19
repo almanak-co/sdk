@@ -781,16 +781,30 @@ def test_the_skill_says_what_the_chain_enforces_and_what_it_does_not():
     """The bounds in the signed transaction are named apart from the checks before it,
     and the deadline is claimed only where a connector declares one in its calldata."""
     from almanak.connectors.composition import connector_from_wire
-    from almanak.connectors.direct import direct_actions
+    from almanak.connectors.direct import connectors_for, direct_actions
 
     rules = " ".join(section("Rules").split())
-    enforced, checked = rules.split("The health floor, and how far the pool price moved")
+    enforced, checked = rules.split("The health floor is checked before signing only.")
     assert "The signed transaction carries, and the chain enforces" in enforced
     for bound in ("the minimum a swap, a deposit or a burn accepts", "the deadline", "gas limit"):
         assert bound in enforced, bound
     assert "health floor" not in enforced.split("Say exactly what each bounds")[1]
-    assert "are checked before signing only" in checked
     assert "Nothing protects a position once its step is mined" in checked
+    # A mint is bounded in both price directions on Uniswap V4 only, and the approval
+    # it leaves to Permit2 is one no command here revokes. Text, not code: the test
+    # only checks that the revocation does not serve the connector.
+    ranged = " ".join(subsection("A position in a tick range").split())
+    for statement in (
+        "On Uniswap V4 the signed mint reverts when the price moved further than "
+        "`--slippage-bps` in either direction",
+        "On the other three only the least of each amount is in the signed mint",
+        "can be filled at a worse price than the pool showed when you read it",
+        "Nothing here revokes the approval to Permit2",
+        "tell the user that before an open there, and that you cannot clear it",
+    ):
+        assert statement in ranged, statement
+    assert "uniswap_v4" not in connectors_for("revoke-exchange")
+    assert "except on Uniswap V4, which it does not serve" in flat()
     # Connectors with no `expired` rule carry no deadline: the lending ones and Curve.
     without = {
         name
