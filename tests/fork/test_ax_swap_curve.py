@@ -9,6 +9,7 @@ rehearsal evidence, not a mainnet run.
 
 import json
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,13 @@ from almanak.gateway.ethereum import DataError, EthereumReader
 from almanak.gateway.evm import chain_number, erc20_address
 from almanak.gateway.fork_config import ForkTarget
 from almanak.gateway.fork_fixture import Fork
-from almanak.gateway.fork_funding import balance, fund_erc20, read_uint
+from almanak.gateway.fork_funding import (
+    balance,
+    fund_erc20,
+    read_uint,
+    send_as,
+    transfer_data,
+)
 from almanak.gateway.read_endpoints import read_endpoint
 from almanak.models import AssetAmount, Chain
 from almanak.transaction_family import is_unsent
@@ -167,7 +174,10 @@ class Setting:
         )
 
     def __call__(self, amount=None, *, execute, limits=LIMITS):
-        config = self.config(amount, limits)
+        return self.run(self.config(amount, limits), amount, execute=execute)
+
+    def run(self, config, amount=None, *, execute):
+        """Run a deployment the command already resolved."""
         gateway = backend(self.fork, config, self.wallet, self.identity)
         try:
             return ax_actions.run(config, gateway, self.request(amount), execute=execute)
@@ -502,17 +512,76 @@ def test_a_swap_refused_after_its_approval_reports_the_allowance_that_remains(se
     assert_no_allowance(setting, again)
 
 
+def assert_refused_for_shares(command, shares, held):
+    """The command is refused for the LP tokens the wallet holds, naming them."""
+    with pytest.raises(DataError, match=f"holds {held} base units") as refusal:
+        command()
+    assert (refusal.value.kind, str(shares) in str(refusal.value)) == ("ownership", True)
+
+
 def test_a_wallet_that_holds_the_pools_lp_token_is_refused_before_anything_is_planned(setting):
     start = setting.balances()
-    shares = setting.target().pool.shares_asset
+    resolved = setting.config()
+    shares = resolved.target(ALLOCATION).pool.shares_asset
     fund_erc20(setting.fork, setting.owner, shares, 10**15)
-    for execute in (False, True):
-        with pytest.raises(DataError, match="holds 1000000000000000 base units") as refusal:
-            setting(execute=execute)
-        assert (refusal.value.kind, str(shares) in str(refusal.value)) == ("ownership", True)
+    # A deployment resolved before the tokens arrived is refused at its first
+    # observation; a command stated after they arrived, at its resolution.
+    late = partial(setting.run, resolved, execute=True)
+    for command in (late, partial(setting, execute=False), partial(setting, execute=True)):
+        assert_refused_for_shares(command, shares, 10**15)
     # Nothing was planned or signed: no record, no allowance, and every balance as it was.
     assert (ax_actions.kept_records(), setting.pool_allowance()) == ([], 0)
     assert (setting.balances(), setting.held(shares)) == (start, 10**15)
+
+
+# An account of no one's that sends the wallet LP tokens it did not ask for.
+SENDER = "0x" + "5e" * 20
+
+
+def sending_shares_once_signed(setting, shares):
+    """A wait that sends the wallet one base unit of the pool's LP token as soon as its
+    swap is signed, and stops the command before the swap is sent."""
+    token = erc20_address(shares, setting.cell.chain)
+
+    def wait(self, state):
+        if state.pending is not None and state.pending.operation.kind == "swap":
+            send_as(setting.fork, SENDER, token, transfer_data(setting.owner, 1))
+            raise KeyboardInterrupt
+
+    return wait
+
+
+def signed_then_sent_shares(setting, monkeypatch, capsys):
+    """Run a swap that is stopped once signed, with LP tokens arriving at that moment."""
+    from almanak.operator_runtime import OperatorRuntime
+
+    shares = setting.target().pool.shares_asset
+    fund_erc20(setting.fork, SENDER, shares, 10)
+    with monkeypatch.context() as patched:
+        patched.setattr(OperatorRuntime, "wait", sending_shares_once_signed(setting, shares))
+        with pytest.raises(KeyboardInterrupt):
+            setting(execute=True)
+    return kept_record(capsys), shares
+
+
+def test_lp_tokens_sent_after_the_swap_is_signed_are_reported_and_the_record_resolves(
+    setting, monkeypatch, capsys
+):
+    start = setting.balances()
+    record, shares = signed_then_sent_shares(setting, monkeypatch, capsys)
+    signed = durable.Journal(record / "state.sqlite").load().pending
+    assert (signed.operation.kind, setting.held(shares), setting.balances()) == ("swap", 1, start)
+
+    # The signed swap is sent, mined and reconciled from its own effects. The tokens no
+    # step explains are listed on its outcome, and the record is gone.
+    recovered = setting.recover(record)
+    issues = recovered["outcomes"][-1]["accounting_issues"]
+    assert (recovered["resolved"], len(issues), str(shares) in issues[0]) == (True, 1, True)
+    assert (ax_actions.kept_records(), record.exists()) == ([], False)
+    assert_swapped(setting, recovered, start, 1)
+    assert_no_allowance(setting, recovered)
+    # The wallet still holds them, so its next swap is refused before anything is signed.
+    assert_refused_for_shares(partial(setting, execute=True), shares, 1)
 
 
 def test_every_declared_cell_has_a_reference_and_every_variant_is_rehearsed():
