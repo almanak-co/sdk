@@ -31,6 +31,7 @@ def candidate_support():
             modes=PROMOTED_MODES,
             actions=actions,
             account_profiles=("eoa", "safe_roles"),
+            direct_actions=(EconomicAction.SUPPLY, EconomicAction.WITHDRAW),
             historical=(
                 HistoricalSupport(
                     model=MODEL,

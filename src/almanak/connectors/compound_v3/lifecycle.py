@@ -60,6 +60,19 @@ def validate_initial(state, observations):
         )
 
 
+def adopt_owned(retained, observations):
+    """Ownership of each position as its observation states it, for an operator deployment.
+
+    Base principal is adopted signed, so a wallet's existing debt becomes owned debt.
+    """
+    adopted = tuple(owned(observation) for observation in observations)
+    if tuple(o.target for o in adopted) != tuple(o.target for o in retained):
+        raise DataError(
+            "ownership_mismatch", "observations must cover every configured Comet position"
+        )
+    return adopted
+
+
 def commit_owned(retained, outcome):
     if not outcome.success:
         return retained
@@ -121,6 +134,7 @@ class CompoundLifecycle:
     validate_owned = staticmethod(validate_owned)
     commit_owned = staticmethod(commit_owned)
     validate_closure = staticmethod(validate_closure)
+    adopt = staticmethod(adopt_owned)
 
     @staticmethod
     def increases_exposure(intent):
@@ -136,6 +150,7 @@ class CompoundLifecycle:
             deployment_id=uuid4().hex,
             config=config,
             strategy=strategy,
+            operator=strategy is None,
             capabilities=capabilities,
             permissions=permissions,
             mode="running",
