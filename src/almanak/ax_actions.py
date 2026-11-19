@@ -1007,19 +1007,7 @@ def health_factor(value: str) -> int:
 def swap_arguments(action) -> None:
     """One pool by its address or its key, the asset sold, the exact amount and the price
     bound. `validate_arguments` holds the pool flags to what the connector takes."""
-    action.add_argument("--chain", required=True, help="strict CAIP-2 chain of the pool")
-    action.add_argument("--pool", help="pool address, for a connector whose pools are contracts")
-    action.add_argument("--currency0", help="CAIP-19 currency0 of a Uniswap V4 pool key")
-    action.add_argument("--currency1", help="CAIP-19 currency1 of a Uniswap V4 pool key")
-    action.add_argument(
-        "--fee", type=int, help="pool key fee in hundredths of a basis point (Uniswap V4)"
-    )
-    action.add_argument("--tick-spacing", type=int, help="pool key tick spacing (Uniswap V4)")
-    action.add_argument(
-        "--hooks",
-        help="reviewed hook address of a Uniswap V4 pool key; omit for a hookless pool"
-        " (a dynamic-fee hook takes --fee 8388608)",
-    )
+    pool_arguments(action)
     action.add_argument(
         "--sell",
         type=asset,
@@ -1052,6 +1040,24 @@ def swap_arguments(action) -> None:
         " reverts when mined later than that; a curve call carries no deadline, so a"
         " signed curve swap stays valid until it is mined or its nonce is used, bound"
         f" only by its minimum output (default: {DEFAULT_DEADLINE_SECONDS})",
+    )
+
+
+def pool_arguments(action) -> None:
+    """The chain and the flags that name one pool: its address, or the members of its
+    key. `validate_arguments` holds them to what the command's connector takes."""
+    action.add_argument("--chain", required=True, help="strict CAIP-2 chain of the pool")
+    action.add_argument("--pool", help="pool address, for a connector whose pools are contracts")
+    action.add_argument("--currency0", help="CAIP-19 currency0 of a Uniswap V4 pool key")
+    action.add_argument("--currency1", help="CAIP-19 currency1 of a Uniswap V4 pool key")
+    action.add_argument(
+        "--fee", type=int, help="pool key fee in hundredths of a basis point (Uniswap V4)"
+    )
+    action.add_argument("--tick-spacing", type=int, help="pool key tick spacing (Uniswap V4)")
+    action.add_argument(
+        "--hooks",
+        help="reviewed hook address of a Uniswap V4 pool key; omit for a hookless pool"
+        " (a dynamic-fee hook takes --fee 8388608)",
     )
 
 

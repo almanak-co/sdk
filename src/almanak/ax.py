@@ -12,7 +12,12 @@ import json
 from almanak import ax_discovery, ax_hypercore, ax_lending_markets
 from almanak.balances import parse_balance_request, read_balance
 from almanak.caip import AssetType, ChainId
-from almanak.cli_arguments import CONNECTOR_INLINE_FLAGS, INLINE_FLAGS, LENDING_SELECTOR_FLAGS
+from almanak.cli_arguments import (
+    CONNECTOR_INLINE_FLAGS,
+    CONNECTOR_INLINE_OPTIONS,
+    INLINE_FLAGS,
+    LENDING_SELECTOR_FLAGS,
+)
 from almanak.connectors.aerodrome.position_request import (
     PositionRequest as AerodromePositionRequest,
 )
@@ -31,6 +36,9 @@ from almanak.connectors.uniswap_v4.domain import PoolPriceRequest
 from almanak.connectors.uniswap_v4.hook_terms import describe
 from almanak.connectors.uniswap_v4.networks import roles_for
 from almanak.connectors.uniswap_v4.pool import read_pool
+from almanak.connectors.uniswap_v4.position_request import (
+    PositionRequest as KeyedPositionRequest,
+)
 from almanak.connectors.v3_pool_position_request import PositionRequest, read_liquidity_position
 from almanak.connectors.v3_pool_request import (
     RESOLVED_POOL_CONNECTORS,
@@ -62,6 +70,8 @@ CONNECTOR_REQUESTS: dict[tuple[str, str], type[Model]] = {
     # A Curve or an Aerodrome position is an account's balance of the pool's LP token.
     ("ax-liquidity-position", "curve"): CurvePositionRequest,
     ("ax-liquidity-position", "aerodrome"): AerodromePositionRequest,
+    # A Uniswap V4 position is an NFT whose pool is named by its key.
+    ("ax-liquidity-position", "uniswap_v4"): KeyedPositionRequest,
 }
 
 
@@ -302,7 +312,9 @@ def inline_request(args) -> dict:
         # An NFT position is named by its token ID, an LP token balance by its account.
         shape = (args.product, args.connector)
         names = CONNECTOR_INLINE_FLAGS.get(shape, INLINE_FLAGS[args.product])
-        return {name: getattr(args, name) for name in names}
+        optional = CONNECTOR_INLINE_OPTIONS.get(shape, ())
+        given = [name for name in optional if getattr(args, name) is not None]
+        return {name: getattr(args, name) for name in (*names, *given)}
     return pool_price_request(args)
 
 

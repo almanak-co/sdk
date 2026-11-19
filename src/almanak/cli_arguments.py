@@ -682,8 +682,9 @@ AX_REQUESTS = {
         "one V3-style liquidity position by its NFT: owner, range, liquidity, principal at"
         " the pool's price and the amounts a collection would pay; for curve and aerodrome,"
         " one account's LP shares in a pool and what burning them would pay, and for"
-        " aerodrome what a fee claim would pay",
-        (*pool_connectors("concentrated"), "curve", "aerodrome"),
+        " aerodrome what a fee claim would pay; a uniswap_v4 position's pool is named by"
+        " its key",
+        (*pool_connectors("concentrated", "keyed"), "curve", "aerodrome"),
     ),
 }
 
@@ -737,6 +738,15 @@ def position_source(command):
         "--chain", help="strict CAIP-2 chain of the pool, given with --pool and --token-id"
     )
     command.add_argument("--pool", help="pool contract address of the position")
+    # A Uniswap V4 position's pool is named by its key, as `ax pool-price` names it.
+    command.add_argument("--currency0", help="uniswap_v4 only: CAIP-19 currency0 of the pool key")
+    command.add_argument("--currency1", help="uniswap_v4 only: CAIP-19 currency1 of the pool key")
+    command.add_argument("--fee", type=int, help="uniswap_v4 only: pool key fee")
+    command.add_argument("--tick-spacing", type=int, help="uniswap_v4 only: pool key tick spacing")
+    command.add_argument(
+        "--hooks",
+        help="uniswap_v4 only: reviewed hook address of the pool key; omit for a hookless pool",
+    )
     command.add_argument(
         "--token-id",
         type=positive,
@@ -801,6 +811,19 @@ INLINE_FLAGS = {
 CONNECTOR_INLINE_FLAGS: dict[tuple[str, str | None], tuple[str, ...]] = {
     ("ax-liquidity-position", "curve"): ("chain", "pool", "account"),
     ("ax-liquidity-position", "aerodrome"): ("chain", "pool", "account"),
+    ("ax-liquidity-position", "uniswap_v4"): (
+        "chain",
+        "currency0",
+        "currency1",
+        "fee",
+        "tick_spacing",
+        "token_id",
+    ),
+}
+# Optional inline flags of one connector's request: never required there, and refused
+# for another connector like the rest of its shape.
+CONNECTOR_INLINE_OPTIONS: dict[tuple[str, str | None], tuple[str, ...]] = {
+    ("ax-liquidity-position", "uniswap_v4"): ("hooks",),
 }
 # Optional inline flags: never required, but refused with --config like the rest.
 INLINE_OPTIONS = {"ax-pool-price": ("base", "hooks")}
@@ -821,7 +844,8 @@ def parse_validated(parser, argv=None):
     product = getattr(args, "product", None)
     if product in INLINE_FLAGS:
         names = inline_flags(parser, args, product)
-        require_inline(parser, args, names, INLINE_OPTIONS.get(product, ()))
+        own = CONNECTOR_INLINE_OPTIONS.get((product, getattr(args, "connector", None)), ())
+        require_inline(parser, args, names, (*INLINE_OPTIONS.get(product, ()), *own))
     if product == "operator-action":
         from almanak.ax_actions import validate_arguments
 
@@ -862,14 +886,16 @@ def inline_flags(parser, args, product: str) -> tuple[str, ...]:
     """The inline flags the request takes for its connector; another shape's are refused."""
     connector = getattr(args, "connector", None)
     names = CONNECTOR_INLINE_FLAGS.get((product, connector), INLINE_FLAGS[product])
+    taken = (*names, *CONNECTOR_INLINE_OPTIONS.get((product, connector), ()))
     shapes = [INLINE_FLAGS[product]]
-    shapes += [found for (name, _), found in CONNECTOR_INLINE_FLAGS.items() if name == product]
+    for table in (CONNECTOR_INLINE_FLAGS, CONNECTOR_INLINE_OPTIONS):
+        shapes += [found for (name, _), found in table.items() if name == product]
     foreign = sorted(
         {
             name
             for shape in shapes
             for name in shape
-            if name not in names and getattr(args, name, None) is not None
+            if name not in taken and getattr(args, name, None) is not None
         }
     )
     if foreign:

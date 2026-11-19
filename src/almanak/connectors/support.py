@@ -263,7 +263,12 @@ def uniswap_support():
     native = set(routes())
     # Every production cell serves `almanak ax swap` as a direct operator action; each
     # has a fork rehearsal of the whole command (tests/fork/test_ax_swap_uniswap_v4.py).
-    direct = (EconomicAction.SWAP,)
+    direct = (
+        EconomicAction.SWAP,
+        EconomicAction.OPEN_LIQUIDITY,
+        EconomicAction.COLLECT,
+        EconomicAction.CLOSE_LIQUIDITY,
+    )
 
     def chain_restrictions(chain):
         if str(chain) not in native:

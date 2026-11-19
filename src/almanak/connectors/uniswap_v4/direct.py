@@ -1,4 +1,7 @@
-"""Uniswap V4 direct operator actions: an exact-input swap in one pool named by its key.
+"""Uniswap V4 direct operator actions in one pool named by its key.
+
+This module holds the exact-input swap and the report every command shares. The
+liquidity commands are `liquidity_direct`.
 
 The deployment holds one trading allocation whose capital is the amount sold, in the
 asset sold, offered whole as one entry. The gateway then sizes its entry quote at
@@ -32,6 +35,15 @@ from almanak.connectors.direct import ALLOCATION, ActionRequest, DirectActions, 
 
 
 def positions(reader, block, resolved, wallet: Wallet, request: ActionRequest) -> dict:
+    """The deployment's one allocation in the resolved pool, as the command states it."""
+    if request.action != "swap":
+        from almanak.connectors.uniswap_v4 import liquidity_direct as liquidity
+
+        return liquidity.positions(reader, block, resolved, wallet, request)
+    return swap_positions(resolved, wallet, request)
+
+
+def swap_positions(resolved, wallet: Wallet, request: ActionRequest) -> dict:
     """One trading allocation in the resolved pool, funded with exactly the amount sold."""
     from almanak.chains import evm_network
     from almanak.connectors.uniswap_v4.custody import custody_assets
@@ -74,6 +86,15 @@ def sell_refusal(pool, held: tuple[str, ...], sold) -> str:
 
 
 def intent(config, observed, request: ActionRequest):
+    """The command's intent, built from the observation it is admitted with."""
+    if request.action != "swap":
+        from almanak.connectors.uniswap_v4 import liquidity_direct as liquidity
+
+        return liquidity.intent(config, observed, request)
+    return swap_intent(config, observed, request)
+
+
+def swap_intent(config, observed, request: ActionRequest):
     """The swap along the entry quote of the observation it is admitted with.
 
     The amount is the quote's input, the minimum output is the quoted output less the
@@ -103,11 +124,17 @@ def position(state) -> dict:
     last block the deployment observed, so a signed step still unresolved is not in
     them. Only nonzero amounts are listed. A Permit2 allowance carries its expiration
     in Unix seconds, after which it grants nothing; an ERC-20 approval to Permit2 has
-    none.
+    none. A liquidity deployment also reports the NFT it owns and what its steps moved.
     """
     owned = state.owned[0]
     seen = last_observed(state)
+    liquidity: dict = {}
+    if owned.target.liquidity_enabled:
+        from almanak.connectors.uniswap_v4.liquidity_direct import position as held
+
+        liquidity = held(state)
     return {
+        **liquidity,
         "inventory": [
             {"asset": str(value.asset), "amount": str(value.amount)}
             for value in (owned.inventory0, owned.inventory1)
@@ -132,4 +159,9 @@ def last_observed(state):
     return state.baseline[0] if state.baseline else None
 
 
-DIRECT = DirectActions(actions=("swap",), positions=positions, intent=intent, position=position)
+DIRECT = DirectActions(
+    actions=("swap", "open-liquidity", "collect-liquidity-fees", "close-liquidity"),
+    positions=positions,
+    intent=intent,
+    position=position,
+)

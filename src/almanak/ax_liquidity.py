@@ -2,7 +2,8 @@
 
 The commands themselves run through `ax_actions`; what each one admits and how its
 deployment is built is the connector's: the V3 pool family's
-(`connectors/v3_pool_liquidity_direct.py`), Curve's
+(`connectors/v3_pool_liquidity_direct.py`), Uniswap V4's
+(`connectors/uniswap_v4/liquidity_direct.py`), Curve's
 (`connectors/curve/liquidity_direct.py`) or Aerodrome's
 (`connectors/aerodrome/liquidity_direct.py`).
 
@@ -41,11 +42,13 @@ RANGED = {
 
 
 def arguments(name: str, action) -> None:
-    """One pool by its address, then the range or the NFT and the bounds the command takes."""
+    """One pool by its address or its key, then the range or the NFT and the bounds the
+    command takes."""
+    from almanak.ax_actions import pool_arguments
+
     # No liquidity command takes the single --amount of a supply or a swap.
     action.set_defaults(amount=None)
-    action.add_argument("--chain", required=True, help="strict CAIP-2 chain of the pool")
-    action.add_argument("--pool", required=True, help="pool address")
+    pool_arguments(action)
     if name == "open-liquidity":
         range_arguments(action)
     if name in NFT_ACTIONS:
@@ -53,7 +56,7 @@ def arguments(name: str, action) -> None:
             "--token-id",
             type=token_id,
             help="the position's NFT at the pool's position manager; the wallet must own it"
-            " and it must be a position of --pool (not curve or aerodrome, whose position"
+            " and it must be a position of the named pool (not curve or aerodrome, whose position"
             " is the wallet's LP token balance)",
         )
     if name in ADDITIONS:

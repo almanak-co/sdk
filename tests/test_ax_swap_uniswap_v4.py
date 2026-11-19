@@ -208,12 +208,12 @@ def native_market():
 def test_the_connector_supports_operator_deployments_and_serves_the_swap():
     found = connector_from_wire({"connector": CONNECTOR})
     assert supports_operator(found.codec.checkpoint)
-    assert direct.binding(CONNECTOR).actions == ("swap",)
+    assert direct.binding(CONNECTOR).actions[0] == "swap"
     assert CONNECTOR in direct.connectors_for("swap") and CONNECTOR not in direct.NOT_DIRECT
     production = [cell for cell in found.chain_support if RunMode.PRODUCTION in cell.modes]
     assert len(production) == 8
     for cell in production:
-        assert [str(action) for action in cell.direct_actions] == ["swap_exact_input"]
+        assert str(cell.direct_actions[0]) == "swap_exact_input"
         direct.require_direct(CONNECTOR, cell.chain, direct.ActionRequest("swap", 5))
         with pytest.raises(ValueError, match="unsupported as a direct action"):
             cell.require_direct("exit_exchange")
