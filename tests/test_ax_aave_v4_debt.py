@@ -5,7 +5,9 @@ without signing or chain access. The whole commands on deployed contracts are
 tests/fork/test_ax_aave_v4_debt.py.
 """
 
+import gzip
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,18 +19,27 @@ from almanak.connectors import lending_lookup
 from almanak.connectors.aave_v4 import direct
 from almanak.connectors.aave_v4 import execution as aave_execution
 from almanak.connectors.aave_v4.authority import admit_intent, declared
+from almanak.connectors.aave_v4.debt import owed_reserves
 from almanak.connectors.aave_v4.lifecycle import adopt_ownership, commit_ownership
-from almanak.connectors.aave_v4.models import Ownership
+from almanak.connectors.aave_v4.models import LendingSnapshot, Ownership
+from almanak.connectors.aave_v4.operations import CollateralOperation, WithdrawOperation
 from almanak.connectors.aave_v4.reader import plan_operation
-from almanak.connectors.aave_v4.validation import validate_debt_operation, validate_owned
+from almanak.connectors.aave_v4.validation import (
+    validate_account_release,
+    validate_debt_operation,
+    validate_owned,
+)
 from almanak.connectors.composition import connector_from_wire
 from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet, binding, require_direct
 from almanak.connectors.support import EconomicAction
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.fork_execution import ForkGateway
 from almanak.models import Chain
+from tests.lending_captures import current_capture
+from tests.retained_scheduling import checkpoint_input
 from tests.test_aave_debt import borrowing_proof  # noqa: F401
 
+ROOT = Path(__file__).parents[1]
 WALLET = Wallet(account="treasury", address="0x" + "ab" * 20)
 ORACLE = "0x" + "0c" * 20
 ETHEREUM, AVALANCHE = ChainId("eip155:1"), ChainId("eip155:43114")
@@ -38,6 +49,9 @@ COLLATERAL, DEBT = "main_weth", "main_usdc"
 WETH, USDC = 0, 7
 BORROW = ActionRequest("borrow", 5, min_health_factor=FLOOR)
 REPAY, WITHDRAW = ActionRequest("repay"), ActionRequest("withdraw")
+# What a wallet holds in one reserve of the stub Spoke.
+BACKING = {"supplied": 9, "collateral": True}
+OWED = {"drawn": 3}
 
 
 def feed(reserve_id: int) -> str:
@@ -45,15 +59,24 @@ def feed(reserve_id: int) -> str:
 
 
 class Spoke:
-    """A Spoke with nine reserves, one wallet's position in each, and its oracle."""
+    """A Spoke with nine reserves, one account's position in each, and its oracle."""
 
-    def __init__(self, factors=None, **held):
-        # Reserve ID to what the wallet holds there; the rest is empty.
+    def __init__(self, factors=None, account=WALLET.address, **held):
+        # Reserve ID to what the account holds there; the rest is empty.
         self.held = {int(name.removeprefix("r")): values for name, values in held.items()}
         # Reserve ID to collateral factor in basis points; None forbids the read.
         self.factors = factors
+        self.account = account
+        self.reads = []
+        # The block every read is pinned at.
+        self.block = SimpleNamespace(number=7)
+
+    def pin_block(self, number):
+        assert number in (self.block.number, "latest")
+        return self.block
 
     def call(self, target, signature, block, **options):
+        self.reads.append(signature)
         if signature == "getReserveCount()":
             return (9,)
         if signature == "ORACLE()":
@@ -64,7 +87,7 @@ class Spoke:
         if signature in ("getReserve(uint256)", "getDynamicReserveConfig(uint256,uint32)"):
             return self.configuration(signature, *options["args"])
         reserve_id, account = options["args"]
-        assert account == WALLET.address
+        assert account == self.account
         held = {"supplied": 0, "drawn": 0, "premium": 0, "offset": 0, "collateral": False}
         held.update(self.held.get(reserve_id, {}))
         if signature == "getUserPosition(uint256,address)":
@@ -92,7 +115,10 @@ def mainnet(reserve, reserve_id=None):
 
 @pytest.fixture
 def market(borrowing_proof, monkeypatch):  # noqa: F811
-    """Resolution of the capture's Spoke: its debt reserve, and any other reserve ID."""
+    """Resolution of the capture's Spoke: its debt reserve, and any other reserve ID.
+
+    `market.refused` maps a reserve ID to the refusal its resolution raises.
+    """
     weth = borrowing_proof.config.allocation(COLLATERAL).reserve
     usdc = borrowing_proof.config.allocation(DEBT).reserve
 
@@ -100,12 +126,18 @@ def market(borrowing_proof, monkeypatch):  # noqa: F811
         chosen = SimpleNamespace(chain=reserve.chain.chain_id, spoke=reserve.spoke)
         return SimpleNamespace(reserve=reserve, selection=chosen)
 
+    def requested(reserve_id=USDC):
+        return resolved(mainnet(usdc) if reserve_id == USDC else mainnet(weth, reserve_id))
+
     def resolve(reader, selected, selection, block):
         assert (selection.connector, selection.spoke) == ("aave_v4", usdc.spoke)
-        return resolved(mainnet(weth, selection.reserve_id))
+        if selection.reserve_id in requested.refused:
+            raise requested.refused[selection.reserve_id]
+        return requested(selection.reserve_id)
 
+    requested.refused = {}
     monkeypatch.setattr(lending_lookup, "resolve", resolve)
-    return lambda reserve_id=USDC: resolved(mainnet(usdc if reserve_id == USDC else weth))
+    return requested
 
 
 def configured(document):
@@ -125,24 +157,29 @@ def test_the_connector_declares_borrow_and_full_repayment_on_both_chains():
     assert all(cell.direct_actions == cell.actions == expected for cell in cells)
 
 
-def test_the_wallets_reserves_on_a_spoke_are_those_it_supplies_or_owes():
+def test_the_wallets_position_is_read_in_every_reserve_of_the_spoke():
     reader = Spoke(
-        r0={"supplied": 9, "collateral": True},
+        r0=BACKING,
         r2={"supplied": 4},
-        # Enabled with nothing supplied: it backs nothing.
+        # The flag stands with nothing supplied.
         r3={"collateral": True},
         r5={"premium": 1},
         r6={"offset": -1},
-        r7={"drawn": 3},
+        r7=OWED,
     )
-    assert direct.held_reserves(reader, None, "spoke", WALLET.address) == {
+    account = direct.spoke_account(reader, None, "spoke", WALLET.address)
+    assert list(account) == list(range(9))
+    assert {i: item for i, item in account.items() if item != direct.Held(0, False, False)} == {
         0: direct.Held(9, False, True),
         2: direct.Held(4, False, False),
+        3: direct.Held(0, False, True),
         5: direct.Held(0, True, False),
         6: direct.Held(0, True, False),
         7: direct.Held(0, True, False),
     }
-    assert direct.held_reserves(Spoke(), None, "spoke", WALLET.address) == {}
+    # Debt is read from the shares of each reserve, never from a priced account value.
+    assert owed_reserves(reader, "spoke", WALLET.address, None) == [5, 6, 7]
+    assert "getUserAccountData(address)" not in reader.reads
 
 
 def test_a_borrow_binds_the_debt_with_every_supply_that_can_back_it(market):
@@ -185,20 +222,82 @@ def test_a_borrow_binds_the_debt_with_every_supply_that_can_back_it(market):
         admit_intent(capabilities, config.borrow("collateral_0", 5))
 
 
-def test_a_repayment_binds_every_supply_and_states_the_lowest_floor(market):
-    held = {"r0": {"supplied": 9, "collateral": True}, "r5": {"supplied": 2}, "r7": {"drawn": 3}}
-    document = direct.positions(Spoke(**held), None, market(), WALLET, REPAY)
+def test_a_borrow_does_not_skip_a_collateral_the_connector_cannot_verify(market):
+    market.refused[0] = DataError("deployment_changed", "outside the verified revisions")
+    reader = Spoke(factors={0: 8300}, r0={"supplied": 9})
+    with pytest.raises(DataError, match="outside the verified revisions"):
+        direct.positions(reader, None, market(), WALLET, BORROW)
+
+
+def collateral_of(document):
     (debt,) = document["debts"]
-    # It enables nothing, so it binds the supply a borrow would leave out as well.
-    assert debt["collateral"] == ["collateral_0", "collateral_5"]
-    assert debt["collateral_price_sources"] == [feed(0), feed(5)]
+    assert [a["name"] for a in document["allocations"]] == debt["collateral"]
     assert debt["minimum_health_factor"] == 10**18 + 1
+    return debt["collateral"]
+
+
+def test_a_repayment_binds_the_collateral_it_releases_and_the_lowest_floor(market):
+    held = {"r0": BACKING, "r3": {"supplied": 4}, "r5": BACKING, "r7": OWED}
+    document = direct.positions(Spoke(**held), None, market(), WALLET, REPAY)
+    # A supply that is not collateral has nothing to release and is not bound.
+    assert collateral_of(document) == ["collateral_0", "collateral_5"]
+    assert document["debts"][0]["collateral_price_sources"] == [feed(0), feed(5)]
     assert configured(document).debts[0].minimum_health_factor == 10**18 + 1
-    # The command line takes no floor for a repayment; a stated one would be kept.
-    assert direct.health_floor(ActionRequest("repay", min_health_factor=FLOOR)) == FLOOR
+    # With no debt left, a repayment still releases what a refused borrow enabled.
+    released = direct.positions(Spoke(r0=BACKING), None, market(), WALLET, REPAY)
+    assert collateral_of(released) == ["collateral_0"]
     assert direct.health_floor(BORROW) == FLOOR
     with pytest.raises(ValueError, match="borrow requires --min-health-factor"):
         direct.health_floor(ActionRequest("borrow", 5))
+
+
+def test_each_of_two_debts_is_repaid_and_collateral_stays_until_the_last(market):
+    both = Spoke(r0=BACKING, r3=OWED, r7=OWED)
+    for requested in (USDC, 3):
+        document = direct.positions(both, None, market(requested), WALLET, REPAY)
+        # Reserve 0 backs the other debt: the repayment names a reserve it leaves alone.
+        assert collateral_of(document) == ["collateral_1"]
+        config = configured(document)
+        assert config.target(ALLOCATION).reserve.reserve_id == requested
+        assert direct.intent(config, (), REPAY).kind == "repay"
+    last = direct.positions(Spoke(r0=BACKING, r3=OWED), None, market(3), WALLET, REPAY)
+    assert collateral_of(last) == ["collateral_0"]
+
+
+def test_a_debt_with_nothing_else_supplied_is_repaid(market):
+    for held in (
+        {"r7": OWED},
+        # Supply and debt in one reserve: the reserve's own flag is not the repayment's.
+        {"r7": {**BACKING, **OWED}},
+        # A flag that stands with nothing supplied releases nothing.
+        {"r0": {"collateral": True}, "r7": OWED},
+    ):
+        document = direct.positions(Spoke(**held), None, market(), WALLET, REPAY)
+        expected = "collateral_1" if "r0" in held else "collateral_0"
+        assert collateral_of(document) == [expected]
+        assert configured(document).debts[0].collateral == (expected,)
+
+
+def test_a_reserve_the_connector_cannot_verify_does_not_hold_back_a_repayment(market):
+    refusal = DataError("deployment_changed", "outside the verified revisions")
+    held = Spoke(r0=BACKING, r2=BACKING, r7=OWED)
+    market.refused[0] = refusal
+    # The verified collateral is released; the other one stays enabled.
+    assert collateral_of(direct.positions(held, None, market(), WALLET, REPAY)) == ["collateral_2"]
+    market.refused.update({1: ValueError("unreviewed"), 2: refusal})
+    # Nothing to release can be verified: the repayment names the first reserve that can.
+    assert collateral_of(direct.positions(held, None, market(), WALLET, REPAY)) == ["collateral_3"]
+    # A read that may pass on a later attempt is not a refusal.
+    market.refused[0] = DataError("http", "busy", transient=True)
+    with pytest.raises(DataError, match="busy"):
+        direct.positions(held, None, market(), WALLET, REPAY)
+
+
+def test_a_repayment_with_no_reserve_to_bind_says_which_rule_holds_it(market):
+    flagged = {f"r{i}": {"collateral": True} for i in range(9) if i != USDC}
+    with pytest.raises(ValueError, match="no other reserve of this Spoke can be bound") as refused:
+        direct.positions(Spoke(r7=OWED, **flagged), None, market(), WALLET, REPAY)
+    assert "the connector's debt names a supply position of its Spoke" in str(refused.value)
 
 
 def repayment(proof):
@@ -208,6 +307,20 @@ def repayment(proof):
         for o in proof.outcomes
         if o.decision.intent.kind == "repay" and o.before.target.allocation == DEBT
     ]
+
+
+def test_a_repayment_that_releases_nothing_ends_with_its_revocation(
+    borrowing_proof,  # noqa: F811
+):
+    """With the named reserve's flag off, the capture's revocation completes the request."""
+    config = borrowing_proof.config
+    revoke = repayment(borrowing_proof)[2]
+    assert revoke.operation.kind == "revoke" and not revoke.strategy_result().complete
+    untouched = tuple(c.model_copy(update={"enabled": False}) for c in revoke.after.collateral)
+    after = revoke.after.model_copy(update={"collateral": untouched})
+    assert revoke.model_copy(update={"after": after}).strategy_result().complete
+    with pytest.raises(ValueError, match="no remaining debt, allowance or collateral"):
+        plan_operation(config.repay(DEBT), after, config.allocation(DEBT))
 
 
 def test_no_floor_can_refuse_a_repayment(borrowing_proof, monkeypatch):  # noqa: F811
@@ -250,44 +363,43 @@ def ownership_before(proof, outcome):
     raise AssertionError("outcome is not part of the capture")
 
 
-def test_a_borrow_or_repayment_is_refused_without_a_position_to_bind(market):
-    nothing = "has supplied no collateral on this Spoke"
+def test_a_borrow_is_refused_without_collateral_or_beside_another_debt(market):
     for held in (
         {},
         # A supply in the borrowed reserve itself is not another position to bind.
         {"r7": {"supplied": 5}},
         {"r5": {"supplied": 2}},
     ):
-        with pytest.raises(ValueError, match=nothing):
+        with pytest.raises(ValueError, match="has supplied no collateral on this Spoke"):
             direct.positions(Spoke(factors={5: 0}, **held), None, market(), WALLET, BORROW)
-    with pytest.raises(ValueError, match="supplies no reserve of this Spoke other than reserve 7"):
-        direct.positions(Spoke(r7={"drawn": 3}), None, market(), WALLET, REPAY)
-
-
-def test_a_second_debt_reserve_on_the_spoke_is_refused(market):
-    reader = Spoke(r0={"supplied": 9, "collateral": True}, r3={"drawn": 3}, r4={"premium": 1})
-    for request in (BORROW, REPAY):
-        with pytest.raises(ValueError, match="has debt in reserve 3 of this Spoke") as refused:
-            direct.positions(reader, None, market(), WALLET, request)
-        assert "one debt reserve per wallet and Spoke: repay reserve 3 in full" in str(
-            refused.value
-        )
+    reader = Spoke(r0=BACKING, r3=OWED, r4={"premium": 1})
+    with pytest.raises(ValueError, match="has debt in reserve 3 of this Spoke") as refused:
+        direct.positions(reader, None, market(), WALLET, BORROW)
+    assert "one debt reserve per wallet and Spoke: repay reserve 3 in full" in str(refused.value)
     # More of the same debt is the one debt reserve.
-    same = Spoke(factors={}, r0={"supplied": 9, "collateral": True}, r7={"drawn": 3})
+    same = Spoke(factors={}, r0=BACKING, r7=OWED)
     assert direct.positions(same, None, market(), WALLET, BORROW)["debts"][0]["name"] == ALLOCATION
 
 
+def test_a_floor_is_refused_on_an_action_that_is_not_projected(market):
+    for action, amount in (("supply", 5), ("withdraw", None), ("repay", None)):
+        request = ActionRequest(action, amount, min_health_factor=FLOOR)
+        with pytest.raises(ValueError, match="projects health only for a borrow") as refused:
+            # Refused before any read: the reader is never used.
+            direct.positions(None, None, market(WETH), WALLET, request)
+        assert f"a floor on a {action} would not be checked" in str(refused.value)
+
+
 def test_collateral_is_not_withdrawn_while_the_wallet_owes_on_the_spoke(market):
-    backing = Spoke(r0={"supplied": 9, "collateral": True}, r2={"supplied": 4}, r7={"drawn": 3})
+    backing = Spoke(r0=BACKING, r2={"supplied": 4}, r7=OWED)
     with pytest.raises(
         ValueError, match="reserve 0 is collateral for the wallet's debt"
     ) as refused:
         direct.positions(backing, None, market(WETH), WALLET, WITHDRAW)
     assert "in reserve 7 of this Spoke: repay that debt in full first" in str(refused.value)
     # A supply that is not collateral, or collateral with no debt open, backs nothing.
-    released = Spoke(r0={"supplied": 9, "collateral": True})
-    unused = Spoke(r0={"supplied": 9}, r3={"supplied": 4, "collateral": True}, r7={"drawn": 3})
-    for reader in (released, unused, Spoke()):
+    unused = Spoke(r0={"supplied": 9}, r3={"supplied": 4, "collateral": True}, r7=OWED)
+    for reader in (Spoke(r0=BACKING), unused, Spoke()):
         document = direct.positions(reader, None, market(WETH), WALLET, WITHDRAW)
         assert [a["name"] for a in document["allocations"]] == [ALLOCATION]
         assert "debts" not in document
@@ -340,6 +452,54 @@ def test_adoption_takes_supply_and_debt_ownership_from_the_observed_positions(
         adopt_ownership(empty[:1], observed)
 
 
+def release_steps(proof):
+    """The capture's two releases of one fund's collateral: the repayment's disabling
+    step, and the withdrawal after it."""
+    target = proof.config.target(COLLATERAL)
+    disable = repayment(proof)[3].operation
+    assert isinstance(disable, CollateralOperation) and disable.collateral == target
+    return disable, WithdrawOperation(target=target), target.fund.address
+
+
+def test_a_release_of_collateral_is_held_to_the_accounts_debt_on_the_spoke(
+    borrowing_proof,  # noqa: F811
+):
+    disable, withdraw, account = release_steps(borrowing_proof)
+    for held in ({"r3": OWED}, {"r0": BACKING, "r8": {"premium": 1}}):
+        reader = Spoke(account=account, **{"r0": BACKING, **held})
+        owed = min(int(name[1:]) for name in held if name != "r0")
+        for operation in (disable, withdraw):
+            with pytest.raises(DataError, match=f"the account owes reserve {owed}") as refused:
+                validate_account_release(reader, operation, reader.block)
+            assert refused.value.kind == "residual_debt"
+            assert "reserve 0 is collateral" in str(refused.value)
+    # With nothing owed on the Spoke either release is admitted.
+    for operation in (disable, withdraw):
+        clear = Spoke(account=account, r0=BACKING)
+        validate_account_release(clear, operation, clear.block)
+        # A block that is no longer the one the plan read is not read again.
+        with pytest.raises(DataError, match="no longer canonical"):
+            validate_account_release(clear, operation, SimpleNamespace(number=7, hash="other"))
+    # A supply that is not collateral backs nothing: one read, whatever is owed.
+    unused = Spoke(account=account, r0={"supplied": 9}, r3=OWED)
+    validate_account_release(unused, withdraw, unused.block)
+    assert unused.reads == ["getUserReserveStatus(uint256,address)"]
+
+
+def test_only_a_release_reads_the_account(borrowing_proof):  # noqa: F811
+    kinds = set()
+    for outcome in borrowing_proof.outcomes:
+        operation = outcome.operation
+        releases = isinstance(operation, WithdrawOperation) or (
+            isinstance(operation, CollateralOperation) and not operation.enabled
+        )
+        if not releases:
+            # No reader: nothing is read for an approval, a supply, a borrow or a repay.
+            validate_account_release(None, operation, None)
+            kinds.add(operation.kind)
+    assert kinds == {"approve", "supply", "collateral", "borrow", "repay", "revoke"}
+
+
 def operator(proof, outcome):
     """An operator deployment of the capture's positions, about to plan `outcome`."""
     return proof.model_copy(
@@ -356,6 +516,17 @@ def operator(proof, outcome):
     )
 
 
+def gateway_of(proof, outcome, reader):
+    gateway = object.__new__(ForkGateway)
+    gateway.config, gateway.guard = proof.config, lambda: None
+    reader.chain = outcome.operation.target.fund.chain
+    reader.block = outcome.before.block
+    gateway.reader = reader
+    observed = {o.allocation: o for o in outcome.decision.observations}
+    gateway.snapshot = lambda name, block, reference=None: observed[name]
+    return gateway
+
+
 def test_the_gateway_admits_every_step_of_an_operator_borrow_and_repayment(
     borrowing_proof,  # noqa: F811
 ):
@@ -367,13 +538,106 @@ def test_the_gateway_admits_every_step_of_an_operator_borrow_and_repayment(
     ]
     kinds = ["collateral", "borrow", "approve", "repay", "revoke", "collateral"]
     assert [o.operation.kind for o in steps] == kinds
-    gateway = object.__new__(ForkGateway)
-    gateway.config, gateway.guard = borrowing_proof.config, lambda: None
-    gateway.reader = SimpleNamespace(chain=steps[0].operation.target.fund.chain)
+    account = steps[0].operation.target.fund.address
     for outcome in steps:
+        gateway = gateway_of(borrowing_proof, outcome, Spoke(account=account, r0=BACKING))
         gateway.validate_operation(
             operator(borrowing_proof, outcome), outcome.operation, outcome.before
         )
+    # The release is the one step that reads the account, and a second debt refuses it.
+    assert gateway.reader.reads.count("getUserPosition(uint256,address)") == 9
+    indebted = gateway_of(borrowing_proof, steps[-1], Spoke(account=account, r0=BACKING, r3=OWED))
+    with pytest.raises(DataError, match="the account owes reserve 3") as refused:
+        indebted.validate_operation(
+            operator(borrowing_proof, steps[-1]), steps[-1].operation, steps[-1].before
+        )
+    assert refused.value.kind == "residual_debt"
+
+
+def withdrawal(proof):
+    """The capture's withdrawal of the collateral, after its debt was repaid."""
+    return next(
+        o
+        for o in proof.outcomes
+        if o.operation.kind == "withdraw" and o.operation.allocation == COLLATERAL
+    )
+
+
+def test_the_connector_refuses_an_operator_withdrawal_of_collateral_with_debt_open(
+    borrowing_proof,  # noqa: F811
+):
+    """The check runs where the gateway plans and re-verifies a step, not in the binding."""
+    outcome = withdrawal(borrowing_proof)
+    account = outcome.operation.target.fund.address
+    indebted = Spoke(account=account, r0=BACKING, r3=OWED)
+    gateway = gateway_of(borrowing_proof, outcome, indebted)
+    with pytest.raises(DataError, match="reserve 0 is collateral and the account owes reserve 3"):
+        gateway.validate_operation(
+            operator(borrowing_proof, outcome), outcome.operation, outcome.before
+        )
+    clear = gateway_of(borrowing_proof, outcome, Spoke(account=account, r0=BACKING))
+    clear.validate_operation(operator(borrowing_proof, outcome), outcome.operation, outcome.before)
+    # A strategy deployment is checked as before: its reader is never asked.
+    strategy = operator(borrowing_proof, outcome).model_copy(
+        update={"operator": False, "strategy": borrowing_proof.strategy}
+    )
+    gateway = gateway_of(borrowing_proof, outcome, indebted)
+    indebted.reads.clear()
+    gateway.validate_operation(strategy, outcome.operation, outcome.before)
+    assert indebted.reads == []
+
+
+def planned(outcome, trigger):
+    decision = SimpleNamespace(trigger=SimpleNamespace(kind=trigger))
+    return SimpleNamespace(operation=outcome.operation, call=outcome.call, decision=decision)
+
+
+def test_a_plan_made_before_the_debt_opened_is_refused_at_signing(
+    borrowing_proof,  # noqa: F811
+):
+    outcome = withdrawal(borrowing_proof)
+    account = outcome.operation.target.fund.address
+    reader = Spoke(account=account, r0=BACKING, r3=OWED)
+    backend = SimpleNamespace(config=borrowing_proof.config, reader=reader)
+    with pytest.raises(DataError, match="the account owes reserve 3") as refused:
+        aave_execution.current_checks(backend, planned(outcome, "operator"))
+    assert refused.value.kind == "residual_debt"
+    # A strategy's plan reads nothing more at signing than it did.
+    reader.reads.clear()
+    aave_execution.current_checks(backend, planned(outcome, "interval"))
+    assert reader.reads == []
+    reader.held.pop(3)
+    aave_execution.current_checks(backend, planned(outcome, "operator"))
+
+
+def test_strategy_observations_keep_their_wire_form(borrowing_proof):  # noqa: F811
+    """The capture loads and dumps as retained: the guard added nothing to a snapshot."""
+    packed = (ROOT / "tests/fixtures/safe-aave-borrowing-lifecycle.json.gz").read_bytes()
+    retained = checkpoint_input(current_capture(json.loads(gzip.decompress(packed))))
+    wire = borrowing_proof.model_dump(mode="json")
+    assert wire["baseline"] == retained["baseline"] and wire["closure"] == retained["closure"]
+    assert len(wire["outcomes"]) == len(retained["outcomes"]) == 24
+    for dumped, kept in zip(wire["outcomes"], retained["outcomes"], strict=True):
+        assert (dumped["before"], dumped["after"]) == (kept["before"], kept["after"])
+        assert dumped["decision"]["observations"] == kept["decision"]["observations"]
+    assert "operator" not in wire
+    assert set(LendingSnapshot.model_fields) == {
+        "allocation",
+        "account",
+        "position",
+        "wallet_balance",
+        "allowance",
+        "native_balance",
+        "simulated",
+        "payer",
+        "collateral_enabled",
+        "drawn_shares",
+        "premium_shares",
+        "premium_offset_ray",
+        "health_factor",
+        "health_error",
+        "collateral",
+    }
 
 
 def test_the_result_reports_the_requested_position_by_name():

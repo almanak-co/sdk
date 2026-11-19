@@ -21,29 +21,52 @@ def position_components(reader, target, block) -> tuple[dict[str, Any], int]:
 
 def reserve_components(reader, spoke, reserve_id, account, block) -> tuple[dict[str, Any], int]:
     """One account's debt shares and collateral flag in one reserve, and its supply shares."""
-    args = (reserve_id, account)
+    drawn, premium, offset, supplied = user_position(reader, spoke, reserve_id, account, block)
+    return dict(
+        drawn_shares=drawn,
+        premium_shares=premium,
+        premium_offset_ray=offset,
+        collateral_enabled=collateral_enabled(reader, spoke, reserve_id, account, block),
+    ), supplied
+
+
+def user_position(reader, spoke, reserve_id, account, block) -> tuple[int, int, int, int]:
+    """Drawn shares, premium shares, premium offset in ray and supply shares."""
     drawn, premium, offset, supplied, _ = reader.call(
         spoke,
         "getUserPosition(uint256,address)",
         block,
         inputs=("uint256", "address"),
-        args=args,
+        args=(reserve_id, account),
         outputs=("uint120", "uint120", "int200", "uint120", "uint32"),
     )
+    return drawn, premium, offset, supplied
+
+
+def collateral_enabled(reader, spoke, reserve_id, account, block) -> bool:
     enabled, _ = reader.call(
         spoke,
         "getUserReserveStatus(uint256,address)",
         block,
         inputs=("uint256", "address"),
-        args=args,
+        args=(reserve_id, account),
         outputs=("bool", "bool"),
     )
-    return dict(
-        drawn_shares=drawn,
-        premium_shares=premium,
-        premium_offset_ray=offset,
-        collateral_enabled=enabled,
-    ), supplied
+    return enabled
+
+
+def owed_reserves(reader, spoke, account, block) -> list[int]:
+    """The reserve IDs of a Spoke in which the account has any drawn or premium debt.
+
+    Read from the debt shares of every reserve, not from the account's health or debt
+    value, which need prices and can round a small debt to nothing.
+    """
+    (count,) = reader.call(spoke, "getReserveCount()", block)
+    return [
+        reserve_id
+        for reserve_id in range(count)
+        if any(user_position(reader, spoke, reserve_id, account, block)[:3])
+    ]
 
 
 def collateral_observations(reader, config, debt, block):

@@ -34,6 +34,7 @@ from almanak.connectors.aave_v4.reader import (
 from almanak.connectors.aave_v4.state import Checkpoint, Outcome, Pending
 from almanak.connectors.aave_v4.validation import (
     require_zero_debt,
+    validate_account_release,
     validate_debt_movement,
     validate_debt_operation,
     validate_owned,
@@ -44,6 +45,7 @@ from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm import erc20_address
 from almanak.gateway.evm_fees import charged_fees
 from almanak.models import AssetAmount, Block, Eoa, SafeRoles
+from almanak.operator_deployment import is_operator
 
 
 def snapshot(backend, name: str, block: Block) -> LendingSnapshot:
@@ -129,6 +131,8 @@ def validate_operation(
         if backend.config.debts or before.collateral_enabled:
             validate_collateral_release(backend, allocation, before)
         validate_teardown(state, operation, before, owned)
+    if is_operator(state):
+        validate_account_release(backend.reader, operation, before.block)
 
 
 def validate_collateral_release(backend, allocation, before):
@@ -160,6 +164,19 @@ def current_debt_checks(backend, plan, block=None):
         validate_repayment_funding(backend.snapshot(allocation.name, block), allocation)
 
 
+def current_release_checks(backend, plan, block=None):
+    """Hold an operator's planned release of collateral to the account's debt now.
+
+    The plan was validated at its own pinned block. A debt opened since then is seen
+    here, at the head the step is signed against, so the plan is refused unsigned.
+    """
+    # Only an operator deployment admits an operator trigger, and a plan retains it.
+    if plan.decision.trigger.kind != "operator":
+        return
+    block = block or backend.reader.pin_block("latest")
+    validate_account_release(backend.reader, plan.operation, block)
+
+
 def current_checks(backend, plan, block=None):
     from almanak.gateway.replacement_assets import verify_asset
     from almanak.transaction_family import replacement_policy
@@ -168,6 +185,7 @@ def current_checks(backend, plan, block=None):
         block = block or backend.reader.pin_block("latest")
         verify_asset(backend.reader, plan.operation.target.reserve.asset, block)
     current_debt_checks(backend, plan, block)
+    current_release_checks(backend, plan, block)
 
 
 def reconcile(backend, pending, receipt, block):

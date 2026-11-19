@@ -7,6 +7,8 @@ It is rehearsal evidence, not a mainnet run.
 """
 
 import json
+from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from typing import NamedTuple
 
@@ -18,6 +20,7 @@ from almanak import ax_actions
 from almanak.caip import AssetType, ChainId
 from almanak.chains import evm_network
 from almanak.configuration.yaml import load
+from almanak.connectors.aave_v4 import execution as aave_execution
 from almanak.connectors.direct import ActionRequest
 from almanak.connectors.lending_lookup import selection
 from almanak.gateway.credentials import write_private
@@ -27,6 +30,7 @@ from almanak.gateway.fork_config import ForkTarget
 from almanak.gateway.fork_fixture import Fork
 from almanak.gateway.fork_funding import fund_erc20
 from almanak.gateway.read_endpoints import read_endpoint
+from almanak.gateway.safe_fixture import calldata
 from almanak.models import Chain
 from tests.fork.production_gateway_driver import RehearsalGateway
 
@@ -58,6 +62,14 @@ class Cell(NamedTuple):
     borrowed: AssetType
 
 
+def borrowed_asset(fork, chain):
+    """The asset the reference's fork fixture funds on the chain beside the wrapped one."""
+    funded = {AssetType(a["asset"]) for fund in fork["funds"] for a in fund["assets"]}
+    wrapped = evm_network(chain).wrapped_native
+    (borrowed,) = {asset for asset in funded if asset.chain == chain} - {wrapped}
+    return borrowed
+
+
 def fixture_of(name):
     """One chain's pinned block, Spoke, reserve IDs and borrowed asset in the reference."""
     fork = load(ROOT / f"examples/operators/{REFERENCE}.fork.yaml").value["fork"]
@@ -65,12 +77,9 @@ def fixture_of(name):
     collateral, debt = markets[f"{name}_collateral_market"], markets[f"{name}_debt_market"]
     chain = ChainId(collateral["chain"])
     (anchor,) = [item for item in fork["anchors"] if item["chain"] == str(chain)]
-    wrapped = evm_network(chain).wrapped_native
-    funded = [AssetType(a["asset"]) for fund in fork["funds"] for a in fund["assets"]]
-    (borrowed,) = [asset for asset in funded if asset.chain == chain and asset != wrapped]
     assert collateral["spoke"] == debt["spoke"]
     reserves = (collateral["reserve_id"], debt["reserve_id"], *CELLS[name])
-    return Cell(chain, anchor, collateral["spoke"], *reserves, borrowed)
+    return Cell(chain, anchor, collateral["spoke"], *reserves, borrowed_asset(fork, chain))
 
 
 def origin_block(env, chain, anchor):
@@ -95,7 +104,7 @@ def funded_wallet(fork, token, directory):
         "password_file": str(directory / "keystore-password"),
     }
     write_private(directory / "wallet.json", json.dumps(wallet))
-    return ax_actions.read_wallet(directory)
+    return ax_actions.read_wallet(directory), signer
 
 
 def as_mainnet(fork, chain):
@@ -113,7 +122,7 @@ class Desk:
         self.fork, self.cell = fork, cell
         self.collateral, self.debt = cell.collateral, cell.debt
         wrapped = erc20_address(evm_network(cell.chain).wrapped_native, cell.chain)
-        self.wallet = funded_wallet(fork, wrapped, tmp_path / "wallet")
+        self.wallet, self.signer = funded_wallet(fork, wrapped, tmp_path / "wallet")
         self.identity = as_mainnet(fork, cell.chain)
 
     def backend(self, config):
@@ -144,6 +153,10 @@ class Desk:
         """Run one command on the collateral reserve, or on `reserve`."""
         request = ActionRequest(action, amount, min_health_factor=floor)
         config = self.deployment(request, self.collateral if reserve is None else reserve)
+        return self.run(config, request, execute=execute)
+
+    def run(self, config, request, *, execute=True):
+        """Run a request against a deployment, which may have been bound earlier."""
         gateway = self.backend(config)
         try:
             return ax_actions.run(config, gateway, request, execute=execute)
@@ -155,6 +168,38 @@ class Desk:
         config = self.deployment(ActionRequest("supply", amount), reserve_id)
         asset = config.allocations[0].reserve.asset
         fund_erc20(self.fork, self.wallet["address"], asset, amount)
+
+    def spoke(self, signature, *arguments):
+        """A Spoke call the wallet signs itself, outside any command."""
+        types = tuple(signature[signature.index("(") + 1 : -1].split(","))
+        self.send(self.cell.spoke, signature, types, arguments)
+
+    def send(self, to, signature, types, arguments):
+        """Sign and mine one wallet transaction, with gas to spare over the estimate:
+        interest accrues between the estimate and the block that includes it."""
+        rpc, sender = self.fork.rpc, self.signer.address
+        data = calldata(signature, types, arguments)
+        estimate = rpc("eth_estimateGas", [{"from": sender, "to": to, "data": data}])
+        signed = self.signer.sign_transaction(
+            {
+                "chainId": chain_number(self.cell.chain),
+                "nonce": int(rpc("eth_getTransactionCount", [sender, "pending"]), 16),
+                "to": to_checksum_address(to),
+                "data": data,
+                "value": 0,
+                "gas": 2 * int(estimate, 16),
+                "gasPrice": int(rpc("eth_gasPrice"), 16),
+            }
+        )
+        rpc.wait_receipt(rpc("eth_sendRawTransaction", ["0x" + signed.raw_transaction.hex()]))
+
+    def open_debt(self, reserve_id, *collateral):
+        """Enable the given reserves as collateral and borrow `reserve_id`, as raw
+        transactions the binding of a command never saw."""
+        owner = self.wallet["address"]
+        for enabled in collateral:
+            self.spoke("setUsingAsCollateral(uint256,bool,address)", enabled, True, owner)
+        self.spoke("borrow(uint256,uint256,address)", reserve_id, BORROWED, owner)
 
 
 @pytest.fixture(params=CELLS)
@@ -177,79 +222,116 @@ def operations(result):
     return [item["operation"] for item in result["outcomes"]]
 
 
+def summary(result):
+    """What one executed command did: its steps in order, and whether it completed."""
+    return operations(result), result["completed"]
+
+
 def shares(result, moment, kind):
     return int(result[moment][f"{kind}_shares"])
 
 
+def refuses(desk, error, text, *arguments, **options):
+    """Preview a command that is refused, and return the refusal."""
+    with pytest.raises(error, match=text) as refused:
+        desk(*arguments, execute=False, **options)
+    return refused.value
+
+
+def borrow(desk, floor=FLOOR, **options):
+    return desk("borrow", BORROWED, reserve=desk.debt, floor=floor, **options)
+
+
 def supplied(desk, amount=COLLATERAL, reserve=None):
     result = desk("supply", amount, reserve=reserve)
-    assert operations(result) == ["approve", "supply"] and result["completed"]
+    assert summary(result) == (["approve", "supply"], True)
     return result
 
 
 def withdrawn(desk, reserve=None):
     result = desk("withdraw", reserve=reserve)
-    assert operations(result) == ["withdraw"] and result["completed"]
+    assert summary(result) == (["withdraw"], True)
     assert shares(result, "position_after", "supplied") == 0
+
+
+def repaid(desk, reserve, released):
+    """Repay one reserve in full: approve, repay, revoke, then one `collateral` step for
+    each reserve named in `released`."""
+    result = desk("repay", reserve=reserve)
+    assert summary(result) == (["approve", "repay", "revoke", *released], True)
+    assert shares(result, "position_before", "debt") > 0 == shares(result, "position_after", "debt")
+    return result
+
+
+# Refusals of the binding, read before any deployment exists.
+NO_COLLATERAL = "has supplied no collateral on this Spoke"
+BACKS_DEBT = "is collateral for the wallet's debt in reserve"
+ONE_DEBT = "serves one debt reserve per wallet and Spoke"
+# Refusals the connector raises when it plans a step.
+NOTHING_LEFT = "no remaining debt, allowance or collateral"
+BELOW_FLOOR = "projected account health is below"
+OWED_RESERVE = "observed exposure differs from owned supply"
 
 
 def test_a_debt_is_opened_and_closed_by_separate_commands(desk):
     """Borrow against supplied collateral, repay in full, then withdraw the collateral,
     each one command that adopts what the earlier ones left."""
-    with pytest.raises(ValueError, match="has supplied no collateral on this Spoke"):
-        desk("borrow", BORROWED, execute=False, reserve=desk.debt, floor=FLOOR)
+    refuses(desk, ValueError, NO_COLLATERAL, "borrow", BORROWED, reserve=desk.debt, floor=FLOOR)
     supplied(desk)
+    assert_opened(desk)
+    assert_the_floor_refuses_more(desk)
+    assert_held_while_indebted(desk)
+    repaid(desk, desk.debt, ["collateral"])
+    # The repayment released the collateral, and nothing is left for another one.
+    refuses(desk, ValueError, NOTHING_LEFT, "repay", reserve=desk.debt)
+    withdrawn(desk)
 
-    preview = desk("borrow", BORROWED, execute=False, reserve=desk.debt, floor=FLOOR)
-    # A supply is not collateral on a Spoke until the borrow enables it.
+
+def assert_opened(desk):
+    """A supply is not collateral on a Spoke until the borrow enables it."""
+    preview = borrow(desk, execute=False)
     assert preview["first_step"]["operation"]["kind"] == "collateral"
-    opened = desk("borrow", BORROWED, reserve=desk.debt, floor=FLOOR)
-    assert operations(opened) == ["collateral", "borrow"] and opened["completed"]
+    opened = borrow(desk)
+    assert summary(opened) == (["collateral", "borrow"], True)
     assert shares(opened, "position_before", "debt") == 0 < shares(opened, "position_after", "debt")
 
-    # The collateral is enabled now, so a borrow the floor refuses signs nothing.
-    with pytest.raises(DataError, match="projected account health is below") as refused:
-        desk("borrow", BORROWED, reserve=desk.debt, floor=UNREACHABLE)
-    assert refused.value.kind == "risk_limit"
-    assert_held_while_indebted(desk)
 
-    closed = desk("repay", reserve=desk.debt)
-    assert operations(closed) == ["approve", "repay", "revoke", "collateral"]
-    assert closed["completed"] and shares(closed, "position_after", "debt") == 0
-    # The repayment released the collateral, and nothing is left for another one.
-    with pytest.raises(ValueError, match="no remaining debt, allowance or collateral"):
-        desk("repay", execute=False, reserve=desk.debt)
-    withdrawn(desk)
+def assert_the_floor_refuses_more(desk):
+    """The collateral is enabled now, so a borrow the floor refuses signs nothing."""
+    with pytest.raises(DataError, match=BELOW_FLOOR) as refused:
+        borrow(desk, floor=UNREACHABLE)
+    assert refused.value.kind == "risk_limit"
 
 
 def assert_held_while_indebted(desk):
     """What the other commands do while the debt is open."""
-    with pytest.raises(ValueError, match="is collateral for the wallet's debt in reserve"):
-        desk("withdraw", execute=False)
+    refuses(desk, ValueError, BACKS_DEBT, "withdraw")
     # More collateral is always admitted: a supply never lowers the account's health.
     more = supplied(desk)
     assert shares(more, "position_before", "supplied") < shares(more, "position_after", "supplied")
-    with pytest.raises(ValueError, match="serves one debt reserve per wallet and Spoke"):
-        desk("borrow", BORROWED, execute=False, reserve=desk.cell.second, floor=FLOOR)
+    second = desk.cell.second
+    refuses(desk, ValueError, ONE_DEBT, "borrow", BORROWED, reserve=second, floor=FLOOR)
     # The connector binds one position per reserve, so the owed reserve takes no supply.
-    with pytest.raises(DataError, match="observed exposure differs from owned supply") as owed:
-        desk("supply", BORROWED, execute=False, reserve=desk.debt)
-    assert owed.value.kind == "ownership_mismatch"
+    owed = refuses(desk, DataError, OWED_RESERVE, "supply", BORROWED, reserve=desk.debt)
+    assert owed.kind == "ownership_mismatch"
+
+
+def refused_borrow(desk):
+    """A first borrow the floor refuses: its collateral step is mined, the borrow is not."""
+    result = borrow(desk, floor=UNREACHABLE)
+    assert summary(result) == (["collateral"], False)
+    assert result["refused"]["kind"] == "risk_limit"
+    assert shares(result, "position_after", "debt") == 0
 
 
 def test_a_first_borrow_the_floor_refuses_leaves_collateral_that_still_withdraws(desk):
     """The collateral is enabled before the borrow is projected against the floor."""
     supplied(desk)
-    refused = desk("borrow", BORROWED, reserve=desk.debt, floor=UNREACHABLE)
-    assert operations(refused) == ["collateral"] and not refused["completed"]
-    assert refused["refused"]["kind"] == "risk_limit"
-    assert shares(refused, "position_after", "debt") == 0
+    refused_borrow(desk)
     # A repayment with no debt releases the collateral the refused borrow enabled.
     released = desk("repay", reserve=desk.debt)
-    assert operations(released) == ["collateral"] and released["completed"]
-
-    again = desk("borrow", BORROWED, reserve=desk.debt, floor=UNREACHABLE)
-    assert operations(again) == ["collateral"] and again["refused"]["kind"] == "risk_limit"
+    assert summary(released) == (["collateral"], True)
+    refused_borrow(desk)
     # With no debt on the Spoke, enabled collateral withdraws as any supply does.
     withdrawn(desk)
 
@@ -261,14 +343,115 @@ def test_a_borrow_enables_every_supply_that_can_back_it(desk):
     for reserve in (desk.cell.second, desk.cell.inert):
         desk.fund(reserve, BORROWED)
         supplied(desk, BORROWED, reserve)
-    opened = desk("borrow", BORROWED, reserve=desk.debt, floor=FLOOR)
-    assert operations(opened) == ["collateral", "collateral", "borrow"] and opened["completed"]
+    assert summary(borrow(desk)) == (["collateral", "collateral", "borrow"], True)
     # A supply that is not collateral withdraws while the debt is open.
     withdrawn(desk, desk.cell.inert)
-    with pytest.raises(ValueError, match="is collateral for the wallet's debt in reserve"):
-        desk("withdraw", execute=False, reserve=desk.cell.second)
-    closed = desk("repay", reserve=desk.debt)
-    assert operations(closed) == ["approve", "repay", "revoke", "collateral", "collateral"]
-    assert closed["completed"]
+    refuses(desk, ValueError, BACKS_DEBT, "withdraw", reserve=desk.cell.second)
+    repaid(desk, desk.debt, ["collateral", "collateral"])
     withdrawn(desk, desk.cell.second)
     withdrawn(desk)
+
+
+def refused_by_the_connector(desk, config, request):
+    """Run a request the connector refuses when it plans the first step: the refusal is
+    the execution check's, not the binding's `ValueError`."""
+    with pytest.raises(DataError, match="is collateral and the account owes reserve") as refused:
+        desk.run(config, request)
+    assert refused.value.kind == "residual_debt"
+    # Nothing was signed, so no record is kept.
+    assert ax_actions.kept_records() == []
+
+
+def test_a_debt_opened_after_the_binding_holds_the_collateral_at_planning(desk):
+    """The deployment was bound while the wallet owed nothing. The connector reads the
+    account again when it plans the withdrawal, and refuses it."""
+    supplied(desk)
+    request = ActionRequest("withdraw")
+    bound_before = desk.deployment(request, desk.collateral)
+    assert summary(borrow(desk)) == (["collateral", "borrow"], True)
+    refused_by_the_connector(desk, bound_before, request)
+    # The same holds for a debt the wallet opened outside any command.
+    repaid(desk, desk.debt, ["collateral"])
+    bound_before = desk.deployment(request, desk.collateral)
+    desk.open_debt(desk.cell.second, desk.collateral)
+    refused_by_the_connector(desk, bound_before, request)
+    # A command bound now names the cause before any deployment exists.
+    refuses(desk, ValueError, BACKS_DEBT, "withdraw")
+
+
+def after_planning(act):
+    """An interrupt check that acts once, between the first plan and its signature."""
+    calls = []
+
+    @contextmanager
+    def interruptible():
+        def check():
+            calls.append(None)
+            if len(calls) == 2:
+                act()
+
+        yield check
+
+    return interruptible
+
+
+def signing_refusals(monkeypatch):
+    """Each refusal of the connector's release check at signing, as it is raised."""
+    seen = []
+    checks = aave_execution.current_release_checks
+
+    def recorded(backend, plan, block=None):
+        try:
+            checks(backend, plan, block)
+        except DataError as error:
+            seen.append((plan.operation.kind, error.kind))
+            raise
+
+    monkeypatch.setattr(aave_execution, "current_release_checks", recorded)
+    return seen
+
+
+def assert_nothing_signed(result):
+    """The refused withdrawal left no step, signed or mined, and the supply as it was."""
+    assert (result["outcomes"], result["completed"], "unresolved" in result) == ([], False, False)
+    assert result["refused"]["kind"] == "residual_debt"
+    assert shares(result, "position_after", "supplied") > 0
+
+
+def test_a_debt_opened_after_planning_refuses_the_withdrawal_at_signing(desk, monkeypatch):
+    """The plan was made and validated before the debt existed, and is not signed."""
+    supplied(desk)
+    seen = signing_refusals(monkeypatch)
+    opening = after_planning(partial(desk.open_debt, desk.debt, desk.collateral))
+    monkeypatch.setattr(ax_actions, "interruptible", opening)
+    result = desk("withdraw")
+    assert result["first_step"]["operation"]["kind"] == "withdraw"
+    assert seen[0] == ("withdraw", "residual_debt")
+    assert_nothing_signed(result)
+
+
+def test_each_of_two_debts_is_repaid_and_the_collateral_stays_until_the_last(desk):
+    second = desk.cell.second
+    supplied(desk)
+    assert borrow(desk)["completed"]
+    # The second debt is opened outside any command: a direct borrow refuses one.
+    desk.fund(second, 10 * BORROWED)
+    desk.open_debt(second)
+    repaid(desk, desk.debt, [])
+    # The collateral still backs the other debt.
+    refuses(desk, ValueError, f"wallet's debt in reserve {second} of this Spoke", "withdraw")
+    repaid(desk, second, ["collateral"])
+    withdrawn(desk)
+
+
+def test_a_debt_with_no_other_supply_is_repaid(desk):
+    """Supply and debt in one reserve, with nothing else on the Spoke to bind."""
+    owner, backing = desk.wallet["address"], 5 * BORROWED
+    token = erc20_address(desk.cell.borrowed, desk.cell.chain)
+    desk.send(token, "approve(address,uint256)", ("address", "uint256"), (desk.cell.spoke, backing))
+    desk.spoke("supply(uint256,uint256,address)", desk.debt, backing, owner)
+    desk.open_debt(desk.debt, desk.debt)
+    closed = repaid(desk, desk.debt, [])
+    assert shares(closed, "position_after", "supplied") > 0
+    # The reserve's own collateral flag stands, and with nothing owed it withdraws.
+    withdrawn(desk, desk.debt)
