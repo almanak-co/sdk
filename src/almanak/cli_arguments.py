@@ -73,7 +73,7 @@ def public_rpc_option(group) -> None:
     group.add_argument(
         "--public-rpc",
         choices=sorted(PUBLIC_RPC),
-        help=f"a public endpoint that needs no key, for reads and previews only ({served})",
+        help=f"a public endpoint that needs no key, for reads and direct actions ({served})",
     )
 
 
