@@ -78,6 +78,11 @@ def recorded(reference_strategy):
 
 def pytest_addoption(parser):
     parser.addoption("--fork-env", type=Path, help="explicit provider env file for fork proofs")
+    parser.addoption(
+        "--live-public",
+        action="store_true",
+        help="collect tests/live: `almanak ax` reads against public mainnet endpoints",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
