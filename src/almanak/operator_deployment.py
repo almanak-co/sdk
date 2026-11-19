@@ -16,6 +16,15 @@ def supports_operator(checkpoint_type) -> bool:
     return "operator" in getattr(checkpoint_type, "model_fields", {})
 
 
+def adopts(before, after) -> bool:
+    """Whether this update is an operator deployment's initialization.
+
+    It is the one update that may set ownership without execution evidence: the
+    deployment adopts the position its verified baseline observations state.
+    """
+    return is_operator(before) and not before.initialized and after.initialized
+
+
 def validate_origin(state) -> None:
     if state.operator and state.strategy is not None:
         raise ValueError("an operator deployment retains no strategy")

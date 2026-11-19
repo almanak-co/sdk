@@ -24,6 +24,7 @@ plugins:
           - support.md
         Operate:
           - operating.md
+          - agents.md
         Additional Guides:
           - code.md
           - qa.md

@@ -29,7 +29,7 @@ def main() -> int:
     try:
         return dispatch(args)
     except KeyboardInterrupt:
-        print("Interrupted; the checkpoint is preserved for resume or teardown.", file=sys.stderr)
+        print(interrupted_message(args), file=sys.stderr)
         return 130
     except Exception as exc:
         document = error_document(exc)
@@ -37,6 +37,13 @@ def main() -> int:
             raise
         print(json.dumps(document), file=sys.stderr)
     return 1
+
+
+def interrupted_message(args) -> str:
+    if str(getattr(args, "product", "")).startswith("operator-"):
+        # A direct action is never resumed; only the chain says what it did.
+        return "Interrupted; read the position before acting again."
+    return "Interrupted; the checkpoint is preserved for resume or teardown."
 
 
 def error_document(exc: Exception) -> dict | None:
@@ -118,6 +125,14 @@ def dispatch(args) -> int:
         from almanak.markets import command as markets
 
         return markets(args)
+    if args.product == "operator-action":
+        from almanak.ax_actions import command as operator_action
+
+        return operator_action(args)
+    if args.product == "operator-recover":
+        from almanak.ax_actions import recover_command
+
+        return recover_command(args)
     if args.product.startswith("ax-"):
         from almanak.ax import command
 

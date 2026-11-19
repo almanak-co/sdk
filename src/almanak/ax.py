@@ -40,7 +40,7 @@ from almanak.gateway.evm import native_asset
 from almanak.gateway.hypercore_info import GatewayInfo, HyperCoreInfo
 from almanak.gateway.observation_gateway import gateway_reader
 from almanak.gateway.onchain_lookup import GatewayLookups, VendorLookups
-from almanak.gateway.read_endpoints import verified_reader
+from almanak.gateway.read_endpoints import public_reader, verified_reader
 from almanak.models import ZERO_ADDRESS, Account, Chain, Model
 
 # Request model per (product, connector). The parser's --connector choices in
@@ -299,13 +299,15 @@ def lookup_source(args):
     # gateway, which keeps the vendor key in its own process.
     if args.env_file is not None:
         return VendorLookups(args.env_file)
+    if public_rpc(args) is not None:
+        return VendorLookups(None)
     return GatewayLookups(args.gateway_url, read_token(args.gateway_auth_file))
 
 
 def info_source(args):
     # The same transport as the reads. Hyperliquid's API needs no key, so an env file
     # only selects querying it from this process instead of through the gateway.
-    if args.env_file is not None:
+    if args.env_file is not None or public_rpc(args) is not None:
         return HyperCoreInfo()
     return GatewayInfo(args.gateway_url, read_token(args.gateway_auth_file))
 
@@ -315,9 +317,16 @@ def observation_reader(args, chain: ChainId) -> EthereumReader:
     # gateway, which keeps the credential in its own process.
     if args.env_file is not None:
         return verified_reader(chain, args.env_file)
+    name = public_rpc(args)
+    if name is not None:
+        return public_reader(chain, name)
     if args.gateway_auth_file is None:
         raise ValueError("--gateway-url requires --gateway-auth-file")
     return gateway_reader(chain, args.gateway_url, args.gateway_auth_file)
+
+
+def public_rpc(args) -> str | None:
+    return getattr(args, "public_rpc", None)
 
 
 def mainnet(chain_id: ChainId) -> Chain:

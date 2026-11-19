@@ -52,6 +52,21 @@ def validate_observed_ownership(state, observed):
         validate_owned(owned, item)
 
 
+def adopt_ownership(owned, observed):
+    """Ownership of each position as its observation states it, for an operator deployment."""
+    return tuple(
+        Ownership(
+            target=item.target,
+            shares=seen.position.supplied_shares,
+            drawn_shares=seen.drawn_shares,
+            premium_shares=seen.premium_shares,
+            premium_offset_ray=seen.premium_offset_ray,
+            collateral_enabled=seen.collateral_enabled,
+        )
+        for item, seen in zip(owned, observed, strict=True)
+    )
+
+
 def apply_share_movement(owned, operation: SupplyOperation | WithdrawOperation, shares):
     delta = shares if isinstance(operation, SupplyOperation) else -shares
     return tuple(
@@ -130,6 +145,7 @@ class AaveLifecycle:
     validate_owned = staticmethod(validate_observed_ownership)
     commit_owned = staticmethod(commit_ownership)
     validate_closure = staticmethod(validate_closure)
+    adopt = staticmethod(adopt_ownership)
 
     @staticmethod
     def increases_exposure(intent):

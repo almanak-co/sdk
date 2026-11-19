@@ -29,6 +29,7 @@ from almanak.models import Chain, Model, SafeRoles
 from almanak.operator_deployment import (
     accounting_blocked,
     accounting_refusal,
+    adopts,
     is_operator,
     request_executed,
 )
@@ -752,7 +753,12 @@ class GatewayService:
         from almanak.external_effects import changed
 
         expected = self.connector.lifecycle.ownership(before)
-        if changed(before, after):
+        if adopts(before, after):
+            # An operator deployment adopts the position its baseline states; the
+            # baseline itself is verified against the chain below.
+            adopted = self.connector.lifecycle.adopt(before.owned, after.baseline)
+            expected = {"owned": adopted}
+        elif changed(before, after):
             from almanak.gateway.external_effects import verified_commit
 
             verified = verified_commit(self.adapter, before, after)

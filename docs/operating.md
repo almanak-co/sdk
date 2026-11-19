@@ -372,6 +372,13 @@ the read-only gateway and never opens signing files. EOA funds are their own
 submitters. Safe funds use delegated Roles operators; owners remain distinct and
 are never a fallback signer.
 
+`wallet create` asks for the keystore password twice. Without a terminal, name
+the password with `--password-file` (an operator-owned private file, which is not
+copied), or pass `--generate-password` to have one generated into
+`keystore-password` beside the keystore. Either way the printed result and
+`wallet.json` name the file as `password_file`, so a later command can unlock the
+keystore without a terminal. The result never contains the password or the key.
+
 Encrypted keystores must match the named submitters. Interactive passwords are
 passed ephemerally and are not saved in manifests. An explicit private
 `password_file` in the operator signing section is an operator choice. A gateway
@@ -412,6 +419,119 @@ assumptions. Custom dashboard failure remains visible without hiding the report.
 Explicit process management remains under `service gateway`, `service fork`,
 `service start`, `service resume`, `service status` and `service teardown`.
 `permissions generate|verify` uses an authenticated gateway.
+
+### Operator actions
+
+`almanak ax supply` and `almanak ax withdraw` run one action for one wallet in one
+process, with no strategy, workspace or gateway process to start:
+
+```bash
+almanak ax supply --connector aave_v4 --chain eip155:1 \
+  --spoke 0x94e7a5dcbe816e498b89ab752661904e2f56c485 --reserve-id 0 \
+  --amount 10000000000000000 --wallet /private/operator --env-file /private/providers.env \
+  --max-gas-price-wei 5000000000 --max-transaction-fee 5000000000000000
+```
+
+Without `--execute` the command resolves the market, reads the wallet's current
+position, plans the first step and prints it; nothing is signed, and the keystore is
+not opened. With `--execute` it signs and sends each step, waits for its receipt and
+prints the outcomes with the position before and after. A supply is an approval
+followed by the supply, so the preview shows the approval.
+
+An executed action reports `completed`, true only when the whole request finished,
+and the command exits 1 when it is false. A supply is not atomic: its approval can
+be mined and the supply then be refused, for example on a fee quote above the
+ceiling, or revert. The position is then unchanged and the allowance stays on chain;
+`outcomes` lists the steps that ran and `refused` names the refusal. A failure that
+is not a refusal prints the steps already sent as one
+`{"event": "steps_sent", "outcomes": ...}` line on standard error before its error.
+A step that was signed and has no reconciled outcome yet is reported apart from
+`outcomes`, as `unresolved` with its operation and transaction hash; it may or may
+not have been sent, and `executed` is true for it. A first step refused at planning
+fails the command with that refusal and signs nothing.
+
+Standard output carries one JSON document, the result. Events and the error are
+JSON lines on standard error. While a signed step is unresolved, a transient
+provider or storage failure is held and asked again instead of ending the command.
+`position_before` and `position_after` are share counts; `ax lending-position`
+reports the amount in assets. An outcome lists `accounting_issues` when the step
+does not explain a wallet movement.
+
+A withdrawal of a supply that is enabled as collateral is refused with
+`residual_collateral`, also when the account has no debt. No direct command
+disables collateral.
+
+A supply plans against the wallet's allowance to the spoke: zero, or exactly the
+requested amount left by an earlier approval. Any other allowance is refused with
+"supply allowance differs from the requested amount". Retry a half-finished supply
+with the same amount, or clear the allowance first. A withdrawal clears it: when an
+allowance remains, the withdrawal is followed by a revocation, and with nothing
+supplied the revocation is its only step.
+
+Each fee ceiling applies to one transaction, so a supply, or a withdrawal that also
+revokes, can spend up to twice `--max-transaction-fee`. The quoted gas price is
+twice the base fee plus the tip, so `--max-gas-price-wei` refuses a step once the
+base fee passes about half of it. The command also uses a gas limit of at most
+1,000,000 with a 25% buffer over the estimate, and reads no older than 120 seconds.
+
+| Option | Meaning |
+| --- | --- |
+| market selection | The same flags or `--config` file as `ax lending-reserve`. |
+| `--amount` | Base units of the reserve asset. `withdraw` takes none: it withdraws the whole supplied balance. |
+| `--wallet` | The directory `almanak wallet create` wrote, under any account name. The keystore is unlocked with the recorded `password_file` or by asking. |
+| `--env-file` | The provider key (`ALCHEMY_API_KEY`). Required with `--execute`. |
+| `--public-rpc` | A named public endpoint instead of `--env-file`, for a preview only. |
+| `--max-gas-price-wei`, `--max-transaction-fee` | Required ceilings; a step quoted above either is refused. |
+
+Operator actions support Aave V4 with an EOA wallet. Safe/Roles accounts are not
+supported.
+
+The action runs through the same planning, simulation, signing and receipt
+reconciliation as a strategy's, as an operator deployment that exists only for the
+command: its journal is a private record directory under
+`~/.local/state/almanak-v3/actions/`, removed when the command ends. The deployment
+adopts the position the wallet already holds, read at the start, so a later command
+sees what an earlier one did.
+
+Nothing is kept between finished commands, so an interrupted command is not
+resumed. If a command fails, is interrupted or receives SIGTERM or SIGHUP while a
+signed step is unresolved, its record is kept. A command that still prints its
+result names the record there as `record_kept`; one that fails prints
+`{"event": "record_kept", "path": ...}` on standard error. A process that is killed
+outright prints nothing, so the absence of both does not mean nothing was kept.
+Only one action runs for a wallet at a time, previews included: a second one
+started meanwhile is refused the same way and can be run once the first exits.
+While a record
+holds a signed step the wallet stays claimed and later actions for it are refused
+with "fund is already claimed". Checking the transaction on chain does not release
+the claim; `almanak ax recover` does. A wallet a running strategy uses is refused
+the same way.
+
+```bash
+almanak ax recover
+almanak ax recover --record ~/.local/state/almanak-v3/actions/<record> --env-file /private/providers.env
+```
+
+Without `--record` it lists the kept records: each one's `path`, `chain`, `account`
+and `unresolved` step. With `--record` it resolves that record's signed step: from
+its receipt when the transaction was mined, otherwise by sending the same signed
+bytes again and waiting. It plans and signs nothing, and needs no wallet. Once the
+step has its outcome, whatever the request had not yet signed is dropped
+(`discarded_request`), the record is removed and the claim released; state the
+action again against the position as it now is. A step that cannot be resolved
+leaves `resolved` false with the reason under `refused`, keeps the record and exits
+1. A record a running command still uses is refused.
+
+A record with no signed step holds nothing worth keeping. When a command is killed
+before it signs, the next operator action removes that record and releases its
+claim, once it can read the record and see that nothing is signed. That includes a
+journal with no checkpoint yet, left by a command killed while creating it. A
+record that cannot be read at all is kept with its claim, and `record_kept` can
+name such a record. Do not kill a command that runs with `--execute`: it waits for each receipt
+without a time limit, and stops between steps on SIGINT, SIGTERM or SIGHUP.
+
+An action has no amount ceiling: it is bounded by the wallet's balance and the two
+fee ceilings.
 
 ### Market resolution
 
@@ -465,14 +585,28 @@ provider still runs at another block is refused as `provider_context`; an
 explicit number is pinned as given.
 
 Each observation reads through exactly one transport: `--env-file` resolves the
-provider credentials in the calling process, or `--gateway-url` with
+provider credentials in the calling process, `--public-rpc` names a public endpoint
+that needs no key, or `--gateway-url` with
 `--gateway-auth-file` reads through `service read-gateway`, a read-only
 observation gateway that keeps the credentials in its own process and serves
 only whitelisted JSON-RPC reads and the discovery lookups below over
 authenticated loopback. Sessions that must not receive a provider key use
-the gateway transport. Without either flag, `ax` reads through the gateway named
+the gateway transport. Without a flag, `ax` reads through the gateway named
 by `ALMANAK_AX_GATEWAY_URL` and `ALMANAK_AX_GATEWAY_AUTH_FILE`; a flag always wins, and
-with neither the command is refused. The
+with neither the command is refused. A public endpoint is never chosen for the
+caller.
+
+`--public-rpc <name>` reads through one named public endpoint; `--help` lists the
+names and the chains each serves. It is for `ax` reads and for previews of
+`ax supply` and `ax withdraw`. Before any read the endpoint must report the chain's
+number and its pinned genesis block and a head no older than 120 seconds; otherwise
+the command is refused with `chain_mismatch` or `stale`. One endpoint serves a
+command, and a failure fails the read: nothing falls back to another endpoint.
+Nobody answers for a public endpoint. It gives no promise of availability, archive
+state or wide log ranges, it rate limits without notice, and its operator sees the
+addresses a command reads. `--execute`, `ax recover`, strategy runs, forks, checks
+and backtests do not accept one and need a provider key or an operator RPC URL. A
+lookup that uses a vendor key is refused when it is made. The
 inline `pool-price` key names a pool on the reviewed deployment for the chain,
 hookless unless `--hooks` names a reviewed hook (whose dynamic-fee profiles take
 `--fee 8388608`). Use each command's `--help` for the complete argument list.

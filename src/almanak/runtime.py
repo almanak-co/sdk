@@ -252,9 +252,10 @@ class Runtime:
 
     def __init__(
         self,
-        endpoint: str,
-        auth_file: Path,
+        endpoint: str | None = None,
+        auth_file: Path | None = None,
         *,
+        gateway: GatewayClient | None = None,
         create=None,
         strategy: StrategyDefinition | None = None,
         expected=None,
@@ -262,9 +263,15 @@ class Runtime:
         clock: Callable[[], datetime] = utc_now,
         export: Path | None = None,
     ):
-        worker_command(key_file=auth_file)
         self.export = export
-        self.gateway: GatewayClient | ScopedGateway = GatewayClient(endpoint, auth_file)
+        # A caller that holds the gateway service in its own process passes its client;
+        # every other coordinator reaches the gateway over authenticated loopback.
+        if gateway is None:
+            if endpoint is None or auth_file is None:
+                raise ValueError("gateway URL and authentication file are required")
+            worker_command(key_file=auth_file)
+            gateway = GatewayClient(endpoint, auth_file)
+        self.gateway: GatewayClient | ScopedGateway = gateway
         self.chain_availability: tuple[ChainAvailability, ...] = ()
         self.live_bindings: tuple | None = None
         # Per-chain copies keep this pointer, so the declared series are read once.

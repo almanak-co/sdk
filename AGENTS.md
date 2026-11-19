@@ -230,6 +230,15 @@ independently.
   inside trusted provider resolution and out of author files, logs and retained
   evidence. Verify endpoint chain identity and required archive access; do not
   substitute providers on failure.
+- Accepted: a named public endpoint (`--public-rpc`) serves `almanak ax` reads
+  and direct-action previews without a key. The caller names it; it is never a
+  default and never a fallback. The reviewed list is in code, covers Ethereum
+  and Avalanche, and excludes HyperEVM. Each reader verifies the chain number,
+  the pinned genesis block and a recent head. Execution, `ax recover`, strategy
+  runs, forks, checks and backtests refuse it.
+- Proposed, not accepted: execution through a public endpoint, a second
+  endpoint as a witness for pinned blocks, and built-in request rates for
+  public endpoints.
 - An omitted lending price source is resolved once, retained as evidence and
   frozen. A later change halts as a pin does, and restart re-resolves.
 - Vendor discovery names candidates, never identity. A token is verified by its
@@ -336,11 +345,23 @@ independently.
   `ALMANAK_AX_GATEWAY_AUTH_FILE`. `--block` defaults to `finalized`.
 - `ax resolve`, `ax dex-pools` and `ax lending-markets` name candidates for
   authoring under the discovery rules above.
-- Operator actions that do not come from a strategy run through durable
-  operator deployments. Their authority is an operator-managed action policy
-  compiled into ordinary capabilities, with cumulative budgets in durable
-  state. They use the shared runtime, planning, signing and recovery path and
-  preview the plan before signing.
+- Accepted: operator actions that do not come from a strategy are direct
+  commands (`ax supply`, `ax withdraw`), each one process with no workspace,
+  gateway process or state kept between commands. Inside the command they run
+  as an operator deployment through the shared planning, simulation, signing
+  and reconciliation path, with the gateway service in the same process. The
+  deployment adopts the position the wallet holds at the start. Without
+  `--execute` nothing is signed.
+- A direct command is not resumed. A signed step left unresolved keeps its
+  record and the wallet's claim, which refuses later actions for that wallet.
+  `ax recover` resolves the signed step from its receipt or by sending the
+  signed bytes again, drops what the request had not signed, and releases the
+  claim; it plans and signs nothing. Records live in durable local state; one
+  with no signed step is removed, with its claim, by the next direct command.
+  An unreadable record is kept.
+- Operator actions have no amount ceiling or cumulative budget; the required
+  fee ceilings and the wallet balance bound them. An operator-managed action
+  policy is proposed, not accepted.
 
 ## Check output and dashboards
 

@@ -22,12 +22,32 @@ class OperatorRuntime(Runtime):
     operator = True
     # Seconds between checks for an unmined signed step.
     poll = 1.0
+    # The latest refusal that dropped the active request's plan; nobody re-decides it.
+    refused: DataError | None = None
+
+    def count_replan(self, exc, *arguments, **options):
+        self.refused = exc
+        super().count_replan(exc, *arguments, **options)
 
     def decide(self, state):
         """No strategy decides; an idle deployment waits for the next operator request."""
         if not state.initialized:
             return self.initialize(state, self.gateway.observe())
         return True
+
+    def initialize(self, state, observed):
+        """Adopt the account's existing position instead of requiring a pristine fund.
+
+        An operator acts on what the account holds now. The gateway re-reads the baseline
+        and accepts only the ownership that baseline states.
+        """
+        owned = self.connector.lifecycle.adopt(state.owned, observed)
+        self.journal.update(
+            lambda current: current.model_copy(
+                update={"initialized": True, "baseline": observed, "owned": owned}
+            )
+        )
+        return False
 
     def deliver_outcome(self, state):
         # There is no strategy transition to apply: delivery only acknowledges the outcome.
@@ -44,17 +64,19 @@ class OperatorRuntime(Runtime):
             self.fault("transition", outcome)
         return False
 
-    def recover(self):
+    def recover(self, interrupt=lambda: None):
         """Resolve signed steps and deliver recorded outcomes; never plan or sign a new one.
 
         A request that was admitted but not confirmed stays retained and unexecuted:
-        the caller resumes or discards it explicitly.
+        the caller resumes or discards it explicitly. `interrupt` is called before every
+        step and may raise to stop.
         """
         while True:
+            interrupt()
             state = self.journal.load()
             if state.mode == "closed" or not self.retained(state):
                 return state
-            self.tick()
+            self.held_tick()
             self.wait(state)
 
     @staticmethod
@@ -121,6 +143,13 @@ class OperatorRuntime(Runtime):
         if state.plan is None:
             self.prepare_decision(state)
             state = self.journal.load()
+        if state.plan is None:
+            # Preparation refused the request and dropped it; a strategy would decide
+            # again, an operator has to be told why.
+            refused = self.refused
+            if refused is None:
+                raise DataError("plan_refused", "the request was refused during planning")
+            raise DataError(refused.kind, f"the request was refused during planning: {refused}")
         return state.plan
 
     def discard(self):
@@ -138,15 +167,42 @@ class OperatorRuntime(Runtime):
             )
         )
 
-    def execute(self):
-        """Run the admitted request to its outcome; returns the outcomes it produced."""
+    def execute(self, interrupt=lambda: None):
+        """Run the admitted request to its outcome; returns the outcomes it produced.
+
+        `interrupt` is called before every step and may raise to stop, so a stop
+        requested while waiting on a signed step is honoured before anything more is
+        planned, signed or sent. The journal keeps whatever was signed.
+
+        A transient failure while a signed step is unresolved is held and asked again:
+        giving up there would leave a sent transaction without its outcome over one
+        failed read.
+        """
         state = self.journal.load()
         if state.decision is None and not self.retained(state):
             raise ValueError("no operator request is admitted")
         before = len(state.outcomes)
-        while not self.tick():
+        while True:
+            interrupt()
+            if self.held_tick():
+                break
             self.wait(self.journal.load())
         return self.journal.load().outcomes[before:]
+
+    def held_tick(self) -> bool:
+        """One tick; a passing failure while a signed step waits is not an ending."""
+        try:
+            return self.tick()
+        except DataError as exc:
+            if not self.holds(exc):
+                raise
+            return False
+
+    def holds(self, exc: DataError) -> bool:
+        """Whether a failure is a passing one met while a signed step waits."""
+        if not (exc.transient or exc.kind == "gateway_unavailable"):
+            return False
+        return self.journal.load().pending is not None
 
     def finish(self):
         """Close the deployment once every obligation it owns is verifiably gone."""

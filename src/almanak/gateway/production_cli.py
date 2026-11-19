@@ -75,7 +75,12 @@ def validate_launch(args, config):
 def command(args):
     if args.product == "wallet-create":
         name = TypeAdapter(Name).validate_python(args.account)
-        result = create_wallet(args.output, name)
+        result = create_wallet(
+            args.output,
+            name,
+            password_file=args.password_file,
+            generate_password=args.generate_password,
+        )
     else:
         result = preflight(args.config, args.env_file)
     print(json.dumps(result, indent=2))

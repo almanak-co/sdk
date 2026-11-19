@@ -63,5 +63,6 @@ does define rather than reopening the assistant.
 runs DeFi actions such as swaps, while this SDK's `ax` is read-only protocol
 observations (`pool`, `pool-price`, `lending-reserve`, `lending-position`,
 `perp-position`, `perp-markets`, `balance`), read through `--env-file` or a
-`service read-gateway` sidecar. V2 `ax` command lines, such as
-`almanak ax swap`, are rejected by the SDK parser.
+`service read-gateway` sidecar, plus `ax supply` and `ax withdraw`, which preview
+or execute one [operator action](operating.md#operator-actions). V2 `ax` command
+lines, such as `almanak ax swap`, are rejected by the SDK parser.
