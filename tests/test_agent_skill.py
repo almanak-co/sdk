@@ -91,17 +91,24 @@ def test_every_refusal_the_skill_names_is_text_the_sdk_can_print():
         assert any(message in literal for literal in literals), message
 
 
-def test_reads_and_previews_take_either_transport_and_recovery_takes_the_key():
-    """A first run needs no key: only the commands that send anything name the env file."""
+def test_every_chain_command_runs_on_either_transport():
+    """Nothing needs a provider key: each command takes the public endpoint or the key."""
     for line in commands():
         if "--help" in line or line.startswith("almanak wallet "):
             continue
         if line.startswith("almanak ax recover"):
-            assert "<transport>" not in line
-        else:
-            assert "<transport>" in line and "--env-file" not in line, line
+            # Recovery uses the provider its record names.
+            assert "<transport>" not in line and "--env-file" not in line, line
+            continue
+        assert "<transport>" in line and "--env-file" not in line, line
         keyed = line.replace("<transport>", "--env-file .env")
         parse_validated(build_parser(), filled(keyed))
+
+
+def test_the_skill_never_asks_for_a_provider_key():
+    text = " ".join(SKILL.read_text().split())
+    assert "never ask the user for a provider key" in text
+    assert "--execute needs --env-file" not in text
 
 
 def test_the_agent_creates_its_wallet_before_any_command_needs_an_address():

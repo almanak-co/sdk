@@ -8,6 +8,12 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Changed
+- `ax supply` and `ax withdraw` execute through a named public endpoint
+  (`--public-rpc`), so a direct action needs no provider key. `ax recover` uses the
+  endpoint its record's action ran on and takes `--env-file` only for a record that
+  used a provider key.
+
 ## [3.2.0] - 2026-11-19
 
 ### Added

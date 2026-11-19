@@ -231,14 +231,17 @@ independently.
   evidence. Verify endpoint chain identity and required archive access; do not
   substitute providers on failure.
 - Accepted: a named public endpoint (`--public-rpc`) serves `almanak ax` reads
-  and direct-action previews without a key. The caller names it; it is never a
-  default and never a fallback. The reviewed list is in code, covers Ethereum
-  and Avalanche, and excludes HyperEVM. Each reader verifies the chain number,
-  the pinned genesis block and a recent head. Execution, `ax recover`, strategy
-  runs, forks, checks and backtests refuse it.
-- Proposed, not accepted: execution through a public endpoint, a second
-  endpoint as a witness for pinned blocks, and built-in request rates for
-  public endpoints.
+  and direct actions, previewed, executed or recovered, without a provider key.
+  The caller names it; it is never a default and never a fallback. The reviewed
+  list is in code, covers Ethereum and Avalanche, and excludes HyperEVM. Each
+  reader verifies the chain number, the pinned genesis block and a recent head.
+  Strategy runs, forks, checks and backtests refuse it.
+- Accepted risk: a direct action executed through a public endpoint signs what
+  that one endpoint's reads resolve, including the market's contract, and the
+  endpoint's operator sees each transaction before it is mined. A false report
+  can lose up to the amount of the action. A second endpoint as a witness was
+  considered and declined.
+- Proposed, not accepted: built-in request rates for public endpoints.
 - An omitted lending price source is resolved once, retained as evidence and
   frozen. A later change halts as a pin does, and restart re-resolves.
 - Vendor discovery names candidates, never identity. A token is verified by its

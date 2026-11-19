@@ -29,8 +29,10 @@ ALCHEMY_NETWORKS = {
 
 # Public endpoints that need no key, by the name a command selects them with. One named
 # endpoint serves a command; nothing falls back to another. They serve `almanak ax`
-# reads and action previews only: none promises availability, archive state or wide
-# log ranges, and each operator sees the addresses a command reads.
+# reads and direct actions only: none promises availability, archive state or wide
+# log ranges, and each operator sees the addresses a command reads and the
+# transactions it sends. Nobody answers for what one reports, and a direct action
+# signs what its reads resolve: that risk is the caller's when they name one.
 PUBLIC_RPC: dict[str, dict[ChainId, str]] = {
     "publicnode": {
         ChainId("eip155:1"): "https://ethereum-rpc.publicnode.com",
@@ -75,7 +77,7 @@ def provider_endpoint(provider: Provider, env_file: Path) -> str:
     if isinstance(provider, PublicProvider):
         # Everything that resolves an endpoint here executes, forks or collects history.
         raise ValueError(
-            "a public endpoint serves only `almanak ax` reads and action previews; "
+            "a public endpoint serves only `almanak ax` reads and direct actions; "
             "this needs a provider key or an operator RPC URL"
         )
     values = dotenv_values(env_file, interpolate=False)
