@@ -22,6 +22,11 @@ its changelog is on the `v2` branch.
   has borrowed, and every leg it holds in a Comet or a Morpho market. An action the
   protocol would check against a health floor is refused while the wallet has debt
   there, and the refusal says so.
+- `ax borrow`, `ax repay` and `ax collateral`, and an optional `--amount` on
+  `ax withdraw` and `ax repay`, for the forms each lending connector serves.
+  `--min-health-factor` states the lowest health factor a projected action may leave
+  the account with: it is required to borrow, and for any other projected action
+  while the wallet has debt in the venue. No floor can refuse a repayment.
 - `--public-rpc` serves `almanak ax` reads on Base, Arbitrum, BNB, Optimism, Polygon and
   Robinhood beside Ethereum and Avalanche. `drpc` adds Base, Optimism, Polygon and
   Robinhood, and four chain operators' own endpoints are named `base`, `arbitrum`,
@@ -55,6 +60,10 @@ its changelog is on the `v2` branch.
   Avalanche resolves with `ax recover --record <record> --public-rpc publicnode`.
 
 ### Fixed
+- `ax withdraw` on Aave V4 refuses a reserve that backs the wallet's open debt on the
+  Spoke. It was held back only by the Spoke's own limit of a health factor of 1,
+  while the documentation said every withdrawal of collateral was refused. A
+  withdrawal of collateral with no debt open works, and the documentation says so.
 - The `--public-rpc` help no longer says the endpoint is for reads and previews only:
   direct actions execute through it.
 

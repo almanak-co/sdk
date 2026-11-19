@@ -383,6 +383,13 @@ independently.
   the account uses as collateral or has borrowed, every leg held in a Comet or a
   Morpho market. Never relax a connector's ownership or risk check for an
   operator deployment; bind what the check needs, or refuse with the cause.
+- A direct action a connector projects against a health floor takes the
+  operator's `--min-health-factor`, one floor for the wallet's whole position in
+  the venue. It is required to borrow, and for any other projected action while
+  the wallet has debt there. A repayment is never projected: where a connector's
+  configuration demands a floor beside repay authority, the lowest valid one is
+  stated, so no floor can refuse a repayment. Never describe the floor as
+  on-chain enforcement.
 - Declare a direct action on a cell only after its fork rehearsal passed there.
   Morpho Blue on HyperEVM declares none: the provider runs head-pinned reads at
   a later block, which the reader refuses.
