@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from almanak.caip import ChainId
 from scripts.live_qa.cli import Invocation, Run
 
 SPEND_ENV = "ALMANAK_QA_SPEND_REAL_FUNDS"
@@ -38,7 +39,7 @@ WARNING = """\
 class WriteMarket:
     """A reviewed Aave V4 market the write check may use, with its size limit."""
 
-    chain: str
+    chain: ChainId
     spoke: str
     reserve_id: int
     symbol: str
@@ -56,8 +57,8 @@ class FeeLimit:
     transaction_fee: int
 
 
-ETHEREUM = "eip155:1"
-AVALANCHE = "eip155:43114"
+ETHEREUM = ChainId("eip155:1")
+AVALANCHE = ChainId("eip155:43114")
 GWEI = 10**9
 
 MARKETS: dict[str, WriteMarket] = {
@@ -76,7 +77,7 @@ MARKETS: dict[str, WriteMarket] = {
 }
 
 # A ceiling above these is refused: a QA round trip is never worth more gas than this.
-FEE_LIMITS: dict[str, FeeLimit] = {
+FEE_LIMITS: dict[ChainId, FeeLimit] = {
     ETHEREUM: FeeLimit(gas_price=100 * GWEI, transaction_fee=2 * 10**16),
     AVALANCHE: FeeLimit(gas_price=200 * GWEI, transaction_fee=2 * 10**17),
 }
@@ -98,10 +99,9 @@ class WriteRequest:
 
 
 def environment_gates(environment: Mapping[str, str]) -> list[str]:
+    # Present with any value, an empty one included: the gate fails closed.
     refusals = [
-        f"{name} is set: the write check never runs in CI"
-        for name in CI_ENV
-        if environment.get(name)
+        f"{name} is set: the write check never runs in CI" for name in CI_ENV if name in environment
     ]
     if environment.get(SPEND_ENV) != "1":
         refusals.append(f"{SPEND_ENV}=1 is required: this check spends real funds")
@@ -137,7 +137,11 @@ def wallet_gates(request: WriteRequest, interactive: bool) -> list[str]:
 
 def output_gates(output: Path | None) -> list[str]:
     """A report is never written over an earlier run's, which may hold transaction hashes."""
-    if output is not None and output.is_dir() and any(output.iterdir()):
+    if output is None or not (output.exists() or output.is_symlink()):
+        return []
+    if not output.is_dir():
+        return [f"--output {output} is not a directory; name a new output directory"]
+    if any(output.iterdir()):
         return [f"--output {output} is not empty; use a new output directory"]
     return []
 
@@ -212,7 +216,7 @@ def confirmation_phrase(request: WriteRequest) -> str:
 def action(request: WriteRequest, name: str, *, execute: bool) -> tuple[str, ...]:
     """The `almanak ax supply` or `ax withdraw` command for the request's market."""
     market = MARKETS[request.market or ""]
-    arguments = ["ax", name, "--connector", "aave_v4", "--chain", market.chain]
+    arguments = ["ax", name, "--connector", "aave_v4", "--chain", str(market.chain)]
     arguments += ["--spoke", market.spoke, "--reserve-id", str(market.reserve_id)]
     if name == "supply":
         arguments += ["--amount", str(request.amount)]
@@ -292,10 +296,18 @@ class WriteCheck:
 
     def round_trip(self) -> str | None:
         """Supply, then withdraw everything. Returns what went wrong, or None."""
-        if not completed(self.step("supply", "supply", execute=True)):
+        supply = self.step("supply", "supply", execute=True)
+        if not completed(supply):
             return (
                 "the supply did not complete. Do not run this again: read `outcomes` and"
                 " `refused` above, then `almanak ax recover` if a record was kept"
+            )
+        if not holds_nothing(supply.output.get("position_before")):
+            # The supply adopted what the wallet held when it ran, after the preview.
+            return (
+                "the wallet's position changed between the preview and the supply, so the"
+                " withdrawal was not run: it would withdraw more than this check supplied."
+                " THE SUPPLIED AMOUNT IS STILL IN THE MARKET, with what was there before"
             )
         if not planned(self.step("withdraw preview", "withdraw", execute=False)):
             return (
@@ -305,8 +317,10 @@ class WriteCheck:
         withdrawal = self.step("withdraw", "withdraw", execute=True)
         if not completed(withdrawal):
             return (
-                "the withdrawal did not complete. THE SUPPLIED AMOUNT MAY STILL BE IN THE"
-                " MARKET; read `outcomes` and `refused` above before doing anything else"
+                "the withdrawal did not complete, and its outcome is not known: THE SUPPLIED"
+                " AMOUNT MAY STILL BE IN THE MARKET, or the withdrawal may have been mined."
+                " Do not withdraw again yet: read `outcomes` and `refused` above, resolve a"
+                " kept record with `almanak ax recover`, then read the position"
             )
         if not holds_nothing(withdrawal.output.get("position_after")):
             return "the withdrawal completed but the position is not empty"
@@ -370,6 +384,12 @@ def run_writes(
     refusals = gates(request, environment, output, interactive=ask is not None)
     if refusals:
         say("The write check refuses to start:\n" + "\n".join(f"- {line}" for line in refusals))
+        return 2
+    try:
+        # Made before the first command, so a report can be written whatever follows.
+        output.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        say(f"The write check refuses to start:\n- --output {output} cannot be created: {exc}")
         return 2
     say(WARNING)
     check = WriteCheck(request, run, say)

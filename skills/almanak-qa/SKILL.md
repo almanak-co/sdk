@@ -188,9 +188,13 @@ When it exits 1, read what it printed and report it exactly. Do not run it again
 - A supply that did not complete may have sent its approval. List the kept
   records with `almanak ax recover` and tell the user what you found.
 - A message that the supplied amount is still in the market means the withdrawal
-  did not happen. Tell the user plainly that their funds are still supplied, and
-  that `almanak ax withdraw` for that market returns them; run it only if they ask,
-  preview first, as the `almanak` skill describes.
+  was not run or its preview was refused. Tell the user plainly that their funds
+  are still supplied, and that `almanak ax withdraw` for that market returns them;
+  run it only if they ask, preview first, as the `almanak` skill describes.
+- A withdrawal that was executed but did not complete has an unknown outcome: the
+  funds may still be supplied, or the withdrawal may have been mined. Do not
+  withdraw again. List the kept records with `almanak ax recover`, tell the user
+  what is unresolved, and read the position before proposing anything.
 
 ```bash
 almanak ax recover
