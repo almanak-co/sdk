@@ -205,43 +205,65 @@ def debt(result, moment):
     return int(result[moment]["debt_scaled"])
 
 
-def test_a_debt_is_opened_and_closed_by_separate_commands(desk):
-    """Borrow against supplied collateral, then every way out, each one command that
-    adopts what the earlier ones left."""
-    floor, borrowed = 15 * 10**17, 10**5
+FLOOR, BORROWED = 15 * 10**17, 10**5
+
+
+def assert_supply_moved(result, steps, direction):
+    """A completed command moved the supplied balance up (1) or down (-1), not to zero."""
+    assert ran(result, *steps)
+    before, after = supplied(result, "position_before"), supplied(result, "position_after")
+    assert min(before, after) > 0
+    assert (after - before) * direction > 0
+
+
+def open_debt(desk):
+    """Supply collateral and borrow against it; a floor no position reaches refuses."""
     # The wallet holds the borrowed asset already, so a full repayment covers interest.
-    desk.fund_second(10 * borrowed)
+    desk.fund_second(10 * BORROWED)
     # Enough of the cheapest wrapped native coin to back the debt above the floor.
     assert_supplied(desk("supply", 50 * AMOUNT, execute=True), 0)
     # A floor no position reaches, even where the borrowed amount is dust.
     with pytest.raises(DataError, match="below the configured minimum"):
-        desk("borrow", borrowed, execute=False, asset=desk.second, floor=10**60)
-    opened = desk("borrow", borrowed, execute=True, asset=desk.second, floor=floor)
-    assert operations(opened) == ["borrow"] and opened["completed"]
+        desk("borrow", BORROWED, execute=False, asset=desk.second, floor=10**60)
+    opened = desk("borrow", BORROWED, execute=True, asset=desk.second, floor=FLOOR)
+    assert ran(opened, "borrow")
     assert debt(opened, "position_before") == 0 < debt(opened, "position_after")
 
-    # With debt, an action the Pool risk-checks needs a stated floor.
+
+def act_with_debt_open(desk):
+    """With debt, an action the Pool risk-checks needs a stated floor, and runs under one."""
     with pytest.raises(ValueError, match="state --min-health-factor"):
         desk("supply", AMOUNT, execute=False)
-    more = desk("supply", AMOUNT, execute=True, floor=floor)
-    assert operations(more) == ["approve", "supply"] and more["completed"]
-    assert 0 < supplied(more, "position_before") < supplied(more, "position_after")
-    part = desk("withdraw", AMOUNT, execute=True, floor=floor)
-    assert operations(part) == ["withdraw"] and part["completed"]
-    assert 0 < supplied(part, "position_after") < supplied(part, "position_before")
+    more = desk("supply", AMOUNT, execute=True, floor=FLOOR)
+    assert_supply_moved(more, ("approve", "supply"), 1)
+    part = desk("withdraw", AMOUNT, execute=True, floor=FLOOR)
+    assert_supply_moved(part, ("withdraw",), -1)
 
-    some = desk("repay", borrowed // 2, execute=True, asset=desk.second)
-    assert operations(some)[:2] == ["approve", "repay"] and some["completed"]
+
+def close_debt(desk):
+    """Repay part of the debt, then the whole of what is left."""
+    some = desk("repay", BORROWED // 2, execute=True, asset=desk.second)
+    assert (operations(some)[:2], some["completed"]) == (["approve", "repay"], True)
     assert 0 < debt(some, "position_after") < debt(some, "position_before")
     closed = desk("repay", execute=True, asset=desk.second)
-    assert closed["completed"] and debt(closed, "position_after") == 0
+    assert (closed["completed"], debt(closed, "position_after")) == (True, 0)
     assert "repay" in operations(closed)
 
+
+def release_collateral(desk):
     released = desk("collateral", execute=True, enable=False)
-    assert operations(released) == ["collateral"] and released["completed"]
+    assert ran(released, "collateral")
     assert released["position_after"]["collateral_enabled"] is False
-    withdrawn = desk("withdraw", execute=True)
-    assert operations(withdrawn) == ["withdraw"] and supplied(withdrawn, "position_after") == 0
+    assert_withdrawn(desk("withdraw", execute=True))
+
+
+def test_a_debt_is_opened_and_closed_by_separate_commands(desk):
+    """Borrow against supplied collateral, then every way out, each one command that
+    adopts what the earlier ones left."""
+    open_debt(desk)
+    act_with_debt_open(desk)
+    close_debt(desk)
+    release_collateral(desk)
 
 
 def stopped_after_the_first_send(desk, monkeypatch, capsys):
