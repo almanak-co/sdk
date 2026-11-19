@@ -398,11 +398,13 @@ independently.
   chooses a slippage, and no other venue's price is consulted. A swap inside a
   liquidity action is never admitted; the operator swaps separately.
 - A direct liquidity action owns only what its allocation states: the stated
-  amounts of the pool's two currencies, and for an existing position the one NFT
+  amounts of the pool's currencies, and for an existing position the one NFT
   named by token ID, which the command and the gateway each verify on chain
-  (owner, pool, range). The statement lives in the allocation's `adopt` field,
-  which only an operator deployment may carry. An adopting allocation quotes and
-  admits no swap.
+  (owner, pool, range). Where a position is a balance of the pool's own LP token
+  (Curve, Aerodrome classic) the allocation owns the wallet's whole balance of
+  it. The statement lives in the allocation's `adopt` field, which only an
+  operator deployment may carry. An adopting allocation quotes and admits no
+  swap.
 - Declare a direct action on a cell only after its fork rehearsal passed there.
   Morpho Blue on HyperEVM declares none: the provider runs head-pinned reads at
   a later block, which the reader refuses.

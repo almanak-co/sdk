@@ -775,6 +775,25 @@ revoked. The read is `ax liquidity-position --connector aerodrome` with `--accou
 A wallet that holds a pool's LP shares on Curve or Aerodrome is refused an `ax swap`
 in that pool, which owns no liquidity: swap first, or in another pool.
 
+Uniswap V4 serves `open-liquidity`, `collect-liquidity-fees` and `close-liquidity`,
+with the pool named by its key as for a swap (`--currency0`, `--currency1`, `--fee`,
+`--tick-spacing` and, for a reviewed hooked pool, `--hooks`) and a position by
+`--token-id`. Its connector has no intent that adds to or removes part of a
+position, so `increase-liquidity` and `decrease-liquidity` refuse it. A key may name
+the chain's native coin: the wallet provides and receives the wrapped token, and
+`--amount0` and `--amount1` follow the key's order. A mint is for a fixed liquidity,
+the most the stated amounts cover at the observed price, and the most of each token
+it may take is trimmed to what that liquidity takes at the edge of `--slippage-bps`
+around the observed price. The position manager reverts a mint that needs more, so a
+price moved further than that in either direction after signing reverts the mint. A
+mint approves Permit2 for that most of each token and gives the position manager a
+Permit2 allowance that expires at the mint's deadline. What the mint does not take
+stays approved: the Permit2 allowance until it expires, the ERC-20 approval to
+Permit2 without limit of time. `revoke-exchange` does not serve Uniswap V4, so the
+approval to Permit2 is revoked with another tool. A collection and a close approve
+nothing. `ax liquidity-position --connector uniswap_v4` takes the key flags and
+`--token-id`.
+
 The action runs through the same planning, simulation, signing and receipt
 reconciliation as a strategy's, as an operator deployment that exists only for the
 command: its journal is a private record directory under
@@ -861,7 +880,7 @@ subcommand, and every one but the two HyperCore subcommands takes `--block`
 | `pool-price` | `uniswap_v4` | `--chain`, `--currency0`, `--currency1`, `--fee`, `--tick-spacing` and optional `--base`, or `--config` |
 | `lending-reserve` | `aave_v3`, `sparklend`, `aave_v4`, `compound_v3`, `morpho_blue` | `--chain` and the connector's selector flags, or `--config` |
 | `lending-position` | same as `lending-reserve` | the same selection, plus `--account` |
-| `liquidity-position` | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `curve`, `aerodrome` | `--chain`, `--pool` and `--token-id` for the first three, `--chain`, `--pool` and `--account` for `curve` and `aerodrome`, or `--config` |
+| `liquidity-position` | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `uniswap_v4`, `curve`, `aerodrome` | `--chain`, `--pool` and `--token-id` for the first three, `--chain`, the pool key flags and `--token-id` for `uniswap_v4`, `--chain`, `--pool` and `--account` for `curve` and `aerodrome`, or `--config` |
 | `perp-position` | `gmx_v2` | `--config`, `--account` |
 | `perp-markets` | `gmx_v2` | `--chain` and `--query`, or `--config` |
 | `balance` | none | `--asset` (CAIP-19 asset type), `--account` (repeatable) |

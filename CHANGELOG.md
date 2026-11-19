@@ -44,6 +44,10 @@ its changelog is on the `v2` branch.
   `--receive` whether the burn pays every coin in proportion or one coin. They serve
   Aerodrome stable and volatile pools too, whose position is the wallet's balance of
   the pool's share token.
+- `ax open-liquidity`, `ax collect-liquidity-fees` and `ax close-liquidity` serve
+  Uniswap V4, with the pool named by its key and a native pool provided in the wrapped
+  token. A mint reverts when the pool price moved further than `--slippage-bps` in
+  either direction after signing.
 - `--public-rpc` serves `almanak ax` reads on Base, Arbitrum, BNB, Optimism, Polygon and
   Robinhood beside Ethereum and Avalanche. `drpc` adds Base, Optimism, Polygon and
   Robinhood, and four chain operators' own endpoints are named `base`, `arbitrum`,
