@@ -120,7 +120,12 @@ def write_new_directory(parent: int, directory: Path, *wallet):
     """
     os.mkdir(directory.name, 0o700, dir_fd=parent)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    created = os.open(directory.name, flags, dir_fd=parent)
+    try:
+        created = os.open(directory.name, flags, dir_fd=parent)
+    except OSError:
+        # Nothing was written; an empty directory left here would refuse a retry.
+        os.rmdir(directory.name, dir_fd=parent)
+        raise
     written: list[str] = []
 
     def write(name, contents):

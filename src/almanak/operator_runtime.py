@@ -171,6 +171,10 @@ class OperatorRuntime(Runtime):
         `interrupt` is called before every step and may raise to stop, so a stop
         requested while waiting on a signed step is honoured before anything more is
         planned, signed or sent. The journal keeps whatever was signed.
+
+        A transient failure while a signed step is unresolved is held and asked again:
+        giving up there would leave a sent transaction without its outcome over one
+        failed read.
         """
         state = self.journal.load()
         if state.decision is None and not self.retained(state):
@@ -178,10 +182,22 @@ class OperatorRuntime(Runtime):
         before = len(state.outcomes)
         while True:
             interrupt()
-            if self.tick():
+            try:
+                finished = self.tick()
+            except DataError as exc:
+                if not self.holds(exc):
+                    raise
+                finished = False
+            if finished:
                 break
             self.wait(self.journal.load())
         return self.journal.load().outcomes[before:]
+
+    def holds(self, exc: DataError) -> bool:
+        """Whether a failure is a passing one met while a signed step waits."""
+        if not (exc.transient or exc.kind == "gateway_unavailable"):
+            return False
+        return self.journal.load().pending is not None
 
     def finish(self):
         """Close the deployment once every obligation it owns is verifiably gone."""

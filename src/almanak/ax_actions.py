@@ -16,6 +16,7 @@ import os
 import shutil
 import signal
 import sqlite3
+import sys
 import tempfile
 import threading
 from contextlib import contextmanager
@@ -340,9 +341,14 @@ def clear_if_finished(directory: Path) -> None:
                 return
             if not in_flight(directory):
                 discard(directory)
-    except (FileNotFoundError, NotADirectoryError):
-        # Not a record: the root's own lock file, or a directory without a lock.
+    except NotADirectoryError:
+        # The root's own lock file.
         return
+    except FileNotFoundError:
+        # Creation locks a record before the root lock is released, so a directory with
+        # no lock is what a killed command's cleanup left behind.
+        if directory.is_dir() and not in_flight(directory):
+            discard(directory)
 
 
 def run(config, backend, action: str, amount: int | None, *, execute: bool) -> dict:
@@ -361,13 +367,19 @@ def run(config, backend, action: str, amount: int | None, *, execute: bool) -> d
                     lease_seconds=30,
                     operator_actions=True,
                 )
-                return perform(
+                result = perform(
                     service, action, amount, execute=execute, create=config, interrupt=check
                 )
-            finally:
-                # However the action ended, a signed step may be in flight; its record
-                # is the only evidence of it.
-                settle(directory)
+            except BaseException:
+                kept = settle(directory)
+                if kept is not None:
+                    event = {"event": "record_kept", "path": str(kept)}
+                    print(json.dumps(event), file=sys.stderr, flush=True)
+                raise
+            kept = settle(directory)
+            if kept is not None:
+                result["record_kept"] = str(kept)
+            return result
     finally:
         lock.close()
 
@@ -383,13 +395,17 @@ def in_flight(directory: Path) -> bool:
         return True
 
 
-def settle(directory: Path) -> None:
+def settle(directory: Path) -> Path | None:
+    """Remove the record, or return it when it is kept.
+
+    However the action ended, a signed step may be in flight, and its record is the only
+    evidence of it. The fund then stays claimed by this record, so no later command can
+    act on the account until the operator has looked at the signed step.
+    """
     if in_flight(directory):
-        # The fund stays claimed by this record, so no later command can act on the
-        # account until the operator has looked at the signed step.
-        print(json.dumps({"event": "record_kept", "path": str(directory)}), flush=True)
-    else:
-        discard(directory)
+        return directory
+    discard(directory)
+    return None
 
 
 def discard(directory: Path) -> None:
@@ -438,7 +454,8 @@ def executed(runtime, start: int, interrupt) -> dict:
 
     A refusal on a later step, such as a fee quote above the ceiling after the approval
     was mined, is part of the result and never replaces it: the steps already sent stay
-    reported. Any other failure reports them as one event line before it propagates.
+    reported. Any other failure reports them as one event line on standard error before
+    it propagates.
     """
     refusal = None
     try:
@@ -465,7 +482,7 @@ def report_sent(runtime, start: int) -> None:
     event = {"outcomes": [outcome_summary(item) for item in state.outcomes[start:]]}
     event.update(unresolved(state))
     if event["outcomes"] or "unresolved" in event:
-        print(json.dumps({"event": "steps_sent", **event}), flush=True)
+        print(json.dumps({"event": "steps_sent", **event}), file=sys.stderr, flush=True)
 
 
 def unresolved(state) -> dict:
@@ -486,7 +503,7 @@ def executed_result(state, outcomes, refusal) -> dict:
     """
     final = outcomes[-1] if outcomes else None
     result = {
-        "executed": bool(outcomes),
+        "executed": bool(outcomes) or state.pending is not None,
         "completed": final is not None and final.strategy_result().complete,
         "outcomes": [outcome_summary(item) for item in outcomes],
         "position_after": position(state),
@@ -514,11 +531,16 @@ def step(plan) -> dict:
 
 
 def outcome_summary(outcome) -> dict:
-    return {
+    summary = {
         "operation": outcome.operation.kind,
         "success": outcome.success,
         "transaction": outcome.tx_hash,
     }
+    issues = getattr(outcome, "accounting_issues", ())
+    if issues:
+        # A wallet movement the step does not explain; nothing else would report it.
+        summary["accounting_issues"] = list(issues)
+    return summary
 
 
 def arguments(commands, lending_source) -> None:

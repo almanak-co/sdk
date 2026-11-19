@@ -444,11 +444,18 @@ be mined and the supply then be refused, for example on a fee quote above the
 ceiling, or revert. The position is then unchanged and the allowance stays on chain;
 `outcomes` lists the steps that ran and `refused` names the refusal. A failure that
 is not a refusal prints the steps already sent as one
-`{"event": "steps_sent", "outcomes": ...}` line before its error. A step that was
-signed and has no reconciled outcome yet is reported apart from `outcomes`, as
-`unresolved` with its operation and transaction hash; it may or may not have been
-sent. A first step refused at planning fails the command with that refusal and
-signs nothing.
+`{"event": "steps_sent", "outcomes": ...}` line on standard error before its error.
+A step that was signed and has no reconciled outcome yet is reported apart from
+`outcomes`, as `unresolved` with its operation and transaction hash; it may or may
+not have been sent, and `executed` is true for it. A first step refused at planning
+fails the command with that refusal and signs nothing.
+
+Standard output carries one JSON document, the result. Events and the error are
+JSON lines on standard error. While a signed step is unresolved, a transient
+provider or storage failure is held and asked again instead of ending the command.
+`position_before` and `position_after` are share counts; `ax lending-position`
+reports the amount in assets. An outcome lists `accounting_issues` when the step
+does not explain a wallet movement.
 
 A withdrawal of a supply that is enabled as collateral is refused with
 `residual_collateral`, also when the account has no debt. No direct command
@@ -487,9 +494,13 @@ sees what an earlier one did.
 
 Nothing is kept between finished commands, so an interrupted command is not
 resumed. If a command fails, is interrupted or receives SIGTERM or SIGHUP while a
-signed step is unresolved, its record is kept and the command prints
-`{"event": "record_kept", "path": ...}`. A process that is killed outright prints
-nothing, so the absence of that line does not mean nothing was kept. While a record
+signed step is unresolved, its record is kept. A command that still prints its
+result names the record there as `record_kept`; one that fails prints
+`{"event": "record_kept", "path": ...}` on standard error. A process that is killed
+outright prints nothing, so the absence of both does not mean nothing was kept.
+Only one action runs for a wallet at a time, previews included: a second one
+started meanwhile is refused the same way and can be run once the first exits.
+While a record
 holds a signed step the wallet stays claimed and later actions for it are refused
 with "fund is already claimed". Checking the transaction on chain does not release
 the claim, and there is no command that clears it yet, so the wallet stays blocked

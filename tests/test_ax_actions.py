@@ -268,7 +268,10 @@ def test_a_signed_step_in_flight_keeps_its_record(monkeypatch, stored, state_hom
     with pytest.raises(OSError):
         ax_actions.run("config", None, "supply", 5, execute=True)
     (record,) = records(state_home)
-    assert json.loads(capsys.readouterr().out) == {"event": "record_kept", "path": str(record)}
+    streams = capsys.readouterr()
+    # Standard output stays free for the one result document.
+    assert streams.out == ""
+    assert json.loads(streams.err) == {"event": "record_kept", "path": str(record)}
 
 
 def test_a_result_returned_with_a_signed_step_pending_keeps_its_record(
@@ -276,9 +279,11 @@ def test_a_result_returned_with_a_signed_step_pending_keeps_its_record(
 ):
     monkeypatch.setattr(stored, "pending", object())
     monkeypatch.setattr(ax_actions, "perform", lambda *a, **k: {"completed": False})
-    assert ax_actions.run("config", None, "supply", 5, execute=True) == {"completed": False}
+    result = ax_actions.run("config", None, "supply", 5, execute=True)
     (record,) = records(state_home)
-    assert json.loads(capsys.readouterr().out)["path"] == str(record)
+    # A returned result names the kept record itself, as one document.
+    assert result == {"completed": False, "record_kept": str(record)}
+    assert capsys.readouterr() == ("", "")
 
 
 def claim(state_home, database):
@@ -305,14 +310,15 @@ def test_a_killed_commands_record_and_claim_are_cleared_unless_a_step_was_signed
 
     record, claimed = abandoned(state_home, "killed")
     running, running_claim = abandoned(state_home, "running")
-    (state_home / "actions/unrelated").mkdir()
+    # What a kill in the middle of cleanup leaves: a record directory without its lock.
+    (state_home / "actions/unlocked").mkdir()
     with (running / "lock").open() as held:
         fcntl.flock(held, fcntl.LOCK_EX)
         ax_actions.clear_finished_records()
         # Another command's live record is left alone, with its claim.
         assert running.exists() and running_claim.exists()
     assert not record.exists() and not claimed.exists()
-    assert (state_home / "actions/unrelated").exists()
+    assert not (state_home / "actions/unlocked").exists()
 
     signed, signed_claim = abandoned(state_home, "signed")
     monkeypatch.setattr(stored, "pending", object())
@@ -399,7 +405,7 @@ def test_an_unexpected_failure_reports_the_steps_already_sent(desk, capsys):
     amount = desk.intent("supply").amount.amount
     with pytest.raises(OSError):
         ax_actions.perform(desk.service, "supply", amount, execute=True)
-    event = json.loads(capsys.readouterr().out)
+    event = json.loads(capsys.readouterr().err)
     assert event["event"] == "steps_sent"
     assert [item["operation"] for item in event["outcomes"]] == ["approve"]
 
@@ -557,7 +563,10 @@ def test_a_signal_between_steps_stops_the_action_and_reports_its_kept_record(
     with pytest.raises(ax_actions.Terminated):
         ax_actions.run("config", None, "supply", 5, execute=True)
     (record,) = records(state_home)
-    assert json.loads(capsys.readouterr().out) == {"event": "record_kept", "path": str(record)}
+    streams = capsys.readouterr()
+    # Standard output stays free for the one result document.
+    assert streams.out == ""
+    assert json.loads(streams.err) == {"event": "record_kept", "path": str(record)}
 
 
 def test_a_stop_requested_while_waiting_is_honoured_before_the_next_step(desk):
@@ -687,11 +696,13 @@ def test_a_signed_step_without_an_outcome_is_reported_as_unresolved(recorded, ca
     result = ax_actions.executed_result(state, [approve], None)
     # It is not an outcome: nothing says yet whether it was mined.
     assert result["unresolved"] == expected and len(result["outcomes"]) == 1
+    # A signed step counts as executed even before any outcome exists.
+    assert ax_actions.executed_result(state, [], None)["executed"] is True
     assert "unresolved" not in finished(recorded, [approve])
 
     runtime = SimpleNamespace(journal=SimpleNamespace(load=lambda: state))
     ax_actions.report_sent(runtime, 1)
-    assert json.loads(capsys.readouterr().out) == {
+    assert json.loads(capsys.readouterr().err) == {
         "event": "steps_sent",
         "outcomes": [],
         "unresolved": expected,
@@ -712,3 +723,67 @@ def test_the_whole_path_to_a_record_is_synced_on_every_action(state_home, monkey
     synced.clear()
     ax_actions.new_record()[1].close()
     assert synced == path
+
+
+def transient_once(runtime, step):
+    """Fail the named runtime step once with a passing provider error."""
+    from almanak.gateway.ethereum import DataError
+
+    real, failed = getattr(runtime, step), []
+
+    def failing(*arguments):
+        if not failed:
+            failed.append(True)
+            raise DataError("rate_limit", "provider is rate limited", transient=True)
+        return real(*arguments)
+
+    setattr(runtime, step, failing)
+    return failed
+
+
+def test_a_passing_failure_while_a_signed_step_waits_is_asked_again(desk):
+    runtime = desk.runtime()
+    runtime.submit(desk.intent("supply"))
+    failed = transient_once(runtime, "resolve_pending")
+    outcomes = runtime.execute()
+    # One failed receipt read did not abandon the sent approval.
+    assert failed and [item.operation.kind for item in outcomes] == ["approve", "supply"]
+
+
+def test_a_passing_failure_with_nothing_signed_ends_the_action(desk):
+    from almanak.gateway.ethereum import DataError
+
+    runtime = desk.runtime()
+    runtime.submit(desk.intent("supply"))
+    transient_once(runtime, "prepare_decision")
+    with pytest.raises(DataError, match="rate limited"):
+        runtime.execute()
+    assert desk.gateway.broadcasts == [] and desk.store.load().pending is None
+
+
+def test_an_outcome_reports_a_wallet_movement_it_does_not_explain(recorded):
+    (supply,) = outcomes_of(recorded, "supply")
+    assert "accounting_issues" not in ax_actions.outcome_summary(supply)
+    flagged = supply.model_copy(update={"accounting_issues": ("unexplained transfer",)})
+    assert ax_actions.outcome_summary(flagged)["accounting_issues"] == ["unexplained transfer"]
+
+
+def test_the_in_process_gateway_takes_renews_and_releases_the_services_lease(tmp_path, recorded):
+    """The real service's lease, through the client the direct action uses."""
+    desk = Desk(tmp_path, recorded)
+    gateway = ax_actions.LocalGateway(desk.service)
+    gateway.acquire()
+    assert gateway.heartbeat.is_alive() and gateway.lease_error is None
+    gateway.scoped("renew")
+    assert gateway.lease_confirmed is not None
+    # One coordinator per deployment: a second client is refused while the first lives.
+    other = ax_actions.LocalGateway(desk.service)
+    with pytest.raises(Exception, match="lease|coordinator"):
+        other.acquire()
+    other.close()
+    gateway.close()
+    assert not gateway.heartbeat.is_alive() and gateway.coordinator is None
+    # The release is real: the next coordinator is admitted at once.
+    other = ax_actions.LocalGateway(desk.service)
+    other.acquire()
+    other.close()
