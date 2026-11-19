@@ -7,6 +7,8 @@ commands is tests/fork/test_ax_liquidity.py.
 """
 
 import json
+import secrets
+import threading
 from dataclasses import dataclass, replace
 from importlib import import_module
 from types import SimpleNamespace
@@ -20,25 +22,43 @@ from almanak import ax, ax_actions
 from almanak.caip import AssetId, ChainId
 from almanak.chains import evm_network
 from almanak.cli_arguments import build_parser, parse_validated
-from almanak.connectors import direct, v3_pool_direct, v3_pool_request
+from almanak.configuration.composed import Parameters as ComposedParameters
+from almanak.connectors import direct, v3_pool_direct, v3_pool_reconciliation, v3_pool_request
 from almanak.connectors import v3_pool_liquidity_direct as liquidity
 from almanak.connectors.composition import connector_from_wire
-from almanak.connectors.concentrated_math import amounts, sqrt_at_tick
+from almanak.connectors.concentrated_math import (
+    addition_maximums,
+    amounts,
+    liquidity_for,
+    sqrt_at_tick,
+)
 from almanak.connectors.direct import ALLOCATION, ActionRequest
 from almanak.connectors.v3_pool_position_request import PositionRequest, read_liquidity_position
 from almanak.connectors.v3_pool_positions import Position
 from almanak.connectors.v3_pool_reader import position_key
+from almanak.connectors.v3_pool_receipts import Effects
 from almanak.dex_intents import TickBounds
+from almanak.gateway import observation_gateway
 from almanak.gateway.ethereum import DataError, Reverted
-from almanak.gateway.observation_gateway import ReadMethod
+from almanak.gateway.observation_gateway import (
+    GatewayReader,
+    GatewayRequest,
+    ObservationGateway,
+    ReadMethod,
+    gateway_reader,
+)
 from almanak.gateway.resolution_evm import RetainedResolutionReader
+from almanak.gateway.service import GatewayService, http_server
 from almanak.models import ZERO_ADDRESS, AssetAmount
+from almanak.operator_deployment import refuse_adoption
+from almanak.state import Journal
 from almanak.strategy import StrategyDefinition
 from tests.test_ax_swap import (
     CONNECTORS,
     OBSERVED,
     POOLS,
     WALLET,
+    SwapDesk,
     configuration,
     created,
     resolved,
@@ -120,6 +140,34 @@ class Manager(RetainedResolutionReader):
         types += ("uint128", "uint256", "uint256", "uint128", "uint128")
         record = (0, ZERO_ADDRESS, nft.token0, nft.token1, nft.key, nft.lower, nft.upper)
         return encode(types, (*record, nft.liquidity, *nft.growth, *nft.owed))
+
+
+REAL_FAMILY = v3_pool_request.family
+
+
+def reading(connector, market, monkeypatch, tick=0):
+    """State the family's pool and tick reads: the pool at `tick`, and fee growth
+    outside the two bounds of the range around tick zero."""
+    real = REAL_FAMILY(connector)
+    outside = {ticks(market)[0][0]: (Q128, 0), ticks(market)[0][1]: (0, 2 * Q128)}
+
+    def read_tick(reader, source, block, index):
+        return (1, 1, *outside.get(index, (0, 0)))
+
+    stated = v3_pool_request.Family(
+        resolution=real.resolution,
+        support=real.support,
+        read_pool=lambda reader, source, block: pool_state(connector, market, tick),
+        read_tick=read_tick,
+        price_request=real.price_request,
+    )
+    monkeypatch.setattr(v3_pool_request, "family", lambda name: stated)
+
+
+@pytest.fixture(autouse=True)
+def stated_reads(connector, monkeypatch):
+    """Every test reads the pool at tick zero unless it states another tick."""
+    reading(connector, resolved(connector), monkeypatch)
 
 
 def ticks(market):
@@ -586,7 +634,9 @@ def test_an_open_offers_the_stated_amounts_and_the_gateway_admits_only_that_mint
     found = connector_from_wire({"connector": connector})
     intent = v3_pool_direct.intent(config, (seen,), opening(market))
     assert intent.kind == "open_liquidity" and intent.target == config.target(ALLOCATION)
-    assert (intent.maximum0.amount, intent.maximum1.amount) == (AMOUNT0, AMOUNT1)
+    most = offer(market)
+    assert (intent.maximum0.amount, intent.maximum1.amount) == most
+    assert most[0] <= AMOUNT0 and most[1] <= AMOUNT1
     assert (intent.range, intent.deadline) == (None, market.block.timestamp + 300)
     found.codec.capability.admit(state.capabilities, intent)
     assert found.lifecycle.increases_exposure(intent)
@@ -599,20 +649,20 @@ def test_an_open_offers_the_stated_amounts_and_the_gateway_admits_only_that_mint
         "approve",
         target.assets[0],
         spender,
-        AMOUNT0,
+        most[0],
     )
     owned = state.owned[0]
-    half = observation(connector, config, owned, market, allowed={(0, spender): AMOUNT0})
+    half = observation(connector, config, owned, market, allowed={(0, spender): most[0]})
     second = step(half)
-    assert (second.kind, second.asset, second.amount) == ("approve", target.assets[1], AMOUNT1)
+    assert (second.kind, second.asset, second.amount) == ("approve", target.assets[1], most[1])
     # An allowance of another size is reset before the exact one is granted.
-    stale = observation(connector, config, owned, market, allowed={(0, spender): AMOUNT0 + 5})
+    stale = observation(connector, config, owned, market, allowed={(0, spender): most[0] + 5})
     assert (step(stale).kind, step(stale).amount) == ("approve", 0)
-    both = {(0, spender): AMOUNT0, (1, spender): AMOUNT1}
+    both = {(0, spender): most[0], (1, spender): most[1]}
     approved = observation(connector, config, owned, market, allowed=both)
     mint = step(approved)
     assert (mint.kind, mint.range) == ("mint", None)
-    assert (mint.maximum0.amount, mint.maximum1.amount) == (AMOUNT0, AMOUNT1)
+    assert (mint.maximum0.amount, mint.maximum1.amount) == most
     assert mint.minimum0.amount <= AMOUNT0 and mint.minimum1.amount <= AMOUNT1
     assert mint.minimum_liquidity > 1
 
@@ -689,7 +739,8 @@ def test_an_increase_adds_the_stated_amounts_to_the_adopted_nft_only(connector):
     config, state, seen = on_position(connector, market, "increase-liquidity")
     intent = v3_pool_direct.intent(config, (seen,), naming("increase-liquidity"))
     assert intent.kind == "increase_liquidity"
-    assert (intent.maximum0.amount, intent.maximum1.amount) == (AMOUNT0, AMOUNT1)
+    most = offer(market)
+    assert (intent.maximum0.amount, intent.maximum1.amount) == most
     found = connector_from_wire({"connector": connector})
     found.codec.capability.admit(state.capabilities, intent)
     assert found.lifecycle.increases_exposure(intent)
@@ -697,7 +748,7 @@ def test_an_increase_adds_the_stated_amounts_to_the_adopted_nft_only(connector):
     step = checked(connector, config, state, intent, seen)
     spender = config.target(ALLOCATION).contracts.position_manager
     assert (step(seen).kind, step(seen).spender) == ("approve", spender)
-    both = {(0, spender): AMOUNT0, (1, spender): AMOUNT1}
+    both = {(0, spender): most[0], (1, spender): most[1]}
     approved = observation(
         connector, config, state.owned[0], market, allowed=both, position=position(market)
     )
@@ -711,6 +762,15 @@ def test_an_increase_adds_the_stated_amounts_to_the_adopted_nft_only(connector):
     opened = found.codec.actions.authoring.open_liquidity(config.allocation(ALLOCATION), seen)
     with pytest.raises(ValueError, match="must preserve existing NFT ownership"):
         checked(connector, config, state, opened, seen)(approved)
+
+
+def offer(market, stated=(AMOUNT0, AMOUNT1), bounds=None, bps=50):
+    """What an addition of the stated amounts offers at tick zero: no more than the
+    range takes within the price tolerance."""
+    lower, upper = bounds or ticks(market)[0]
+    return addition_maximums(
+        *stated, sqrt_at_tick(0), sqrt_at_tick(lower), sqrt_at_tick(upper), bps
+    )
 
 
 def principal(market, amount=LIQUIDITY):
@@ -1073,25 +1133,6 @@ def test_the_position_read_is_an_observation_with_the_reads_own_transports(
             PositionRequest.model_validate_json(json.dumps({**values, **refused}))
 
 
-def reading(connector, market, nfts, monkeypatch, tick=0):
-    """A reader and a family whose pool and tick reads are stated by the test."""
-    real = v3_pool_request.family(connector)
-    outside = {ticks(market)[0][0]: (Q128, 0), ticks(market)[0][1]: (0, 2 * Q128)}
-
-    def read_tick(reader, source, block, tick):
-        return (1, 1, *outside[tick])
-
-    stated = v3_pool_request.Family(
-        resolution=real.resolution,
-        support=real.support,
-        read_pool=lambda reader, source, block: pool_state(connector, market, tick),
-        read_tick=read_tick,
-        price_request=real.price_request,
-    )
-    monkeypatch.setattr(v3_pool_request, "family", lambda name: stated)
-    return manager(connector, market, nfts)
-
-
 def test_the_position_read_reports_owner_range_principal_and_what_a_collection_pays(
     connector, monkeypatch
 ):
@@ -1100,7 +1141,7 @@ def test_the_position_read_reports_owner_range_principal_and_what_a_collection_p
     stated = PositionRequest(chain=chain, pool=market.pool.pool, token_id=TOKEN)
     # Another account's position is read as well: the report names its owner.
     nfts = {TOKEN: held(market, owner=STRANGER), OTHER_TOKEN: held(market, liquidity=0)}
-    reader = reading(connector, market, nfts, monkeypatch)
+    reader = manager(connector, market, nfts)
     report = read_liquidity_position(reader, connector, stated, market.block)
     lower, upper = ticks(market)[0]
     assets = (market.asset0, market.asset1)
@@ -1112,6 +1153,8 @@ def test_the_position_read_reports_owner_range_principal_and_what_a_collection_p
         ]
 
     assert report["product"] == "liquidity_position" and report["support"] == "verified"
+    # Only Slipstream models a gauge, and this owner is not it.
+    assert report.get("staked") == (False if connector == "aerodrome_slipstream" else None)
     assert report["request"] == {**stated.model_dump(mode="json"), "connector": connector}
     assert (report["owner"], report["block"]) == (STRANGER, market.block.model_dump(mode="json"))
     assert report["position"] == {
@@ -1154,7 +1197,8 @@ def test_the_position_read_refuses_a_missing_nft_another_pool_and_another_chain(
     chain = market.pool.chain.chain_id
     stated = PositionRequest(chain=chain, pool=market.pool.pool, token_id=TOKEN)
     elsewhere = held(market, key=position_key(market.pool)[1] + 1)
-    reader = reading(connector, market, {OTHER_TOKEN: elsewhere}, monkeypatch, tick=-1)
+    reading(connector, market, monkeypatch, tick=-1)
+    reader = manager(connector, market, {OTHER_TOKEN: elsewhere})
     with pytest.raises(ValueError, match=f"holds no NFT {TOKEN}"):
         read_liquidity_position(reader, connector, stated, market.block)
     with pytest.raises(ValueError, match=f"NFT {OTHER_TOKEN} is a position of another pool"):
@@ -1196,3 +1240,511 @@ def test_the_read_command_pins_its_block_and_passes_the_request_on(connector, mo
     assert seen["request"].token_id == TOKEN
     with pytest.raises(ValueError, match=f"{connector} declares no support on eip155:31337"):
         ax.liquidity_position(position_arguments(connector, "--chain", "eip155:31337"))
+
+
+# The review's reproduction: a range 500 ticks either side of tick zero, at 50 basis points.
+WIDE = (-500, 500)
+BIG, SMALL = 20 * 10**9, 10**9
+
+
+def planned_addition(connector, market, stated, token=None):
+    """The addition the connector's own planner prepares, and the approvals before it.
+
+    Each step is checked as the gateway checks it. The approvals are the pool currency
+    index and amount of each, in order.
+    """
+    nfts = None if token is None else {TOKEN: token}
+    config, state, seen = started(connector, market, stated, nfts, wallets=(BIG, BIG))
+    step = checked(connector, config, state, v3_pool_direct.intent(config, (seen,), stated), seen)
+    target, allowed, approved = config.target(ALLOCATION), {}, []
+    while True:
+        before = observation(
+            connector,
+            config,
+            state.owned[0],
+            market,
+            wallets=(BIG, BIG),
+            allowed=allowed,
+            position=seen.position,
+        )
+        operation = step(before)
+        if operation.kind != "approve":
+            return operation, approved
+        index = target.assets.index(operation.asset)
+        allowed[(index, operation.spender)] = operation.amount
+        approved.append((index, operation.amount))
+
+
+def taken(addition, bounds, tick):
+    """What the position manager takes for the offer at a price, or None when it reverts.
+
+    The manager adds the liquidity both offered amounts cover at the execution price,
+    rounds what it takes up, and reverts below either minimum or without liquidity.
+    """
+    lower, upper = sqrt_at_tick(bounds[0]), sqrt_at_tick(bounds[1])
+    price = sqrt_at_tick(tick)
+    offered = addition.maximum0.amount, addition.maximum1.amount
+    used = amounts(liquidity_for(*offered, price, lower, upper), price, lower, upper, up=True)
+    enough = used[0] >= addition.minimum0.amount and used[1] >= addition.minimum1.amount
+    return used if enough and any(used) else None
+
+
+def mined_at(addition, bounds, span):
+    """The ticks of `span` at which the addition would be mined rather than revert."""
+    return [tick for tick in span if taken(addition, bounds, tick) is not None]
+
+
+def whole(addition, stated):
+    """The same step offering the stated amounts whole, as it did before it was bounded."""
+    return addition.model_copy(
+        update={
+            "maximum0": addition.maximum0.model_copy(update={"amount": stated[0]}),
+            "maximum1": addition.maximum1.model_copy(update={"amount": stated[1]}),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("stated", "offered", "minimums", "exposed"),
+    [
+        # Twenty times the currency0 the range takes: unbounded below when offered whole.
+        ((BIG, SMALL), (1225935577, SMALL), (816538207, 999999997), (-451, 49)),
+        # The mirror image, unbounded above when offered whole.
+        ((SMALL, BIG), (SMALL, 1224682432), (999999997, 815703546), (-50, 451)),
+        # In the range's own ratio nothing is trimmed and nothing was exposed.
+        ((SMALL, SMALL), (SMALL, SMALL), (816538207, 815703546), (-50, 49)),
+    ],
+)
+def test_a_mint_is_bounded_in_price_on_both_sides_whatever_the_statement(
+    connector, stated, offered, minimums, exposed
+):
+    market = resolved(connector)
+    opened = opening(
+        market, tick_lower=WIDE[0], tick_upper=WIDE[1], amount0=stated[0], amount1=stated[1]
+    )
+    mint, approved = planned_addition(connector, market, opened)
+    assert (mint.kind, mint.maximum0.amount, mint.maximum1.amount) == ("mint", *offered)
+    assert (mint.minimum0.amount, mint.minimum1.amount) == minimums
+    # Only the offer is approved, never the surplus of the statement.
+    assert approved == [(0, offered[0]), (1, offered[1])]
+
+    # 50 basis points of price are 50 ticks: the mint is mined inside them and nowhere else.
+    span = range(WIDE[0] + 1, WIDE[1])
+    assert mined_at(mint, WIDE, span) == list(range(-50, 50))
+    for tick in range(-50, 50):
+        used = taken(mint, WIDE, tick)
+        assert used[0] <= offered[0] and used[1] <= offered[1]
+        # Inside the tolerance the trimmed offer takes what the whole statement would.
+        assert used == taken(whole(mint, stated), WIDE, tick)
+
+    # Offered whole, the same statement and minimums were mined far outside it, taking
+    # the surplus at the moved price.
+    unbounded = mined_at(whole(mint, stated), WIDE, span)
+    assert (unbounded[0], unbounded[-1]) == exposed
+    worst = taken(whole(mint, stated), WIDE, exposed[0] if stated[0] > stated[1] else exposed[1])
+    assert max(worst) > 19 * SMALL or stated[0] == stated[1]
+
+
+def test_a_single_sided_open_offers_and_approves_only_the_currency_its_range_takes(connector):
+    market = resolved(connector)
+    stated = {"amount0": 5 * 10**9, "amount1": 7 * 10**9}
+    # Above the price the range takes currency0 alone, and below it currency1 alone.
+    for bounds, offered, index in (
+        ((500, 1000), (5 * 10**9, 0), 0),
+        ((-1000, -500), (0, 7 * 10**9), 1),
+    ):
+        opened = opening(market, tick_lower=bounds[0], tick_upper=bounds[1], **stated)
+        mint, approved = planned_addition(connector, market, opened)
+        assert (mint.maximum0.amount, mint.maximum1.amount) == offered
+        assert approved == [(index, offered[index])]
+        # Short of its range the mint takes exactly that one amount at any price. Once
+        # the price is inside the range it has nothing of the other currency to add.
+        span = range(-999, 1000)
+        outside = [tick for tick in span if not bounds[0] < tick < bounds[1]]
+        side = [tick for tick in outside if (tick <= bounds[0]) == (index == 0)]
+        assert mined_at(mint, bounds, span) == side
+        assert {taken(mint, bounds, tick) for tick in side} == {offered}
+
+
+def test_a_range_beside_the_price_but_inside_the_tolerance_is_bounded_on_its_near_side(
+    connector,
+):
+    market = resolved(connector)
+    opened = opening(
+        market,
+        tick_lower=50,
+        tick_upper=550,
+        amount0=5 * 10**9,
+        amount1=7 * 10**9,
+        slippage_bps=100,
+    )
+    mint, approved = planned_addition(connector, market, opened)
+    # 100 basis points reach 99 ticks, into the range: the offer holds the little
+    # currency1 the range takes there, and the mint is mined up to that tick only.
+    assert (mint.maximum0.amount, mint.maximum1.amount) == (5 * 10**9, 560566028)
+    assert approved == [(0, 5 * 10**9), (1, 560566028)]
+    assert mined_at(mint, (50, 550), range(-400, 550)) == list(range(-400, 100))
+    assert taken(whole(mint, (5 * 10**9, 7 * 10**9)), (50, 550), 300) is not None
+
+
+def test_an_increase_is_bounded_as_a_mint_is(connector):
+    market = resolved(connector)
+    adopted = held(market, lower=WIDE[0], upper=WIDE[1])
+    stated = naming("increase-liquidity", amount0=BIG, amount1=SMALL)
+    increase, approved = planned_addition(connector, market, stated, adopted)
+    assert (increase.kind, increase.nft) == ("increase", nft_id(market))
+    assert (increase.maximum0.amount, increase.maximum1.amount) == (1225935577, SMALL)
+    assert approved == [(0, 1225935577), (1, SMALL)]
+    assert mined_at(increase, WIDE, range(-499, 500)) == list(range(-50, 50))
+
+
+def test_an_increase_that_states_no_amount_is_refused_before_any_read(connector):
+    market = resolved(connector)
+    for zero in ({"amount0": 0, "amount1": 0}, {"amount0": None, "amount1": None}):
+        # No reader is given: reading the NFT first would fail on it instead.
+        with pytest.raises(ValueError, match="requires --amount0 or --amount1 above zero"):
+            deployed(connector, market, naming("increase-liquidity", **zero))
+
+
+def test_a_collection_with_nothing_owed_is_refused_before_a_deployment_exists(connector):
+    market = resolved(connector)
+    # The pool's growth inside the range is (4, 5) per unit of liquidity at tick zero.
+    settled = held(market, growth=(4 * Q128, 5 * Q128), owed=(0, 0))
+    with pytest.raises(ValueError, match=f"NFT {TOKEN} is owed nothing in either currency"):
+        deployed(connector, market, naming("collect-liquidity-fees"), {TOKEN: settled})
+    # Fees earned since the manager's record, or an amount it recorded, are collected.
+    for owing in (replace(settled, growth=(3 * Q128, 5 * Q128)), replace(settled, owed=(0, 1))):
+        config = deployed(connector, market, naming("collect-liquidity-fees"), {TOKEN: owing})
+        assert config.allocations[0].adopt.nft == nft_id(market)
+    # The other commands do not ask what is owed.
+    for action in ("close-liquidity", "decrease-liquidity", "increase-liquidity"):
+        deployed(connector, market, naming(action), {TOKEN: settled})
+
+
+def test_the_deadline_help_says_what_it_bounds(connector, capsys):
+    for command, step in (("open-liquidity", "mint"), ("close-liquidity", "close")):
+        with pytest.raises(SystemExit):
+            arguments(connector, command, "--help")
+        text = " ".join(capsys.readouterr().out.split())
+        assert "no step is planned or signed later than this after the observed block" in text
+        assert f"the {step} reverts when mined later" in text
+        assert ("an approval before it carries no deadline" in text) == (step == "mint")
+
+
+class Held:
+    """A gateway double whose every read is the chain the test states.
+
+    The observation follows the ownership it is asked for, as the adapter's does: the
+    wallet's balances, and the NFT the chain holds whenever that ownership owns or is
+    to adopt one.
+    """
+
+    def __init__(self, store, build):
+        self.store, self.build = store, build
+
+    def observe(self):
+        return (self.build(self.store.load().owned[0]),)
+
+    def verify_snapshot(self, observation):
+        return self.build(observation.owned)
+
+    def snapshot(self, allocation, block, observation):
+        return self.build(observation.owned)
+
+
+class LiquidityDesk(SwapDesk):
+    """An operator deployment behind the real gateway service, over a stated chain."""
+
+    def __init__(self, tmp_path, config, build):
+        self.config = config
+        self.store = Journal(tmp_path / "state.sqlite")
+        self.store.create(config, None)
+        self.gateway = Held(self.store, build)
+        self.service = GatewayService(
+            config, self.store.path, self.gateway, lease_seconds=2, operator_actions=True
+        )
+
+    def submit(self, stated):
+        """Admit the command's request through the coordinator and the gateway."""
+        build = direct.binding_for(self.config).intent
+        return self.runtime().submit(lambda state, seen: build(state.config, seen, stated))
+
+    def started(self, **forged):
+        """The checkpoint before its start, and the start the coordinator would record."""
+        before = self.store.load()
+        baseline = self.gateway.observe()
+        values = {"initialized": True, "baseline": baseline, **forged}
+        return before, before.model_copy(update=values)
+
+
+def liquidity_desk(connector, tmp_path, stated, chain=None, wallets=(9000, 9000)):
+    """A desk whose chain holds `chain` as the NFT, whatever the deployment names."""
+    market = resolved(connector)
+    nfts = None if chain is None else {TOKEN: held(market)}
+    config = deployed(connector, market, stated, nfts)
+    tmp_path.mkdir(exist_ok=True)
+
+    def build(owned):
+        expects = owned.position is not None or owned.adopts is not None
+        found = chain if expects else None
+        return observation(connector, config, owned, market, wallets=wallets, position=found)
+
+    return market, LiquidityDesk(tmp_path, config, build)
+
+
+def test_the_gateway_admits_an_open_over_the_inventory_it_adopted_itself(connector, tmp_path):
+    market = resolved(connector)
+    _, desk = liquidity_desk(connector, tmp_path, opening(market))
+    created_state = desk.store.load()
+    assert (created_state.initialized, created_state.baseline) == (False, ())
+    record = desk.submit(opening(market))
+    state = desk.store.load()
+    assert (record.intent.kind, record.trigger.kind) == ("open_liquidity", "operator")
+    assert state.initialized and state.decision == record
+    owned = state.owned[0]
+    assert (owned.inventory0.amount, owned.inventory1.amount) == (AMOUNT0, AMOUNT1)
+    assert (owned.position, state.baseline, record.observations) == (
+        None,
+        desk.gateway.observe(),
+        desk.gateway.observe(),
+    )
+    assert (record.intent.maximum0.amount, record.intent.maximum1.amount) == offer(market)
+
+
+def test_the_gateway_refuses_a_start_that_attributes_more_than_the_wallet_or_the_statement(
+    connector, tmp_path
+):
+    market = resolved(connector)
+    # The wallet is one base unit short of the stated currency1.
+    lacking = (AMOUNT0, AMOUNT1 - 1)
+    _, short = liquidity_desk(connector, tmp_path / "short", opening(market), wallets=lacking)
+    with pytest.raises(DataError, match="less than the") as refusal:
+        short.service.validate_update(*short.started())
+    assert refusal.value.kind == "inventory" and not short.store.load().initialized
+    with pytest.raises(DataError, match="less than the"):
+        short.submit(opening(market))
+
+    _, desk = liquidity_desk(connector, tmp_path / "covered", opening(market))
+    before, honest = desk.started()
+    desk.service.validate_update(before, honest)
+    richer = before.owned[0].model_copy(
+        update={"inventory0": AssetAmount(asset=market.pool.currency0, amount=AMOUNT0 + 1)}
+    )
+    with pytest.raises(ValueError, match="ownership must follow the independently verified"):
+        desk.service.validate_update(*desk.started(owned=(richer,)))
+
+
+def test_the_gateway_adopts_the_named_nft_from_the_baseline_it_verifies(connector, tmp_path):
+    market = resolved(connector)
+    stated = naming("collect-liquidity-fees")
+    _, desk = liquidity_desk(connector, tmp_path, stated, chain=position(market))
+    assert desk.store.load().owned[0].adopts == nft_id(market)
+    record = desk.submit(stated)
+    state = desk.store.load()
+    owned = state.owned[0]
+    assert (record.intent.kind, state.initialized) == ("collect_liquidity_fees", True)
+    assert (owned.position, owned.adopts, owned.entry_complete) == (position(market), None, True)
+    assert (owned.inventory0.amount, owned.inventory1.amount) == (0, 0)
+    # The baseline names the NFT to adopt and holds the chain's read of it.
+    (baseline,) = state.baseline
+    assert (baseline.owned.adopts, baseline.position) == (nft_id(market), position(market))
+    assert record.observations[0].owned == owned
+
+
+def test_the_gateway_refuses_to_adopt_another_nft_than_the_one_named(connector, tmp_path):
+    market = resolved(connector)
+    stated = naming("close-liquidity")
+    other = position(market, token=OTHER_TOKEN)
+    # The chain answers with another NFT of the same wallet, pool and range.
+    _, desk = liquidity_desk(connector, tmp_path / "other", stated, chain=other)
+    before, _ = desk.started()
+    taken_over = type(before.owned[0])(
+        target=before.owned[0].target,
+        inventory0=before.owned[0].inventory0,
+        inventory1=before.owned[0].inventory1,
+        position=other,
+        entry_complete=True,
+    )
+    with pytest.raises(DataError, match="does not hold the NFT to adopt") as refusal:
+        desk.service.validate_update(*desk.started(owned=(taken_over,)))
+    assert refusal.value.kind == "ownership"
+    with pytest.raises(DataError, match="does not hold the NFT to adopt"):
+        desk.submit(stated)
+    assert not desk.store.load().initialized
+
+    # A start that records the named NFT with other facts than the chain's is refused
+    # against the gateway's own read of the baseline.
+    _, desk = liquidity_desk(connector, tmp_path / "named", stated, chain=position(market))
+    before, honest = desk.started()
+    inflated = position(market, replace(held(market), liquidity=LIQUIDITY + 1))
+    forged = honest.baseline[0].model_copy(update={"position": inflated})
+    claimed = type(before.owned[0])(
+        target=before.owned[0].target,
+        inventory0=before.owned[0].inventory0,
+        inventory1=before.owned[0].inventory1,
+        position=inflated,
+        entry_complete=True,
+    )
+    with pytest.raises(ValueError, match="differs from its pinned chain reads"):
+        desk.service.validate_update(
+            before, honest.model_copy(update={"baseline": (forged,), "owned": (claimed,)})
+        )
+    # And the honest start is the only ownership it accepts.
+    with pytest.raises(ValueError, match="ownership must follow the independently verified"):
+        desk.service.validate_update(before, honest)
+    adopted = connector_from_wire({"connector": connector}).lifecycle.adopt(
+        before.owned, honest.baseline
+    )
+    desk.service.validate_update(before, honest.model_copy(update={"owned": adopted}))
+
+
+def test_a_position_changed_from_outside_is_recorded_as_observed_with_an_accounting_issue(
+    connector,
+):
+    market = resolved(connector)
+    config, state, seen = on_position(connector, market, "decrease-liquidity")
+    owned, removed = state.owned[0], LIQUIDITY // 4
+    intent = v3_pool_direct.intent(config, (seen,), naming("decrease-liquidity"))
+    operation = checked(connector, config, state, intent, seen)(seen)
+    pending = SimpleNamespace(before=seen, operation=operation)
+    effects = Effects(delta0=5, delta1=6, liquidity_delta=-removed, nft=nft_id(market))
+    issue = f"{nft_id(market)}: liquidity position includes unexplained external changes"
+
+    def holding(amount):
+        return position(market, replace(held(market), liquidity=amount))
+
+    # A mined decrease whose NFT holds more than the decrease leaves: someone added to it.
+    issues = v3_pool_reconciliation.liquidity_issues
+    assert issues(pending, effects, holding(LIQUIDITY - removed), True) == ()
+    assert issues(pending, effects, holding(LIQUIDITY - removed + 7), True) == (issue,)
+    assert issues(pending, effects, holding(LIQUIDITY - removed - 7), True) == (issue,)
+    # A reverted step and a burned NFT are judged by the snapshot instead.
+    assert issues(pending, effects, holding(LIQUIDITY + 7), False) == ()
+    assert issues(pending, effects, None, True) == ()
+
+    # A reverted step finds the NFT changed: ownership follows the chain, with the issue.
+    observe = v3_pool_reconciliation.observed_ownership
+    assert observe(owned, seen) == (owned, seen, ())
+    grown = holding(LIQUIDITY + 7)
+    after = observation(connector, config, owned, market, position=grown)
+    kept, recorded, changed = observe(owned, after)
+    assert (kept.position, recorded.owned, recorded.position, changed) == (
+        grown,
+        kept,
+        grown,
+        (issue,),
+    )
+    assert (kept.inventory0, kept.inventory1, kept.target) == (
+        owned.inventory0,
+        owned.inventory1,
+        owned.target,
+    )
+
+    # The recorded outcome's ownership is the deployment's from then on, reverted or not,
+    # so the next step starts from the position the chain holds.
+    lifecycle = connector_from_wire({"connector": connector}).lifecycle
+    reverted = SimpleNamespace(success=False, after=recorded, operation=operation)
+    assert lifecycle.commit_owned(state.owned, reverted) == (kept,)
+    unchanged = SimpleNamespace(success=False, after=seen, operation=operation)
+    assert lifecycle.commit_owned(state.owned, unchanged) == state.owned
+    lifecycle.validate_owned(SimpleNamespace(owned=(kept,)), (recorded,))
+    # Before anything is signed, a position that differs from what is owned still refuses.
+    with pytest.raises(DataError, match="differs from retained ownership"):
+        lifecycle.validate_owned(SimpleNamespace(owned=state.owned), (after,))
+
+
+def test_a_staked_slipstream_position_reports_no_accrued_fees(connector):
+    market = resolved(connector)
+    chain = market.pool.chain.chain_id
+    stated = PositionRequest(chain=chain, pool=market.pool.pool, token_id=TOKEN)
+    gauge = OBSERVED.get(connector, {}).get("gauge", STRANGER)
+    reader = manager(connector, market, {TOKEN: held(market, owner=gauge)})
+    report = read_liquidity_position(reader, connector, stated, market.block)
+    recorded = [item["amount"] for item in report["owed_recorded"]]
+    owed = [item["amount"] for item in report["owed"]]
+    assert (report["owner"], recorded) == (gauge, ["11", "13"])
+    if connector == "aerodrome_slipstream":
+        # The gauge holds it: its liquidity earns emissions there, not trading fees.
+        assert (report["staked"], owed) == (True, recorded)
+    else:
+        assert "staked" not in report and owed == [str(11 + 3 * LIQUIDITY), str(13 + 4 * LIQUIDITY)]
+
+
+def test_only_an_operator_deployment_carries_an_adoption_on_any_path(connector):
+    market = resolved(connector)
+    config = deployed(connector, market, opening(market))
+    strategy = StrategyDefinition(filename="strategy.py", source="def decide(context):\n    pass\n")
+    refusal = "only an operator deployment adopts inventory or a position"
+    # A strategy checkpoint, created or decoded.
+    with pytest.raises(ValueError, match=refusal):
+        created(connector, config, strategy)
+    operator = created(connector, config)
+    wire = {**json.loads(operator.model_dump_json()), "operator": False}
+    wire["strategy"] = strategy.model_dump()
+    with pytest.raises(ValueError, match=refusal):
+        type(operator).model_validate_json(json.dumps(wire))
+    # A backtest of the connector.
+    economic = import_module(f"almanak.connectors.{connector}.economic_parameters")
+    with pytest.raises(ValueError, match=refusal):
+        economic._binding.initial_owned(config, ALLOCATION)  # noqa: SLF001
+    # A composed configuration, which is a strategy's or a backtest's.
+    (allocation,) = config.allocations
+    composed = SimpleNamespace(
+        allocations=(allocation,),
+        accounts=SimpleNamespace(bindings=(SimpleNamespace(name=allocation.account),)),
+    )
+    with pytest.raises(ValueError, match=refusal):
+        ComposedParameters.scope(composed)
+    refuse_adoption(())
+    refuse_adoption((SimpleNamespace(),))
+
+
+@pytest.fixture
+def read_gateway(connector, tmp_path, monkeypatch):
+    """A real read gateway over loopback whose provider is the stated position manager."""
+    market = resolved(connector)
+    provider = manager(connector, market, {TOKEN: held(market)})
+    monkeypatch.setattr(observation_gateway, "verified_reader", lambda chain, env_file: provider)
+    token = tmp_path / "read-gateway.token"
+    token.write_text(secrets.token_hex(32))
+    token.chmod(0o600)
+    gateway = ObservationGateway(tmp_path / "operator.env")
+    server = http_server(gateway, token, 0, request_type=GatewayRequest, fields={"read", "lookup"})
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield market, f"http://127.0.0.1:{server.server_port}", token
+    finally:
+        server.shutdown()
+        server.server_close()
+        gateway.close()
+
+
+def test_a_missing_nft_is_refused_by_name_through_the_read_gateway(connector, read_gateway):
+    market, endpoint, token = read_gateway
+    chain = market.pool.chain.chain_id
+    stated = PositionRequest(chain=chain, pool=market.pool.pool, token_id=TOKEN)
+    with gateway_reader(chain, endpoint, token) as reader:
+        assert isinstance(reader, GatewayReader)
+        block = reader.pin_block(market.block.number)
+        # A read the gateway serves reaches the report unchanged.
+        report = read_liquidity_position(reader, connector, stated, block)
+        assert (report["owner"], report["position"]["liquidity"]) == (
+            WALLET.address,
+            str(LIQUIDITY),
+        )
+        # The position manager reverts for a token it does not hold; the revert stays one
+        # across the gateway, so the command names the NFT instead of an RPC refusal.
+        missing = stated.model_copy(update={"token_id": OTHER_TOKEN})
+        with pytest.raises(ValueError, match=f"holds no NFT {OTHER_TOKEN}"):
+            read_liquidity_position(reader, connector, missing, block)
+        manager_address = market.contracts.position_manager
+        with pytest.raises(Reverted) as revert:
+            reader.call(
+                manager_address,
+                "ownerOf(uint256)",
+                block,
+                inputs=("uint256",),
+                args=(OTHER_TOKEN,),
+                outputs=("address",),
+            )
+        assert (revert.value.kind, revert.value.reverted, revert.value.data) == ("rpc", True, None)
