@@ -224,28 +224,43 @@ def held(result, moment, unit="supply_shares"):
     return int(result[moment][unit])
 
 
+EMPTY_LOAN = {"leg": "loan", "supply_shares": "0", "borrow_shares": "0"}
+
+
+def assert_ran(result, steps):
+    """The steps the command sent, in order, and that they completed its request."""
+    assert (operations(result), result["completed"]) == (steps, True)
+
+
 def assert_supplied(result, before, unit="supply_shares"):
-    assert operations(result) == ["approve", "supply"] and result["completed"]
+    assert_ran(result, ["approve", "supply"])
     assert held(result, "position_before", unit) == before
     assert held(result, "position_after", unit) > before
 
 
-def test_supply_then_withdraw_each_as_one_command(setting):
-    preview = setting("supply", execute=False)
-    assert preview["executed"] is False and "outcomes" not in preview
+def assert_withdrawn(result, steps, unit="supply_shares"):
+    assert_ran(result, steps)
+    assert held(result, "position_after", unit) == 0
+
+
+def assert_refused(setting, error, message, *arguments, **options):
+    with pytest.raises(error, match=message):
+        setting(*arguments, **options)
+
+
+def assert_preview(preview):
+    assert (preview["executed"], "outcomes" in preview) == (False, False)
     assert preview["first_step"]["operation"]["kind"] == "approve"
-    assert preview["position_before"] == {
-        "leg": "loan",
-        "supply_shares": "0",
-        "borrow_shares": "0",
-    }
+    assert preview["position_before"] == EMPTY_LOAN
+
+
+def test_supply_then_withdraw_each_as_one_command(setting):
+    assert_preview(setting("supply", execute=False))
     first = setting("supply", execute=True)
     assert_supplied(first, 0)
     # A later command adopts the position the account already holds and adds to it.
     assert_supplied(setting("supply", execute=True), held(first, "position_after"))
-    withdrawn = setting("withdraw", execute=True)
-    assert operations(withdrawn) == ["withdraw"] and withdrawn["completed"]
-    assert held(withdrawn, "position_after") == 0
+    assert_withdrawn(setting("withdraw", execute=True), ["withdraw"])
 
 
 def stopped_after_the_first_send(setting, monkeypatch, capsys):
@@ -265,53 +280,61 @@ def stopped_after_the_first_send(setting, monkeypatch, capsys):
     return Path(kept["path"])
 
 
-def test_an_interrupted_supply_is_recovered_and_the_wallet_is_freed(setting, monkeypatch, capsys):
-    record = stopped_after_the_first_send(setting, monkeypatch, capsys)
+def assert_blocked(setting, record):
     (listed,) = ax_actions.kept_records()
     assert (listed["path"], listed["unresolved"]["operation"]) == (str(record), "approve")
     # The kept record blocks the wallet until its signed step is resolved.
-    with pytest.raises(RuntimeError, match="already claimed"):
-        setting("supply", execute=False)
-    recovered = setting.recover(record)
+    assert_refused(setting, RuntimeError, "already claimed", "supply", execute=False)
+
+
+def assert_recovered(recovered, record):
     assert (recovered["resolved"], recovered["discarded_request"]) == (True, True)
     assert (operations(recovered), "unresolved" in recovered) == (["approve"], False)
     assert (ax_actions.kept_records(), record.exists()) == ([], False)
+
+
+def test_an_interrupted_supply_is_recovered_and_the_wallet_is_freed(setting, monkeypatch, capsys):
+    record = stopped_after_the_first_send(setting, monkeypatch, capsys)
+    assert_blocked(setting, record)
+    assert_recovered(setting.recover(record), record)
     # The approval stands: another amount is refused, and the same supply needs only
     # its own step.
-    with pytest.raises(DataError, match="supply allowance differs from the requested amount"):
-        setting("supply", amount=setting.amounts["loan"] + 1, execute=False)
-    again = setting("supply", execute=True)
-    assert (operations(again), again["completed"]) == (["supply"], True)
+    refusal = "supply allowance differs from the requested amount"
+    other = setting.amounts["loan"] + 1
+    assert_refused(setting, DataError, refusal, "supply", amount=other, execute=False)
+    assert_ran(setting("supply", execute=True), ["supply"])
     # A withdrawal is complete only once an allowance left on the core is revoked too.
     setting.approve(7)
-    withdrawn = setting("withdraw", execute=True)
-    assert (operations(withdrawn), withdrawn["completed"]) == (["withdraw", "revoke"], True)
-    assert held(withdrawn, "position_after") == 0
+    assert_withdrawn(setting("withdraw", execute=True), ["withdraw", "revoke"])
+
+
+def assert_posted(posted, amount):
+    """A first collateral supply: the whole amount, and no other leg bound yet."""
+    assert_supplied(posted, 0, "collateral")
+    assert held(posted, "position_after", "collateral") == amount
+    assert "other_leg" not in posted["position_after"]
+
+
+def assert_lent_beside(lent, collateral):
+    """A first loan supply whose deployment binds the collateral the wallet holds."""
+    assert_supplied(lent, 0)
+    bound = (lent["position_before"]["other_leg"], lent["position_after"]["other_leg"])
+    assert bound == (collateral, collateral)
 
 
 def test_each_leg_is_served_while_the_wallet_holds_the_other(setting):
     posted = setting("supply", "collateral", execute=True)
-    assert_supplied(posted, 0, "collateral")
-    assert held(posted, "position_after", "collateral") == setting.amounts["collateral"]
-    assert "other_leg" not in posted["position_after"]
-    # The loan leg's deployment binds the collateral the wallet already holds.
+    assert_posted(posted, setting.amounts["collateral"])
     lent = setting("supply", "loan", execute=True)
-    assert_supplied(lent, 0)
-    assert lent["position_before"]["other_leg"] == posted["position_after"]
-    assert lent["position_after"]["other_leg"] == posted["position_after"]
+    assert_lent_beside(lent, posted["position_after"])
     released = setting("withdraw", "collateral", execute=True)
-    assert operations(released) == ["withdraw"] and released["completed"]
-    assert held(released, "position_after", "collateral") == 0
+    assert_withdrawn(released, ["withdraw"], "collateral")
     assert released["position_after"]["other_leg"]["supply_shares"] == str(
         held(lent, "position_after")
     )
     withdrawn = setting("withdraw", "loan", execute=True)
-    assert operations(withdrawn) == ["withdraw"] and withdrawn["completed"]
-    assert withdrawn["position_after"] == {
-        "leg": "loan",
-        "supply_shares": "0",
-        "borrow_shares": "0",
-    }
+    assert_ran(withdrawn, ["withdraw"])
+    assert withdrawn["position_after"] == EMPTY_LOAN
 
 
 FLOOR = 15 * 10**17
@@ -326,59 +349,60 @@ def test_a_debt_is_opened_and_closed_by_separate_commands(setting):
     """Borrow against posted collateral, then every way out, each one command that
     adopts what the earlier ones left."""
     borrowed, posted = setting.amounts["loan"] // 10, setting.amounts["collateral"]
-    with pytest.raises(ValueError, match="a borrow is served on the loan leg"):
-        setting("borrow", "collateral", amount=borrowed, floor=FLOOR, execute=False)
-    with pytest.raises(ValueError, match="the wallet has no collateral in this market"):
-        setting("borrow", amount=borrowed, floor=FLOOR, execute=False)
+    owed = assert_debt_opened(setting, borrowed, posted)
+    assert_debt_leaves_safe_actions_unfloored(setting, owed)
+    assert_collateral_leaves_only_floored(setting, posted)
+    assert_debt_repaid(setting, borrowed)
+    released = setting("withdraw", "collateral", execute=True)
+    assert_ran(released, ["withdraw"])
+    assert released["position_after"] == {"leg": "collateral", "collateral": "0"}
+
+
+FLOOR_REFUSAL = "violates the configured fund/market health floor"
+
+
+def assert_debt_opened(setting, borrowed, posted):
+    """A borrow needs the loan leg, posted collateral and a floor the position clears.
+
+    Returns the borrow shares the wallet then owes.
+    """
+    request = {"amount": borrowed, "floor": FLOOR, "execute": False}
+    wrong_leg = "a borrow is served on the loan leg"
+    assert_refused(setting, ValueError, wrong_leg, "borrow", "collateral", **request)
+    unbacked = "the wallet has no collateral in this market"
+    assert_refused(setting, ValueError, unbacked, "borrow", **request)
     assert_supplied(setting("supply", "collateral", execute=True), 0, "collateral")
     print(json.dumps({"lender_supplied_first": setting.ensure_liquidity(borrowed)}))
     # A floor no position reaches, however small the debt.
-    with pytest.raises(ValueError, match="violates the configured fund/market health floor"):
-        setting("borrow", amount=borrowed, floor=10**60, execute=False)
+    assert_refused(setting, ValueError, FLOOR_REFUSAL, "borrow", **{**request, "floor": 10**60})
     opened = setting("borrow", amount=borrowed, floor=FLOOR, execute=True)
-    assert operations(opened) == ["borrow"] and opened["completed"]
+    assert_ran(opened, ["borrow"])
     assert debt(opened, "position_before") == 0 < debt(opened, "position_after")
     assert opened["position_after"]["other_leg"] == {"leg": "collateral", "collateral": str(posted)}
-
-    assert_debt_leaves_safe_actions_unfloored(setting, debt(opened, "position_after"))
-    assert_collateral_leaves_only_floored(setting, posted)
-
-    some = setting("repay", amount=borrowed // 2, execute=True)
-    assert operations(some) == ["approve", "repay"] and some["completed"]
-    assert 0 < debt(some, "position_after") < debt(some, "position_before")
-    # The held balance is approved, so interest accrued since cannot leave the repayment
-    # short; what it does not take is revoked.
-    closed = setting("repay", execute=True)
-    assert operations(closed) == ["approve", "repay", "revoke"] and closed["completed"]
-    assert debt(closed, "position_after") == 0
-    with pytest.raises(DataError, match="the wallet owes no debt in this market"):
-        setting("repay", execute=False)
-    released = setting("withdraw", "collateral", execute=True)
-    assert operations(released) == ["withdraw"] and released["completed"]
-    assert released["position_after"] == {"leg": "collateral", "collateral": "0"}
+    return debt(opened, "position_after")
 
 
 def assert_debt_leaves_safe_actions_unfloored(setting, owed):
     """Lending and taking the lent balance back cannot lower health: no floor is asked."""
     lent = setting("supply", "loan", execute=True)
-    assert operations(lent) == ["approve", "supply"] and lent["completed"]
+    assert_ran(lent, ["approve", "supply"])
     assert debt(lent, "position_before") == owed
     withdrawn = setting("withdraw", "loan", execute=True)
-    assert operations(withdrawn) == ["withdraw"] and withdrawn["completed"]
+    assert_ran(withdrawn, ["withdraw"])
     assert (held(withdrawn, "position_after"), debt(withdrawn, "position_after")) == (0, owed)
 
 
 def assert_collateral_leaves_only_floored(setting, posted):
     """Collateral that backs debt leaves in part, above a stated floor."""
-    part = posted // 10
-    with pytest.raises(ValueError, match="cannot be withdrawn in full while the debt is open"):
-        setting("withdraw", "collateral", floor=FLOOR, execute=False)
-    with pytest.raises(ValueError, match="state --min-health-factor, or repay the debt"):
-        setting("withdraw", "collateral", amount=part, execute=False)
-    with pytest.raises(ValueError, match="violates the configured fund/market health floor"):
-        setting("withdraw", "collateral", amount=posted - 1, floor=FLOOR, execute=False)
-    taken = setting("withdraw", "collateral", amount=part, floor=FLOOR, execute=True)
-    assert operations(taken) == ["withdraw"] and taken["completed"]
+    part, leg = posted // 10, ("withdraw", "collateral")
+    full = "cannot be withdrawn in full while the debt is open"
+    assert_refused(setting, ValueError, full, *leg, floor=FLOOR, execute=False)
+    unfloored = "state --min-health-factor, or repay the debt"
+    assert_refused(setting, ValueError, unfloored, *leg, amount=part, execute=False)
+    most = {"amount": posted - 1, "floor": FLOOR, "execute": False}
+    assert_refused(setting, ValueError, FLOOR_REFUSAL, *leg, **most)
+    taken = setting(*leg, amount=part, floor=FLOOR, execute=True)
+    assert_ran(taken, ["withdraw"])
     assert held(taken, "position_after", "collateral") == posted - part
     assert debt(taken, "position_after", "collateral") == debt(
         taken, "position_before", "collateral"
@@ -386,6 +410,21 @@ def assert_collateral_leaves_only_floored(setting, posted):
     # An allowance left on the collateral is cleared by the same kind of withdrawal,
     # while the debt that keeps a full withdrawal away is still open.
     setting.approve(7, "collateral")
-    cleared = setting("withdraw", "collateral", amount=part, floor=FLOOR, execute=True)
-    assert operations(cleared) == ["withdraw", "revoke"] and cleared["completed"]
+    cleared = setting(*leg, amount=part, floor=FLOOR, execute=True)
+    assert_ran(cleared, ["withdraw", "revoke"])
     assert held(cleared, "position_after", "collateral") == posted - 2 * part
+
+
+def assert_debt_repaid(setting, borrowed):
+    """A partial repayment, then the rest, after which there is nothing to repay."""
+    some = setting("repay", amount=borrowed // 2, execute=True)
+    assert_ran(some, ["approve", "repay"])
+    assert 0 < debt(some, "position_after") < debt(some, "position_before")
+    # The held balance is approved, so interest accrued since cannot leave the repayment
+    # short; what it does not take is revoked.
+    closed = setting("repay", execute=True)
+    assert_ran(closed, ["approve", "repay", "revoke"])
+    assert debt(closed, "position_after") == 0
+    assert_refused(
+        setting, DataError, "the wallet owes no debt in this market", "repay", execute=False
+    )
