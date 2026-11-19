@@ -43,18 +43,20 @@ ACTIONS = {
     "collateral": "enable or disable the supplied balance as collateral",
     "swap": "sell an exact amount of one pool currency for another, in one named pool",
     "open-liquidity": "mint a concentrated-liquidity position in one tick range of one"
-    " named pool, from stated amounts of its two currencies, or for curve deposit stated"
-    " amounts of a pool's coins for its LP token; nothing is swapped",
+    " named pool, from stated amounts of its two currencies, or for curve and aerodrome"
+    " deposit stated amounts of a pool's coins for its LP token; nothing is swapped",
     "increase-liquidity": "add stated amounts of the pool's currencies to a position"
     " the wallet owns; nothing is swapped",
     "decrease-liquidity": "remove part of the liquidity of a position the wallet owns and"
-    " collect what it is owed; for curve, burn part of the wallet's LP shares",
+    " collect what it is owed; for curve and aerodrome, burn part of the wallet's LP shares",
     "collect-liquidity-fees": "collect what a position the wallet owns is owed, without"
-    " changing its liquidity",
+    " changing its liquidity; for aerodrome, claim the fees the wallet's LP shares earned",
     "close-liquidity": "remove all liquidity of a position the wallet owns, collect what"
-    " it is owed and burn its NFT; for curve, burn all of the wallet's LP shares",
+    " it is owed and burn its NFT; for curve and aerodrome, burn all of the wallet's LP"
+    " shares, and for aerodrome claim their fees",
     "revoke-exchange": "set every allowance the wallet gave the pool's router and"
-    " position manager, or for curve the pool itself, in the pool currencies to zero",
+    " position manager, or for curve the pool itself, in the pool currencies to zero; for"
+    " aerodrome also the router's allowance in the pool's LP token",
 }
 # Actions whose market is one pool; the others name a lending market, with the flags
 # `ax lending-reserve` takes.

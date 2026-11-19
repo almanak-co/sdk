@@ -12,7 +12,10 @@ import json
 from almanak import ax_discovery, ax_hypercore, ax_lending_markets
 from almanak.balances import parse_balance_request, read_balance
 from almanak.caip import AssetType, ChainId
-from almanak.cli_arguments import LENDING_SELECTOR_FLAGS
+from almanak.cli_arguments import CONNECTOR_INLINE_FLAGS, INLINE_FLAGS, LENDING_SELECTOR_FLAGS
+from almanak.connectors.aerodrome.position_request import (
+    PositionRequest as AerodromePositionRequest,
+)
 from almanak.connectors.curve.position_request import PositionRequest as CurvePositionRequest
 from almanak.connectors.discovery import pool_connectors
 from almanak.connectors.gmx_v2.market_request import GmxMarketRequest, read_gmx_market
@@ -56,8 +59,9 @@ CONNECTOR_REQUESTS: dict[tuple[str, str], type[Model]] = {
     **{("ax-pool", c): PoolRequest for c in pool_connectors("concentrated", "resolved")},
     # A position is an NFT of a V3-style position manager.
     **{("ax-liquidity-position", c): PositionRequest for c in pool_connectors("concentrated")},
-    # A Curve position is an account's balance of the pool's LP token.
+    # A Curve or an Aerodrome position is an account's balance of the pool's LP token.
     ("ax-liquidity-position", "curve"): CurvePositionRequest,
+    ("ax-liquidity-position", "aerodrome"): AerodromePositionRequest,
 }
 
 
@@ -186,11 +190,17 @@ def liquidity_position(args):
     support_level(args.connector, request.chain)
     with observation_reader(args, chain.chain_id) as reader:
         block = reader.pin_block(args.block)
-        if isinstance(request, CurvePositionRequest):
-            from almanak.connectors.curve.position_request import read_liquidity_position as read
-
-            return read(reader, request, block)
+        if not isinstance(request, PositionRequest):
+            return account_position_read(args.connector)(reader, request, block)
         return read_liquidity_position(reader, args.connector, request, block)
+
+
+def account_position_read(connector: str):
+    """The position read of a connector whose position is an account's LP token balance:
+    its own `position_request.read_liquidity_position(reader, request, block)`."""
+    from importlib import import_module
+
+    return import_module(f"almanak.connectors.{connector}.position_request").read_liquidity_position
 
 
 def token_resolve(args):
@@ -289,8 +299,10 @@ def inline_request(args) -> dict:
     if args.product == "ax-perp-markets":
         return {"chain": args.chain, "query": args.query}
     if args.product == "ax-liquidity-position":
-        named = "account" if args.connector == "curve" else "token_id"
-        return {"chain": args.chain, "pool": args.pool, named: getattr(args, named)}
+        # An NFT position is named by its token ID, an LP token balance by its account.
+        shape = (args.product, args.connector)
+        names = CONNECTOR_INLINE_FLAGS.get(shape, INLINE_FLAGS[args.product])
+        return {name: getattr(args, name) for name in names}
     return pool_price_request(args)
 
 

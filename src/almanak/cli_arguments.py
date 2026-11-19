@@ -680,9 +680,10 @@ AX_REQUESTS = {
     ),
     "liquidity-position": (
         "one V3-style liquidity position by its NFT: owner, range, liquidity, principal at"
-        " the pool's price and the amounts a collection would pay; for curve, one account's"
-        " LP shares in a pool and what burning them for every coin would pay",
-        (*pool_connectors("concentrated"), "curve"),
+        " the pool's price and the amounts a collection would pay; for curve and aerodrome,"
+        " one account's LP shares in a pool and what burning them would pay, and for"
+        " aerodrome what a fee claim would pay",
+        (*pool_connectors("concentrated"), "curve", "aerodrome"),
     ),
 }
 
@@ -743,8 +744,8 @@ def position_source(command):
     )
     command.add_argument(
         "--account",
-        help="curve only, in place of --token-id: the account whose LP shares in the pool"
-        " are the position",
+        help="curve and aerodrome only, in place of --token-id: the account whose LP"
+        " shares in the pool are the position",
     )
 
 
@@ -795,9 +796,11 @@ INLINE_FLAGS = {
     "ax-pool-price": ("chain", "currency0", "currency1", "fee", "tick_spacing"),
 }
 # Inline flags of a request whose shape is its connector's own, in place of the
-# product's: a Curve position is an account's LP token balance, not an NFT.
+# product's: a Curve or an Aerodrome position is an account's LP token balance, not an
+# NFT.
 CONNECTOR_INLINE_FLAGS: dict[tuple[str, str | None], tuple[str, ...]] = {
-    ("ax-liquidity-position", "curve"): ("chain", "pool", "account")
+    ("ax-liquidity-position", "curve"): ("chain", "pool", "account"),
+    ("ax-liquidity-position", "aerodrome"): ("chain", "pool", "account"),
 }
 # Optional inline flags: never required, but refused with --config like the rest.
 INLINE_OPTIONS = {"ax-pool-price": ("base", "hooks")}

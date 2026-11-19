@@ -2,8 +2,9 @@
 
 The commands themselves run through `ax_actions`; what each one admits and how its
 deployment is built is the connector's: the V3 pool family's
-(`connectors/v3_pool_liquidity_direct.py`) or Curve's
-(`connectors/curve/liquidity_direct.py`).
+(`connectors/v3_pool_liquidity_direct.py`), Curve's
+(`connectors/curve/liquidity_direct.py`) or Aerodrome's
+(`connectors/aerodrome/liquidity_direct.py`).
 
 argparse cannot tie a flag to the connector, so each command's parser holds the position
 flags of every connector that serves it, none of them required, and `validate` holds a
@@ -52,8 +53,8 @@ def arguments(name: str, action) -> None:
             "--token-id",
             type=token_id,
             help="the position's NFT at the pool's position manager; the wallet must own it"
-            " and it must be a position of --pool (not curve, whose position is the"
-            " wallet's LP token balance)",
+            " and it must be a position of --pool (not curve or aerodrome, whose position"
+            " is the wallet's LP token balance)",
         )
     if name in ADDITIONS:
         amount_arguments(action)
@@ -63,9 +64,9 @@ def arguments(name: str, action) -> None:
             type=liquidity_units,
             required=True,
             help="liquidity to remove, in the position's own liquidity units and below what"
-            " it holds; `ax liquidity-position` reports what it holds. For curve, the LP"
-            " shares to burn, in base units of the pool's LP token and below the wallet's"
-            " balance",
+            " it holds; `ax liquidity-position` reports what it holds. For curve and"
+            " aerodrome, the LP shares to burn, in base units of the pool's LP token and"
+            " below the wallet's balance",
         )
     if name in ("decrease-liquidity", "close-liquidity"):
         action.add_argument(
@@ -110,7 +111,7 @@ def range_arguments(action) -> None:
             f"--tick-{side}",
             type=tick,
             help=f"{side} tick of the position's range, a multiple of the pool's tick spacing"
-            " (not curve, whose pools have no range)",
+            " (not curve or aerodrome, whose pools have no range)",
         )
 
 
@@ -121,7 +122,9 @@ def amount_arguments(action) -> None:
             type=whole_units,
             default=0,
             help=f"most base units of the pool's currency{index} the step may use"
-            " (default: 0); at least one of the two amounts must be above zero (not curve)",
+            " (default: 0); at least one of the two amounts must be above zero, and for"
+            " aerodrome both, since its deposit takes the two in the pool's proportion (not"
+            " curve)",
         )
     action.add_argument(
         "--amount",
@@ -144,7 +147,8 @@ def bound_arguments(name: str, action) -> None:
             " observed block, and it reverts when it would take less of a currency than the"
             " range takes at the edges of that move; a curve deposit reverts when it would"
             " mint more than this far below the LP shares its amounts were worth at the"
-            " observed block"
+            " observed block, and an aerodrome deposit when it would take or mint that much"
+            " less than its amounts were worth there"
         )
     else:
         bound = (

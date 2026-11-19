@@ -249,20 +249,12 @@ def test_the_connector_supports_operator_deployments_and_serves_the_swap(variant
         direct.require_direct(CONNECTOR, BASE, direct.ActionRequest("supply", 5))
 
 
-def test_the_swap_is_the_only_action_an_operator_request_is_admitted_for(variant):
-    cells = connector_from_wire({"connector": CONNECTOR}).chain_support
-    others = [
-        (cell, action) for cell in cells for action in cell.actions if action != "swap_exact_input"
-    ]
-    # Liquidity, exits and revocations stay strategy actions.
-    assert {str(action) for _, action in others} >= {
-        "open_liquidity",
-        "exit_exchange",
-        "revoke_exchange",
-    }
-    for cell, action in others:
-        with pytest.raises(ValueError, match="unsupported as a direct action"):
-            cell.require_direct(action)
+def test_an_exit_stays_a_strategy_action(variant):
+    (cell,) = connector_from_wire({"connector": CONNECTOR}).chain_support
+    undeclared = [action for action in cell.actions if action not in cell.direct_actions]
+    assert [str(action) for action in undeclared] == ["exit_exchange"]
+    with pytest.raises(ValueError, match="unsupported as a direct action"):
+        cell.require_direct(undeclared[0])
 
 
 def test_a_strategy_checkpoint_keeps_its_wire_form(variant):
