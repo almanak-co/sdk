@@ -649,14 +649,18 @@ result lists it, and a later swap of the same amount uses it. No command only
 revokes an allowance.
 
 `ax recover` resolves an interrupted swap as it does any action. A signed Curve swap
-that the pool would now pay below its minimum is neither sent nor released: recovery
-reports `signed_attempt_unsendable` and the record and the wallet's claim stay until
-the market returns or the nonce is used.
+that may have been sent, and that the pool would now pay below its minimum, is
+neither sent nor released: `ax recover` reports `signed_attempt_unsendable` and
+exits 1, and the record and the wallet's claim on that chain stay. The only way out
+is the pool paying the minimum again, after which `ax recover` sends the same bytes.
+Using the nonce with another transaction does not release the record: every later
+`ax recover` then reports `nonce_conflict`. No funds are at risk in that state, since
+the signed bytes can no longer be mined, but no command drops the record.
 
 A swap deployment trades one pool and holds no liquidity position. On Aerodrome and
-Curve a wallet that holds the pool's LP shares, however few, is refused, as a
-trading-only strategy there is. Anyone can send such shares to a wallet, and no
-direct command removes them.
+Curve a wallet that holds the pool's LP shares, however few, is refused before
+anything is signed, as a trading-only strategy there is. Anyone can send such shares
+to a wallet, and no direct command removes them.
 
 The action runs through the same planning, simulation, signing and receipt
 reconciliation as a strategy's, as an operator deployment that exists only for the

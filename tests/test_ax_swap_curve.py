@@ -747,6 +747,17 @@ def arguments(*extra, connector="curve", without=()):
     return parse_validated(build_parser(), ["ax", "swap", *flags, *extra])
 
 
+def _flags(buy):
+    """The command line of one Curve swap with `--buy` spelled as given."""
+    stated = arguments()
+    return [
+        "--connector", "curve", "--chain", "eip155:1", "--pool", stated.pool,
+        "--sell", USDC.upper().replace("EIP155:1/ERC20:0X", "eip155:1/erc20:0x"),
+        "--buy", buy, "--amount", "1000", "--slippage-bps", "50", "--wallet", "wallet",
+        "--env-file", ".env", "--max-gas-price-wei", "7", "--max-transaction-fee", "9",
+    ]  # fmt: skip
+
+
 def test_the_command_line_states_both_coins_and_the_bounds():
     args = arguments()
     assert (args.product, args.ax_command, args.execute) == ("operator-action", "swap", False)
@@ -762,6 +773,13 @@ def test_the_command_line_states_both_coins_and_the_bounds():
         RESOLVED_POOLS["stableswap_ng"][0],
     )
     assert ax_actions.action_request(arguments(without=("--buy",))).buy is None
+    # A checksummed address names the same coin: both sides are read in canonical spelling.
+    mixed = "eip155:1/erc20:0x4c9EDD5852cd905f086C759E8383e09bff1E68B3"
+    spelled = parse_validated(
+        build_parser(),
+        ["ax", "swap", *[v for v in _flags(buy=mixed)]],
+    )
+    assert (spelled.sell, spelled.buy) == (USDC, CRVUSD)
 
 
 def test_the_help_never_calls_the_seconds_an_on_chain_bound_for_curve(capsys):

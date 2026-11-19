@@ -972,6 +972,7 @@ def swap_arguments(action) -> None:
     )
     action.add_argument(
         "--buy",
+        type=asset,
         help="CAIP-19 asset bought, another of the pool's coins: required for curve,"
         " whose pools can hold more than two coins, and not accepted for a connector"
         " whose pools hold two currencies",
