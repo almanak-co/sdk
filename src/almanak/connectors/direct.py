@@ -26,6 +26,12 @@ COMMAND_INTENTS: dict[str, tuple[str, ...]] = {
     "repay": ("repay", "repay_amount"),
     "collateral": ("collateral",),
     "swap": ("swap_exact_input",),
+    "open-liquidity": ("open_liquidity",),
+    "increase-liquidity": ("increase_liquidity",),
+    "decrease-liquidity": ("decrease_liquidity",),
+    "collect-liquidity-fees": ("collect_liquidity_fees",),
+    "close-liquidity": ("close_liquidity",),
+    "revoke-exchange": ("revoke_exchange",),
 }
 
 
@@ -51,6 +57,17 @@ class ActionRequest:
     deadline_seconds: int | None = None
     # The CAIP-19 asset type bought, stated only where `DirectActions.names_bought`.
     buy: str | None = None
+    # A liquidity action only. `amount0` and `amount1` are the most base units of the
+    # pool's currency0 and currency1 a mint or an increase may use. `tick_lower` and
+    # `tick_upper` are the range a new position is minted into. `token_id` names an
+    # existing position by its position-manager NFT. `liquidity` is how much of that
+    # position a decrease removes, in the position's own liquidity units.
+    amount0: int | None = None
+    amount1: int | None = None
+    tick_lower: int | None = None
+    tick_upper: int | None = None
+    token_id: int | None = None
+    liquidity: int | None = None
 
     @property
     def kind(self) -> str:

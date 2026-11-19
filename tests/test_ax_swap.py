@@ -207,11 +207,11 @@ def strategy_checkpoint(connector):
 def test_the_connector_supports_operator_deployments_and_serves_the_swap(connector):
     found = connector_from_wire({"connector": connector})
     assert supports_operator(found.codec.checkpoint)
-    assert direct.binding(connector).actions == ("swap",)
+    assert "swap" in direct.binding(connector).actions
     assert connector in direct.connectors_for("swap") and connector not in direct.NOT_DIRECT
     cells = [cell for cell in found.chain_support if cell.direct_actions]
     assert cells and all(
-        [str(action) for action in cell.direct_actions] == ["swap_exact_input"] for cell in cells
+        "swap_exact_input" in [str(action) for action in cell.direct_actions] for cell in cells
     )
     for cell in cells:
         direct.require_direct(connector, cell.chain, direct.ActionRequest("swap", 5))
@@ -221,13 +221,20 @@ def test_the_connector_supports_operator_deployments_and_serves_the_swap(connect
         direct.require_direct(connector, cells[0].chain, direct.ActionRequest("supply", 5))
 
 
-def test_the_swap_is_the_only_action_an_operator_request_is_admitted_for(connector):
+def test_an_operator_request_is_admitted_only_for_a_declared_action(connector):
     cells = connector_from_wire({"connector": connector}).chain_support
     others = [
-        (cell, action) for cell in cells for action in cell.actions if action != "swap_exact_input"
+        (cell, action)
+        for cell in cells
+        for action in cell.actions
+        if action not in cell.direct_actions
     ]
-    # Liquidity, exits and revocations stay strategy actions on every chain.
-    assert {str(action) for _, action in others} >= {"open_liquidity", "exit_exchange"}
+    # An exit stays a strategy action on every chain: it swaps what a close returns.
+    assert all(
+        "exit_exchange" in {str(a) for c, a in others if c is cell}
+        for cell in cells
+        if cell.direct_actions
+    )
     for cell, action in others:
         with pytest.raises(ValueError, match="unsupported as a direct action"):
             cell.require_direct(action)

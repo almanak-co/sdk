@@ -678,6 +678,11 @@ AX_REQUESTS = {
         " resolution",
         pool_connectors("concentrated", "resolved"),
     ),
+    "liquidity-position": (
+        "one V3-style liquidity position by its NFT: owner, range, liquidity, principal at"
+        " the pool's price and the amounts a collection would pay",
+        pool_connectors("concentrated"),
+    ),
 }
 
 
@@ -718,8 +723,26 @@ def pool_source(command):
     command.add_argument("--pool", help="pool contract address, given with --chain")
 
 
+def position_source(command):
+    # One request, named either inline or by file; both validate as PositionRequest.
+    source = command.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--config",
+        type=Path,
+        help='JSON request file: {"chain": "<CAIP-2>", "pool": "0x...", "token_id": 1}',
+    )
+    source.add_argument(
+        "--chain", help="strict CAIP-2 chain of the pool, given with --pool and --token-id"
+    )
+    command.add_argument("--pool", help="pool contract address of the position")
+    command.add_argument(
+        "--token-id", type=positive, help="the position's NFT at the pool's position manager"
+    )
+
+
 INLINE_SOURCES = {
     "pool": pool_source,
+    "liquidity-position": position_source,
     "perp-markets": perp_market_source,
     "pool-price": pool_price_source,
 }
@@ -759,6 +782,7 @@ def lending_source(command):
 # Inline request flags per ax subcommand, exclusive with --config.
 INLINE_FLAGS = {
     "ax-pool": ("chain", "pool"),
+    "ax-liquidity-position": ("chain", "pool", "token_id"),
     "ax-perp-markets": ("chain", "query"),
     "ax-pool-price": ("chain", "currency0", "currency1", "fee", "tick_spacing"),
 }

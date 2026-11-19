@@ -47,9 +47,18 @@ PROMOTED_STARTS = {
     "eip155:4663": datetime(2026, 9, 8, 5, 28, tzinfo=UTC),
 }
 PROMOTED_CHAINS = tuple(PROMOTED_STARTS)
-# Every production cell serves `almanak ax swap` as a direct operator action; each has
-# a fork rehearsal of the whole command (tests/fork/test_ax_swap.py).
-DIRECT_ACTIONS = (EconomicAction.SWAP,)
+# Every production cell serves `almanak ax swap`, the liquidity commands and the
+# revocation as direct operator actions; each has a fork rehearsal of the whole command
+# (tests/fork/test_ax_swap.py, tests/fork/test_ax_liquidity.py).
+DIRECT_ACTIONS = (
+    EconomicAction.SWAP,
+    EconomicAction.OPEN_LIQUIDITY,
+    EconomicAction.INCREASE_LIQUIDITY,
+    EconomicAction.DECREASE_LIQUIDITY,
+    EconomicAction.COLLECT,
+    EconomicAction.CLOSE_LIQUIDITY,
+    EconomicAction.REVOKE,
+)
 PROMOTED_MODES = (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST)
 PRODUCTION_RESTRICTIONS = tuple(
     restriction for restriction in RESTRICTIONS if "production-path accounting" not in restriction

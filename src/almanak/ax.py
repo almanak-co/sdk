@@ -27,6 +27,7 @@ from almanak.connectors.uniswap_v4.domain import PoolPriceRequest
 from almanak.connectors.uniswap_v4.hook_terms import describe
 from almanak.connectors.uniswap_v4.networks import roles_for
 from almanak.connectors.uniswap_v4.pool import read_pool
+from almanak.connectors.v3_pool_position_request import PositionRequest, read_liquidity_position
 from almanak.connectors.v3_pool_request import (
     RESOLVED_POOL_CONNECTORS,
     PoolRequest,
@@ -52,6 +53,8 @@ CONNECTOR_REQUESTS: dict[tuple[str, str], type[Model]] = {
     ("ax-perp-markets", "gmx_v2"): GmxMarketRequest,
     # Every concentrated or resolved pool connector takes the same pool request.
     **{("ax-pool", c): PoolRequest for c in pool_connectors("concentrated", "resolved")},
+    # A position is an NFT of a V3-style position manager.
+    **{("ax-liquidity-position", c): PositionRequest for c in pool_connectors("concentrated")},
 }
 
 
@@ -64,6 +67,7 @@ def command(args) -> int:
         "ax-perp-position": perp_position,
         "ax-perp-markets": perp_markets,
         "ax-pool": pool,
+        "ax-liquidity-position": liquidity_position,
         "ax-resolve": token_resolve,
         "ax-dex-pools": pool_discovery,
         "ax-lending-markets": lending_markets,
@@ -173,6 +177,15 @@ def pool(args):
         return read_pool_state(reader, args.connector, request, block, args.depth_bps)
 
 
+def liquidity_position(args):
+    request = parse_request(args)
+    chain = live_chain(mainnet(request.chain))
+    support_level(args.connector, request.chain)
+    with observation_reader(args, chain.chain_id) as reader:
+        block = reader.pin_block(args.block)
+        return read_liquidity_position(reader, args.connector, request, block)
+
+
 def token_resolve(args):
     chain = live_chain(mainnet(ChainId(args.chain))).chain_id
     with lookup_source(args) as lookups, observation_reader(args, chain) as reader:
@@ -268,6 +281,8 @@ def inline_request(args) -> dict:
         return {"chain": args.chain, "pool": args.pool}
     if args.product == "ax-perp-markets":
         return {"chain": args.chain, "query": args.query}
+    if args.product == "ax-liquidity-position":
+        return {"chain": args.chain, "pool": args.pool, "token_id": args.token_id}
     return pool_price_request(args)
 
 

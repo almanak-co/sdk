@@ -41,10 +41,30 @@ ACTIONS = {
     "repay": "repay the whole debt, including interest, or an amount of it",
     "collateral": "enable or disable the supplied balance as collateral",
     "swap": "sell an exact amount of one pool currency for another, in one named pool",
+    "open-liquidity": "mint a concentrated-liquidity position in one tick range of one"
+    " named pool, from stated amounts of its two currencies; nothing is swapped",
+    "increase-liquidity": "add stated amounts of the pool's two currencies to a position"
+    " the wallet owns; nothing is swapped",
+    "decrease-liquidity": "remove part of the liquidity of a position the wallet owns and"
+    " collect what it is owed",
+    "collect-liquidity-fees": "collect what a position the wallet owns is owed, without"
+    " changing its liquidity",
+    "close-liquidity": "remove all liquidity of a position the wallet owns, collect what"
+    " it is owed and burn its NFT",
+    "revoke-exchange": "set every allowance the wallet gave the pool's router and"
+    " position manager in the two pool currencies to zero",
 }
 # Actions whose market is one pool; the others name a lending market, with the flags
 # `ax lending-reserve` takes.
-POOL_ACTIONS = ("swap",)
+POOL_ACTIONS = (
+    "swap",
+    "open-liquidity",
+    "increase-liquidity",
+    "decrease-liquidity",
+    "collect-liquidity-fees",
+    "close-liquidity",
+    "revoke-exchange",
+)
 LENDING_ACTIONS = tuple(name for name in ACTIONS if name not in POOL_ACTIONS)
 # Whether each lending command's --amount is required; one not named here takes none.
 AMOUNTS = {"supply": True, "borrow": True, "withdraw": False, "repay": False}
@@ -207,6 +227,12 @@ def action_request(args):
         slippage_bps=getattr(args, "slippage_bps", None),
         deadline_seconds=getattr(args, "deadline_seconds", None),
         buy=getattr(args, "buy", None),
+        amount0=getattr(args, "amount0", None),
+        amount1=getattr(args, "amount1", None),
+        tick_lower=getattr(args, "tick_lower", None),
+        tick_upper=getattr(args, "tick_upper", None),
+        token_id=getattr(args, "token_id", None),
+        liquidity=getattr(args, "liquidity", None),
     )
 
 
@@ -887,8 +913,12 @@ def arguments(commands, lending_source) -> None:
             choices=connectors_for(name),
             help="canonical connector ID",
         )
-        if name in POOL_ACTIONS:
+        if name == "swap":
             swap_arguments(action)
+        elif name in POOL_ACTIONS:
+            from almanak.ax_liquidity import arguments as liquidity_arguments
+
+            liquidity_arguments(name, action)
         else:
             lending_source(action)
             request_arguments(name, action)

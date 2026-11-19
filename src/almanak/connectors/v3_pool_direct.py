@@ -1,6 +1,9 @@
-"""Direct exact-input swaps for the V3 pool family: one stated amount in one named pool.
+"""Direct actions for the V3 pool family: one command, one deployment, one named pool.
 
-The deployment holds one trading allocation whose capital is the amount sold, in the
+This module holds the exact-input swap and the report every command shares. The
+liquidity commands and the revocation are `v3_pool_liquidity_direct`.
+
+A swap deployment holds one trading allocation whose capital is the amount sold, in the
 asset sold, offered whole as one entry. The gateway then sizes its entry quote at
 exactly the stated amount and admits the swap only along that quote, and the inventory
 attributed to the deployment is that amount and no more of the wallet. Nothing in the
@@ -21,6 +24,15 @@ from almanak.connectors.direct import ALLOCATION, ActionRequest, DirectActions, 
 
 
 def positions(reader, block, resolved, wallet: Wallet, request: ActionRequest) -> dict:
+    """The deployment's one allocation in the resolved pool, as the command states it."""
+    if request.action != "swap":
+        from almanak.connectors import v3_pool_liquidity_direct as liquidity
+
+        return liquidity.positions(reader, block, resolved, wallet, request)
+    return swap_positions(resolved, wallet, request)
+
+
+def swap_positions(resolved, wallet: Wallet, request: ActionRequest) -> dict:
     """One trading allocation in the resolved pool, funded with exactly the amount sold."""
     from almanak.chains import evm_network
 
@@ -54,6 +66,15 @@ def positions(reader, block, resolved, wallet: Wallet, request: ActionRequest) -
 
 
 def intent(config, observed, request: ActionRequest):
+    """The command's intent, built from the observation it is admitted with."""
+    if request.action != "swap":
+        from almanak.connectors import v3_pool_liquidity_direct as liquidity
+
+        return liquidity.intent(config, observed, request)
+    return swap_intent(config, observed, request)
+
+
+def swap_intent(config, observed, request: ActionRequest):
     """The swap along the entry quote of the observation it is admitted with.
 
     The amount is the quote's input, the minimum output is the quoted output less the
@@ -82,11 +103,18 @@ def position(state) -> dict:
     Inventory is the deployment's own: the amount to sell before the swap, the amount
     received after it, never the wallet's whole balance. Allowances are those of the
     last block the deployment observed, so a signed step still unresolved is not in
-    them; only nonzero ones are listed.
+    them; only nonzero ones are listed. A liquidity deployment also reports the NFT it
+    owns and what its steps moved.
     """
     owned = state.owned[0]
     seen = last_observed(state)
+    liquidity: dict = {}
+    if owned.target.liquidity_enabled:
+        from almanak.connectors.v3_pool_liquidity_direct import position as held
+
+        liquidity = held(state)
     return {
+        **liquidity,
         "inventory": [
             {"asset": str(value.asset), "amount": str(value.amount)}
             for value in (owned.inventory0, owned.inventory1)
@@ -106,4 +134,17 @@ def last_observed(state):
     return state.baseline[0] if state.baseline else None
 
 
-DIRECT = DirectActions(actions=("swap",), positions=positions, intent=intent, position=position)
+DIRECT = DirectActions(
+    actions=(
+        "swap",
+        "open-liquidity",
+        "increase-liquidity",
+        "decrease-liquidity",
+        "collect-liquidity-fees",
+        "close-liquidity",
+        "revoke-exchange",
+    ),
+    positions=positions,
+    intent=intent,
+    position=position,
+)
