@@ -115,6 +115,10 @@ class Snapshot[T: Target, P: ConcentratedObservation, W: Ownership, Q: Quote](Mo
 def quotes_for(config, owned, quote, pool=None, *, entry=True):
     """Decision quotes; `entry=False` skips the entry quote an exit or teardown cannot use."""
     allocation = config.allocation(owned.target.allocation)
+    if allocation.adopt is not None:
+        # An adopting allocation trades nothing. With no quote in its observations the
+        # gateway's swap check has nothing to admit a swap along.
+        return {}
     result = entry_quotes(allocation, owned, quote) if entry else {}
     requests = {"exit_quote": exit_amount(owned), "rebalance_quote": rebalance_request(owned, pool)}
     for key, amount in requests.items():
@@ -202,15 +206,20 @@ class Observations:
 
     def initial_owned(self, config, name):
         allocation = config.allocation(name)
+        adopt = allocation.adopt
+        counter = 0 if adopt is None else adopt.counter
         values = tuple(
             AssetAmount(
                 asset=asset,
-                amount=allocation.capital.amount if asset == allocation.capital.asset else 0,
+                amount=allocation.capital.amount if asset == allocation.capital.asset else counter,
             )
             for asset in (allocation.pool.currency0, allocation.pool.currency1)
         )
         return self.ownership_type(
-            target=config.target(name), inventory0=values[0], inventory1=values[1]
+            target=config.target(name),
+            inventory0=values[0],
+            inventory1=values[1],
+            adopts=None if adopt is None else adopt.nft,
         )
 
     def ownership(self, config, name, reference):
@@ -275,13 +284,6 @@ class Observations:
             16,
         )
         wallets = self.wallet_balances(reader, target, block)
-        position = (
-            self.reads.nft_position(
-                reader, target, owned.position.nft, block, expected=owned.position.range
-            )
-            if owned.position is not None
-            else None
-        )
         return self.snapshot_type(
             target=target,
             pool=pool,
@@ -291,10 +293,24 @@ class Observations:
             allowances=self.allowances(reader, target, block),
             native_balance=AssetAmount(asset=config.allocation(name).native_asset, amount=native),
             payer=profile.submitter,
-            position=position,
+            position=self.observed_position(reader, target, owned, block),
             quotes_included=quotes,
             **self.snapshot_quotes(reader, config, owned, pool, quotes, residual),
         )
+
+    def observed_position(self, reader, target, owned, block):
+        """The owned NFT as the chain states it, or the one the ownership is to adopt.
+
+        Either read verifies the NFT's owner, pool and range against the target, so an
+        NFT of another wallet, pool or range fails the observation.
+        """
+        if owned.position is not None:
+            return self.reads.nft_position(
+                reader, target, owned.position.nft, block, expected=owned.position.range
+            )
+        if owned.adopts is not None:
+            return self.reads.nft_position(reader, target, owned.adopts, block)
+        return None
 
     def snapshot_quotes(self, reader, config, owned, pool, quotes, residual):
         if quotes:

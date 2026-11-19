@@ -61,6 +61,10 @@ class Ownership[T: Target](Model):
     inventory1: AssetAmount
     position: Position | SimulatedPosition | None = None
     entry_complete: bool = False
+    # The NFT an operator deployment takes over at its first observation, as its
+    # allocation states it. It is not owned yet: adoption replaces it with the position
+    # read from the chain. Absent for every strategy and once adopted.
+    adopts: AssetId | None = Field(default=None, exclude_if=lambda v: v is None)
 
     @model_validator(mode="after")
     def scope(self):
@@ -68,13 +72,19 @@ class Ownership[T: Target](Model):
             raise ValueError("inventory must retain the target's currency order")
         if self.position is not None and not self.target.liquidity_enabled:
             raise ValueError("owned liquidity requires a configured range or band")
+        expected = AssetType(
+            f"{self.target.fund.chain.chain_id}/erc721:{self.target.contracts.position_manager}"
+        )
         if isinstance(self.position, Position):
-            expected = AssetType(
-                f"{self.target.fund.chain.chain_id}/erc721:{self.target.contracts.position_manager}"
-            )
             if self.position.nft.asset_type != expected:
                 raise ValueError("owned NFT requires its exact manager, chain and configured range")
             validate_position_range(self.target, self.position.range)
+        if self.adopts is not None and (
+            self.position is not None
+            or self.target.range is None
+            or self.adopts.asset_type != expected
+        ):
+            raise ValueError("an NFT to adopt requires its manager, a fixed range and no position")
         return self
 
 

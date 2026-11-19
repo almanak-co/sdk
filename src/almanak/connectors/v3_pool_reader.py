@@ -9,26 +9,38 @@ def nft_position(reader, target, nft, block, *, expected=None):
     )
 
 
-def keyed_nft_position(reader, target, nft, block, key_type, key_value, *, expected=None):
-    from almanak.caip import AssetType
-    from almanak.connectors.v3_pool_positions import Position
+def position_key(pool):
+    """The ABI type and value of the pool key a position record holds after its two tokens.
 
-    manager = AssetType(f"{target.fund.chain.chain_id}/erc721:{target.contracts.position_manager}")
-    if nft.asset_type != manager or not target.liquidity_enabled:
-        raise DataError("ownership", "NFT must identify the configured V3 manager and range")
-    token = int(nft.token_id)
+    A Slipstream pool is keyed by its tick spacing; the others by their fee.
+    """
+    if pool.kind == "aerodrome_slipstream":
+        return "int24", pool.tick_spacing
+    return "uint24", pool.fee
+
+
+def nft_owner(reader, manager, token, block):
+    """The owner the manager records for one NFT; reverts for a token that does not exist."""
     (owner,) = reader.call(
-        target.contracts.position_manager,
+        manager,
         "ownerOf(uint256)",
         block,
         inputs=("uint256",),
         args=(token,),
         outputs=("address",),
     )
-    if owner != target.fund.address:
-        raise DataError("ownership", "retained V3 NFT is not owned by the named fund")
-    result = reader.call(
-        target.contracts.position_manager,
+    return owner
+
+
+def nft_record(reader, manager, token, block, key_type):
+    """The manager's own record of one NFT, checked against nothing.
+
+    It is `positions(uint256)` as the manager returns it: nonce, operator, token0,
+    token1, pool key, tickLower, tickUpper, liquidity, the two fee growth checkpoints
+    and the two amounts owed.
+    """
+    return reader.call(
+        manager,
         "positions(uint256)",
         block,
         inputs=("uint256",),
@@ -48,6 +60,19 @@ def keyed_nft_position(reader, target, nft, block, key_type, key_value, *, expec
             "uint128",
         ),
     )
+
+
+def keyed_nft_position(reader, target, nft, block, key_type, key_value, *, expected=None):
+    from almanak.caip import AssetType
+    from almanak.connectors.v3_pool_positions import Position
+
+    manager = AssetType(f"{target.fund.chain.chain_id}/erc721:{target.contracts.position_manager}")
+    if nft.asset_type != manager or not target.liquidity_enabled:
+        raise DataError("ownership", "NFT must identify the configured V3 manager and range")
+    token = int(nft.token_id)
+    if nft_owner(reader, target.contracts.position_manager, token, block) != target.fund.address:
+        raise DataError("ownership", "retained V3 NFT is not owned by the named fund")
+    result = nft_record(reader, target.contracts.position_manager, token, block, key_type)
     if result[2:5] != (target.pool.currency0.reference, target.pool.currency1.reference, key_value):
         raise DataError("ownership", "retained NFT differs from the configured V3 pool or range")
     return Position(
