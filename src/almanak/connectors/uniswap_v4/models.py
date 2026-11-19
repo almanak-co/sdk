@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
-from almanak.caip import AssetType
+from almanak.caip import AssetId, AssetType
 from almanak.capabilities import CapabilitySet
 from almanak.configuration.gas_parameters import AuthorGas, PreparedConfig
 from almanak.connectors.entry_swap import EntrySwapBps, require_trading_entry
@@ -100,6 +100,22 @@ class Target(DexTarget):
         return self
 
 
+class Adoption(Model):
+    """What an operator deployment owns at its start, stated by a direct liquidity action.
+
+    A strategy never states one: its deployment starts from funded capital alone.
+
+    `counter` is base units of the held pool token that is not the capital asset. With
+    the capital amount it is the inventory attributed to the deployment, and the wallet
+    must cover both. `nft` is the PositionManager NFT the deployment takes over. Its
+    owner, pool key and range are read from the chain at the deployment's first
+    observation and must be the bound wallet, the allocation's pool and its range.
+    """
+
+    counter: Annotated[UInt, Field(lt=2**128)]
+    nft: AssetId | None = Field(default=None, exclude_if=lambda v: v is None)
+
+
 COLLECT_SECONDS_DESCRIPTION = (
     "Optional, liquidity only. Read only by strategy code to time its own fee collection; "
     "connectors never collect on a schedule. Omit when the strategy collects no fees "
@@ -118,6 +134,8 @@ class Allocation(Model):
     range: Range | None = None
     band: TickBand | None = Field(default=None, exclude_if=lambda v: v is None)
     capital: AssetAmount
+    # Absent on the wire unless stated, so a strategy allocation keeps its form.
+    adopt: Adoption | None = Field(default=None, exclude_if=lambda v: v is None)
     # Each entry quote is sized from this share of capital, capped by the funding
     # inventory. Trading swaps all of it and repeats; liquidity swaps the part the mint
     # pairs with, offered only while no position is held, and the mint uses all inventory.
@@ -153,9 +171,15 @@ class Allocation(Model):
         require_custody(self.pool)
         if self.capital.asset not in custody_assets(self.pool):
             raise ValueError("capital must identify a configured funding currency")
-        if not 0 < self.capital.amount < 2**128:
+        # Only an adopting allocation may state no capital: it can act on a position
+        # without bringing inventory.
+        least = 1 if self.adopt is None else 0
+        if not least <= self.capital.amount < 2**128:
             raise ValueError("capital must fit positive uint128")
-        require_trading_entry(self.liquidity_enabled, self.entry_swap_bps)
+        if self.adopt is None:
+            require_trading_entry(self.liquidity_enabled, self.entry_swap_bps)
+        else:
+            validate_adoption(self, self.adopt)
         if (
             self.collect_seconds is not None
             and self.hold_seconds is not None
@@ -164,6 +188,22 @@ class Allocation(Model):
             raise ValueError("fee collection must precede scheduled closure")
         validate_liquidity_shape(self.pool, self.range, self.band)
         return self
+
+
+def validate_adoption(allocation, adopt):
+    """An adopting allocation is one fixed range that trades nothing.
+
+    Its entry share must be stated as zero, since the default offers the whole capital
+    as an entry swap, and it has no band, whose rebalancing is a swap as well.
+    """
+    if allocation.entry_swap_bps or allocation.band is not None or allocation.range is None:
+        raise ValueError("an adopting allocation states a fixed range, no entry swap and no band")
+    if adopt.nft is None:
+        return
+    chain = allocation.pool.chain.chain_id
+    manager = AssetType(f"{chain}/erc721:{allocation.contracts.position_manager}")
+    if adopt.nft.asset_type != manager:
+        raise ValueError("an adopted NFT must be one of the allocation's PositionManager")
 
 
 def validate_liquidity_shape(pool, range, band):

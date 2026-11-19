@@ -5,10 +5,15 @@ from uuid import uuid4
 from almanak.connectors.ownership import protocol_ownership
 from almanak.connectors.uniswap_v4.observation_models import counter_settled
 from almanak.connectors.uniswap_v4.observations import initial_owned
-from almanak.connectors.uniswap_v4.state import Checkpoint, Work
+from almanak.connectors.uniswap_v4.state import (
+    Checkpoint,
+    LiquidityPosition,
+    Ownership,
+    Work,
+)
 from almanak.connectors.uniswap_v4.validation import validate_owned
-from almanak.connectors.v3_pool_lifecycle import adopt_owned
 from almanak.dex_intents import OpenLiquidity, SwapExactInput
+from almanak.gateway.ethereum import DataError
 from almanak.work import initial_work
 
 
@@ -29,6 +34,47 @@ def validate_initial(state, observed):
     validate_observed(state, observed)
     if any(o.needs_cleanup for o in observed):
         raise ValueError("new deployment cannot adopt pre-existing spending authority")
+
+
+def adopt_owned(owned, observed):
+    """Ownership of an operator deployment at its start: what its allocation states.
+
+    The stated inventory is attributed only when the wallet covers it; an operator is
+    refused here, before anything is planned, when it does not. An NFT the allocation
+    names becomes the owned position with the liquidity and the fee checkpoint the
+    observation read from the chain, which verified its owner, pool key and range.
+    Nothing else of the wallet is adopted.
+    """
+    return tuple(adopted(item, seen) for item, seen in zip(owned, observed, strict=True))
+
+
+def adopted(item, seen):
+    for held, attributed in zip(
+        (seen.wallet0, seen.wallet1), (item.inventory0, item.inventory1), strict=True
+    ):
+        if held.amount < attributed.amount:
+            raise DataError(
+                "inventory",
+                f"the wallet holds {held.amount} base units of {held.asset}, "
+                f"less than the {attributed.amount} the action needs",
+            )
+    if item.adopts is None:
+        return item
+    if seen.owned != item or not seen.position_liquidity:
+        raise DataError("ownership", "the observation does not hold the NFT to adopt")
+    # The position was opened before this deployment, so its entry is already made. Its
+    # fee checkpoint is the PoolManager's own, so the fees it has earned and not yet
+    # collected are measured from it; None when that read failed, which later reports
+    # the fees as unmeasured.
+    return Ownership(
+        target=item.target,
+        inventory0=item.inventory0,
+        inventory1=item.inventory1,
+        position=LiquidityPosition(
+            nft=item.adopts, liquidity=seen.position_liquidity, fee_growth=seen.position_growth
+        ),
+        entry_complete=True,
+    )
 
 
 def commit_owned(owned, outcome):
@@ -61,8 +107,6 @@ class UniswapLifecycle:
     validate_initial = staticmethod(validate_initial)
     validate_owned = staticmethod(validate_observed)
     commit_owned = staticmethod(commit_owned)
-    # An operator deployment starts with the inventory its allocation states,
-    # refused when the wallet does not cover it: a swap adopts no venue position.
     adopt = staticmethod(adopt_owned)
     validate_closure = staticmethod(validate_closure)
 
@@ -70,6 +114,8 @@ class UniswapLifecycle:
     def initial(config, strategy, capabilities, permissions):
         from almanak.triggers import DecisionSchedule
 
+        if strategy is not None and any(a.adopt is not None for a in config.allocations):
+            raise ValueError("only an operator deployment adopts inventory or a position")
         return Checkpoint(
             schedule=DecisionSchedule(),
             work=initial_work(config, Work),

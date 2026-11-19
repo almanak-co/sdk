@@ -13,12 +13,18 @@ from almanak.models import AssetAmount
 
 def initial_owned(config, name):
     allocation, target = config.allocation(name), config.target(name)
-    capital = allocation.capital
+    capital, adopt = allocation.capital, allocation.adopt
+    counter = 0 if adopt is None else adopt.counter
     inventory0, inventory1 = (
-        AssetAmount(asset=held, amount=capital.amount if capital.asset == held else 0)
+        AssetAmount(asset=held, amount=capital.amount if capital.asset == held else counter)
         for held in target.assets
     )
-    return Ownership(target=target, inventory0=inventory0, inventory1=inventory1)
+    return Ownership(
+        target=target,
+        inventory0=inventory0,
+        inventory1=inventory1,
+        adopts=None if adopt is None else adopt.nft,
+    )
 
 
 def ownership(config, name, reference):
@@ -55,19 +61,33 @@ def allowances(reader, target, block):
     return tuple(result)
 
 
+def observed_token(owned):
+    """The NFT an observation reads, with the range it must have: the owned position, or
+    the one the ownership is to adopt, whose range is the target's own."""
+    if owned.position is not None:
+        return owned.position.token_id, owned.position.range
+    if owned.adopts is not None:
+        return int(owned.adopts.token_id), None
+    return None, None
+
+
 def position_evidence(reader, owned, block):
-    if owned.position is None:
+    """The NFT's liquidity and fee checkpoints as the chain states them.
+
+    The position read verifies the NFT's owner, pool key and range against the target,
+    so an NFT of another wallet, pool or range fails the observation.
+    """
+    token_id, expected = observed_token(owned)
+    if token_id is None:
         return {}
-    liquidity, selected = reads.position(
-        reader, owned.target, owned.position.token_id, block, expected=owned.position.range
-    )
+    liquidity, selected = reads.position(reader, owned.target, token_id, block, expected=expected)
     result = {"position_liquidity": liquidity}
     try:
         result["fee_growth"] = reads.fee_growth(reader, owned.target, block, selected)
         _, result["position_growth"] = reads.position_growth(
             reader,
             owned.target,
-            owned.position.token_id,
+            token_id,
             block,
             selected,
         )
@@ -123,6 +143,10 @@ def quotes_for(config, owned, pool, quote, *, entry=True):
     skips that search.
     """
     allocation = config.allocation(owned.target.allocation)
+    if allocation.adopt is not None:
+        # An adopting allocation trades nothing. With no quote in its observations the
+        # gateway's swap check has nothing to admit a swap along.
+        return {}
     inventory = (owned.inventory0, owned.inventory1)
     funding = next(v for v in inventory if v.asset == allocation.capital.asset)
     counter = next(v for v in inventory if v.asset != allocation.capital.asset)
