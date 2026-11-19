@@ -62,11 +62,28 @@ def refusal_messages():
     return [message for row in rows for message in re.findall(r"`([^`]+)`", row)]
 
 
-def test_every_refusal_the_skill_names_is_one_the_sdk_emits():
-    source = "\n".join(
-        path.read_text() for path in (SKILL.parents[2] / "src/almanak").rglob("*.py")
-    )
+def string_literals():
+    import ast
+
+    literals = []
+    for path in (SKILL.parents[2] / "src/almanak").rglob("*.py"):
+        nodes = ast.walk(ast.parse(path.read_text()))
+        literals.extend(
+            node.value
+            for node in nodes
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        )
+    return literals
+
+
+def test_every_refusal_the_skill_names_is_text_the_sdk_can_print():
+    """Each entry is part of a string the SDK holds, not merely a name in its code.
+
+    This does not prove which command prints it; the fork proof and the action tests
+    cover the refusals an action raises.
+    """
+    literals = string_literals()
     messages = refusal_messages()
-    assert len(messages) >= 8
+    assert len(messages) >= 9
     for message in messages:
-        assert message in source, message
+        assert any(message in literal for literal in literals), message

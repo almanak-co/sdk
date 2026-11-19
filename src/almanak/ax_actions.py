@@ -12,6 +12,7 @@ Without `--execute` the command plans the first step and signs nothing.
 
 import fcntl
 import json
+import os
 import shutil
 import signal
 import sqlite3
@@ -264,13 +265,30 @@ def records_root() -> Path:
     return durable.claims_root().parent / "actions"
 
 
+@contextmanager
+def records_locked(root: Path):
+    """Serialize record creation with the sweep, so a record is never seen unlocked
+    while its creator is alive."""
+    with (root / ".lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
 def new_record():
     """A private record directory, locked for as long as this process uses it."""
     root = records_root()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    directory = Path(tempfile.mkdtemp(dir=root))
-    lock = (directory / "lock").open("w")
-    fcntl.flock(lock, fcntl.LOCK_EX)
+    with records_locked(root):
+        directory = Path(tempfile.mkdtemp(dir=root))
+        lock = (directory / "lock").open("w")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        # The claim written later names this record; its entry must survive a crash
+        # that the claim survives, or nothing could release the claim.
+        descriptor = os.open(root, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     return directory, lock
 
 
@@ -285,18 +303,23 @@ def clear_finished_records() -> None:
     root = records_root()
     if not root.is_dir():
         return
-    for directory in root.iterdir():
-        try:
-            with (directory / "lock").open("r") as lock:
-                try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except OSError:
-                    continue
-                if not in_flight(directory):
-                    discard(directory)
-        except (FileNotFoundError, NotADirectoryError):
-            # No lock yet: another command is creating it, or it is not a record.
-            continue
+    with records_locked(root):
+        for directory in root.iterdir():
+            clear_if_finished(directory)
+
+
+def clear_if_finished(directory: Path) -> None:
+    try:
+        with (directory / "lock").open("r") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return
+            if not in_flight(directory):
+                discard(directory)
+    except (FileNotFoundError, NotADirectoryError):
+        # Not a record: the root's own lock file, or a directory without a lock.
+        return
 
 
 def run(config, backend, action: str, amount: int | None, *, execute: bool) -> dict:
@@ -347,7 +370,13 @@ def settle(directory: Path) -> None:
 
 
 def discard(directory: Path) -> None:
-    durable.release_claims((directory / "state.sqlite").resolve())
+    database = (directory / "state.sqlite").resolve()
+    durable.release_claims(database)
+    if durable.claimed_by(database):
+        # Another command held a claim's lock while it read the owner. The record
+        # stays so that the next command can release the claim; without the record
+        # nothing could.
+        return
     shutil.rmtree(directory, ignore_errors=True)
 
 
@@ -407,12 +436,21 @@ def executed(runtime, start: int, interrupt) -> dict:
 
 def report_sent(runtime, start: int) -> None:
     try:
-        outcomes = runtime.journal.load().outcomes[start:]
+        state = runtime.journal.load()
     except Exception:
         return
-    if outcomes:
-        sent = [outcome_summary(item) for item in outcomes]
-        print(json.dumps({"event": "steps_sent", "outcomes": sent}), flush=True)
+    event = {"outcomes": [outcome_summary(item) for item in state.outcomes[start:]]}
+    event.update(unresolved(state))
+    if event["outcomes"] or "unresolved" in event:
+        print(json.dumps({"event": "steps_sent", **event}), flush=True)
+
+
+def unresolved(state) -> dict:
+    """The signed step with no reconciled outcome yet; it may or may not have been sent."""
+    pending = state.pending
+    if pending is None:
+        return {}
+    return {"unresolved": {"operation": pending.operation.kind, "transaction": pending.tx_hash}}
 
 
 def executed_result(state, outcomes, refusal) -> dict:
@@ -429,6 +467,7 @@ def executed_result(state, outcomes, refusal) -> dict:
         "completed": final is not None and final.strategy_result().complete,
         "outcomes": [outcome_summary(item) for item in outcomes],
         "position_after": position(state),
+        **unresolved(state),
     }
     if refusal is not None and not result["completed"]:
         result["refused"] = {"kind": refusal.kind, "message": str(refusal)}

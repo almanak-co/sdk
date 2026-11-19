@@ -41,6 +41,8 @@ it has acted in.
   the agent runs on controls the wallet. Safe/Roles accounts are not supported for
   operator actions.
 - Actions are Aave V4 supply and full withdrawal on Ethereum and Avalanche.
+- A supply that is enabled as collateral cannot be withdrawn: the withdrawal is
+  refused, and no direct command disables collateral.
 - An action has no amount ceiling. The fee ceilings and the wallet balance bound
   it, and the confirmation before `--execute` is an instruction to the agent, not
   an enforced control.

@@ -12,7 +12,8 @@ preview, and execute only after they agree. You never write strategy code for th
 Every command prints JSON on standard output. A refusal prints one JSON line with
 `error` on standard error, usually with a `message`, and exits with a status other
 than 0. An executed action that did not finish also exits 1, with the reason under
-`refused` in its result. Read the reason before retrying; do not retry a refusal
+`refused` in its result. A transaction that reverted leaves no `refused`, so read
+`outcomes` as well. Read the reason before retrying; do not retry a refusal
 unchanged.
 
 ## What is supported
@@ -198,6 +199,8 @@ to exit; it stops between steps and reports what it sent.
 
 The action succeeded only when `completed` is true; the command exits 1 otherwise.
 Report each entry of `outcomes` with its `transaction` hash, and `position_after`.
+An `unresolved` entry is a transaction that was signed and may have been sent but
+has no result yet; report its hash and do not treat it as done or as failed.
 Add the market to `settings.json` after a completed supply.
 
 A supply is not atomic. When `completed` is false, read `outcomes` and `refused`:
@@ -217,14 +220,16 @@ the allowance, but it also withdraws everything supplied in that market, so say 
 | `supply allowance differs from the requested amount` | The wallet already approved a different amount to this market, from an unfinished supply or from outside these commands. | Tell the user. Supplying exactly the approved amount works; so does a withdrawal, which revokes the allowance and withdraws everything supplied. |
 | `funds are unavailable for supply` | The wallet does not hold that much of the asset, or the market cannot take it. | Check the wallet's balance of the asset and tell the user. |
 | `withdraw requires owned supply` | The wallet has nothing supplied in that market. | Say so; check the market is the right one. |
+| `disable collateral after verified repayment before withdrawal` | The supplied balance is enabled as collateral. These commands cannot disable collateral. | Do not retry. Tell the user the collateral must be disabled another way first. |
 | `nonce_conflict` | The wallet has a pending transaction. | Wait and ask the user before trying again. |
 | `ALCHEMY_API_KEY is required` | The env file is missing the key. | Go back to the provider key step. |
 
 If a command was interrupted after `--execute`, do not run it again. Read the
 position first: the action may have gone through. A line with
-`"event": "steps_sent"` lists the transactions it sent before it failed, and a line
-with `"event": "record_kept"` means a signed transaction is unresolved and the
-wallet is blocked; give the user its `path`.
+`"event": "steps_sent"` lists the transactions it sent before it failed, with any
+signed transaction still `unresolved`. A line with `"event": "record_kept"` means a
+record was kept, normally because a signed transaction is unresolved, and the
+wallet is blocked; give the user its `path` and do not delete it.
 
 ## Rules
 

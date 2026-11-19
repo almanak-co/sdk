@@ -444,8 +444,15 @@ be mined and the supply then be refused, for example on a fee quote above the
 ceiling, or revert. The position is then unchanged and the allowance stays on chain;
 `outcomes` lists the steps that ran and `refused` names the refusal. A failure that
 is not a refusal prints the steps already sent as one
-`{"event": "steps_sent", "outcomes": ...}` line before its error. A first step
-refused at planning fails the command with that refusal and signs nothing.
+`{"event": "steps_sent", "outcomes": ...}` line before its error. A step that was
+signed and has no reconciled outcome yet is reported apart from `outcomes`, as
+`unresolved` with its operation and transaction hash; it may or may not have been
+sent. A first step refused at planning fails the command with that refusal and
+signs nothing.
+
+A withdrawal of a supply that is enabled as collateral is refused with
+`residual_collateral`, also when the account has no debt. No direct command
+disables collateral.
 
 A supply plans against the wallet's allowance to the spoke: zero, or exactly the
 requested amount left by an earlier approval. Any other allowance is refused with
@@ -491,7 +498,10 @@ the same way.
 
 A record with no signed step holds nothing worth keeping. When a command is killed
 before it signs, the next operator action removes that record and releases its
-claim. Do not kill a command that runs with `--execute`: it waits for each receipt
+claim, once it can read the record and see that nothing is signed. A record it
+cannot read is kept with its claim, and `record_kept` can name such a record: a
+command killed while it was creating its journal leaves one, although nothing was
+signed. Do not kill a command that runs with `--execute`: it waits for each receipt
 without a time limit, and stops between steps on SIGINT, SIGTERM or SIGHUP.
 
 An action has no amount ceiling: it is bounded by the wallet's balance and the two

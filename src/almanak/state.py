@@ -354,6 +354,21 @@ def claims_root() -> Path:
     return Path.home() / ".local/state/almanak-v3/claims"
 
 
+def claimed_by(database: Path) -> bool:
+    """Whether any fund claim still names this journal as its owner."""
+    root = claims_root()
+    if not root.is_dir():
+        return False
+    for path in root.glob("*.claim"):
+        try:
+            owner = json.loads(path.read_text() or "{}")
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(owner, dict) and owner.get("database") == str(database):
+            return True
+    return False
+
+
 def release_claims(database: Path) -> int:
     """Remove the fund claims a stopped deployment's journal still owns.
 

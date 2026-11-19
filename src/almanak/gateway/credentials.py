@@ -4,7 +4,6 @@ import getpass
 import json
 import os
 import secrets
-import shutil
 import stat
 from pathlib import Path
 
@@ -99,19 +98,36 @@ def create_wallet(
     signer = Signer.create()
     encrypted = Signer.encrypt(signer.key, password)
     directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+    created = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         return write_wallet(directory, account, signer.address, encrypted, generated, password_file)
     except BaseException as failure:
         # A partial directory would hold a keystore without its record or password, and
         # would refuse a retry at the same path.
         try:
-            shutil.rmtree(directory)
+            remove_created(created, directory)
         except OSError as cleanup:
             raise OSError(
                 f"wallet creation failed ({failure}) and its partial directory could not "
                 f"be removed: {directory} ({cleanup})"
             ) from failure
         raise
+    finally:
+        os.close(created)
+
+
+def remove_created(descriptor: int, directory: Path) -> None:
+    """Remove the directory this call made, and nothing else.
+
+    Its files are removed through the descriptor opened when it was made, so a path
+    that has since come to name another directory, such as an existing wallet, loses
+    nothing. The path is removed only while it still names that same directory.
+    """
+    for name in os.listdir(descriptor):
+        os.unlink(name, dir_fd=descriptor)
+    if not os.path.samestat(os.fstat(descriptor), os.stat(directory, follow_symlinks=False)):
+        raise OSError("the path no longer names the directory that was created")
+    os.rmdir(directory)
 
 
 def write_wallet(directory, account, address, encrypted, generated, password_file=None):

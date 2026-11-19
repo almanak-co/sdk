@@ -103,13 +103,32 @@ def test_a_failed_cleanup_names_the_partial_directory(tmp_path, monkeypatch):
     def failing(path, contents):
         raise OSError("disk went read-only")
 
-    def unremovable(path):
+    def unremovable(descriptor, path):
         raise OSError("read-only file system")
 
     monkeypatch.setattr(credentials, "write_private", failing)
-    monkeypatch.setattr(credentials.shutil, "rmtree", unremovable)
+    monkeypatch.setattr(credentials, "remove_created", unremovable)
     with pytest.raises(OSError) as raised:
         create_wallet(tmp_path / "operator", "treasury", generate_password=True)
     message = str(raised.value)
     assert str(tmp_path / "operator") in message and "could not be removed" in message
     assert "disk went read-only" in message and "read-only file system" in message
+
+
+def test_cleanup_never_removes_a_directory_this_call_did_not_create(tmp_path, monkeypatch):
+    """A path that comes to name an existing wallet during creation loses nothing."""
+    existing = create_wallet(tmp_path / "existing", "treasury", generate_password=True)
+    target = tmp_path / "operator"
+
+    def substituted(path, contents):
+        # The first write finds the path replaced by another, complete wallet.
+        target.rename(tmp_path / "moved")
+        (tmp_path / "existing").rename(target)
+        raise OSError("disk went read-only")
+
+    monkeypatch.setattr(credentials, "write_private", substituted)
+    with pytest.raises(OSError, match="could not be removed"):
+        create_wallet(target, "treasury", generate_password=True)
+    kept = json.loads((target / "wallet.json").read_text())
+    assert kept["address"] == existing["address"]
+    assert (target / "keystores.json").exists() and (target / "keystore-password").exists()

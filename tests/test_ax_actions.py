@@ -229,7 +229,7 @@ def stored(monkeypatch):
 
 def records(state_home):
     root = state_home / "actions"
-    return sorted(root.iterdir()) if root.is_dir() else []
+    return sorted(path for path in root.iterdir() if path.is_dir()) if root.is_dir() else []
 
 
 def test_the_private_record_is_removed_when_nothing_is_in_flight(monkeypatch, stored, state_home):
@@ -643,3 +643,56 @@ def test_an_interrupted_action_is_not_described_as_resumable():
 
     assert "read the position" in interrupted_message(SimpleNamespace(product="operator-action"))
     assert "resume" in interrupted_message(SimpleNamespace(product="run"))
+
+
+def test_a_record_is_kept_while_its_claim_cannot_be_released(stored, state_home):
+    import fcntl
+
+    record, claimed = abandoned(state_home, "killed")
+    with claimed.open() as contended:
+        # Another command for the same wallet is reading the claim's owner.
+        fcntl.flock(contended, fcntl.LOCK_EX)
+        ax_actions.clear_finished_records()
+        assert record.exists() and claimed.exists()
+    # The record is what lets the next command release the claim.
+    ax_actions.clear_finished_records()
+    assert not record.exists() and not claimed.exists()
+
+
+def test_a_new_record_is_never_visible_to_a_sweep_before_it_is_locked(state_home, monkeypatch):
+    swept = []
+    flock = ax_actions.fcntl.flock
+
+    def sweeping(handle, operation):
+        flock(handle, operation)
+        if Path(handle.name).name == "lock" and not swept:
+            swept.append(True)
+            # A sweep in this process would block on the root lock held by creation.
+            root_lock = (state_home / "actions/.lock").open()
+            with pytest.raises(OSError):
+                flock(root_lock, ax_actions.fcntl.LOCK_EX | ax_actions.fcntl.LOCK_NB)
+            root_lock.close()
+
+    monkeypatch.setattr(ax_actions.fcntl, "flock", sweeping)
+    directory, lock = ax_actions.new_record()
+    assert swept and directory.is_dir()
+    lock.close()
+
+
+def test_a_signed_step_without_an_outcome_is_reported_as_unresolved(recorded, capsys):
+    (approve,) = outcomes_of(recorded, "approve")
+    pending = SimpleNamespace(operation=SimpleNamespace(kind="supply"), tx_hash="0xabc")
+    state = SimpleNamespace(owned=recorded.owned, outcomes=(approve,), pending=pending)
+    expected = {"operation": "supply", "transaction": "0xabc"}
+    result = ax_actions.executed_result(state, [approve], None)
+    # It is not an outcome: nothing says yet whether it was mined.
+    assert result["unresolved"] == expected and len(result["outcomes"]) == 1
+    assert "unresolved" not in finished(recorded, [approve])
+
+    runtime = SimpleNamespace(journal=SimpleNamespace(load=lambda: state))
+    ax_actions.report_sent(runtime, 1)
+    assert json.loads(capsys.readouterr().out) == {
+        "event": "steps_sent",
+        "outcomes": [],
+        "unresolved": expected,
+    }

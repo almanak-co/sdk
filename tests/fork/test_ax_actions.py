@@ -79,7 +79,10 @@ def act(fork, config, wallet, identity, action, amount=None, *, execute):
 
 
 @pytest.fixture
-def setting(fork, tmp_path):
+def setting(fork, tmp_path, monkeypatch):
+    # Records and claims stay out of the operator's own state: the first action sweeps
+    # every record it finds there.
+    monkeypatch.setattr("almanak.state.claims_root", lambda: tmp_path / "state/claims")
     origin = fork.fixture.origin.chain
     reserve = AaveReserve.model_validate(
         {**fork.fixture.allocations[0].reserve.model_dump(), "chain": origin}
