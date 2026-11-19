@@ -784,7 +784,13 @@
    ],
    "variants": [],
    "direct_actions": [
-    "swap_exact_input"
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -2714,7 +2720,13 @@
    ],
    "variants": [],
    "direct_actions": [
-    "swap_exact_input"
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -2787,7 +2799,13 @@
    ],
    "variants": [],
    "direct_actions": [
-    "swap_exact_input"
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -2861,7 +2879,13 @@
    ],
    "variants": [],
    "direct_actions": [
-    "swap_exact_input"
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -2934,7 +2958,13 @@
    ],
    "variants": [],
    "direct_actions": [
-    "swap_exact_input"
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -3079,7 +3109,13 @@
    ],
    "variants": [],
    "direct_actions": [
-    "swap_exact_input"
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -3153,7 +3189,13 @@
    ],
    "variants": [],
    "direct_actions": [
-    "swap_exact_input"
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -3226,7 +3268,13 @@
    ],
    "variants": [],
    "direct_actions": [
-    "swap_exact_input"
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -3300,7 +3348,13 @@
    ],
    "variants": [],
    "direct_actions": [
-    "swap_exact_input"
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -3373,7 +3427,13 @@
    ],
    "variants": [],
    "direct_actions": [
-    "swap_exact_input"
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -3446,7 +3506,13 @@
    ],
    "variants": [],
    "direct_actions": [
-    "swap_exact_input"
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -3519,7 +3585,13 @@
    ],
    "variants": [],
    "direct_actions": [
-    "swap_exact_input"
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -3592,7 +3664,13 @@
    ],
    "variants": [],
    "direct_actions": [
-    "swap_exact_input"
+    "swap_exact_input",
+    "open_liquidity",
+    "increase_liquidity",
+    "decrease_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange"
    ],
    "gas_lifecycle": {
     "trade": {

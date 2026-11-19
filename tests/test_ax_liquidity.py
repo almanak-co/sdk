@@ -281,9 +281,9 @@ def test_the_connector_serves_the_liquidity_commands_on_every_production_cell(co
         assert command in ax_actions.POOL_ACTIONS and ax_actions.ACTIONS[command]
         for cell in cells:
             cell.require_direct(kind)
-            direct.require_direct(connector, cell.chain, command)
+            direct.require_direct(connector, cell.chain, direct.ActionRequest(command))
         with pytest.raises(ValueError, match=f"{connector} serves no direct {command} on"):
-            direct.require_direct(connector, ChainId("eip155:31337"), command)
+            direct.require_direct(connector, ChainId("eip155:31337"), direct.ActionRequest(command))
     # An exit would swap what a close returns, so it is no direct action anywhere.
     for cell in cells:
         with pytest.raises(ValueError, match="unsupported as a direct action"):

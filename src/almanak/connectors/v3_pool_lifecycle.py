@@ -52,7 +52,9 @@ def adopted(item, seen):
                 f"the wallet holds {held.amount} base units of {held.asset}, "
                 f"less than the {attributed.amount} the action needs",
             )
-    if item.adopts is None:
+    # Only the V3 family's ownership can name an NFT to adopt; a connector that shares
+    # this function for its swap has none.
+    if getattr(item, "adopts", None) is None:
         return item
     if seen.position is None or seen.position.nft != item.adopts:
         raise DataError("ownership", "the observation does not hold the NFT to adopt")

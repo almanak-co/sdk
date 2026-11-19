@@ -177,7 +177,7 @@ def market_request(args):
         return lending_request(args)
     values = {"connector": args.connector, "chain": args.chain}
     values.update(
-        (name, value) for name in POOL_FLAGS if (value := getattr(args, name)) is not None
+        (name, value) for name in POOL_FLAGS if (value := getattr(args, name, None)) is not None
     )
     return resolution(args.connector).MarketSelection.model_validate_json(json.dumps(values))
 
@@ -198,7 +198,8 @@ def validate_arguments(parser, args) -> None:
     fields = resolution(args.connector).MarketSelection.model_fields
     required = [name for name in POOL_FLAGS if name in fields and fields[name].is_required()]
     optional = [name for name in POOL_FLAGS if name in fields and name not in required]
-    given = [name for name in POOL_FLAGS if getattr(args, name) is not None]
+    # A command states only the pool flags its own parser has.
+    given = [name for name in POOL_FLAGS if getattr(args, name, None) is not None]
     refusal = pool_refusal(required, optional, given)
     if refusal is not None:
         also = f" and optionally {flags(optional)}" if optional else ""
