@@ -422,9 +422,9 @@ Explicit process management remains under `service gateway`, `service fork`,
 
 ### Operator actions
 
-`almanak ax supply`, `withdraw`, `borrow`, `repay`, `collateral` and `swap` each run
-one action for one wallet in one process, with no strategy, workspace or gateway
-process to start. The lending commands:
+`almanak ax supply`, `withdraw`, `borrow`, `repay`, `collateral`, `swap` and the
+liquidity commands each run one action for one wallet in one process, with no
+strategy, workspace or gateway process to start. The lending commands:
 
 ```bash
 almanak ax supply --connector aave_v4 --chain eip155:1 \
@@ -656,7 +656,8 @@ it by the amount sold, depending on the token.
 
 A swap refused or reverted after its approval was mined leaves that approval: the
 result lists it, and a later swap of the same amount uses it, on Uniswap V4 after
-granting the Permit2 allowance again. No command only revokes an allowance.
+granting the Permit2 allowance again. `ax revoke-exchange`, where a connector serves
+it, sets the allowances to zero.
 
 `ax recover` resolves an interrupted swap as it does any action. A signed Curve swap
 that may have been sent, and that the pool would now pay below its minimum, is
@@ -675,6 +676,63 @@ reconciled from its own receipt and its outcome lists them under `accounting_iss
 On Curve the same holds from the moment the step is signed. On Aerodrome, shares
 that arrive after a step is signed and before it is first sent leave its record
 kept, and `ax recover` refuses again until the shares are moved out of the wallet.
+
+#### Liquidity
+
+Concentrated-liquidity positions on Uniswap V3, PancakeSwap V3 and Aerodrome
+Slipstream are opened and managed with one command per step, on every chain where
+`almanak support` lists the kind under `direct_actions`. Each names its pool with
+`--pool`:
+
+| Command | Takes | Does |
+| --- | --- | --- |
+| `open-liquidity` | `--tick-lower`, `--tick-upper`, `--amount0`, `--amount1`, `--slippage-bps` | Mints a position in that tick range from at most those amounts of the pool's two currencies. |
+| `increase-liquidity` | `--token-id`, `--amount0`, `--amount1`, `--slippage-bps` | Adds at most those amounts to a position the wallet owns. |
+| `decrease-liquidity` | `--token-id`, `--liquidity`, `--slippage-bps` | Removes that much of the position's liquidity and collects what it is owed. |
+| `collect-liquidity-fees` | `--token-id` | Collects what the position is owed and leaves its liquidity. |
+| `close-liquidity` | `--token-id`, `--slippage-bps` | Removes all liquidity, collects what is owed and burns the NFT. |
+| `revoke-exchange` | | Sets every allowance the wallet gave the pool's router and position manager, in the two pool currencies, to zero. |
+
+```bash
+almanak ax open-liquidity --connector uniswap_v3 --chain eip155:8453 \
+  --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 \
+  --tick-lower -198040 --tick-upper -198010 \
+  --amount0 400000000000000000 --amount1 1000000000 --slippage-bps 50 \
+  --wallet /private/operator --public-rpc base \
+  --max-gas-price-wei 1000000000 --max-transaction-fee 2000000000000000
+almanak ax liquidity-position --connector uniswap_v3 --chain eip155:8453 \
+  --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 --token-id 5947663 --public-rpc base
+```
+
+The ticks are the operator's own and must be multiples of the pool's tick spacing;
+there are no bands. `--amount0` and `--amount1` are base units of the pool's
+currency0 and currency1, at least one above zero, and the wallet must hold both
+stated amounts. Nothing is swapped inside a liquidity action: the mint uses what the
+range and the price at the observed block allow, and the rest stays in the wallet.
+Swap first with `ax swap` when the wallet holds only one side. `--slippage-bps` is
+required and bounds how far the pool price may move between the observed block and
+the mined step; `--deadline-seconds` is 300 unless stated.
+
+A position is named by `--token-id`, the position manager's NFT. The command reads
+it at its pinned block and refuses an NFT the wallet does not own or one of another
+pool; the deployment then owns that NFT and nothing else, and its range is the
+NFT's own. A position opened anywhere, by a strategy or another tool, can be
+managed this way. Collecting, decreasing or closing a position with no liquidity is
+refused before anything is signed; increasing one is served.
+
+`ax liquidity-position` is the read for a position: its `owner`, `range`,
+`liquidity`, whether the pool price is in range, the `principal` it would return at
+the current price, and what it is `owed`, which is what a collect pays. It takes
+the same transports and `--block` as the other reads.
+
+`position_before` and `position_after` of a liquidity action hold the `position`
+(its `token_id`, `range` and `liquidity`, or null), what `moved` in and out of the
+wallet in each currency over the mined steps, the `inventory` still unused, and the
+nonzero `allowances`. An open or an increase approves the position manager for the
+stated amounts and uses what the mint takes, so the unused part of each approval
+remains afterwards; `revoke-exchange` clears it. A mint is the largest step: with
+its 25% buffer it stays under the default gas limit on the forks rehearsed, and the
+fee ceiling must cover it at the chain's gas price.
 
 The action runs through the same planning, simulation, signing and receipt
 reconciliation as a strategy's, as an operator deployment that exists only for the

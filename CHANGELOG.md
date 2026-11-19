@@ -31,6 +31,13 @@ its changelog is on the `v2` branch.
   on Uniswap V3, Uniswap V4, PancakeSwap V3, Aerodrome, Aerodrome Slipstream and
   Curve, with a required `--slippage-bps` below the pool's own quote at the observed
   block. The result lists what was sold and bought and any allowance left.
+- `ax open-liquidity`, `ax increase-liquidity`, `ax decrease-liquidity`,
+  `ax collect-liquidity-fees` and `ax close-liquidity` open and manage a
+  concentrated-liquidity position on Uniswap V3, PancakeSwap V3 and Aerodrome
+  Slipstream, in a tick range and from amounts the operator states. An existing
+  position is named by `--token-id`, whoever opened it. Nothing is swapped inside a
+  liquidity action. `ax revoke-exchange` sets the allowances a command left to zero,
+  and `ax liquidity-position` reads a position.
 - `--public-rpc` serves `almanak ax` reads on Base, Arbitrum, BNB, Optimism, Polygon and
   Robinhood beside Ethereum and Avalanche. `drpc` adds Base, Optimism, Polygon and
   Robinhood, and four chain operators' own endpoints are named `base`, `arbitrum`,
