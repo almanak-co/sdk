@@ -120,6 +120,7 @@ junit_family = "xunit1"
 markers = [
     "fork: explicit EVM fork proof requiring Anvil and --fork-env",
     "strategy_fork: automatically discovered strategy lifecycle on a configured fork",
+    "live_public: opt-in read against a public mainnet endpoint; collected only with --live-public",
 ]
 
 [tool.crap]
