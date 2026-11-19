@@ -49,7 +49,9 @@ its changelog is on the `v2` branch.
   `--amount` per named coin, and `decrease-liquidity` and `close-liquidity` state with
   `--receive` whether the burn pays every coin in proportion or one coin. They serve
   Aerodrome stable and volatile pools too, whose position is the wallet's balance of
-  the pool's share token.
+  the pool's share token. An Aerodrome deposit offers the stated amounts in the
+  proportion of the pool's reserves and reverts when that proportion moved further
+  than `--slippage-bps` in either direction.
 - `ax open-liquidity`, `ax collect-liquidity-fees` and `ax close-liquidity` serve
   Uniswap V4, with the pool named by its key and a native pool provided in the wrapped
   token. A mint reverts when mined at a price further than `--slippage-bps` from the

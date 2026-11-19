@@ -674,7 +674,7 @@ anything is signed, as a trading-only strategy there is. Anyone can send such sh
 to a wallet. Shares that arrive once a step is mined do not block it: the step is
 reconciled from its own receipt and its outcome lists them under `accounting_issues`.
 On Curve the same holds from the moment the step is signed. On Aerodrome, shares
-that arrive after a step is signed and before it is first sent leave its record
+that arrive after a swap step is signed and before it is first sent leave its record
 kept, and `ax recover` refuses again until the shares are moved out of the wallet.
 
 #### Liquidity
@@ -795,9 +795,20 @@ The commands are the V3 family's without a tick range or a token ID:
 above zero, and `decrease-liquidity` takes `--liquidity` in shares;
 `collect-liquidity-fees` claims the fees the shares earned, and `revoke-exchange`
 also clears the share approval a burn gave the router. The deployment owns the
-wallet's whole share position in the pool, whoever deposited it. A deposit approves
-the router for the stated amounts, so the unused part of each remains until
-revoked. The read is `ax liquidity-position --connector aerodrome` with `--account`.
+wallet's whole share position in the pool, whoever deposited it.
+
+An Aerodrome deposit offers what it takes of the stated amounts at the proportion of
+the pool's reserves at the observed block: all of one amount and the other's share
+of it. It approves the router for exactly that. `--slippage-bps` bounds it on both
+sides: the call reverts when it would take less of either currency than that far
+below the offer, which bounds how far the proportion may move in either direction.
+The call states no minimum of shares; a shortfall is refused before signing and
+reported once mined. Mined at the observed proportion a deposit leaves no allowance;
+after a move inside the slippage, what the router did not take of one amount stays
+approved until revoked. A signed liquidity step is sent although shares arrived in
+the wallet since, and its outcome lists them under `accounting_issues`. A close is
+complete for the shares it burned; shares that arrive with the burn stay in the
+wallet. The read is `ax liquidity-position --connector aerodrome` with `--account`.
 
 A wallet that holds a pool's LP shares on Curve or Aerodrome is refused an `ax swap`
 in that pool, which owns no liquidity: swap first, or in another pool.
