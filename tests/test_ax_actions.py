@@ -707,5 +707,6 @@ def test_every_directory_a_new_record_creates_is_synced_through_its_parent(state
     # The records directory and its new ancestor, then the record's own entry.
     assert synced == [state_home, state_home.parent, root]
     synced.clear()
+    # A later command syncs them again: the first may have stopped before it did.
     ax_actions.new_record()[1].close()
-    assert synced == [root]
+    assert synced == [state_home, state_home.parent, root]

@@ -283,11 +283,16 @@ def sync_directory(path: Path) -> None:
 
 
 def durable_root() -> Path:
-    """The records directory, with every directory entry this call created synced."""
+    """The records directory, with the directory entries that lead to it synced.
+
+    The entries of the records directory and of the state directory above it are synced
+    on every call, not only by the call that created them: an earlier command may have
+    stopped between creating a directory and syncing it.
+    """
     root = records_root()
     created = [path for path in (root, *root.parents) if not path.exists()]
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for path in created:
+    for path in dict.fromkeys((root, root.parent, *created)):
         sync_directory(path.parent)
     return root
 
