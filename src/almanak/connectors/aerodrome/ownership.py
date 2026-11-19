@@ -30,8 +30,28 @@ def at_indices(position, pool):
 
 
 def validate_owned(owned, before):
+    """Admit work that is not yet signed against this observation."""
     if owned != before.owned or owned.position != before.position:
         raise DataError("ownership", "observed pool shares or fee claims differ from owned amounts")
+    require_inventory(owned, before)
+
+
+def validate_retained(owned, before):
+    """What signed bytes of an adopting allocation still need of an observation: its own
+    ownership and its inputs.
+
+    The fund's stored position is not among them. Anyone can send the fund a share, and
+    that also moves the fee indices the pool stores for it, for good. Signed bytes held
+    to the stored position could then never be sent: an approval or a fee claim carries
+    no deadline to release it by. They are sent, and the difference is an accounting
+    issue on their outcome.
+    """
+    if owned != before.owned:
+        raise DataError("ownership", "observation differs from retained fund ownership")
+    require_inventory(owned, before)
+
+
+def require_inventory(owned, before):
     if any(
         wallet.amount < inventory.amount
         for wallet, inventory in zip(

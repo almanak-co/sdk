@@ -97,8 +97,6 @@ class Allocation(Model):
     def units(self):
         if self.native_asset != native_asset(self.pool.chain.chain_id):
             raise ValueError("payer policy must identify the chain native asset")
-        if self.capital.asset not in (self.pool.currency0, self.pool.currency1):
-            raise ValueError("capital must identify the explicit funding currency")
         if self.adopt is None:
             require_trading_entry(self.liquidity_enabled, self.entry_swap_bps)
         elif not self.liquidity_enabled or self.entry_swap_bps:
@@ -106,6 +104,8 @@ class Allocation(Model):
             raise ValueError(
                 "an adopting allocation has liquidity authority and states no entry swap"
             )
+        if self.capital.asset not in (self.pool.currency0, self.pool.currency1):
+            raise ValueError("capital must identify the explicit funding currency")
         # Only an adopting allocation may state no capital: it can act on the fund's
         # shares without bringing inventory.
         least = 1 if self.adopt is None else 0

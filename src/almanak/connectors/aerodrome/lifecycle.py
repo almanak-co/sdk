@@ -12,6 +12,7 @@ from almanak.connectors.dex_residual import counter_settled
 from almanak.connectors.ownership import protocol_ownership
 from almanak.connectors.v3_pool_lifecycle import adopt_owned as adopt_inventory
 from almanak.dex_intents import IncreaseLiquidity, OpenLiquidity, SwapExactInput
+from almanak.operator_deployment import refuse_adoption
 from almanak.work import initial_work
 
 
@@ -77,9 +78,9 @@ def require_origin(config, strategy):
     An adopting allocation's observations carry no quote. An operator allocation with
     liquidity authority that did not adopt would be offered quotes a swap could follow.
     """
+    if strategy is not None:
+        refuse_adoption(config.allocations)
     adopting = [a.adopt is not None for a in config.allocations]
-    if strategy is not None and any(adopting):
-        raise ValueError("only an operator deployment adopts inventory or pool shares")
     liquid = [a.liquidity_enabled for a in config.allocations]
     if strategy is None and adopting != liquid:
         raise ValueError("an operator allocation with liquidity authority states what it adopts")

@@ -163,14 +163,20 @@ def bound_arguments(name: str, action) -> None:
             " beyond that edge, and for a range beside the price, no price reverts it and it"
             " takes only the one currency the range holds there, at most the offered amount;"
             " a uniswap_v4 mint is bounded the same way around the price its mint step is"
-            " planned at; a curve deposit reverts when it would mint more"
-            " than this far below the LP shares its amounts were worth at the observed block,"
-            " and an aerodrome deposit when it would take or mint that much less than its"
-            " amounts were worth there"
+            " planned at; a curve deposit reverts when it would mint more than this far below"
+            " the LP shares its amounts were worth at the observed block; an aerodrome deposit"
+            " offers what it takes of the stated amounts at the proportion of the pool's"
+            " reserves at the observed block, and it is not signed, and reverts when mined,"
+            " when it would take less of either currency than this far below that offer, which"
+            " bounds how far the proportion may move in either direction; its call states no"
+            " minimum of pool shares, so shares this far below what the offer was worth are"
+            " refused before signing and only reported once mined"
         )
         unbounded = "; an approval before it carries no deadline"
     else:
-        unbounded = ""
+        # A burn in a tick range needs no approval. Aerodrome's router pulls the shares.
+        claim = ", nor does the fee claim after it" if name == "close-liquidity" else ""
+        unbounded = f"; for aerodrome the share approval before it carries no deadline{claim}"
         bound = (
             "the step reverts when it would pay out any currency more than this far below"
             " the position's principal at the observed block"

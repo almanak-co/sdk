@@ -109,6 +109,14 @@ def initial_owned(config, name):
     return Ownership(target=target, inventory0=values[0], inventory1=values[1])
 
 
+def funded_owned(config, name):
+    """Initial ownership of a backtest: funded capital, never an adoption."""
+    from almanak.operator_deployment import refuse_adoption
+
+    refuse_adoption((config.allocation(name),))
+    return initial_owned(config, name)
+
+
 def ownership(config, name, reference):
     if reference is None:
         return initial_owned(config, name)

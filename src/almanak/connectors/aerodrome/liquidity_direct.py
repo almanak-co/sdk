@@ -13,16 +13,24 @@ their fee claims are the account's, so the deployment cannot own a part of the b
 A wallet that holds none starts without a position. `open-liquidity` is the first
 deposit and is refused for a wallet that already holds shares or fee claims;
 `increase-liquidity` adds to them. Shares that reach the wallet from elsewhere before a
-step is sent refuse it, because the observed position is then not the adopted one. Once
-a step is sent they cannot stop it: the step is reconciled from its own effects, the
-position as the pool stores it stays owned whole, and the step's outcome lists the
-difference as an accounting issue.
+step is signed refuse it, because the observed position is then not the adopted one.
+Once a step is signed they cannot stop it: it is sent and reconciled from its own
+effects, the position as the pool stores it stays owned whole, and the step's outcome
+lists the difference as an accounting issue. A close whose burn they arrive with is
+complete for the shares it burned; what arrived stays in the wallet.
 
 A deposit states the most of each currency it may use. Those two amounts are the
-deployment's whole inventory, attributed only when the wallet covers both. The router
-takes the two currencies in the pool's own proportion, so it uses all of one amount and
-at most the other, and both must be above zero. It approves the router for exactly each
-stated amount; what the deposit does not use stays approved.
+deployment's whole inventory, attributed only when the wallet covers both, and both
+must be above zero. The router takes the two currencies in the proportion of the pool's
+reserves, for a stable pool as for a volatile one. The deposit offers exactly what it
+takes of the stated amounts at the observed proportion, all of one and the other's
+share of it, and approves the router for that offer and no more. Its call requires each
+offered amount less the stated slippage, so a proportion that moved further in either
+direction reverts it. Mined at the observed proportion it takes the whole offer and
+leaves no allowance; after a move inside the slippage, what the router did not take of
+one amount stays approved. The call states no minimum of shares: the gateway refuses to
+sign when the shares would be that far below what the offer was worth, and a shortfall
+once mined is an accounting issue on the outcome, not a revert.
 
 `decrease-liquidity` burns the stated number of shares and `close-liquidity` all of
 them, each after approving the router for exactly those shares, which the burn spends
@@ -153,7 +161,7 @@ def open_liquidity(actions, allocation, seen, request):
             "the wallet already holds shares or fee claims of this pool; "
             "increase-liquidity adds to them"
         )
-    return actions.authoring.open_liquidity(allocation, seen)
+    return bounded(actions.authoring.open_liquidity(allocation, seen), seen)
 
 
 def increase_liquidity(actions, allocation, seen, request):
@@ -161,7 +169,40 @@ def increase_liquidity(actions, allocation, seen, request):
         raise ValueError(
             "the wallet holds no shares of this pool; open-liquidity makes the first deposit"
         )
-    return actions.authoring.increase_liquidity(allocation, seen)
+    return bounded(actions.authoring.increase_liquidity(allocation, seen), seen)
+
+
+def bounded(addition, seen):
+    """The deposit, offering exactly what it takes at the observed proportion.
+
+    The router takes at most the desired amount of each currency, in the proportion of
+    the pool's reserves when it is mined, and reverts when that is less than a minimum.
+    The planner derives the minimums from the offer less the slippage. Offered whole, an
+    amount stated beyond the proportion would be a desired amount with no bound near it:
+    a proportion pushed after signing could make the deposit take up to all of it.
+    Trimmed to the proportional pair, the offer bounds both sides. With the proportion
+    moved beyond the slippage in either direction the router can only take one currency
+    in full by taking less of the other than its minimum, so it reverts. Within it the
+    deposit takes at most the pair. The proportion is of the reserves for both
+    invariants, so in a stable pool the bound is on the reserves, which move further
+    than the price.
+    """
+    from almanak.connectors.aerodrome import math
+
+    pool = seen.pool
+    most = math.proportional(
+        pool.reserve0,
+        pool.reserve1,
+        pool.total_supply,
+        addition.maximum0.amount,
+        addition.maximum1.amount,
+    )
+    return addition.model_copy(
+        update={
+            "maximum0": addition.maximum0.model_copy(update={"amount": most[0]}),
+            "maximum1": addition.maximum1.model_copy(update={"amount": most[1]}),
+        }
+    )
 
 
 def held_shares(seen, request) -> int:
