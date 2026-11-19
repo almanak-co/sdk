@@ -20,7 +20,7 @@ from almanak.gateway.ethereum import DataError, EthereumReader
 from almanak.gateway.evm import chain_number, erc20_address
 from almanak.gateway.fork_config import ForkTarget
 from almanak.gateway.fork_fixture import Fork
-from almanak.gateway.fork_funding import fund_erc20, read_uint
+from almanak.gateway.fork_funding import calldata, fund_erc20, read_uint
 from almanak.gateway.read_endpoints import read_endpoint
 from almanak.models import Chain
 from tests.fork.test_ax_swap import (
@@ -227,6 +227,99 @@ def test_a_wallet_that_holds_the_pools_shares_is_refused_before_anything_is_plan
     # Nothing was signed: no record is kept, and no balance, share or allowance moved.
     assert (ax_actions.kept_records(), setting.balances()) == ([], start)
     assert (shares(setting)[1:], setting.router_allowance()) == ((1, 0), 0)
+
+
+def share_sender(setting):
+    """Another account that holds one base unit of the pool's shares and can pay to send it."""
+    sender = "0x" + "5e" * 20
+    setting.fork.rpc("anvil_setBalance", [sender, hex(10**18)])
+    fund_erc20(setting.fork, sender, shares(setting)[0], 1)
+    setting.fork.rpc("anvil_impersonateAccount", [sender])
+    return sender
+
+
+def share_sent_with_the_swap(setting, monkeypatch, *, stop=False):
+    """Make the next swap share its block with a transfer of one pool share to the wallet.
+
+    The share arrives after the swap was signed and sent, so no observation before the
+    signature could see it; the swap is reconciled at the block that holds both. With
+    `stop`, the command is interrupted once that block is mined.
+    """
+    from almanak.operator_runtime import OperatorRuntime
+
+    rpc, sender = setting.fork.rpc, share_sender(setting)
+    token = erc20_address(shares(setting)[0], setting.cell.chain)
+    transfer = calldata("transfer(address,uint256)", ("address", "uint256"), (setting.owner, 1))
+
+    def wait(self, state):
+        pending = state.pending
+        if pending is None or pending.operation.kind != "swap":
+            return
+        if pending.unsent:
+            # Signed, with its last check before the send still to come: the swap then
+            # stays in the node's pool until the share has been sent as well.
+            rpc("evm_setAutomine", [False])
+            return
+        priced = {"from": sender, "to": token, "data": transfer, "gasPrice": rpc("eth_gasPrice")}
+        rpc("eth_sendTransaction", [priced])
+        rpc("evm_mine")
+        rpc("evm_setAutomine", [True])
+        interrupt_if(stop)
+
+    monkeypatch.setattr(OperatorRuntime, "wait", wait)
+
+
+def interrupt_if(stop):
+    if stop:
+        raise KeyboardInterrupt
+
+
+def assert_share_reported(setting, result):
+    """The swap is reconciled, and its outcome names the share no step explains."""
+    approval, swap = result["outcomes"]
+    (issue,) = swap["accounting_issues"]
+    assert (swap["success"], "accounting_issues" in approval) == (True, False)
+    assert str(shares(setting)[0]) in issue and "trading-only allocation" in issue
+    # The share was sent to the wallet and not moved or approved by the command.
+    assert shares(setting)[1:] == (1, 0)
+
+
+def assert_refused_for_the_share(setting):
+    """The wallet is free of any record, and its share refuses the next command at once."""
+    with pytest.raises(DataError, match="a trading-only allocation cannot own") as refusal:
+        setting(execute=False)
+    assert (refusal.value.kind, ax_actions.kept_records()) == ("ownership", [])
+
+
+def test_a_share_sent_to_the_wallet_while_the_swap_is_unmined_is_reported_not_refused(
+    setting, monkeypatch
+):
+    start = setting.balances()
+    with monkeypatch.context() as patched:
+        share_sent_with_the_swap(setting, patched)
+        result = setting(execute=True)
+    assert result["completed"]
+    assert_swapped(setting, result, start, 1)
+    assert_no_allowance(setting, result)
+    assert_share_reported(setting, result)
+    assert_refused_for_the_share(setting)
+
+
+def test_a_swap_mined_with_a_share_sent_to_the_wallet_is_recovered_with_the_share_reported(
+    setting, monkeypatch
+):
+    start = setting.balances()
+    with monkeypatch.context() as patched:
+        share_sent_with_the_swap(setting, patched, stop=True)
+        with pytest.raises(KeyboardInterrupt):
+            setting(execute=True)
+    (kept,) = ax_actions.kept_records()
+    recovered = setting.recover(Path(kept["path"]))
+    assert (recovered["resolved"], recovered["discarded_request"]) == (True, False)
+    assert_swapped(setting, recovered, start, 1)
+    assert_no_allowance(setting, recovered)
+    assert_share_reported(setting, recovered)
+    assert_refused_for_the_share(setting)
 
 
 def test_both_invariants_are_declared_and_have_a_trading_reference_to_rehearse():
