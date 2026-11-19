@@ -472,7 +472,10 @@ is not a refusal prints the steps already sent as one
 `{"event": "steps_sent", "outcomes": ...}` line on standard error before its error.
 A step that was signed and has no reconciled outcome yet is reported apart from
 `outcomes`, as `unresolved` with its operation and transaction hash; it may or may
-not have been sent, and `executed` is true for it. A first step refused at planning
+not have been sent, and `executed` is true for it. A signed step whose deadline
+passed without it being mined is released, since it can no longer take effect, and
+is listed under `released_expired` with its operation and transaction hash;
+`executed` is true for it and `completed` false. A first step refused at planning
 fails the command with that refusal and signs nothing.
 
 Standard output carries one JSON document, the result. Events and the error are
@@ -641,12 +644,19 @@ it bought, and the nonzero `allowances` left to the venue:
 | Connector | Steps | Allowance after a completed swap |
 | --- | --- | --- |
 | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome` | `approve` to the router for exactly the amount, after a reset to zero when another allowance stands, then `swap` | none |
-| `uniswap_v4` | `approve_erc20` to Permit2, `approve_permit2` to the router until the deadline, then `swap` | none from a wallet with none; allowances that already cover the amount are used as they stand and what the swap does not spend remains |
+| `uniswap_v4` | `approve_erc20` to Permit2, `approve_permit2` to the router until the deadline, then `swap` | none from a wallet with none; see below for a wallet with standing allowances |
 | `curve` | `approve` to the pool for exactly the amount, then the exchange | none |
 
+On Uniswap V4 a standing ERC-20 approval to Permit2 that covers the amount is used
+as it stands, and a standing Permit2 allowance to the router is used only when it
+outlasts the swap's deadline; otherwise it is granted again for exactly the amount.
+What the swap does not spend remains. An unlimited allowance stays: Permit2 leaves
+its own whole, and a token leaves an unlimited approval to Permit2 whole or lowers
+it by the amount sold, depending on the token.
+
 A swap refused or reverted after its approval was mined leaves that approval: the
-result lists it, and a later swap of the same amount uses it. No command only
-revokes an allowance.
+result lists it, and a later swap of the same amount uses it, on Uniswap V4 after
+granting the Permit2 allowance again. No command only revokes an allowance.
 
 `ax recover` resolves an interrupted swap as it does any action. A signed Curve swap
 that may have been sent, and that the pool would now pay below its minimum, is
@@ -712,7 +722,10 @@ step has its outcome, whatever the request had not yet signed is dropped
 (`discarded_request`), the record is removed and the claim released; state the
 action again against the position as it now is. A step that cannot be resolved
 leaves `resolved` false with the reason under `refused`, keeps the record and exits
-1. A record a running command still uses is refused.
+1. A signed step whose deadline passed unmined is released instead: it is listed
+under `released_expired`, `resolved` is true and the wallet is free, and the command
+exits 1 because the step did not happen. A record a running command still uses is
+refused.
 
 A record with no signed step holds nothing worth keeping. When a command is killed
 before it signs, the next operator action removes that record and releases its
