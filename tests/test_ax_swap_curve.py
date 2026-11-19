@@ -247,11 +247,11 @@ def test_curve_supports_operator_deployments_and_serves_the_swap_on_every_declar
         [str(action) for action in cell.direct_actions] == ["swap_exact_input"] for cell in cells
     )
     for cell in cells:
-        direct.require_direct("curve", cell.chain, "swap")
+        direct.require_direct("curve", cell.chain, direct.ActionRequest("swap", 5))
     with pytest.raises(ValueError, match="curve serves no direct swap on eip155:31337"):
-        direct.require_direct("curve", ChainId("eip155:31337"), "swap")
+        direct.require_direct("curve", ChainId("eip155:31337"), direct.ActionRequest("swap", 5))
     with pytest.raises(ValueError, match="curve serves no direct supply"):
-        direct.require_direct("curve", cells[0].chain, "supply")
+        direct.require_direct("curve", cells[0].chain, direct.ActionRequest("supply", 5))
 
 
 def test_the_swap_is_the_only_action_an_operator_request_is_admitted_for():
