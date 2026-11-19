@@ -378,6 +378,14 @@ independently.
   `direct.py`, and each chain's support lists them as `direct_actions`. Every
   other installed connector is named with its reason. Accepted: GMX V2 and
   Hyperliquid serve no direct action.
+- A direct deployment binds the wallet's whole position in the venue, read at
+  the command's pinned block, not only the requested market: every Pool reserve
+  the account uses as collateral or has borrowed, every leg held in a Comet or a
+  Morpho market. Never relax a connector's ownership or risk check for an
+  operator deployment; bind what the check needs, or refuse with the cause.
+- Declare a direct action on a cell only after its fork rehearsal passed there.
+  Morpho Blue on HyperEVM declares none: the provider runs head-pinned reads at
+  a later block, which the reader refuses.
 - Operator actions have no amount ceiling or cumulative budget; the required
   fee ceilings and the wallet balance bound them. An operator-managed action
   policy is proposed, not accepted.

@@ -15,6 +15,13 @@ its changelog is on the `v2` branch.
   action before any read, and the gateway admits and plans an operator request only
   for a declared action.
 - `ax supply` and `ax withdraw` take an optional `--max-gas-limit`.
+- `ax supply` and `ax withdraw` serve Aave V3, SparkLend, Compound V3 and Morpho Blue
+  beside Aave V4, on every chain where the connector has production support for a
+  plain account, except Morpho Blue on HyperEVM. The deployment covers the wallet's
+  whole position in the venue: the Pool reserves the account uses as collateral or
+  has borrowed, and every leg it holds in a Comet or a Morpho market. An action the
+  protocol would check against a health floor is refused while the wallet has debt
+  there, and the refusal names the debt.
 - `--public-rpc` serves `almanak ax` reads on Base, Arbitrum, BNB, Optimism, Polygon and
   Robinhood beside Ethereum and Avalanche. `drpc` adds Base, Optimism, Polygon and
   Robinhood, and four chain operators' own endpoints are named `base`, `arbitrum`,
