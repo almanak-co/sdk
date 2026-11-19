@@ -99,6 +99,10 @@ def position_evidence(reader, owned, block):
 
 
 def decision_quotes(reader, config, owned, pool, *, entry=True):
+    if config.allocation(owned.target.allocation).adopt is not None:
+        # An adopting allocation trades nothing. With no quote in its observations the
+        # gateway's swap check has nothing to admit a swap along.
+        return {}
     return quotes_for(
         config,
         owned,
@@ -143,10 +147,6 @@ def quotes_for(config, owned, pool, quote, *, entry=True):
     skips that search.
     """
     allocation = config.allocation(owned.target.allocation)
-    if allocation.adopt is not None:
-        # An adopting allocation trades nothing. With no quote in its observations the
-        # gateway's swap check has nothing to admit a swap along.
-        return {}
     inventory = (owned.inventory0, owned.inventory1)
     funding = next(v for v in inventory if v.asset == allocation.capital.asset)
     counter = next(v for v in inventory if v.asset != allocation.capital.asset)

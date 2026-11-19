@@ -312,11 +312,9 @@ def test_an_adopting_allocation_trades_nothing_and_only_an_operator_states_one()
 def test_an_adopting_deployment_quotes_no_swap_and_its_validation_admits_none():
     market, config, state, seen = opening()
 
-    def unreachable(amount):
-        raise AssertionError("an adopting allocation asked for a quote")
-
-    # Two-sided inventory and no position would otherwise offer an exit quote.
-    assert observations.quotes_for(config, state.owned[0], seen.pool, unreachable) == {}
+    # Two-sided inventory and no position would otherwise offer an exit quote. No
+    # reader is given: a quote would have to read.
+    assert observations.decision_quotes(None, config, state.owned[0], seen.pool) == {}
     assert (seen.entry_quote, seen.exit_quote, seen.rebalance_quote) == (None, None, None)
     swap = SwapExactInput[Target](
         target=config.target(ALLOCATION),
