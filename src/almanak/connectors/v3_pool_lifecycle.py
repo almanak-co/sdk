@@ -69,8 +69,12 @@ def adopted(item, seen):
 
 
 def commit_owned(owned, outcome):
-    if not outcome.success:
-        return owned
+    """Ownership after a recorded step: what its reconciliation observed.
+
+    A reverted step leaves ownership as it was, unless its block holds the NFT changed
+    from outside; reconciliation then records the observed position (with an accounting
+    issue), and later steps must start from it.
+    """
     return tuple(outcome.after.owned if o.target == outcome.operation.target else o for o in owned)
 
 
@@ -110,8 +114,6 @@ class Lifecycle:
     def initial(cls, config, strategy, capabilities, permissions):
         from almanak.triggers import DecisionSchedule
 
-        if strategy is not None and any(a.adopt is not None for a in config.allocations):
-            raise ValueError("only an operator deployment adopts inventory or a position")
         return cls.checkpoint_type(
             schedule=DecisionSchedule(),
             work=initial_work(config, cls.work_type),

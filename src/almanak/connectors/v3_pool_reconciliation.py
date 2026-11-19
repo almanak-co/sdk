@@ -15,6 +15,12 @@ from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm_fees import charged_fees
 from almanak.models import AssetAmount
 
+# Anyone may add liquidity to a position-manager NFT, so a position can change between
+# the signing of a step and its block. The step's receipt still proves the step's own
+# effects, so the position is recorded as the chain holds it and the difference is an
+# accounting issue. Raising instead would leave a mined step that can never be recorded.
+POSITION_CHANGED = "liquidity position includes unexplained external changes"
+
 
 def retained_position(backend, pending, effects, block, success, *, position_reader=nft_position):
     old, operation = pending.before.owned.position, pending.operation
@@ -32,10 +38,36 @@ def reconciled_liquidity(backend, old, operation, effects, block, *, position_re
     current = position_reader(
         backend.reader, operation.target, nft, block, expected=operation.range
     )
-    expected = (old.liquidity if old else 0) + effects.liquidity_delta
-    if current.liquidity != expected:
-        raise DataError("ownership", "observed NFT liquidity differs from retained receipt effects")
     return current
+
+
+def liquidity_issues(pending, effects, position, success):
+    """Whether the NFT holds other liquidity than the step's own receipt leaves it."""
+    old, operation = pending.before.owned.position, pending.operation
+    if not success or position is None or isinstance(operation, (Approval, Swap)):
+        return ()
+    expected = (old.liquidity if old else 0) + effects.liquidity_delta
+    return () if position.liquidity == expected else (f"{position.nft}: {POSITION_CHANGED}",)
+
+
+def observed_ownership(owned, after):
+    """Ownership with the NFT as the step's own block holds it, and what that changed.
+
+    A reverted step, an approval and a swap leave the position as it was owned. When
+    the snapshot reads it differently, it was changed from outside: the observed position
+    becomes the owned one and the difference is reported as an accounting issue.
+    """
+    if after.position == owned.position:
+        return owned, after, ()
+    held = type(owned)(
+        target=owned.target,
+        inventory0=owned.inventory0,
+        inventory1=owned.inventory1,
+        position=after.position,
+        entry_complete=owned.entry_complete,
+    )
+    issue = f"{after.position.nft}: {POSITION_CHANGED}"
+    return held, after.model_copy(update={"owned": held}), (issue,)
 
 
 def owned_after(pending, effects, position, success):
@@ -172,6 +204,8 @@ def reconcile(
     after = snapshot(
         backend, pending.operation.allocation, block, owned, quotes=False, residual=exiting
     )
+    owned, after, changed = observed_ownership(owned, after)
+    changed += liquidity_issues(pending, effects, position, success)
     gas_paid, fee_evidence = charged_fees(backend, pending, receipt, block)
     issues = validate_balances(pending, after, effects, gas_paid.amount, success)
     earned, settlement_issues = settlement(pending.operation, effects, success)
@@ -194,5 +228,5 @@ def reconcile(
         op_fee_evidence=fee_evidence,
         call=pending.call,
         execution=pending.execution,
-        accounting_issues=(*issues, *settlement_issues),
+        accounting_issues=(*issues, *settlement_issues, *changed),
     )
