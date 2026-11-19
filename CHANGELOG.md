@@ -51,8 +51,8 @@ its changelog is on the `v2` branch.
   the pool's share token.
 - `ax open-liquidity`, `ax collect-liquidity-fees` and `ax close-liquidity` serve
   Uniswap V4, with the pool named by its key and a native pool provided in the wrapped
-  token. A mint reverts when the pool price moved further than `--slippage-bps` in
-  either direction after signing.
+  token. A mint reverts when mined at a price further than `--slippage-bps` from the
+  price its step was planned at, within what the range itself holds.
 - `--public-rpc` serves `almanak ax` reads on Base, Arbitrum, BNB, Optimism, Polygon and
   Robinhood beside Ethereum and Avalanche. `drpc` adds Base, Optimism, Polygon and
   Robinhood, and four chain operators' own endpoints are named `base`, `arbitrum`,

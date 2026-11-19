@@ -801,18 +801,32 @@ with the pool named by its key as for a swap (`--currency0`, `--currency1`, `--f
 `--token-id`. Its connector has no intent that adds to or removes part of a
 position, so `increase-liquidity` and `decrease-liquidity` refuse it. A key may name
 the chain's native coin: the wallet provides and receives the wrapped token, and
-`--amount0` and `--amount1` follow the key's order. A mint is for a fixed liquidity,
-the most the stated amounts cover at the observed price, and the most of each token
-it may take is trimmed to what that liquidity takes at the edge of `--slippage-bps`
-around the observed price. The position manager reverts a mint that needs more, so a
-price moved further than that in either direction after signing reverts the mint. A
-mint approves Permit2 for that most of each token and gives the position manager a
-Permit2 allowance that expires at the mint's deadline. What the mint does not take
-stays approved: the Permit2 allowance until it expires, the ERC-20 approval to
-Permit2 without limit of time. `revoke-exchange` does not serve Uniswap V4, so the
-approval to Permit2 is revoked with another tool. A collection and a close approve
-nothing. `ax liquidity-position --connector uniswap_v4` takes the key flags and
-`--token-id`.
+`--amount0` and `--amount1` follow the key's order.
+
+A Uniswap V4 mint is for a fixed liquidity: the most the stated amounts cover at the
+price observed when the mint step is planned. The most it may take of each currency
+is the stated amount, trimmed to what that liquidity takes at the edge of
+`--slippage-bps` around that same price: the price less the slippage for currency0,
+the price plus the slippage for currency1. The position manager reverts a mint that
+needs more, so a mint mined at a price further than `--slippage-bps` from the price
+it was planned at reverts, and against the currency that limits the liquidity it
+reverts on any move. The range bounds what the slippage cannot. Where an edge of the
+slippage lies at or beyond a bound of the range, the mint may take all the range
+holds of that currency, and no price in that direction reverts it. A range wholly
+beside the price takes one currency only, the same amount at every price on that
+side. The gateway plans the mint only while the price is within `--slippage-bps` of
+the price the command decided at, and does not send it once the price has left the
+slippage around the planned price; these two are the gateway's checks, not the
+chain's.
+
+Each step approves what its own observation allows the mint to take: Permit2 for
+that most of each token, and for the position manager a Permit2 allowance that
+expires at the mint's deadline. An approval mined at an earlier price for less than
+the mint now needs is made again before the mint. What the mint does not take stays
+approved: the Permit2 allowance until it expires, the ERC-20 approval to Permit2
+without limit of time. `revoke-exchange` does not serve Uniswap V4, so the approval
+to Permit2 is revoked with another tool. A collection and a close approve nothing.
+`ax liquidity-position --connector uniswap_v4` takes the key flags and `--token-id`.
 
 The action runs through the same planning, simulation, signing and receipt
 reconciliation as a strategy's, as an operator deployment that exists only for the
