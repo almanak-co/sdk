@@ -26,7 +26,10 @@ When it loads, the agent checks the installation, the provider and the wallet,
 reads the gas balance on the chains it has used and reports the positions it knows
 of. If there is no wallet it creates one with
 `almanak wallet create --generate-password` and asks the user to fund it. The agent
-never asks for an address, a key or a seed phrase.
+never asks for an address, a key or a seed phrase. Before the user funds the
+wallet it tells them that it cannot send funds back, and that the key exists only
+as `keystores.json` with its password in `keystore-password`, under
+`~/.almanak/agent/wallet/` on that machine.
 
 The skill covers every direct action the CLI serves for a plain wallet:
 
@@ -38,8 +41,16 @@ The skill covers every direct action the CLI serves for a plain wallet:
 
 It holds no list of chains. Before an action the agent runs `almanak support` for
 the connector and chain and goes on only when `direct_actions` lists the action's
-kind. A test holds the skill's commands, connectors, selector flags, position
-fields and refusal texts to the code.
+kind.
+
+`tests/test_agent_skill.py` holds the skill to the code where the code states the
+fact: every command line parses for every connector it is written for, every flag
+named in a sentence is an option of the CLI, and the command, selector, public
+endpoint, position field, health floor and result field tables match the
+declarations, models and functions they describe. A refusal named in its table is
+a kind the SDK raises or part of a message it raises; the test does not show
+which command raises it. The rules an agent must keep, and what the skill says a
+field or a refusal means, are checked only as text.
 
 For each request the agent names the market or pool, converts the amounts to base
 units, runs the action without `--execute`, tells the user what it will do and what
@@ -65,8 +76,15 @@ it never picks one silently:
   wallet's balance of the pool's LP token, and on Curve the user chooses whether a
   burn pays every coin or one.
   Nothing is swapped inside a liquidity action.
-- **The fee ceilings.** Each applies to one step, and an action can take several;
-  the agent states the bound for all of them and never raises a ceiling itself.
+- **The fee ceilings.** Each applies to one step, and an action takes several;
+  the agent states the ceiling for one step, states no total it cannot count, and
+  never raises a ceiling itself.
+
+When a command ends without a result, the agent does not repeat it: it lists the
+kept records, reads the position and reports. It resolves with `ax recover` only a
+record of its own wallet. Resolving can send a signed transaction again, however
+old, so the agent does it unasked only for an action the user has just confirmed,
+and asks first for any other.
 
 No provider key is needed. The agent reads, previews and executes through a named
 public endpoint (`--public-rpc`), which the reviewed
@@ -93,15 +111,19 @@ opened elsewhere is read when the user names its market or token ID.
 - The wallet is a plain account that holds the funds. Whoever controls the machine
   the agent runs on controls the wallet. Safe/Roles accounts are not supported for
   operator actions.
-- GMX V2 and Hyperliquid serve no direct action. HyperEVM has no public endpoint,
-  so anything there needs the user's provider key.
-- An action takes the token itself: a chain's native coin must already be wrapped,
-  and nothing here transfers funds out of the wallet.
+- GMX V2 and Hyperliquid serve no direct action. No direct action is served on
+  HyperEVM, which has no public endpoint either: a provider key there serves reads
+  only.
+- An action takes the token itself: a chain's native coin must already be wrapped.
+- The agent cannot send funds back. Nothing here transfers out of the wallet, so
+  funds leave it only through its key, which the user should keep a copy of.
 - An action has no amount ceiling. The fee ceilings and the wallet balance bound
   it, and the confirmation before `--execute` is an instruction to the agent, not
   an enforced control.
-- A health floor, a slippage bound and a preview are checks before signing. None of
-  them protects a position after the transaction is mined, and the agent does not
+- The minimum a swap, a deposit or a burn accepts, the deadline where the call
+  carries one, and the gas price and gas limit are in the signed transaction, so
+  the chain enforces them. The health floor is a check before signing only.
+  Nothing protects a position after its step is mined, and the agent does not
   watch positions.
 - A public endpoint's operator sees the addresses read and the transactions sent,
   and an action signs what that one endpoint's reads resolve.
