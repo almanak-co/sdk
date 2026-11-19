@@ -297,10 +297,13 @@ reverse-fault case, recovery-foundation node, backtest or offline gate.
 
 ## Public endpoint qualification
 
-A (name, chain) pair is in the reviewed `--public-rpc` list only when
-`scripts/qualify_public_rpc.py` passes every check on that endpoint. The tool is
-live and explicit: it connects to the endpoints, so the offline suite never runs
-it. It reads no env file and no provider key, and it signs and sends nothing.
+A (name, chain) pair is in the reviewed `--public-rpc` list only after it passed
+every check of `scripts/qualify_public_rpc.py` in repeated full runs. A pass is a
+point-in-time result: a transient refusal fails a run as it would fail a command,
+so a healthy endpoint can fail one run and a listed one can still refuse a read.
+The tool is live and explicit: it connects to the endpoints, so the offline suite
+never runs it. It reads no env file and no provider key, and it signs and sends
+nothing.
 
 ```bash
 uv run --locked python -m scripts.qualify_public_rpc
@@ -310,9 +313,12 @@ uv run --locked python -m scripts.qualify_public_rpc \
 ```
 
 Without arguments it checks every listed pair, one after another with a pause.
-`--candidate NAME CHAIN URL` checks an endpoint that is not listed. It prints one
-JSON report that names hosts only and exits 1 when any checked endpoint fails. The
-checks drive the SDK's own readers:
+`--candidate NAME CHAIN URL` checks an endpoint that is not listed, and is not
+combined with `--name` or `--chain`. It prints one JSON report that names hosts
+only and exits 1 when any checked endpoint fails; a wrong command line exits 2
+before any endpoint is opened. The checks drive the SDK's own readers through a
+sample of the reads an observation and a direct action make. They do not cover
+every method a connector calls:
 
 | Check | What the endpoint must serve |
 | --- | --- |
@@ -320,17 +326,21 @@ checks drive the SDK's own readers:
 | `production_guard` | What a direct action verifies before each privileged step: an HTTPS endpoint, the chain, a client that is not a test node and the genesis again. |
 | `reads_at_finalized`, `reads_at_latest`, `reads_at_number` | Call, code, storage and balance reads that name the block's hash with `requireCanonical`, at the default `finalized`, at `latest` and at a numbered block 64 behind the head. A probe call returns the block timestamp the provider's EVM saw, which must be the pinned block's. |
 | `submitter_state` | The head by its number, no older than an action accepts, and the same nonce at `latest` and `pending`. |
-| `fee_quote` | The fee quote of a direct action: gas estimated at the pinned block's hash, a one-block fee history with one reward percentile and the next base fee, and the node's gas price on BNB. |
+| `fee_quote` | The fee quote of a direct action: gas estimated at the pinned block's hash, a one-block fee history with one reward percentile and the base fee the chain's policy bids on (the next block's, or the observed block's on Avalanche), and the node's gas price on BNB. |
 | `op_fees` | On Base and Optimism, the pinned GasPriceOracle and L1Block revisions and their fee parameters. |
 | `receipts` | A mined transaction and its receipt with the fields reconciliation reads, on a block that is canonical by number, and `null` for a transaction hash the provider does not know, as a transaction that is not mined yet answers. |
 
-A refusal is reported in the SDK's own words, never the provider's. An endpoint
-whose only failures are rate limits is checked again after a pause, up to
-`--attempts` times; one that stays rate limited fails. A pass means the calls were
-served on the day of the run and promises nothing later, so run the tool again
-before adding a pair and when an endpoint starts refusing reads. Whether an
-endpoint accepts a submitted transaction is not checked, because the tool sends
-none.
+A refusal is reported in the SDK's own words, never the provider's, and an answer
+of the wrong shape fails its check as `malformed`. Each failed check carries
+`rate_limited` and `transient`. An endpoint whose only failures are rate limits is
+checked again after a pause, up to `--attempts` times; one that stays rate limited
+fails. `transient` is the reader's own mark on a failure it re-sent until its
+bounds ran out, such as a transport failure or an HTTP 5xx; the tool reports it
+and does not retry it. A refusal the reader does not classify as transient, such
+as an HTTP 408 or a provider's own error code, is reported as definite even when
+the next run passes. Read a single failure with that in mind, and run the tool
+again before changing the list. Whether an endpoint accepts a submitted
+transaction is not checked, because the tool sends none.
 
 ## Local evidence and scheduling
 

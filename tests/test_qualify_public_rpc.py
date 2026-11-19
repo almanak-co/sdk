@@ -5,7 +5,10 @@ live endpoints.
 """
 
 import json
+import re
 from contextlib import contextmanager
+from functools import partial
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -223,7 +226,7 @@ def test_op_fee_parameters_are_read_only_on_an_op_stack_chain(monkeypatch):
 
 
 def test_the_receipt_read_takes_the_middle_transaction_of_the_newest_block_with_one():
-    blocks = {HEAD: [], HEAD - 1: None, HEAD - 2: ["0x01", KNOWN, "0x03"]}
+    blocks = {HEAD: [], HEAD - 1: [], HEAD - 2: ["0x01", KNOWN, "0x03"]}
     reader = Endpoint(
         eth_getBlockByNumber=lambda params: {"transactions": blocks[int(params[0], 16)]}
     )
@@ -238,6 +241,98 @@ def test_the_receipt_read_takes_the_middle_transaction_of_the_newest_block_with_
     with pytest.raises(DataError):
         tool.recent_transaction(young, 2)  # type: ignore[arg-type]
     assert [params[0] for _, params in young.calls] == ["0x2", "0x1", "0x0"]
+
+
+@pytest.mark.parametrize(
+    ("check", "answers", "message"),
+    [
+        (tool.reads_at_latest, {"eth_getBalance": 5}, "eth_getBalance: invalid quantity"),
+        (tool.reads_at_latest, {"eth_getBalance": "0xzz"}, "eth_getBalance: invalid quantity"),
+        (tool.reads_at_latest, {"eth_getBalance": "5"}, "eth_getBalance: invalid quantity"),
+        (tool.reads_at_finalized, {"eth_getCode": 7}, "eth_getCode: invalid data"),
+        (tool.reads_at_number, {"eth_getStorageAt": ["0x0"]}, "eth_getStorageAt: invalid data"),
+        (tool.submitter_state, {"eth_blockNumber": 1000}, "eth_blockNumber: invalid quantity"),
+        (
+            partial(tool.submitter_state, clock=lambda: NOW),
+            {"eth_getTransactionCount": {"nonce": "0x0"}},
+            "eth_getTransactionCount: invalid quantity",
+        ),
+        (
+            tool.receipts,
+            {"eth_getBlockByNumber": {"transactions": "0xabcd"}},
+            "eth_getBlockByNumber: invalid transaction list",
+        ),
+        (
+            tool.receipts,
+            {"eth_getBlockByNumber": {"transactions": [{"hash": KNOWN}]}},
+            "eth_getBlockByNumber: invalid transaction list",
+        ),
+        (
+            tool.receipts,
+            {"eth_getBlockByNumber": []},
+            "eth_getBlockByNumber: invalid transaction list",
+        ),
+        (
+            tool.receipts,
+            {"eth_getTransactionReceipt": {**receipt(), "blockNumber": HEAD}},
+            "eth_getTransactionReceipt: invalid quantity",
+        ),
+    ],
+)
+def test_an_answer_of_the_wrong_shape_fails_the_check_as_malformed(check, answers, message):
+    """A check ends with its report whatever the endpoint answers."""
+    result = tool.outcome("check", check, probe(Endpoint(**answers)))
+    assert result == {
+        "check": "check",
+        "passed": False,
+        "error": "malformed",
+        "message": message,
+        "rate_limited": False,
+        "transient": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("check", "patched", "raised", "message"),
+    [
+        (tool.fee_quote, "quoted_fees", TypeError("int() can't convert"), "quoted_fees"),
+        (tool.fee_quote, "quoted_fees", ValueError("invalid literal 0xzz"), "quoted_fees"),
+        (tool.op_fees, "read_parameters", KeyError("result"), "read_parameters"),
+        (tool.op_fees, "read_parameters", IndexError("out of range"), "read_parameters"),
+    ],
+)
+def test_an_answer_the_sdk_cannot_decode_fails_the_check_without_its_text(
+    monkeypatch, check, patched, raised, message
+):
+    def read(*arguments):
+        raise raised
+
+    read.__name__ = patched
+    monkeypatch.setattr(tool, patched, read)
+    result = tool.outcome("check", check, probe(Endpoint(BASE)))
+    kind = type(raised).__name__
+    assert (result["passed"], result["error"]) == (False, "malformed")
+    assert result["message"] == f"{message}: undecodable answer ({kind})"
+
+
+def test_the_production_guard_fails_as_malformed_on_an_undecodable_chain_number():
+    result = tool.outcome("guard", tool.production_guard, probe(Endpoint(eth_chainId=1)))
+    assert (result["error"], result["message"]) == (
+        "malformed",
+        "verify_provider: undecodable answer (TypeError)",
+    )
+
+
+def test_a_refusal_the_sdk_raises_while_decoding_stays_its_own():
+    def refused(*arguments):
+        raise DataError("gas_price", "market gas quote exceeds the configured price ceiling")
+
+    with pytest.raises(DataError, match="price ceiling") as kept:
+        tool.decoded(refused)
+    assert kept.value.kind == "gas_price"
+    # Anything that is not a decoding error is a fault of the tool and is not hidden.
+    with pytest.raises(RuntimeError):
+        tool.decoded(lambda: (_ for _ in ()).throw(RuntimeError("bug")))
 
 
 def test_receipts_pass_on_a_canonical_receipt_and_null_for_an_unknown_hash():
@@ -298,8 +393,19 @@ def test_an_outcome_keeps_the_sdk_refusal_and_marks_a_rate_limit():
         "error": "http",
         "message": "eth_call: HTTP 403",
         "rate_limited": False,
+        "transient": False,
     }
-    assert tool.outcome("busy", busy, reader)["rate_limited"] is True
+    limited = tool.outcome("busy", busy, reader)
+    assert (limited["rate_limited"], limited["transient"]) == (True, False)
+
+    def exhausted(probe):
+        # What the reader raises once its re-sends of a transient failure ran out.
+        raise DataError("transport", "eth_call: transport failed", transient=True)
+
+    marked = tool.outcome("exhausted", exhausted, reader)
+    assert (marked["passed"], marked["rate_limited"], marked["transient"]) == (False, False, True)
+    # A transient failure is reported, not retried: only rate limits earn another attempt.
+    assert not tool.rate_limited({"checks": [marked]})
     assert tool.outcome("invalid", invalid, reader) == {
         "check": "invalid",
         "passed": False,
@@ -324,6 +430,16 @@ def test_no_check_runs_on_an_endpoint_of_unproven_identity():
     # Any other failure leaves the remaining checks running.
     results = tool.run_checks(reader, (("first", failing), ("later", later)))
     assert [check["passed"] for check in results] == [False, True] and ran == [True]
+
+
+def test_the_qa_guide_describes_exactly_the_checks_the_tool_runs():
+    guide = (Path(__file__).parents[1] / "docs/qa.md").read_text()
+    section = guide.split("## Public endpoint qualification")[1].split("\n## ")[0]
+    rows = re.findall(r"^\| (`[a-z_]+`(?:, `[a-z_]+`)*) \| .+ \|$", section, flags=re.MULTILINE)
+    described = [label for row in rows for label in re.findall(r"`([a-z_]+)`", row)]
+    assert described == [label for label, _ in tool.CHECKS]
+    for field in ("`rate_limited`", "`transient`", "`malformed`"):
+        assert field in section
 
 
 def test_the_checks_start_with_identity():
@@ -413,23 +529,66 @@ def test_the_default_targets_are_every_listed_pair():
         for name, chains in providers.PUBLIC_RPC.items()
         for chain, url in chains.items()
     ]
-    assert tool.targets(tool.arguments([])) == listed
-    named = tool.targets(tool.arguments(["--name", "drpc", "--chain", "eip155:1"]))
+    assert tool.arguments([]).targets == listed
+    named = tool.arguments(["--name", "drpc", "--chain", "eip155:1"]).targets
     assert named == [("drpc", ETHEREUM, providers.PUBLIC_RPC["drpc"][ETHEREUM])]
-    assert tool.targets(tool.arguments(["--name", "unlisted"])) == []
 
 
 def test_a_candidate_is_an_https_endpoint_on_a_known_chain_under_a_valid_name():
     args = tool.arguments(["--candidate", "example", "eip155:8453", "https://rpc.example"])
-    assert tool.targets(args) == [("example", BASE, "https://rpc.example")]
-    for values in (
-        ["Example", "eip155:8453", "https://rpc.example"],
-        ["example", "eip155:8453", "http://rpc.example"],
-        ["example", "eip155:424242", "https://rpc.example"],
-        ["example", "base", "https://rpc.example"],
+    assert args.targets == [("example", BASE, "https://rpc.example")]
+    for values, message in (
+        (["Example", "eip155:8453", "https://rpc.example"], "not a lowercase endpoint name"),
+        (["example", "eip155:8453", "http://rpc.example"], "must be an HTTPS URL"),
+        (["example", "eip155:8453", "https://user:key@rpc.example"], "must be an HTTPS URL"),
+        (["example", "eip155:424242", "https://rpc.example"], "not a CAIP-2 chain with a pinned"),
+        (["example", "base", "https://rpc.example"], "not a CAIP-2 chain with a pinned"),
     ):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match=message) as refused:
             tool.candidate(values)
+        # The refusal never repeats the URL, which may carry a credential.
+        assert "rpc.example" not in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["--candidate", "Example", "eip155:8453", "https://rpc.example"], "endpoint name"),
+        (["--candidate", "example", "base", "https://rpc.example"], "not a CAIP-2 chain"),
+        (["--candidate", "example", "eip155:8453", "http://rpc.example"], "must be an HTTPS URL"),
+        (
+            ["--name", "drpc", "--candidate", "example", "eip155:8453", "https://rpc.example"],
+            "--name and --chain select listed endpoints, not a --candidate",
+        ),
+        (
+            ["--chain", "eip155:1", "--candidate", "example", "eip155:8453", "https://rpc.example"],
+            "--name and --chain select listed endpoints, not a --candidate",
+        ),
+        (["--name", "unlisted"], "no listed public endpoint matches --name and --chain"),
+        (["--name", "publicnode", "--chain", "eip155:999"], "no listed public endpoint matches"),
+        (["--attempts", "0"], "expected a whole number of at least 1"),
+        (["--attempts", "-1"], "expected a whole number of at least 1"),
+        (["--attempts", "two"], "expected a whole number of at least 1"),
+        (["--pause", "-1"], "expected seconds from 0 to 3600"),
+        (["--retry-pause", "soon"], "expected seconds from 0 to 3600"),
+        (["--retry-pause", "nan"], "expected seconds from 0 to 3600"),
+    ],
+)
+def test_a_wrong_command_line_is_a_usage_error_before_any_endpoint_is_opened(
+    monkeypatch, capsys, arguments, message
+):
+    monkeypatch.setattr(tool, "qualify", lambda target: pytest.fail("opened an endpoint"))
+    with pytest.raises(SystemExit) as stopped:
+        tool.main(arguments)
+    assert stopped.value.code == 2
+    captured = capsys.readouterr()
+    assert message in captured.err and captured.out == ""
+    assert "Traceback" not in captured.err
+
+
+def test_attempts_and_pauses_parse_as_whole_attempts_and_seconds():
+    args = tool.arguments(["--attempts", "1", "--pause", "0", "--retry-pause", "0.5"])
+    assert (args.attempts, args.pause, args.retry_pause) == (1, 0.0, 0.5)
 
 
 def test_the_report_is_one_json_document_and_a_failure_exits_1(monkeypatch, capsys):
@@ -452,9 +611,8 @@ def test_the_report_is_one_json_document_and_a_failure_exits_1(monkeypatch, caps
     assert waits == [1.0]
 
 
-def test_a_passing_run_exits_0_and_an_empty_selection_is_refused(monkeypatch, capsys):
+def test_a_passing_run_exits_0(monkeypatch, capsys):
     monkeypatch.setattr(tool, "settled", lambda target, attempts, pause, *, wait: {"passed": True})
     assert tool.main(["--name", "drpc", "--chain", "eip155:1"], wait=lambda seconds: None) == 0
     assert json.loads(capsys.readouterr().out)["passed"] is True
-    with pytest.raises(SystemExit, match="no listed public endpoint matches"):
-        tool.main(["--name", "unlisted"])
+    assert capsys.readouterr().err == ""

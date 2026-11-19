@@ -1,9 +1,11 @@
 """Qualify public RPC endpoints against what `almanak ax` asks of one.
 
-A (name, chain) pair belongs in `almanak.gateway.providers.PUBLIC_RPC` only when it
-passes every check here. The checks drive the SDK's own readers through the reads a
-public observation and a direct action make, so a pass means those calls were served,
-at the block they were pinned to, on the day of the run. It is no promise for later.
+A (name, chain) pair belongs in `almanak.gateway.providers.PUBLIC_RPC` only after it
+passed every check here in repeated full runs. The checks drive the SDK's own readers
+through a sample of the reads a public observation and a direct action make, so a pass
+means those calls were served, at the block they were pinned to, at the time of the
+run. It is a point-in-time result and no promise for later: a transient refusal fails
+a run as it would fail a command, and an endpoint can pass one run and fail the next.
 
 This tool is live and explicit: it opens connections to the endpoints it is given, so
 no offline test runs it. It reads no env file and no provider key, and it signs and
@@ -18,7 +20,9 @@ checked.
 Without arguments every listed pair is checked, one after another with a pause. A
 `--candidate` checks an endpoint that is not listed. One JSON report goes to standard
 output, naming hosts only, and the exit status is 1 when any checked endpoint fails.
-An endpoint whose only failures are rate limits is checked again after a pause.
+An endpoint whose only failures are rate limits is checked again after a pause. Each
+failed check also carries the reader's own `transient` mark; it is reported, not retried.
+A wrong command line exits 2 before any endpoint is opened.
 """
 
 import argparse
@@ -98,6 +102,43 @@ def require(condition: bool, message: str) -> None:
         raise DataError("inconsistent", message)
 
 
+def quantity(value: Any, method: str) -> int:
+    """A JSON-RPC hex quantity. Any other answer is the endpoint's malformed answer."""
+    try:
+        if not isinstance(value, str) or not value.startswith("0x"):
+            raise ValueError("not a hex quantity")
+        return int(value, 16)
+    except ValueError:
+        raise DataError("malformed", f"{method}: invalid quantity") from None
+
+
+def data(value: Any, method: str) -> str:
+    """JSON-RPC hex data, as code and storage reads answer."""
+    if not isinstance(value, str) or not value.startswith("0x"):
+        raise DataError("malformed", f"{method}: invalid data")
+    return value
+
+
+# What the SDK's own decoding raises on an answer of another shape than the method's.
+UNDECODABLE = (TypeError, KeyError, IndexError, ValueError)
+
+
+def decoded(read: Callable[..., Any], *arguments: Any) -> Any:
+    """Run an SDK read that decodes raw answers itself.
+
+    A command would stop on the same answer with an error of its own, so the check
+    fails as malformed. The error's text can repeat the answer and is not reported.
+    """
+    try:
+        return read(*arguments)
+    except DataError:
+        raise
+    except UNDECODABLE as error:
+        raise DataError(
+            "malformed", f"{read.__name__}: undecodable answer ({type(error).__name__})"
+        ) from None
+
+
 def identity(probe: Probe) -> dict:
     """`public_reader`: the chain number, the pinned genesis and a head within 120 seconds."""
     probe.reads.verify_chain()
@@ -110,7 +151,7 @@ def production_guard(probe: Probe) -> dict:
     and the genesis again, as every privileged request of a direct action verifies."""
     validate_endpoint(probe.endpoint)
     adapter = cast(ProductionGateway, SimpleNamespace(reader=probe.execution))
-    ProductionGateway.verify_provider(adapter)
+    decoded(ProductionGateway.verify_provider, adapter)
     return {}
 
 
@@ -132,9 +173,9 @@ def pinned_reads(probe: Probe, block: Block) -> dict:
     reader = probe.reads
     pin = {"blockHash": block.hash, "requireCanonical": True}
     asset = reader.asset(probe.network.wrapped_native, block)
-    code = reader._rpc("eth_getCode", [probe.wrapped, pin])
-    slot = reader._rpc("eth_getStorageAt", [probe.wrapped, "0x0", pin])
-    balance = int(reader._rpc("eth_getBalance", [ACCOUNT, pin]), 16)
+    code = data(reader._rpc("eth_getCode", [probe.wrapped, pin]), "eth_getCode")
+    slot = data(reader._rpc("eth_getStorageAt", [probe.wrapped, "0x0", pin]), "eth_getStorageAt")
+    balance = quantity(reader._rpc("eth_getBalance", [ACCOUNT, pin]), "eth_getBalance")
     require(asset.decimals == 18, "wrapped native asset does not report 18 decimals")
     require(len(code) > 2 and len(slot) == 66, "contract code or storage is not served")
     executed = context_timestamp(reader, pin)
@@ -166,15 +207,15 @@ def submitter_state(probe: Probe, clock: Callable[[], float] = time.time) -> dic
     """`EvmGateway.observe`, `require_fresh` and `estimate_execution`: the head by its
     number, no older than an action accepts, and a nonce both tags agree on."""
     reader = probe.execution
-    block = reader.pin_block(int(reader._rpc("eth_blockNumber", []), 16))
+    block = reader.pin_block(quantity(reader._rpc("eth_blockNumber", []), "eth_blockNumber"))
     age = clock() - block.timestamp
     require(
         -15 <= age <= MAX_OBSERVATION_AGE_SECONDS,
         f"head by number is {int(age)} seconds old",
     )
+    count = "eth_getTransactionCount"
     latest, pending = (
-        int(reader._rpc("eth_getTransactionCount", [ACCOUNT, tag]), 16)
-        for tag in ("latest", "pending")
+        quantity(reader._rpc(count, [ACCOUNT, tag]), count) for tag in ("latest", "pending")
     )
     require(latest == pending, "the latest and pending nonces of an idle account differ")
     return {"block": block.number, "nonce": latest}
@@ -193,7 +234,7 @@ def fee_quote(probe: Probe) -> dict:
     reader = probe.execution
     block = reader.pin_block("latest")
     call = {"from": ACCOUNT, "to": probe.wrapped, "value": "0x0", "data": DECIMALS}
-    fees = quoted_fees(reader, action_policy(probe.network), block, call)
+    fees = decoded(quoted_fees, reader, action_policy(probe.network), block, call)
     return {
         "block": block.number,
         "gas_estimate": fees["gas_estimate"],
@@ -208,7 +249,7 @@ def op_fees(probe: Probe) -> dict:
     if probe.network.family != "optimism":
         return {"applies": False}
     block = probe.execution.pin_block("latest")
-    parameters = read_parameters(probe.execution, block)
+    parameters = decoded(read_parameters, probe.execution, block)
     return {"applies": True, "block": block.number, "revision": parameters.revision}
 
 
@@ -220,6 +261,8 @@ def recent_transaction(reader: EthereumReader, head: int) -> str:
     for number in range(head, max(-1, head - RECEIPT_BLOCKS), -1):
         block = reader._rpc("eth_getBlockByNumber", [hex(number), False])
         hashes = block.get("transactions") if isinstance(block, dict) else None
+        if not isinstance(hashes, list) or not all(isinstance(item, str) for item in hashes):
+            raise DataError("malformed", "eth_getBlockByNumber: invalid transaction list")
         if hashes:
             return hashes[len(hashes) // 2]
     raise DataError("unavailable", f"no transaction in the last {RECEIPT_BLOCKS} blocks")
@@ -235,7 +278,8 @@ def receipts(probe: Probe) -> dict:
     require(isinstance(receipt, dict), "a mined transaction has no receipt")
     missing = sorted(RECEIPT_FIELDS - set(receipt))
     require(not missing, f"receipt lacks {', '.join(missing)}")
-    block = reader.pin_block(int(receipt["blockNumber"], 16))
+    number = quantity(receipt["blockNumber"], "eth_getTransactionReceipt")
+    block = reader.pin_block(number)
     require(block.hash == receipt["blockHash"], "receipt block is not canonical by number")
     held = reader._rpc("eth_getTransactionByHash", [known], allow_none=True)
     require(held is not None, "a mined transaction is not found by its hash")
@@ -261,7 +305,12 @@ CHECKS: tuple[tuple[str, Check], ...] = (
 
 
 def outcome(label: str, check: Check, probe: Probe) -> dict:
-    """One check's result. Refusal text is the SDK's own, never the provider's."""
+    """One check's result. Refusal text is the SDK's own, never the provider's.
+
+    `transient` is the reader's own mark on a failure it re-sent until its bounds ran
+    out: a later attempt may pass. Anything else is the endpoint's definite answer to
+    this run. Neither is retried here, and both fail the check as they fail a command.
+    """
     try:
         return {"check": label, "passed": True, **check(probe)}
     except DataError as error:
@@ -271,6 +320,7 @@ def outcome(label: str, check: Check, probe: Probe) -> dict:
             "error": error.kind,
             "message": str(error),
             "rate_limited": throttled(error),
+            "transient": bool(error.transient),
         }
     except ValueError as error:
         return {"check": label, "passed": False, "error": "invalid", "message": str(error)}
@@ -333,24 +383,64 @@ def settled(
 
 def candidate(values: list[str]) -> Target:
     name, chain, endpoint = values
-    PublicProvider(kind="public_rpc", name=name)
-    validate_endpoint(endpoint)
-    evm_network(ChainId(chain))
-    return name, ChainId(chain), endpoint
+    try:
+        PublicProvider(kind="public_rpc", name=name)
+    except ValueError:
+        raise ValueError(f"{name!r} is not a lowercase endpoint name") from None
+    try:
+        network = evm_network(ChainId(chain))
+    except ValueError:
+        raise ValueError(f"{chain!r} is not a CAIP-2 chain with a pinned genesis") from None
+    try:
+        validate_endpoint(endpoint)
+    except ValueError:
+        raise ValueError("the endpoint must be an HTTPS URL without credentials") from None
+    return name, network.chain, endpoint
 
 
-def targets(args: argparse.Namespace) -> list[Target]:
-    if args.candidate:
-        return [candidate(values) for values in args.candidate]
+def listed(name: str | None, chain: str | None) -> list[Target]:
     return [
-        (name, chain, endpoint)
-        for name, chains in PUBLIC_RPC.items()
-        for chain, endpoint in chains.items()
-        if args.name in (None, name) and args.chain in (None, str(chain))
+        (listed_name, listed_chain, endpoint)
+        for listed_name, chains in PUBLIC_RPC.items()
+        for listed_chain, endpoint in chains.items()
+        if name in (None, listed_name) and chain in (None, str(listed_chain))
     ]
 
 
+def targets(args: argparse.Namespace) -> list[Target]:
+    """The endpoints to check; a selection that names nothing checkable is a ValueError."""
+    filtered = args.name is not None or args.chain is not None
+    if args.candidate and filtered:
+        raise ValueError("--name and --chain select listed endpoints, not a --candidate")
+    if args.candidate:
+        return [candidate(values) for values in args.candidate]
+    selected = listed(args.name, args.chain)
+    if not selected:
+        raise ValueError("no listed public endpoint matches --name and --chain")
+    return selected
+
+
+def whole(minimum: int) -> Callable[[str], int]:
+    def parse(value: str) -> int:
+        if not (value.isascii() and value.isdigit()) or int(value) < minimum:
+            raise argparse.ArgumentTypeError(f"expected a whole number of at least {minimum}")
+        return int(value)
+
+    return parse
+
+
+def seconds(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError:
+        parsed = -1.0
+    if not 0 <= parsed <= 3600:
+        raise argparse.ArgumentTypeError("expected seconds from 0 to 3600")
+    return parsed
+
+
 def arguments(argv: list[str] | None) -> argparse.Namespace:
+    """The parsed command line with its `targets`; a wrong one ends as a usage error."""
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--name", help="check only the listed endpoints of this name")
     parser.add_argument("--chain", help="check only the listed endpoints of this CAIP-2 chain")
@@ -361,19 +451,23 @@ def arguments(argv: list[str] | None) -> argparse.Namespace:
         metavar=("NAME", "CHAIN", "URL"),
         help="check an HTTPS endpoint that is not listed, instead of the listed ones",
     )
-    parser.add_argument("--attempts", type=int, default=3, help="attempts while rate limited")
-    parser.add_argument("--retry-pause", type=float, default=30.0, help="seconds between them")
-    parser.add_argument("--pause", type=float, default=2.0, help="seconds between endpoints")
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--attempts", type=whole(1), default=3, help="attempts while rate limited (at least 1)"
+    )
+    parser.add_argument("--retry-pause", type=seconds, default=30.0, help="seconds between them")
+    parser.add_argument("--pause", type=seconds, default=2.0, help="seconds between endpoints")
+    args = parser.parse_args(argv)
+    try:
+        args.targets = targets(args)
+    except ValueError as error:
+        parser.error(str(error))
+    return args
 
 
 def main(argv: list[str] | None = None, *, wait: Callable[[float], None] = time.sleep) -> int:
     args = arguments(argv)
-    selected = targets(args)
-    if not selected:
-        raise SystemExit("no listed public endpoint matches --name and --chain")
     reports: list[dict[str, Any]] = []
-    for target in selected:
+    for target in args.targets:
         if reports:
             wait(args.pause)
         reports.append(settled(target, args.attempts, args.retry_pause, wait=wait))
