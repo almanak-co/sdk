@@ -709,30 +709,47 @@ The ticks are the operator's own and must be multiples of the pool's tick spacin
 there are no bands. `--amount0` and `--amount1` are base units of the pool's
 currency0 and currency1, at least one above zero, and the wallet must hold both
 stated amounts. Nothing is swapped inside a liquidity action: the mint uses what the
-range and the price at the observed block allow, and the rest stays in the wallet.
-Swap first with `ax swap` when the wallet holds only one side. `--slippage-bps` is
-required and bounds how far the pool price may move between the observed block and
-the mined step; `--deadline-seconds` is 300 unless stated.
+range takes at the mined price, never more than it takes within `--slippage-bps` of
+the observed price, and the rest stays in the wallet and is not approved. Swap first
+with `ax swap` when the wallet holds only one side. `--slippage-bps` is required. A
+mint or an increase is not signed when the pool price moved more than this since the
+observed block, and the signed call offers and requires what the range takes at the
+edges of that tolerance, so it reverts when mined at a price beyond it in either
+direction. For a decrease or a close, each payout may fall at most this far below
+the principal at the observed block. `--deadline-seconds` is 300 unless stated; the
+position manager's call carries the deadline, and an approval before it carries
+none.
 
 A position is named by `--token-id`, the position manager's NFT. The command reads
 it at its pinned block and refuses an NFT the wallet does not own or one of another
 pool; the deployment then owns that NFT and nothing else, and its range is the
 NFT's own. A position opened anywhere, by a strategy or another tool, can be
 managed this way. Collecting, decreasing or closing a position with no liquidity is
-refused before anything is signed; increasing one is served.
+refused before anything is signed, as is a collect with nothing owed; increasing an
+empty position is served.
+
+A position manager lets any account add liquidity to any NFT. A step that is mined
+after another account added to the position is recorded with the position as its
+block holds it and an `accounting_issues` entry, and the record resolves. A close
+mined that way reverts, since the position is no longer empty when it burns, and is
+stated again.
 
 `ax liquidity-position` is the read for a position: its `owner`, `range`,
 `liquidity`, whether the pool price is in range, the `principal` it would return at
-the current price, and what it is `owed`, which is what a collect pays. It takes
+the current price, and what it is `owed`, which is what a collect pays. An Aerodrome
+Slipstream NFT held by its pool's gauge is reported with `staked: true`, and its
+`owed` is only what the manager recorded, since a staked position earns no trading
+fees. It takes
 the same transports and `--block` as the other reads; `--block` defaults to
 `finalized`, so read a position that was just opened at `--block latest`.
 
 `position_before` and `position_after` of a liquidity action hold the `position`
 (its `token_id`, `range` and `liquidity`, or null), what `moved` in and out of the
 wallet in each currency over the mined steps, the `inventory` the action holds
-beside the position (what a mint left unused, or what a collect, a decrease or a
-close paid out), and the nonzero `allowances`. An open or an increase approves the position manager for the
-stated amounts and uses what the mint takes, so the unused part of each approval
+beside the position (the stated amounts an open or an increase did not use, or what
+a collect, a decrease or a close paid out), and the nonzero `allowances`. An open or
+an increase approves the position manager for what it offers, at most the stated
+amounts, and uses what the mint takes, so the unused part of each approval
 remains afterwards; `revoke-exchange` clears it. A mint is the largest step: with
 its 25% buffer it stays under the default gas limit on the forks rehearsed, and the
 fee ceiling must cover it at the chain's gas price.

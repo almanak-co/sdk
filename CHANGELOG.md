@@ -36,8 +36,13 @@ its changelog is on the `v2` branch.
   concentrated-liquidity position on Uniswap V3, PancakeSwap V3 and Aerodrome
   Slipstream, in a tick range and from amounts the operator states. An existing
   position is named by `--token-id`, whoever opened it. Nothing is swapped inside a
-  liquidity action. `ax revoke-exchange` sets the allowances a command left to zero,
-  and `ax liquidity-position` reads a position.
+  liquidity action. A mint or an increase reverts when mined at a price further than
+  `--slippage-bps` from the observed one in either direction. `ax revoke-exchange`
+  sets the allowances a command left to zero, and `ax liquidity-position` reads a
+  position.
+- A liquidity step mined after another account added to the position's NFT is
+  recorded with the position as its block holds it and an accounting issue, for
+  strategies and direct actions alike, so the step resolves.
 - The liquidity commands also serve Curve, whose position is the wallet's balance of
   the pool's LP token: `open-liquidity` and `increase-liquidity` deposit an exact
   `--amount` per named coin, and `decrease-liquidity` and `close-liquidity` state with

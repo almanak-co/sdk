@@ -30,9 +30,10 @@ def refuse_adoption(positions) -> None:
 
     Only a direct action's operator deployment may carry that statement. A strategy
     deployment and a backtest start from funded capital alone, so every path that
-    builds one from a configuration calls this.
+    builds one from a configuration calls this. A connector states it as a model or as
+    a flag, absent as None or False.
     """
-    if any(getattr(position, "adopt", None) is not None for position in positions):
+    if any(getattr(position, "adopt", None) not in (None, False) for position in positions):
         raise ValueError("only an operator deployment adopts inventory or a position")
 
 

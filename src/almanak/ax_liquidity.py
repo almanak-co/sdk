@@ -39,7 +39,8 @@ RANGED = {
     "close-liquidity": (("token_id",), ()),
     "revoke-exchange": ((), ()),
 }
-# The position-manager call of each, which is the step that carries the deadline.
+# The call of each that carries the deadline, where the connector's call carries one;
+# an approval before it carries none.
 STEPS = {
     "open-liquidity": "mint",
     "increase-liquidity": "increase",
