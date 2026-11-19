@@ -861,6 +861,7 @@ subcommand, and every one but the two HyperCore subcommands takes `--block`
 | `pool-price` | `uniswap_v4` | `--chain`, `--currency0`, `--currency1`, `--fee`, `--tick-spacing` and optional `--base`, or `--config` |
 | `lending-reserve` | `aave_v3`, `sparklend`, `aave_v4`, `compound_v3`, `morpho_blue` | `--chain` and the connector's selector flags, or `--config` |
 | `lending-position` | same as `lending-reserve` | the same selection, plus `--account` |
+| `liquidity-position` | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `curve`, `aerodrome` | `--chain`, `--pool` and `--token-id` for the first three, `--chain`, `--pool` and `--account` for `curve` and `aerodrome`, or `--config` |
 | `perp-position` | `gmx_v2` | `--config`, `--account` |
 | `perp-markets` | `gmx_v2` | `--chain` and `--query`, or `--config` |
 | `balance` | none | `--asset` (CAIP-19 asset type), `--account` (repeatable) |
