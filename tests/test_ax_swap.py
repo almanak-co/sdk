@@ -614,14 +614,16 @@ def test_the_gateway_admits_the_swap_request_built_from_its_observation(connecto
     assert record.observations == (desk.gateway.seen,)
 
 
-@pytest.mark.parametrize("refused", ["revoke_intent", "exit_intent"])
-def test_the_gateway_refuses_an_operator_request_that_is_not_the_swap(connector, tmp_path, refused):
+def test_the_gateway_refuses_an_operator_request_that_is_not_declared_direct(connector, tmp_path):
+    """An exit is no direct action on these cells; a revocation is, and only zeroes
+    allowances."""
     _, config, desk = swap_desk(connector, tmp_path)
     actions = connector_from_wire({"connector": connector}).codec.actions
-    other = getattr(actions, refused)(target=config.target(ALLOCATION))
     with pytest.raises(ValueError, match="unsupported as a direct action"):
-        desk.runtime().submit(other)
+        desk.runtime().submit(actions.exit_intent(target=config.target(ALLOCATION)))
     assert desk.store.load().decision is None
+    revoke = desk.runtime().submit(actions.revoke_intent(target=config.target(ALLOCATION)))
+    assert revoke.intent.kind == "revoke_exchange"
 
 
 def test_an_operation_on_another_pool_is_refused_by_the_connectors_validation(connector):
