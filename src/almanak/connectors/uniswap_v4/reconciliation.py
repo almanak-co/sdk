@@ -80,40 +80,82 @@ def owned_after(pending, deltas, nft, growth, success):
     )
 
 
-def allowance_after(before, operation, deltas, timestamp):
+# Permit2 leaves an allowance of the largest uint160 unchanged when it is spent.
+PERMIT2_UNLIMITED = 2**160 - 1
+# A token decides what a transfer does to an allowance of the largest uint256: WETH9,
+# USDT, DAI and OpenZeppelin tokens leave it unchanged, USDC lowers it like any other.
+ERC20_UNLIMITED = 2**256 - 1
+
+
+def amounts_after_spend(previous, spent):
+    """Every amount an allowance can hold once `spent` base units were pulled through it.
+
+    A finite allowance falls by exactly what was spent, with no alternative. Only an
+    unlimited one is exempt, as its contract defines: Permit2 never lowers its own, and
+    a token may or may not lower the one it gave Permit2. The first amount is the one a
+    modelled step assumes.
+    """
+    if previous.expiration is not None:
+        unlimited = previous.amount == PERMIT2_UNLIMITED
+        return (previous.amount,) if unlimited else (previous.amount - spent,)
+    if previous.amount == ERC20_UNLIMITED:
+        return (previous.amount, previous.amount - spent)
+    return (previous.amount - spent,)
+
+
+def approved(previous, operation, timestamp):
+    """The allowance an approval or a revocation of it leaves."""
+    if (previous.asset, previous.spender) != (operation.asset, operation.spender):
+        return previous
+    update = {"amount": operation.amount}
+    if operation.expiration is not None:
+        # Permit2 encodes zero expiry as the execution block timestamp.
+        update["expiration"] = operation.expiration or timestamp
+    return previous.model_copy(update=update)
+
+
+def spent_through(previous, operation, deltas):
+    """How much of an allowance a swap or a mint pulled: the fund's outflow of its asset,
+    through the token's allowance to Permit2 and Permit2's to the contract that spent."""
+    outflow = -deltas[operation.target.assets.index(previous.asset)]
+    contracts = operation.target.contracts
+    spender = contracts.router if isinstance(operation, Swap) else contracts.position_manager
+    used = previous.expiration is None or previous.spender == spender
+    return outflow if outflow > 0 and used else 0
+
+
+def allowance_states(before, operation, deltas, timestamp):
+    """For each observed allowance, every state the operation can leave it in."""
     result = []
     for previous in before.allowances:
-        current = previous
         if isinstance(operation, Approval):
-            if previous.asset == operation.asset and previous.spender == operation.spender:
-                update = {"amount": operation.amount}
-                if operation.expiration is not None:
-                    # Permit2 encodes zero expiry as the execution block timestamp.
-                    update["expiration"] = operation.expiration or timestamp
-                current = previous.model_copy(update=update)
-        else:
-            index = operation.target.assets.index(previous.asset)
-            spender = (
-                operation.target.contracts.router
-                if isinstance(operation, Swap)
-                else operation.target.contracts.position_manager
-            )
-            if deltas[index] < 0 and (previous.expiration is None or previous.spender == spender):
-                current = previous.model_copy(update={"amount": previous.amount + deltas[index]})
-        result.append(current)
+            result.append((approved(previous, operation, timestamp),))
+            continue
+        spent = spent_through(previous, operation, deltas)
+        amounts = amounts_after_spend(previous, spent) if spent else (previous.amount,)
+        result.append(tuple(previous.model_copy(update={"amount": a}) for a in amounts))
     return tuple(result)
+
+
+def allowance_after(before, operation, deltas, timestamp):
+    """The allowances a modelled step leaves, an unlimited one taken as unchanged."""
+    return tuple(states[0] for states in allowance_states(before, operation, deltas, timestamp))
+
+
+def allowances_reconcile(pending, after, deltas, success) -> bool:
+    """Whether the observed allowances are ones the mined operation can have left."""
+    before = pending.before
+    if not success:
+        return after.allowances == before.allowances
+    states = allowance_states(before, pending.operation, deltas, after.block.timestamp)
+    return len(after.allowances) == len(states) and all(
+        current in admitted for current, admitted in zip(after.allowances, states, strict=True)
+    )
 
 
 def validate_balances(pending, after, deltas, gas, success, spent=None):
     before = pending.before
-    expected = (
-        allowance_after(
-            before, pending.operation, deltas if spent is None else spent, after.block.timestamp
-        )
-        if success
-        else before.allowances
-    )
-    if after.allowances != expected:
+    if not allowances_reconcile(pending, after, deltas if spent is None else spent, success):
         raise DataError("receipt", "ERC-20 or Permit2 allowance does not reconcile")
     issues = []
     for old, new, delta in zip(

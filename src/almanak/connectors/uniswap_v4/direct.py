@@ -13,10 +13,15 @@ one of the two tokens the wallet holds for the pool, never the native coin.
 The steps are an ERC-20 approval of exactly the stated amount to Permit2, a Permit2
 allowance of that amount to the router that expires at the swap's deadline, then the
 swap, which spends both whole: Permit2 then holds only the expiration, with no amount.
-An allowance the wallet already gave that covers the amount is used as it stands, and
-what the swap does not spend of it remains, an unlimited one untouched. A swap
-that is refused or reverts after its approvals were mined leaves them standing: the
-Permit2 allowance lapses at its expiration, the ERC-20 approval to Permit2 does not.
+An allowance the wallet already gave that covers the amount is used as it stands, a
+Permit2 one only when it outlasts the swap's deadline, and what the swap does not spend
+of it remains. Permit2 leaves its own unlimited allowance whole; a token leaves an
+unlimited approval to Permit2 whole or lowers it by the amount sold, as that token is
+written.
+
+A swap that is refused or reverts after its approvals were mined leaves them standing:
+the Permit2 allowance lapses at its expiration, the ERC-20 approval to Permit2 does not.
+A signed swap whose deadline passes unmined is released, and leaves them the same way.
 Nothing here revokes either; the result lists both.
 
 The heavy imports stay inside the functions: the command line imports each connector's
