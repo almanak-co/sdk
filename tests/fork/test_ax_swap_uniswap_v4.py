@@ -359,23 +359,23 @@ def assert_both_stand(setting, refused):
     assert refused["position_after"]["allowances"] == left(setting, token, amount, expiration)
 
 
-def test_a_swap_refused_after_its_approvals_reports_both_and_a_later_swap_uses_them(setting):
+def test_a_swap_refused_after_its_approvals_reports_both_and_a_later_swap_renews_one(setting):
     cell = setting.cell
     start = setting.balances()
     refused = refused_after_the_approvals(setting)
     assert_refused(setting, refused, start)
     assert_both_stand(setting, refused)
-    expiration = setting.authority()[2]
 
-    # A smaller swap inside that time needs neither approval, and what it does not
-    # spend of them remains: the result lists the rest.
+    # A smaller swap needs no ERC-20 approval, and what it does not spend of that one
+    # remains. The Permit2 allowance would lapse before the new swap's deadline, so it
+    # is granted again for exactly the new amount, and spent whole.
     other = cell.amount // 2
     rest = cell.amount - other
     again = setting(other, execute=True)
-    assert (family.operations(again), again["completed"]) == (["swap"], True)
+    assert (family.operations(again), again["completed"]) == (STEPS[1:], True)
     assert start[0] - setting.balances()[0] == other
-    assert setting.authority() == (rest, rest, expiration)
-    assert again["position_after"]["allowances"] == left(setting, rest, rest, expiration)
+    assert setting.authority()[:2] == (rest, 0)
+    assert again["position_after"]["allowances"] == left(setting, rest, 0, 0)
 
 
 def test_a_native_pool_trades_the_wrapped_token_and_moves_no_native_value(native):
