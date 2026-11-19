@@ -660,7 +660,11 @@ the signed bytes can no longer be mined, but no command drops the record.
 A swap deployment trades one pool and holds no liquidity position. On Aerodrome and
 Curve a wallet that holds the pool's LP shares, however few, is refused before
 anything is signed, as a trading-only strategy there is. Anyone can send such shares
-to a wallet, and no direct command removes them.
+to a wallet. Shares that arrive once a step is mined do not block it: the step is
+reconciled from its own receipt and its outcome lists them under `accounting_issues`.
+On Curve the same holds from the moment the step is signed. On Aerodrome, shares
+that arrive after a step is signed and before it is first sent leave its record
+kept, and `ax recover` refuses again until the shares are moved out of the wallet.
 
 The action runs through the same planning, simulation, signing and receipt
 reconciliation as a strategy's, as an operator deployment that exists only for the
