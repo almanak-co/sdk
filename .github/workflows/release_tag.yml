@@ -101,6 +101,7 @@ jobs:
       version_override: ${{ needs.extract_version.outputs.version }}
     secrets:
       ALMANAK_CODE_TOKEN: ${{ secrets.ALMANAK_CODE_TOKEN }}
+      ALMANAK_CODE_REPO: ${{ secrets.ALMANAK_CODE_REPO }}
 
   # A PyPI version can never be uploaded twice, so this runs once every gate
   # passed. It uploads the verified distributions build_dist built (artifact
