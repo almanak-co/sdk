@@ -157,7 +157,11 @@ class GatewayReader(EthereumReader):
             # The gateway already sanitized the failure and named the method.
             kind = payload.get("error", "gateway_error")
             message = payload.get("message", f"{method}: observation gateway refused the read")
-            raise DataError(str(kind), str(message), code=refusal_code(payload))
+            refusal = DataError(str(kind), str(message), code=refusal_code(payload))
+            # Nodes answer a revert under more than one code; the gateway's reader
+            # classified it, and that verdict is passed on beside the code.
+            refusal.reverted = payload.get("reverted") is True
+            raise refusal
         try:
             # JSON mode keeps strict semantics: JSON arrays validate as typed tuples.
             return ObservationResult.model_validate_json(json.dumps(payload["result"]))
