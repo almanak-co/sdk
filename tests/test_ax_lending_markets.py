@@ -29,7 +29,7 @@ from almanak.connectors.compound_v3.support import candidate_support
 from almanak.connectors.morpho_blue.networks import CORES, core_for
 from almanak.connectors.support import aave_support
 from almanak.gateway import ethereum, morpho_lookup
-from almanak.gateway.ethereum import DataError, EthereumReader, ProviderBusy
+from almanak.gateway.ethereum import DataError, EthereumReader, ProviderBusy, Reverted
 from almanak.gateway.onchain_lookup import LookupResult
 from almanak.models import ZERO_ADDRESS, Block, Chain
 
@@ -534,8 +534,8 @@ def aave_v4_calls(reserves=None):
         (hub, "getAssetCount()"): (2,),
         (hub, "getSpokeCount(uint256)"): lambda asset_id: (len(served[asset_id]),),
         (hub, "getSpokeAddress(uint256,uint256)"): lambda a, i: (served[a][i],),
-        (treasury, "getReserveCount()"): DataError(
-            "rpc", "eth_call: RPC rejected the requested read (JSON-RPC 3)", code=3
+        (treasury, "getReserveCount()"): Reverted(
+            "eth_call: RPC rejected the requested read (JSON-RPC 3)", b"", 3
         ),
     }
     for spoke, held in reserves.items():
@@ -854,12 +854,18 @@ def test_an_aave_v4_spoke_that_cannot_be_read_is_named_not_counted_empty(monkeyp
         timestamp=BLOCK.timestamp,
     )
     lost, throttled, garbled = "0x" + "51" * 20, "0x" + "53" * 20, "0x" + "54" * 20
-    treasury = "0x" + "52" * 20
+    treasury, bare, unserved = "0x" + "52" * 20, "0x" + "55" * 20, "0x" + "56" * 20
     errors = {
         lost: DataError("transport", "no answer"),
         throttled: DataError("rpc", "limit exceeded", code=-32005),
         garbled: DataError("abi", "getReserveCount(): invalid ABI response"),
-        treasury: DataError("rpc", "execution reverted", code=3),
+        treasury: Reverted("eth_call: RPC rejected the requested read (JSON-RPC 3)", b"", 3),
+        # Avalanche nodes answer a revert without data under the generic server code.
+        bare: Reverted("eth_call: RPC rejected the requested read (JSON-RPC -32000)", None, -32000),
+        # The same code on a read the node did not execute is no revert.
+        unserved: DataError(
+            "rpc", "eth_call: RPC rejected the requested read (JSON-RPC -32000)", code=-32000
+        ),
     }
 
     class Reader:
@@ -868,14 +874,59 @@ def test_an_aave_v4_spoke_that_cannot_be_read_is_named_not_counted_empty(monkeyp
 
     monkeypatch.setattr(ax_lending_markets, "served_spokes", lambda *_: (list(errors), []))
     source = ax_lending_markets.spoke_reserves(Reader(), None, avalanche, query("aave_v4")).source
-    assert (source["listed"], source["without_reserves"]) == (0, 1)
+    assert (source["listed"], source["without_reserves"]) == (0, 2)
     assert [
         (unread["spoke"], unread["reason"].split(":")[0]) for unread in source["unreadable"]
     ] == [
         (lost, "transport"),
         (throttled, "rpc"),
         (garbled, "abi"),
+        (unserved, "rpc"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("error", "without_reserves", "unreadable"),
+    [
+        # The answers Avalanche public endpoints gave for an empty Spoke, and Ethereum's.
+        ({"code": -32000, "message": "execution reverted"}, 1, 0),
+        ({"code": 3, "message": "execution reverted", "data": "0x"}, 1, 0),
+        # The same code on reads the node refused or could not serve.
+        ({"code": -32000, "message": "provider has not served the block"}, 0, 1),
+        ({"code": -32000, "message": "header not found"}, 0, 1),
+        ({"code": -32000, "message": "missing trie node"}, 0, 1),
+        ({"code": -32005, "message": "limit exceeded"}, 0, 1),
+        ({"code": -32603, "message": "execution reverted"}, 0, 1),
+    ],
+)
+def test_a_spoke_holds_no_reserves_only_when_the_node_reports_a_revert(
+    monkeypatch, error, without_reserves, unreadable
+):
+    # The provider's JSON-RPC answer is classified by the reader, not by its code alone.
+    chain = Chain(chain_id=ChainId("eip155:43114"), environment="mainnet")
+    spoke = "0x" + "52" * 20
+    header = {"number": hex(BLOCK.number), "hash": BLOCK.hash, "timestamp": hex(BLOCK.timestamp)}
+    answers = {"eth_chainId": "0xa86a", "eth_getBlockByNumber": header}
+
+    def handle(request):
+        body = json.loads(request.content)
+        reply = {"jsonrpc": "2.0", "id": body["id"]}
+        if body["method"] in answers:
+            return httpx.Response(200, json=reply | {"result": answers[body["method"]]})
+        assert body["method"] == "eth_call" and body["params"][0]["to"] == spoke
+        return httpx.Response(200, json=reply | {"error": error})
+
+    monkeypatch.setattr(ax_lending_markets, "served_spokes", lambda *_: ([spoke], []))
+    client = httpx.Client(transport=httpx.MockTransport(handle))
+    with EthereumReader(chain, "https://rpc.invalid", client=client) as reader:
+        block = reader.pin_block(BLOCK.number)
+        source = ax_lending_markets.spoke_reserves(reader, None, block, query("aave_v4")).source
+    client.close()
+    assert (source["listed"], source["without_reserves"]) == (0, without_reserves)
+    assert len(source["unreadable"]) == unreadable
+    if unreadable:
+        assert source["unreadable"][0]["spoke"] == spoke
+        assert source["unreadable"][0]["reason"].startswith("rpc: eth_call: ")
 
 
 @pytest.mark.parametrize(
