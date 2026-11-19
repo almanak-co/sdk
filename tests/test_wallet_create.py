@@ -79,10 +79,10 @@ def test_the_two_password_sources_are_exclusive(capsys):
 def test_a_failed_write_leaves_no_partial_wallet_and_a_retry_succeeds(tmp_path, monkeypatch):
     real = credentials.write_private
 
-    def failing(path, contents):
-        if path.name == "keystore-password":
+    def failing(path, contents, **options):
+        if path == "keystore-password":
             raise OSError("no space left on device")
-        real(path, contents)
+        real(path, contents, **options)
 
     monkeypatch.setattr(credentials, "write_private", failing)
     with pytest.raises(OSError):
@@ -100,10 +100,10 @@ def test_a_fifo_password_file_is_refused_without_waiting_for_a_writer(tmp_path):
 
 
 def test_a_failed_cleanup_names_the_partial_directory(tmp_path, monkeypatch):
-    def failing(path, contents):
+    def failing(path, contents, **options):
         raise OSError("disk went read-only")
 
-    def unremovable(descriptor, path):
+    def unremovable(*arguments):
         raise OSError("read-only file system")
 
     monkeypatch.setattr(credentials, "write_private", failing)
@@ -120,7 +120,7 @@ def test_cleanup_never_removes_a_directory_this_call_did_not_create(tmp_path, mo
     existing = create_wallet(tmp_path / "existing", "treasury", generate_password=True)
     target = tmp_path / "operator"
 
-    def substituted(path, contents):
+    def substituted(path, contents, **options):
         # The first write finds the path replaced by another, complete wallet.
         target.rename(tmp_path / "moved")
         (tmp_path / "existing").rename(target)
@@ -132,3 +132,46 @@ def test_cleanup_never_removes_a_directory_this_call_did_not_create(tmp_path, mo
     kept = json.loads((target / "wallet.json").read_text())
     assert kept["address"] == existing["address"]
     assert (target / "keystores.json").exists() and (target / "keystore-password").exists()
+
+
+def test_a_directory_substituted_before_it_is_opened_is_neither_written_nor_removed(
+    tmp_path, monkeypatch
+):
+    existing = create_wallet(tmp_path / "existing", "treasury", generate_password=True)
+    target = tmp_path / "operator"
+    mkdir = os.mkdir
+
+    def substituting(name, mode=0o777, *, dir_fd=None):
+        mkdir(name, mode, dir_fd=dir_fd)
+        if dir_fd is None:
+            return
+        # The new directory is replaced by a complete wallet before it is opened.
+        target.rmdir()
+        (tmp_path / "existing").rename(target)
+
+    monkeypatch.setattr(credentials.os, "mkdir", substituting)
+    with pytest.raises(OSError, match="could not be removed"):
+        create_wallet(target, "treasury", generate_password=True)
+    assert sorted(path.name for path in target.iterdir()) == [
+        "gateway-auth.token",
+        "keystore-password",
+        "keystores.json",
+        "wallet.json",
+    ]
+    assert json.loads((target / "wallet.json").read_text())["address"] == existing["address"]
+
+
+def test_cleanup_removes_only_the_files_this_call_wrote(tmp_path, monkeypatch):
+    write = credentials.write_private
+
+    def failing_late(path, contents, **options):
+        if path == "wallet.json":
+            (tmp_path / "operator/foreign").write_text("not ours")
+            raise OSError("disk went read-only")
+        write(path, contents, **options)
+
+    monkeypatch.setattr(credentials, "write_private", failing_late)
+    with pytest.raises(OSError, match="could not be removed"):
+        create_wallet(tmp_path / "operator", "treasury", generate_password=True)
+    # Its own three files are gone; the file it did not write is left where it was.
+    assert [path.name for path in (tmp_path / "operator").iterdir()] == ["foreign"]

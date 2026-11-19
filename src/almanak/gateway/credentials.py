@@ -61,8 +61,11 @@ def decrypt_signer(keystore, password, profile):
     return signer
 
 
-def write_private(path: Path, contents: str):
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+def write_private(path, contents: str, *, dir_fd=None, opened=lambda: None):
+    """Create one private file; `opened` runs once the file exists as this call's own."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600, dir_fd=dir_fd)
+    opened()
     with os.fdopen(descriptor, "w") as handle:
         handle.write(contents + "\n")
         handle.flush()
@@ -97,15 +100,39 @@ def create_wallet(
             raise ValueError("nonempty matching passwords are required")
     signer = Signer.create()
     encrypted = Signer.encrypt(signer.key, password)
-    directory.mkdir(mode=0o700, parents=True, exist_ok=False)
-    created = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    parent = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        return write_wallet(directory, account, signer.address, encrypted, generated, password_file)
+        return write_new_directory(
+            parent, directory, account, signer.address, encrypted, generated, password_file
+        )
+    finally:
+        os.close(parent)
+
+
+def write_new_directory(parent: int, directory: Path, *wallet):
+    """Create the wallet directory and its files, or leave nothing of this call behind.
+
+    Creation and cleanup address the directory through the parent's descriptor and the
+    files through the directory's own, never through the path again, so a path that
+    comes to name another directory during the call, such as an existing wallet, is
+    neither written to as new nor cleaned up. Only files this call created are removed.
+    """
+    os.mkdir(directory.name, 0o700, dir_fd=parent)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    created = os.open(directory.name, flags, dir_fd=parent)
+    written: list[str] = []
+
+    def write(name, contents):
+        write_private(name, contents, dir_fd=created, opened=lambda: written.append(name))
+
+    try:
+        return write_wallet(directory, *wallet, write=write)
     except BaseException as failure:
         # A partial directory would hold a keystore without its record or password, and
         # would refuse a retry at the same path.
         try:
-            remove_created(created, directory)
+            remove_created(parent, created, directory.name, written)
         except OSError as cleanup:
             raise OSError(
                 f"wallet creation failed ({failure}) and its partial directory could not "
@@ -116,23 +143,19 @@ def create_wallet(
         os.close(created)
 
 
-def remove_created(descriptor: int, directory: Path) -> None:
-    """Remove the directory this call made, and nothing else.
-
-    Its files are removed through the descriptor opened when it was made, so a path
-    that has since come to name another directory, such as an existing wallet, loses
-    nothing. The path is removed only while it still names that same directory.
-    """
-    for name in os.listdir(descriptor):
-        os.unlink(name, dir_fd=descriptor)
-    if not os.path.samestat(os.fstat(descriptor), os.stat(directory, follow_symlinks=False)):
+def remove_created(parent: int, created: int, name: str, written) -> None:
+    for file in written:
+        os.unlink(file, dir_fd=created)
+    entry = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if not os.path.samestat(os.fstat(created), entry):
         raise OSError("the path no longer names the directory that was created")
-    os.rmdir(directory)
+    # Fails, removing nothing, when the directory holds files this call did not write.
+    os.rmdir(name, dir_fd=parent)
 
 
-def write_wallet(directory, account, address, encrypted, generated, password_file=None):
-    write_private(directory / "keystores.json", json.dumps({account: encrypted}))
-    write_private(directory / "gateway-auth.token", secrets.token_hex(32))
+def write_wallet(directory, account, address, encrypted, generated, password_file=None, *, write):
+    write("keystores.json", json.dumps({account: encrypted}))
+    write("gateway-auth.token", secrets.token_hex(32))
     result = {
         "account": account,
         "address": address,
@@ -140,11 +163,11 @@ def write_wallet(directory, account, address, encrypted, generated, password_fil
         "auth_token_file": str((directory / "gateway-auth.token").resolve()),
     }
     if generated is not None:
-        write_private(directory / "keystore-password", generated)
+        write("keystore-password", generated)
         result["password_file"] = str((directory / "keystore-password").resolve())
     elif password_file is not None:
         # The operator's own file stays where it is; the record only names it, so the
         # keystore can be unlocked without a terminal.
         result["password_file"] = str(password_file.resolve())
-    write_private(directory / "wallet.json", json.dumps(result, indent=2))
+    write("wallet.json", json.dumps(result, indent=2))
     return result
