@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 from scripts.live_qa.checks import Check
 from scripts.live_qa.cli import Invocation, Run
-from scripts.live_qa.rpc import Rpc, RpcUnavailable
+from scripts.live_qa.rpc import Rpc, RpcReverted, RpcUnavailable
 
 # Refusals that name the endpoint's availability, not the SDK or the chain's state.
 TRANSIENT_ERRORS = frozenset({"rpc", "http", "transport", "unavailable", "stale", "block_mismatch"})
@@ -72,6 +72,8 @@ class ReadCase:
 class Verdict:
     status: Literal["pass", "fail", "transient"]
     detail: str
+    # Each separate thing a failed check found; `detail` joins them for the report.
+    findings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -99,17 +101,27 @@ class Result:
     seconds: float
     detail: str
     command: str
+    findings: tuple[str, ...] = ()
 
     @property
     def known(self) -> str:
-        """How the result relates to the case's known issue, for the report."""
+        """How the result relates to the case's known issue, for the report.
+
+        It reproduces only when every finding of the failure is the known issue.
+        One finding beside it is a new failure, and is not excused by the marker.
+        """
         issue = self.case.known_issue
         if issue is None:
             return ""
         if self.status == "pass":
             return f"no longer reproduces, remove the marker: {issue.summary}"
-        if self.status == "fail" and issue.signature in self.detail:
+        if self.status != "fail":
+            return f"not observed this run: {issue.summary}"
+        matched = [issue.signature in finding for finding in self.findings or (self.detail,)]
+        if all(matched):
             return f"reproduces: {issue.summary}"
+        if any(matched):
+            return f"other failures beside the known issue: {issue.summary}"
         return f"not observed this run: {issue.summary}"
 
 
@@ -131,12 +143,15 @@ def judge_output(case: ReadCase, output: dict[str, Any], rpc: Rpc) -> Verdict:
         return Verdict("pass", "read succeeded")
     try:
         mismatches = case.check(output, rpc)
+    except RpcReverted as exc:
+        # The endpoint answered: a read the output should make possible reverts.
+        return Verdict("fail", f"a direct read of what the command reported reverted: {exc}")
     except RpcUnavailable as exc:
         return Verdict("transient", f"cross-check blocked: {exc}")
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         return Verdict("fail", f"output is not shaped as the check reads it: {exc!r}")
     if mismatches:
-        return Verdict("fail", "; ".join(mismatches))
+        return Verdict("fail", "; ".join(mismatches), tuple(mismatches))
     return Verdict("pass", "read succeeded and the direct reads agree")
 
 
@@ -186,7 +201,16 @@ def run_case(
         sleep(policy.wait(attempt))
     status: Status = "blocked" if verdict.status == "transient" else verdict.status
     seconds = round(time.monotonic() - started, 1)
-    return Result(case, endpoint, status, attempt, seconds, verdict.detail, invocation.command)
+    return Result(
+        case,
+        endpoint,
+        status,
+        attempt,
+        seconds,
+        verdict.detail,
+        invocation.command,
+        verdict.findings,
+    )
 
 
 def planned(

@@ -34,7 +34,12 @@ def same_block(observation: Output, rpc: Rpc) -> tuple[str, Any, Any]:
     return ("block hash", block["hash"], rpc.block_hash(block["number"]))
 
 
+NO_OBSERVATIONS = ["the command reported no observations, so no balance was compared"]
+
+
 def native_balance(output: Output, rpc: Rpc) -> list[str]:
+    if not output["observations"]:
+        return NO_OBSERVATIONS
     pairs = []
     for observation in output["observations"]:
         number = observation["block"]["number"]
@@ -45,6 +50,8 @@ def native_balance(output: Output, rpc: Rpc) -> list[str]:
 
 
 def erc20_balance(output: Output, rpc: Rpc) -> list[str]:
+    if not output["observations"]:
+        return NO_OBSERVATIONS
     pairs = []
     for observation in output["observations"]:
         number = observation["block"]["number"]
