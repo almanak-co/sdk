@@ -8,6 +8,8 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-11-19
+
 ### Added
 - `almanak ax supply` and `almanak ax withdraw` run one operator action for one wallet in
   one process, without a strategy, workspace or gateway process. Without `--execute` the
