@@ -54,6 +54,9 @@ AMOUNT_HELP = {
 }
 # Commands whose effect on the account's health the protocol can risk-check.
 FLOORED = {"supply": False, "withdraw": False, "borrow": True, "collateral": False}
+# The flags that name a pool: its address, or the members of its key. A connector takes
+# those its own market selection has as fields.
+POOL_FLAGS = ("pool", "currency0", "currency1", "fee", "tick_spacing", "hooks")
 # Seconds after the observed block within which a swap may still be mined.
 DEFAULT_DEADLINE_SECONDS = 300
 
@@ -151,8 +154,43 @@ def market_request(args):
         from almanak.ax import lending_request
 
         return lending_request(args)
-    values = {"connector": args.connector, "chain": args.chain, "pool": args.pool}
+    values = {"connector": args.connector, "chain": args.chain}
+    values.update(
+        (name, value) for name in POOL_FLAGS if (value := getattr(args, name)) is not None
+    )
     return resolution(args.connector).MarketSelection.model_validate_json(json.dumps(values))
+
+
+def flags(names) -> str:
+    return ", ".join("--" + name.replace("_", "-") for name in names)
+
+
+def validate_arguments(parser, args) -> None:
+    """Refuse a pool named the way another connector names its pools, before any read.
+
+    A pool is a contract address for one connector and a key for another, and argparse
+    cannot tie the flags to the connector: the connector's own market selection decides
+    which of them it takes and which it requires.
+    """
+    if args.ax_command not in POOL_ACTIONS:
+        return
+    fields = resolution(args.connector).MarketSelection.model_fields
+    required = [name for name in POOL_FLAGS if name in fields and fields[name].is_required()]
+    optional = [name for name in POOL_FLAGS if name in fields and name not in required]
+    given = [name for name in POOL_FLAGS if getattr(args, name) is not None]
+    refusal = pool_refusal(required, optional, given)
+    if refusal is not None:
+        also = f" and optionally {flags(optional)}" if optional else ""
+        parser.error(f"{args.connector} names its pool with {flags(required)}{also}; {refusal}")
+
+
+def pool_refusal(required, optional, given) -> str | None:
+    """What is wrong with the pool flags given, for a connector taking these."""
+    foreign = [name for name in given if name not in (*required, *optional)]
+    if foreign:
+        return f"it takes no {flags(foreign)}"
+    missing = [name for name in required if name not in given]
+    return f"missing {flags(missing)}" if missing else None
 
 
 def action_request(args):
@@ -908,14 +946,27 @@ def health_factor(value: str) -> int:
 
 
 def swap_arguments(action) -> None:
-    """One pool by its address, the currency sold, the exact amount and the price bound."""
+    """One pool by its address or its key, the asset sold, the exact amount and the price
+    bound. `validate_arguments` holds the pool flags to what the connector takes."""
     action.add_argument("--chain", required=True, help="strict CAIP-2 chain of the pool")
-    action.add_argument("--pool", required=True, help="pool address")
+    action.add_argument("--pool", help="pool address, for a connector whose pools are contracts")
+    action.add_argument("--currency0", help="CAIP-19 currency0 of a Uniswap V4 pool key")
+    action.add_argument("--currency1", help="CAIP-19 currency1 of a Uniswap V4 pool key")
+    action.add_argument(
+        "--fee", type=int, help="pool key fee in hundredths of a basis point (Uniswap V4)"
+    )
+    action.add_argument("--tick-spacing", type=int, help="pool key tick spacing (Uniswap V4)")
+    action.add_argument(
+        "--hooks",
+        help="reviewed hook address of a Uniswap V4 pool key; omit for a hookless pool"
+        " (a dynamic-fee hook takes --fee 8388608)",
+    )
     action.add_argument(
         "--sell",
+        type=asset,
         required=True,
-        help="CAIP-19 asset sold, one of the pool's two currencies;"
-        " the native coin is sold as its wrapped token",
+        help="CAIP-19 asset sold, one of the pool's two currencies; the native coin is"
+        " held and sold as its wrapped token, also where a Uniswap V4 pool key names it",
     )
     action.add_argument(
         "--amount", type=base_units, required=True, help="base units of the asset sold"
@@ -934,6 +985,18 @@ def swap_arguments(action) -> None:
         help="the swap reverts when mined later than this after the observed block"
         f" (default: {DEFAULT_DEADLINE_SECONDS})",
     )
+
+
+def asset(value: str) -> str:
+    """A CAIP-19 asset type in its canonical spelling, so it compares with resolved assets."""
+    import argparse
+
+    from almanak.caip import AssetType
+
+    try:
+        return str(AssetType(value))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"expected a CAIP-19 asset type: {error}") from None
 
 
 def slippage_bps(value: str) -> int:

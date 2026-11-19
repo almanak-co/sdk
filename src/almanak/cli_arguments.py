@@ -781,6 +781,10 @@ def parse_validated(parser, argv=None):
     product = getattr(args, "product", None)
     if product in INLINE_FLAGS:
         require_inline(parser, args, INLINE_FLAGS[product], INLINE_OPTIONS.get(product, ()))
+    if product == "operator-action":
+        from almanak.ax_actions import validate_arguments
+
+        validate_arguments(parser, args)
     from almanak.ax_actions import LENDING_ACTIONS
 
     lending = (*LENDING_REQUESTS, *LENDING_ACTIONS)

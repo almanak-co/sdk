@@ -261,6 +261,9 @@ def uniswap_support():
     from almanak.connectors.uniswap_v4.native_router import routes
 
     native = set(routes())
+    # Every production cell serves `almanak ax swap` as a direct operator action; each
+    # has a fork rehearsal of the whole command (tests/fork/test_ax_swap_uniswap_v4.py).
+    direct = (EconomicAction.SWAP,)
 
     def chain_restrictions(chain):
         if str(chain) not in native:
@@ -300,6 +303,7 @@ def uniswap_support():
             for chain, start in starts
         },
         chains=tuple(ChainId(chain) for chain, _ in starts),
+        direct=direct,
     )
     economic_model = "uniswap-v4-economic-integer-fixed-growth-v1"
     # Polygon and Robinhood historical models exclude REVOKE.
@@ -321,6 +325,7 @@ def uniswap_support():
                         backtest_start_at=start,
                     ),
                 ),
+                "direct_actions": direct,
             }
         )
         for chain, start, historical_actions in (
