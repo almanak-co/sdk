@@ -163,6 +163,12 @@ def action_config(args, request, wallet, provider, endpoint):
 
     chain = Chain(chain_id=request.chain, environment="mainnet")
     with EthereumReader(chain, endpoint) as reader:
+        if args.public_rpc is not None:
+            from almanak.gateway.read_endpoints import verify_public
+
+            # The same genesis and head-age proof a public read gives.
+            reader.verify_chain()
+            verify_public(reader)
         resolved = resolve(reader, family(args.connector), request, reader.pin_block("latest"))
     return lending_config(
         resolved.reserve,

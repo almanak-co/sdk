@@ -156,15 +156,22 @@ def stopped_after_the_first_send(setting, monkeypatch, capsys):
 
 def test_an_interrupted_supply_is_recovered_and_the_wallet_is_freed(setting, monkeypatch, capsys):
     record = stopped_after_the_first_send(setting, monkeypatch, capsys)
+    assert_blocked(setting, record)
+    assert_recovered(setting.recover(record), record)
+    # The approval stands, so restating the same supply needs only its own step.
+    again = setting("supply", AMOUNT, execute=True)
+    assert (operations(again), again["completed"]) == (["supply"], True)
+
+
+def assert_blocked(setting, record):
     (listed,) = ax_actions.kept_records()
-    assert listed["path"] == str(record) and listed["unresolved"]["operation"] == "approve"
+    assert (listed["path"], listed["unresolved"]["operation"]) == (str(record), "approve")
     # The kept record blocks the wallet until its signed step is resolved.
     with pytest.raises(RuntimeError, match="already claimed"):
         setting("supply", AMOUNT, execute=False)
-    recovered = setting.recover(record)
-    assert recovered["resolved"] and recovered["discarded_request"]
-    assert operations(recovered) == ["approve"] and "unresolved" not in recovered
-    assert ax_actions.kept_records() == [] and not record.exists()
-    # The approval stands, so restating the same supply needs only its own step.
-    again = setting("supply", AMOUNT, execute=True)
-    assert operations(again) == ["supply"] and again["completed"]
+
+
+def assert_recovered(recovered, record):
+    assert (recovered["resolved"], recovered["discarded_request"]) == (True, True)
+    assert (operations(recovered), "unresolved" in recovered) == (["approve"], False)
+    assert (ax_actions.kept_records(), record.exists()) == ([], False)

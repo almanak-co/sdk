@@ -88,6 +88,8 @@ def verify_public(reader: EthereumReader, clock=time.time) -> None:
     with reader.retained_pin():
         if reader.pin_block(0).hash != evm_network(reader.chain.chain_id).genesis:
             raise DataError("chain_mismatch", "public endpoint has a different genesis")
-        age = clock() - reader.pin_block("latest").timestamp
+        head = reader.pin_block("latest")
+    # Measured after the answer arrives, so a slow read counts against the head.
+    age = clock() - head.timestamp
     if age > PUBLIC_HEAD_AGE_SECONDS:
         raise DataError("stale", f"public endpoint head is {int(age)} seconds old")

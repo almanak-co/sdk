@@ -222,3 +222,56 @@ def test_a_preview_configuration_records_the_public_provider_it_used(recorded):
     # Whatever later resolves this configuration's endpoint for execution refuses it.
     with pytest.raises(ValueError, match="reads and action previews"):
         provider_endpoint(provider, Path(".env"))
+
+
+def test_head_age_counts_the_time_the_read_itself_took():
+    genesis = evm_network(ETHEREUM).genesis
+    reader = Reader(genesis, 1_000)
+    now = [1_050]
+    pin = reader.pin_block
+
+    def slow(selector):
+        if selector == "latest":
+            # The header was fresh when asked for and old by the time it arrived.
+            now[0] = 1_200
+        return pin(selector)
+
+    reader.pin_block = slow
+    with pytest.raises(DataError, match="head is 200 seconds old"):
+        read_endpoints.verify_public(reader, clock=lambda: now[0])
+
+
+def test_a_preview_on_a_public_endpoint_proves_the_endpoint_before_resolving(monkeypatch):
+    steps = []
+
+    class Opened:
+        def __init__(self, chain, endpoint):
+            steps.append(("open", endpoint))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *arguments):
+            steps.append("closed")
+
+        def verify_chain(self):
+            steps.append("chain")
+
+        def pin_block(self, selector):
+            return selector
+
+    def stale(reader):
+        steps.append("public")
+        raise DataError("stale", "public endpoint head is 500 seconds old")
+
+    monkeypatch.setattr("almanak.gateway.ethereum.EthereumReader", Opened)
+    monkeypatch.setattr(read_endpoints, "verify_public", stale)
+    monkeypatch.setattr(
+        "almanak.connectors.lending_lookup.resolve",
+        lambda *arguments: pytest.fail("resolved a market from an unproven endpoint"),
+    )
+    args = SimpleNamespace(public_rpc="publicnode", connector="aave_v4")
+    request = SimpleNamespace(chain=ETHEREUM)
+    with pytest.raises(DataError, match="500 seconds old"):
+        ax_actions.action_config(args, request, {}, None, "https://public.example")
+    assert steps == [("open", "https://public.example"), "chain", "public", "closed"]
