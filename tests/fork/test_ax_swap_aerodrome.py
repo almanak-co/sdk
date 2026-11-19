@@ -149,22 +149,23 @@ def test_a_swap_sells_exactly_the_stated_amount_and_leaves_no_allowance(setting)
     assert shares(setting)[1:] == (0, 0)
 
 
-def test_the_other_currency_is_sold_back_through_the_same_pool(setting):
-    assert setting(execute=True)["completed"]
-    sold, bought = setting.balances()
+def selling_back(setting):
+    """The same wallet on the same fork, selling all it holds of the other currency."""
     other = next(asset for asset in setting.target().assets if asset != setting.cell.asset)
-    back = Setting(
-        setting.fork,
-        replace(setting.cell, asset=other, funded=bought),
-        setting.wallet,
-        setting.identity,
-    )
+    cell = replace(setting.cell, asset=other, funded=setting.balances()[1])
+    return Setting(setting.fork, cell, setting.wallet, setting.identity)
+
+
+def test_the_other_currency_is_sold_back_through_the_same_pool(setting):
+    first = setting(execute=True)
+    sold, bought = setting.balances()
+    back = selling_back(setting)
     start = back.balances()
-    assert start == (bought, sold)
+    assert (first["completed"], start) == (True, (bought, sold))
     result = back(execute=True)
     assert_swapped(back, result, start, 1)
     assert_no_allowance(back, result)
-    assert result["completed"] and setting.router_allowance() == 0
+    assert (result["completed"], setting.router_allowance()) == (True, 0)
 
 
 def test_an_interrupted_swap_is_recovered_and_reports_the_allowance_it_left(
