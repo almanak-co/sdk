@@ -42,17 +42,18 @@ ACTIONS = {
     "collateral": "enable or disable the supplied balance as collateral",
     "swap": "sell an exact amount of one pool currency for another, in one named pool",
     "open-liquidity": "mint a concentrated-liquidity position in one tick range of one"
-    " named pool, from stated amounts of its two currencies; nothing is swapped",
-    "increase-liquidity": "add stated amounts of the pool's two currencies to a position"
+    " named pool, from stated amounts of its two currencies, or for curve deposit stated"
+    " amounts of a pool's coins for its LP token; nothing is swapped",
+    "increase-liquidity": "add stated amounts of the pool's currencies to a position"
     " the wallet owns; nothing is swapped",
     "decrease-liquidity": "remove part of the liquidity of a position the wallet owns and"
-    " collect what it is owed",
+    " collect what it is owed; for curve, burn part of the wallet's LP shares",
     "collect-liquidity-fees": "collect what a position the wallet owns is owed, without"
     " changing its liquidity",
     "close-liquidity": "remove all liquidity of a position the wallet owns, collect what"
-    " it is owed and burn its NFT",
+    " it is owed and burn its NFT; for curve, burn all of the wallet's LP shares",
     "revoke-exchange": "set every allowance the wallet gave the pool's router and"
-    " position manager in the two pool currencies to zero",
+    " position manager, or for curve the pool itself, in the pool currencies to zero",
 }
 # Actions whose market is one pool; the others name a lending market, with the flags
 # `ax lending-reserve` takes.
@@ -204,6 +205,10 @@ def validate_arguments(parser, args) -> None:
     if refusal is not None:
         also = f" and optionally {flags(optional)}" if optional else ""
         parser.error(f"{args.connector} names its pool with {flags(required)}{also}; {refusal}")
+    if args.ax_command != "swap":
+        from almanak.ax_liquidity import validate
+
+        validate(parser, args)
 
 
 def pool_refusal(required, optional, given) -> str | None:
@@ -234,6 +239,8 @@ def action_request(args):
         tick_upper=getattr(args, "tick_upper", None),
         token_id=getattr(args, "token_id", None),
         liquidity=getattr(args, "liquidity", None),
+        amounts=tuple(stated) if (stated := getattr(args, "amounts", None)) else None,
+        receive=getattr(args, "receive", None),
     )
 
 

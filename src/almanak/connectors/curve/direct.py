@@ -1,4 +1,7 @@
-"""Direct exact-input swaps in one named Curve pool: one stated amount of one coin for another.
+"""Direct actions in one named Curve pool: one command, one deployment.
+
+This module holds the exact-input swap and the report every command shares. The
+liquidity commands and the revocation are `curve/liquidity_direct.py`.
 
 A Curve pool can hold more than two coins, so the request names both the coin sold and
 the coin bought. The deployment holds one trading allocation over the pool: the sold
@@ -43,6 +46,15 @@ from almanak.connectors.direct import ALLOCATION, ActionRequest, DirectActions, 
 
 
 def positions(reader, block, resolved, wallet: Wallet, request: ActionRequest) -> dict:
+    """The deployment's one allocation in the resolved pool, as the command states it."""
+    if request.action != "swap":
+        from almanak.connectors.curve import liquidity_direct as liquidity
+
+        return liquidity.positions(reader, block, resolved, wallet, request)
+    return swap_positions(reader, block, resolved, wallet, request)
+
+
+def swap_positions(reader, block, resolved, wallet: Wallet, request: ActionRequest) -> dict:
     """One trading allocation in the resolved pool, funded with exactly the amount sold."""
     from almanak.chains import evm_network
 
@@ -104,6 +116,15 @@ def require_no_shares(reader, block, pool, wallet: Wallet) -> None:
 
 
 def intent(config, observed, request: ActionRequest):
+    """The command's intent, built from the observation it is admitted with."""
+    if request.action != "swap":
+        from almanak.connectors.curve import liquidity_direct as liquidity
+
+        return liquidity.intent(config, observed, request)
+    return swap_intent(config, observed, request)
+
+
+def swap_intent(config, observed, request: ActionRequest):
     """The swap along the entry quote of the observation it is admitted with.
 
     The amount is the quote's input, the coin bought is the quote's output, and the
@@ -134,18 +155,26 @@ def intent(config, observed, request: ActionRequest):
 def position(state) -> dict:
     """What the deployment holds of each pool coin, and what the wallet lets the pool spend.
 
-    Inventory is the deployment's own, in the pool's coin order: the amount to sell
-    before the swap, the amount received after it, never the wallet's whole balance.
+    Inventory is the deployment's own, in the pool's coin order: what the command
+    stated before its steps and what they left after, never the wallet's whole balance.
     Allowances are those of the last block the deployment observed, so a signed step
-    still unresolved is not in them; only nonzero ones are listed.
+    still unresolved is not in them; only nonzero ones are listed. A liquidity
+    deployment also reports the LP shares it owns and what its steps moved.
     """
     from almanak.connectors.v3_pool_direct import last_observed
 
+    owned = state.owned[0]
     seen = last_observed(state)
+    liquidity: dict = {}
+    if owned.target.liquidity_enabled:
+        from almanak.connectors.curve.liquidity_direct import position as held
+
+        liquidity = held(state)
     return {
+        **liquidity,
         "inventory": [
             {"asset": str(value.asset), "amount": str(value.amount)}
-            for value in state.owned[0].inventory.root
+            for value in owned.inventory.root
         ],
         "allowances": [
             {"asset": str(item.asset), "spender": item.spender, "amount": str(item.amount)}
@@ -155,6 +184,24 @@ def position(state) -> dict:
     }
 
 
+def liquidity_flags(command: str):
+    from almanak.connectors.curve.liquidity_direct import FLAGS
+
+    return FLAGS[command]
+
+
 DIRECT = DirectActions(
-    actions=("swap",), positions=positions, intent=intent, position=position, names_bought=True
+    actions=(
+        "swap",
+        "open-liquidity",
+        "increase-liquidity",
+        "decrease-liquidity",
+        "close-liquidity",
+        "revoke-exchange",
+    ),
+    positions=positions,
+    intent=intent,
+    position=position,
+    names_bought=True,
+    liquidity_flags=liquidity_flags,
 )

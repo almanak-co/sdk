@@ -680,8 +680,9 @@ AX_REQUESTS = {
     ),
     "liquidity-position": (
         "one V3-style liquidity position by its NFT: owner, range, liquidity, principal at"
-        " the pool's price and the amounts a collection would pay",
-        pool_connectors("concentrated"),
+        " the pool's price and the amounts a collection would pay; for curve, one account's"
+        " LP shares in a pool and what burning them for every coin would pay",
+        (*pool_connectors("concentrated"), "curve"),
     ),
 }
 
@@ -736,7 +737,14 @@ def position_source(command):
     )
     command.add_argument("--pool", help="pool contract address of the position")
     command.add_argument(
-        "--token-id", type=positive, help="the position's NFT at the pool's position manager"
+        "--token-id",
+        type=positive,
+        help="the position's NFT at the pool's position manager (not curve)",
+    )
+    command.add_argument(
+        "--account",
+        help="curve only, in place of --token-id: the account whose LP shares in the pool"
+        " are the position",
     )
 
 
@@ -786,6 +794,11 @@ INLINE_FLAGS = {
     "ax-perp-markets": ("chain", "query"),
     "ax-pool-price": ("chain", "currency0", "currency1", "fee", "tick_spacing"),
 }
+# Inline flags of a request whose shape is its connector's own, in place of the
+# product's: a Curve position is an account's LP token balance, not an NFT.
+CONNECTOR_INLINE_FLAGS: dict[tuple[str, str | None], tuple[str, ...]] = {
+    ("ax-liquidity-position", "curve"): ("chain", "pool", "account")
+}
 # Optional inline flags: never required, but refused with --config like the rest.
 INLINE_OPTIONS = {"ax-pool-price": ("base", "hooks")}
 # The session environment that names the read gateway.
@@ -804,7 +817,8 @@ def parse_validated(parser, argv=None):
         require_pair(parser, args, "gateway_url", "gateway_auth_file")
     product = getattr(args, "product", None)
     if product in INLINE_FLAGS:
-        require_inline(parser, args, INLINE_FLAGS[product], INLINE_OPTIONS.get(product, ()))
+        names = inline_flags(parser, args, product)
+        require_inline(parser, args, names, INLINE_OPTIONS.get(product, ()))
     if product == "operator-action":
         from almanak.ax_actions import validate_arguments
 
@@ -839,6 +853,26 @@ def session_transport(parser: argparse.ArgumentParser, args) -> None:
             "(or set ALMANAK_AX_GATEWAY_URL and ALMANAK_AX_GATEWAY_AUTH_FILE)"
         )
     args.gateway_url, args.gateway_auth_file = url, Path(token)
+
+
+def inline_flags(parser, args, product: str) -> tuple[str, ...]:
+    """The inline flags the request takes for its connector; another shape's are refused."""
+    connector = getattr(args, "connector", None)
+    names = CONNECTOR_INLINE_FLAGS.get((product, connector), INLINE_FLAGS[product])
+    shapes = [INLINE_FLAGS[product]]
+    shapes += [found for (name, _), found in CONNECTOR_INLINE_FLAGS.items() if name == product]
+    foreign = sorted(
+        {
+            name
+            for shape in shapes
+            for name in shape
+            if name not in names and getattr(args, name, None) is not None
+        }
+    )
+    if foreign:
+        flags = ", ".join("--" + name.replace("_", "-") for name in foreign)
+        parser.error(f"{connector} takes no {flags} for this request")
+    return names
 
 
 def require_inline(parser, args, names: tuple[str, ...], options: tuple[str, ...] = ()) -> None:

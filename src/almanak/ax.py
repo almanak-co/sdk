@@ -13,6 +13,7 @@ from almanak import ax_discovery, ax_hypercore, ax_lending_markets
 from almanak.balances import parse_balance_request, read_balance
 from almanak.caip import AssetType, ChainId
 from almanak.cli_arguments import LENDING_SELECTOR_FLAGS
+from almanak.connectors.curve.position_request import PositionRequest as CurvePositionRequest
 from almanak.connectors.discovery import pool_connectors
 from almanak.connectors.gmx_v2.market_request import GmxMarketRequest, read_gmx_market
 from almanak.connectors.gmx_v2.position_request import GmxPositionRequest, read_gmx_position
@@ -55,6 +56,8 @@ CONNECTOR_REQUESTS: dict[tuple[str, str], type[Model]] = {
     **{("ax-pool", c): PoolRequest for c in pool_connectors("concentrated", "resolved")},
     # A position is an NFT of a V3-style position manager.
     **{("ax-liquidity-position", c): PositionRequest for c in pool_connectors("concentrated")},
+    # A Curve position is an account's balance of the pool's LP token.
+    ("ax-liquidity-position", "curve"): CurvePositionRequest,
 }
 
 
@@ -183,6 +186,10 @@ def liquidity_position(args):
     support_level(args.connector, request.chain)
     with observation_reader(args, chain.chain_id) as reader:
         block = reader.pin_block(args.block)
+        if isinstance(request, CurvePositionRequest):
+            from almanak.connectors.curve.position_request import read_liquidity_position as read
+
+            return read(reader, request, block)
         return read_liquidity_position(reader, args.connector, request, block)
 
 
@@ -282,7 +289,8 @@ def inline_request(args) -> dict:
     if args.product == "ax-perp-markets":
         return {"chain": args.chain, "query": args.query}
     if args.product == "ax-liquidity-position":
-        return {"chain": args.chain, "pool": args.pool, "token_id": args.token_id}
+        named = "account" if args.connector == "curve" else "token_id"
+        return {"chain": args.chain, "pool": args.pool, named: getattr(args, named)}
     return pool_price_request(args)
 
 

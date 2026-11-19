@@ -54,8 +54,17 @@ def verified_support():
                 "chain": ChainId(chain),
                 "variants": variants,
                 "modes": (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST),
-                # `almanak ax swap`: one exact-input swap between two named coins of a pool.
-                "direct_actions": (EconomicAction.SWAP,),
+                # `almanak ax`: one exact-input swap between two named coins of a pool,
+                # deposits for and burns of its LP token, and the revocation of what the
+                # wallet lets the pool spend.
+                "direct_actions": (
+                    EconomicAction.SWAP,
+                    EconomicAction.OPEN_LIQUIDITY,
+                    EconomicAction.INCREASE_LIQUIDITY,
+                    EconomicAction.DECREASE_LIQUIDITY,
+                    EconomicAction.CLOSE_LIQUIDITY,
+                    EconomicAction.REVOKE,
+                ),
                 "restrictions": candidate.restrictions[1:]
                 + (
                     "economic simulation assumes execution access "
