@@ -426,12 +426,12 @@ def test_a_partial_repayment_or_withdrawal_is_refused_before_any_read(monkeypatc
     monkeypatch.setattr(ax_actions, "transport", unreachable)
     for action in ("repay", "withdraw"):
         arguments = parse_validated(build_parser(), ["ax", action, *COMMAND, "--amount", "5"])
-        refusal = f"aave_v4 serves no direct {action}_amount on eip155:1"
+        refusal = f"aave_v4 serves no direct {action} --amount on eip155:1"
         with pytest.raises(ValueError, match=refusal):
             ax_actions.command(arguments)
         for chain in (ETHEREUM, AVALANCHE):
             require_direct("aave_v4", chain, ActionRequest(action))
-            with pytest.raises(ValueError, match=f"no direct {action}_amount on {chain}"):
+            with pytest.raises(ValueError, match=f"no direct {action} --amount on {chain}"):
                 require_direct("aave_v4", chain, ActionRequest(action, 5))
     with pytest.raises(ValueError, match="aave_v4 serves no direct collateral"):
         require_direct("aave_v4", ETHEREUM, ActionRequest("collateral", enable=False))

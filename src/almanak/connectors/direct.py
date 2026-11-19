@@ -130,4 +130,7 @@ def require_direct(connector: str, chain, request: ActionRequest) -> None:
     cells = connector_from_wire({"connector": connector}).chain_support
     declared = {str(kind) for cell in cells if cell.chain == chain for kind in cell.direct_actions}
     if request.kind not in declared:
-        raise ValueError(f"{connector} serves no direct {request.kind} on {chain}")
+        # The form the operator typed: a second kind is the command with an amount.
+        partial = request.kind != COMMAND_INTENTS[request.action][0]
+        form = f"{request.action} --amount" if partial else request.action
+        raise ValueError(f"{connector} serves no direct {form} on {chain}")

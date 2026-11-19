@@ -87,9 +87,9 @@ def test_a_connector_chain_or_action_that_is_not_declared_is_refused():
         direct.require_direct("aave_v4", ETHEREUM, direct.ActionRequest("collateral", enable=True))
     # A command the connector serves, in a form it does not: Aave V4 withdraws and
     # repays in full.
-    with pytest.raises(ValueError, match="aave_v4 serves no direct withdraw_amount on eip155:1"):
+    with pytest.raises(ValueError, match="aave_v4 serves no direct withdraw --amount on eip155:1"):
         direct.require_direct("aave_v4", ETHEREUM, direct.ActionRequest("withdraw", 5))
-    with pytest.raises(ValueError, match="aave_v4 serves no direct repay_amount on eip155:1"):
+    with pytest.raises(ValueError, match="aave_v4 serves no direct repay --amount on eip155:1"):
         direct.require_direct("aave_v4", ETHEREUM, direct.ActionRequest("repay", 5))
     with pytest.raises(ValueError, match="no direct actions for gmx_v2: a GMX request"):
         direct.require_direct("gmx_v2", ChainId("eip155:42161"), supply)
