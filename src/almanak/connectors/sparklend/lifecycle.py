@@ -3,6 +3,7 @@
 from uuid import uuid4
 
 from almanak.connectors.ownership import protocol_ownership
+from almanak.connectors.pool_lending_lifecycle import adopt as adopt
 from almanak.connectors.pool_lending_lifecycle import commit_owned as commit_owned
 from almanak.connectors.pool_lending_lifecycle import validate_closure as validate_closure
 from almanak.connectors.pool_lending_lifecycle import validate_initial as validate_initial
@@ -44,6 +45,7 @@ class SparkLifecycle:
     validate_owned = staticmethod(validate_owned)
     commit_owned = staticmethod(commit_owned)
     validate_closure = staticmethod(validate_closure)
+    adopt = staticmethod(adopt)
 
     @staticmethod
     def increases_exposure(intent):
@@ -61,6 +63,7 @@ class SparkLifecycle:
             deployment_id=uuid4().hex,
             config=config,
             strategy=strategy,
+            operator=strategy is None,
             capabilities=capabilities,
             permissions=permissions,
             mode="running",

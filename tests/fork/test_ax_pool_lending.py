@@ -1,0 +1,226 @@
+"""`almanak ax supply` and `ax withdraw` on deployed Aave V3 and SparkLend Pools.
+
+One isolated Anvil fork per chain stands in for mainnet behind the production adapter's
+own planning, signing and reconciliation, at the block each reference's fork fixture
+pins. The market is resolved and the deployment built by the command's own code. It is
+rehearsal evidence, not a mainnet run.
+"""
+
+import json
+from pathlib import Path
+
+import pytest
+from eth_account import Account as Signer
+from eth_utils import to_checksum_address
+
+from almanak import ax_actions
+from almanak.caip import AssetType, ChainId
+from almanak.chains import evm_network
+from almanak.configuration.yaml import load
+from almanak.connectors.direct import ActionRequest
+from almanak.connectors.lending_lookup import selection
+from almanak.gateway.credentials import write_private
+from almanak.gateway.ethereum import EthereumReader
+from almanak.gateway.evm import chain_number, erc20_address
+from almanak.gateway.fork_config import ForkTarget
+from almanak.gateway.fork_fixture import Fork
+from almanak.gateway.fork_funding import fund_erc20
+from almanak.gateway.read_endpoints import read_endpoint
+from almanak.models import Chain
+from tests.fork.production_gateway_driver import RehearsalGateway
+
+pytestmark = pytest.mark.fork
+ROOT = Path(__file__).parents[2]
+AMOUNT = 10**16
+PASSWORD = "public-test-password"
+# Above the fee market of every pinned block; Polygon's quotes about 580 gwei.
+LIMITS = ax_actions.FeeLimits(max_gas_price_wei=5000 * 10**9, max_transaction_fee=10**19)
+# Each declared cell, by the reference whose fork fixture pins its block and assets.
+CELLS = (
+    ("aave_v3", "aave_v3_ethereum_lending"),
+    ("aave_v3", "aave_v3_base_lending"),
+    ("aave_v3", "aave_v3_arbitrum_lending"),
+    ("aave_v3", "aave_v3_optimism_lending"),
+    ("aave_v3", "aave_v3_bnb_lending"),
+    ("aave_v3", "aave_v3_polygon_lending"),
+    ("aave_v3", "aave_v3_avalanche_lending"),
+    ("sparklend", "sparklend_ethereum_lending"),
+)
+
+
+def fixture_of(reference):
+    """The pinned block and the second funded asset of a reference's fork fixture."""
+    fork = load(ROOT / f"examples/operators/{reference}.fork.yaml").value["fork"]
+    (anchor,) = fork["anchors"]
+    chain = ChainId(anchor["chain"])
+    wrapped = evm_network(chain).wrapped_native
+    others = [AssetType(a["asset"]) for a in fork["funds"][0]["assets"]]
+    return chain, anchor, next(asset for asset in others if asset != wrapped)
+
+
+def origin_block(env, chain, anchor):
+    with EthereumReader(
+        Chain(chain_id=chain, environment="mainnet"), read_endpoint(chain, env)
+    ) as r:
+        block = r.pin_block(anchor["height"])
+    assert block.hash == anchor["reference"]
+    return block
+
+
+def funded_wallet(fork, token, directory):
+    signer = fork.funded_signer(to_checksum_address(token), 4 * AMOUNT, 100 * 10**18)
+    directory.mkdir(mode=0o700)
+    stores = {"treasury": Signer.encrypt(signer.key, PASSWORD, kdf="pbkdf2", iterations=1000)}
+    write_private(directory / "keystores.json", json.dumps(stores))
+    write_private(directory / "keystore-password", PASSWORD)
+    wallet = {
+        "account": "treasury",
+        "address": signer.address,
+        "keystores": str(directory / "keystores.json"),
+        "password_file": str(directory / "keystore-password"),
+    }
+    write_private(directory / "wallet.json", json.dumps(wallet))
+    return ax_actions.read_wallet(directory)
+
+
+def as_mainnet(fork, chain):
+    fork.rpc("anvil_setChainId", [chain_number(chain)])
+    # The fork keeps the pinned block's time: the adapter's clock is the fork's own, and
+    # a jump to the present would age every price feed past its staleness bound.
+    fork.rpc("evm_mine")
+    return fork.rpc("anvil_metadata")
+
+
+class Desk:
+    """One wallet on one fork; every action is its own deployment, as each command's is."""
+
+    def __init__(self, fork, connector, chain, second, tmp_path):
+        self.fork, self.connector, self.chain = fork, connector, chain
+        self.wrapped, self.second = evm_network(chain).wrapped_native, second
+        self.wallet = funded_wallet(fork, erc20_address(self.wrapped, chain), tmp_path / "wallet")
+        self.identity = as_mainnet(fork, chain)
+
+    def backend(self, config):
+        return RehearsalGateway(
+            config,
+            self.fork.rpc.endpoint,
+            self.identity,
+            Path(self.wallet["keystores"]),
+            Path(self.wallet["password_file"]),
+            None,
+            fixture_clock=True,
+        )
+
+    def __call__(self, action, amount=None, *, execute, asset=None):
+        market = {"chain": str(self.chain), "asset": str(asset or self.wrapped)}
+        request = ActionRequest(action, amount)
+        config = ax_actions.deployment(
+            self.connector,
+            selection(self.connector, market),
+            request,
+            self.wallet,
+            ax_actions.alchemy(self.chain),
+            self.fork.rpc.endpoint,
+            LIMITS,
+        )
+        gateway = self.backend(config)
+        try:
+            return ax_actions.run(config, gateway, request, execute=execute)
+        finally:
+            gateway.close()
+
+    def recover(self, record):
+        return ax_actions.recover(record, self.backend)
+
+    def fund_second(self, amount):
+        fund_erc20(self.fork, self.wallet["address"], self.second, amount)
+
+
+@pytest.fixture(params=CELLS, ids=lambda cell: cell[1])
+def desk(request, tmp_path, monkeypatch):
+    # Records and claims stay out of the operator's own state: the first action sweeps
+    # every record it finds there.
+    monkeypatch.setattr("almanak.state.claims_root", lambda: tmp_path / "state/claims")
+    connector, reference = request.param
+    chain, anchor, second = fixture_of(reference)
+    env = request.config.getoption("--fork-env").resolve()
+    origin = origin_block(env, chain, anchor)
+    target = ForkTarget(chain=origin.chain, provider=ax_actions.alchemy(chain), block=origin)
+    with Fork(env, origin, target=target) as fork:
+        yield Desk(fork, connector, chain, second, tmp_path)
+
+
+def operations(result):
+    return [item["operation"] for item in result["outcomes"]]
+
+
+def supplied(result, moment):
+    return int(result[moment]["supplied_scaled"])
+
+
+def assert_supplied(result, before):
+    assert operations(result) == ["approve", "supply"] and result["completed"]
+    assert supplied(result, "position_before") == before
+    assert supplied(result, "position_after") > before
+
+
+def test_supply_then_withdraw_each_as_one_command(desk):
+    preview = desk("supply", AMOUNT, execute=False)
+    assert preview["executed"] is False and "outcomes" not in preview
+    assert preview["first_step"]["operation"]["kind"] == "approve"
+    assert supplied(preview, "position_before") == 0
+    first = desk("supply", AMOUNT, execute=True)
+    assert_supplied(first, 0)
+    # A later command adopts the position the account already holds and adds to it.
+    assert_supplied(desk("supply", AMOUNT, execute=True), supplied(first, "position_after"))
+    withdrawn = desk("withdraw", execute=True)
+    assert operations(withdrawn) == ["withdraw"] and withdrawn["completed"]
+    assert supplied(withdrawn, "position_after") == 0
+    assert withdrawn["position_after"]["collateral_enabled"] is False
+
+
+def test_a_wallet_that_holds_another_reserve_of_the_pool_supplies_and_withdraws(desk):
+    """The Pool's risk check needs every collateral reserve of the account; the deployment
+    binds the ones the wallet already holds beside the requested one."""
+    assert_supplied(desk("supply", AMOUNT, execute=True), 0)
+    amount = 10**5
+    desk.fund_second(amount)
+    other = desk("supply", amount, execute=True, asset=desk.second)
+    assert_supplied(other, 0)
+    withdrawn = desk("withdraw", execute=True)
+    assert operations(withdrawn) == ["withdraw"] and withdrawn["completed"]
+    again = desk("withdraw", execute=True, asset=desk.second)
+    assert operations(again) == ["withdraw"] and supplied(again, "position_after") == 0
+
+
+def stopped_after_the_first_send(desk, monkeypatch, capsys):
+    """Run a supply that is interrupted while its approval waits for a receipt."""
+    from almanak.operator_runtime import OperatorRuntime
+
+    def stop(self, state):
+        if state.pending is not None:
+            raise KeyboardInterrupt
+
+    with monkeypatch.context() as patched:
+        patched.setattr(OperatorRuntime, "wait", stop)
+        with pytest.raises(KeyboardInterrupt):
+            desk("supply", AMOUNT, execute=True)
+    events = [json.loads(line) for line in capsys.readouterr().err.splitlines() if "event" in line]
+    (kept,) = [event for event in events if event.get("event") == "record_kept"]
+    return Path(kept["path"])
+
+
+def test_an_interrupted_supply_is_recovered_and_the_wallet_is_freed(desk, monkeypatch, capsys):
+    record = stopped_after_the_first_send(desk, monkeypatch, capsys)
+    (listed,) = ax_actions.kept_records()
+    assert (listed["path"], listed["unresolved"]["operation"]) == (str(record), "approve")
+    # The kept record blocks the wallet until its signed step is resolved.
+    with pytest.raises(RuntimeError, match="already claimed"):
+        desk("supply", AMOUNT, execute=False)
+    recovered = desk.recover(record)
+    assert (recovered["resolved"], recovered["discarded_request"]) == (True, True)
+    assert (operations(recovered), "unresolved" in recovered) == (["approve"], False)
+    assert (ax_actions.kept_records(), record.exists()) == ([], False)
+    # The approval stands, so restating the same supply needs only its own step.
+    again = desk("supply", AMOUNT, execute=True)
+    assert (operations(again), again["completed"]) == (["supply"], True)
