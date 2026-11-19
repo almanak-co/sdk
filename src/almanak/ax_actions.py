@@ -40,7 +40,7 @@ ACTIONS = {
     "borrow": "borrow an amount of the reserve asset to the wallet",
     "repay": "repay the whole debt, including interest, or an amount of it",
     "collateral": "enable or disable the supplied balance as collateral",
-    "swap": "sell an exact amount of one pool currency for the other, in one named pool",
+    "swap": "sell an exact amount of one pool currency for another, in one named pool",
 }
 # Actions whose market is one pool; the others name a lending market, with the flags
 # `ax lending-reserve` takes.
@@ -57,7 +57,7 @@ FLOORED = {"supply": False, "withdraw": False, "borrow": True, "collateral": Fal
 # The flags that name a pool: its address, or the members of its key. A connector takes
 # those its own market selection has as fields.
 POOL_FLAGS = ("pool", "currency0", "currency1", "fee", "tick_spacing", "hooks")
-# Seconds after the observed block within which a swap may still be mined.
+# Seconds after the observed block within which a swap may still be signed.
 DEFAULT_DEADLINE_SECONDS = 300
 
 
@@ -130,11 +130,12 @@ class LocalGateway(GatewayClient):
 
 
 def command(args) -> int:
-    from almanak.connectors.direct import require_direct
+    from almanak.connectors.direct import require_bought, require_direct
 
     request = market_request(args)
     action = action_request(args)
     require_direct(args.connector, request.chain, action)
+    require_bought(args.connector, action)
     wallet = read_wallet(args.wallet)
     provider, endpoint = transport(args, request.chain)
     config = action_config(args, request, action, wallet, provider, endpoint)
@@ -205,6 +206,7 @@ def action_request(args):
         sell=getattr(args, "sell", None),
         slippage_bps=getattr(args, "slippage_bps", None),
         deadline_seconds=getattr(args, "deadline_seconds", None),
+        buy=getattr(args, "buy", None),
     )
 
 
@@ -965,8 +967,14 @@ def swap_arguments(action) -> None:
         "--sell",
         type=asset,
         required=True,
-        help="CAIP-19 asset sold, one of the pool's two currencies; the native coin is"
+        help="CAIP-19 asset sold, one of the pool's currencies; the native coin is"
         " held and sold as its wrapped token, also where a Uniswap V4 pool key names it",
+    )
+    action.add_argument(
+        "--buy",
+        help="CAIP-19 asset bought, another of the pool's coins: required for curve,"
+        " whose pools can hold more than two coins, and not accepted for a connector"
+        " whose pools hold two currencies",
     )
     action.add_argument(
         "--amount", type=base_units, required=True, help="base units of the asset sold"
@@ -982,8 +990,10 @@ def swap_arguments(action) -> None:
         "--deadline-seconds",
         type=seconds,
         default=DEFAULT_DEADLINE_SECONDS,
-        help="the swap reverts when mined later than this after the observed block"
-        f" (default: {DEFAULT_DEADLINE_SECONDS})",
+        help="the swap is not signed later than this after the observed block, and it"
+        " reverts when mined later than that; a curve call carries no deadline, so a"
+        " signed curve swap stays valid until it is mined or its nonce is used, bound"
+        f" only by its minimum output (default: {DEFAULT_DEADLINE_SECONDS})",
     )
 
 

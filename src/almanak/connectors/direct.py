@@ -41,13 +41,16 @@ class ActionRequest:
     min_health_factor: int | None = None
     # `collateral` only: whether the supplied balance is to back debt.
     enable: bool | None = None
-    # A swap only. `sell` is the CAIP-19 asset type sold, one of the pool's two
+    # A swap only. `sell` is the CAIP-19 asset type sold, one of the pool's
     # currencies. `slippage_bps` is how far below its quote the output may fall, in
     # basis points. `deadline_seconds` is how long after the observed block the swap
-    # may still be mined.
+    # may still be signed; whether a swap mined later also reverts is the connector's
+    # own call, and a Curve call carries no deadline.
     sell: str | None = None
     slippage_bps: int | None = None
     deadline_seconds: int | None = None
+    # The CAIP-19 asset type bought, stated only where `DirectActions.names_bought`.
+    buy: str | None = None
 
     @property
     def kind(self) -> str:
@@ -76,12 +79,14 @@ class DirectActions:
     intent: Callable
     # `position(state)`: what the deployment owns, for the command's result.
     position: Callable
+    # Whether a swap states the asset bought as well as the asset sold: the connector's
+    # pools can hold more than two coins. Elsewhere the pool decides what is bought.
+    names_bought: bool = False
 
 
 # Installed connectors `ax` runs no direct action for, and why.
 NOT_DIRECT: dict[str, str] = {
     "aerodrome": "direct actions are not implemented for this connector",
-    "curve": "direct actions are not implemented for this connector",
     "gmx_v2": "a GMX request settles through keepers after its transaction is mined, "
     "and cancelling one needs a new signature; a direct command is one process that "
     "ends with its last receipt",
@@ -138,3 +143,20 @@ def require_direct(connector: str, chain, request: ActionRequest) -> None:
         partial = request.kind != COMMAND_INTENTS[request.action][0]
         form = f"{request.action} --amount" if partial else request.action
         raise ValueError(f"{connector} serves no direct {form} on {chain}")
+
+
+def require_bought(connector: str, request: ActionRequest) -> None:
+    """Refuse a swap that leaves the bought asset out where the pool cannot decide it,
+    or states it where the pool does, before any read."""
+    if request.action != "swap":
+        return
+    if binding(connector).names_bought:
+        if request.buy is None:
+            raise ValueError(
+                f"{connector} pools can hold more than two coins: --buy must name the asset bought"
+            )
+    elif request.buy is not None:
+        raise ValueError(
+            f"{connector} pools hold two currencies, so the asset bought is the one not "
+            "sold: --buy is not accepted"
+        )
