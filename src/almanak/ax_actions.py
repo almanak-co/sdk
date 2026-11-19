@@ -274,23 +274,34 @@ def records_locked(root: Path):
         yield
 
 
+def sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def durable_root() -> Path:
+    """The records directory, with every directory entry this call created synced."""
+    root = records_root()
+    created = [path for path in (root, *root.parents) if not path.exists()]
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for path in created:
+        sync_directory(path.parent)
+    return root
+
+
 def new_record():
     """A private record directory, locked for as long as this process uses it."""
-    root = records_root()
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root = durable_root()
     with records_locked(root):
         directory = Path(tempfile.mkdtemp(dir=root))
         lock = (directory / "lock").open("w")
         fcntl.flock(lock, fcntl.LOCK_EX)
-        # The claim written later names this record; its entry, and the entry of the
-        # records directory itself, must survive a crash that the claim survives, or
-        # nothing could release the claim.
-        for durable_directory in (root, root.parent):
-            descriptor = os.open(durable_directory, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+        # The claim written later names this record; its entry must survive a crash
+        # that the claim survives, or nothing could release the claim.
+        sync_directory(root)
     return directory, lock
 
 

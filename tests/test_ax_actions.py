@@ -696,3 +696,16 @@ def test_a_signed_step_without_an_outcome_is_reported_as_unresolved(recorded, ca
         "outcomes": [],
         "unresolved": expected,
     }
+
+
+def test_every_directory_a_new_record_creates_is_synced_through_its_parent(state_home, monkeypatch):
+    synced = []
+    monkeypatch.setattr(ax_actions, "sync_directory", synced.append)
+    directory, lock = ax_actions.new_record()
+    lock.close()
+    root = state_home / "actions"
+    # The records directory and its new ancestor, then the record's own entry.
+    assert synced == [state_home, state_home.parent, root]
+    synced.clear()
+    ax_actions.new_record()[1].close()
+    assert synced == [root]
