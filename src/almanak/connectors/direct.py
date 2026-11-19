@@ -25,6 +25,7 @@ COMMAND_INTENTS: dict[str, tuple[str, ...]] = {
     "borrow": ("borrow",),
     "repay": ("repay", "repay_amount"),
     "collateral": ("collateral",),
+    "swap": ("swap_exact_input",),
 }
 
 
@@ -40,6 +41,13 @@ class ActionRequest:
     min_health_factor: int | None = None
     # `collateral` only: whether the supplied balance is to back debt.
     enable: bool | None = None
+    # A swap only. `sell` is the CAIP-19 asset type sold, one of the pool's two
+    # currencies. `slippage_bps` is how far below its quote the output may fall, in
+    # basis points. `deadline_seconds` is how long after the observed block the swap
+    # may still be mined.
+    sell: str | None = None
+    slippage_bps: int | None = None
+    deadline_seconds: int | None = None
 
     @property
     def kind(self) -> str:
@@ -73,9 +81,6 @@ class DirectActions:
 # Installed connectors `ax` runs no direct action for, and why.
 NOT_DIRECT: dict[str, str] = {
     "uniswap_v4": "direct actions are not implemented for this connector",
-    "uniswap_v3": "direct actions are not implemented for this connector",
-    "pancakeswap_v3": "direct actions are not implemented for this connector",
-    "aerodrome_slipstream": "direct actions are not implemented for this connector",
     "aerodrome": "direct actions are not implemented for this connector",
     "curve": "direct actions are not implemented for this connector",
     "gmx_v2": "a GMX request settles through keepers after its transaction is mined, "

@@ -47,6 +47,9 @@ PROMOTED_STARTS = {
     "eip155:4663": datetime(2026, 9, 8, 5, 28, tzinfo=UTC),
 }
 PROMOTED_CHAINS = tuple(PROMOTED_STARTS)
+# Every production cell serves `almanak ax swap` as a direct operator action; each has
+# a fork rehearsal of the whole command (tests/fork/test_ax_swap.py).
+DIRECT_ACTIONS = (EconomicAction.SWAP,)
 PROMOTED_MODES = (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST)
 PRODUCTION_RESTRICTIONS = tuple(
     restriction for restriction in RESTRICTIONS if "production-path accounting" not in restriction
@@ -56,7 +59,7 @@ PRODUCTION_RESTRICTIONS = tuple(
 CANDIDATE_STARTS: tuple[tuple[str, datetime], ...] = ()
 
 
-def declaration(chain, start, restrictions, modes=(RunMode.FORK, RunMode.BACKTEST)):
+def declaration(chain, start, restrictions, modes=(RunMode.FORK, RunMode.BACKTEST), direct=()):
     return ConnectorChainSupport(
         chain=ChainId(chain),
         modes=modes,
@@ -71,6 +74,7 @@ def declaration(chain, start, restrictions, modes=(RunMode.FORK, RunMode.BACKTES
             ),
         ),
         restrictions=restrictions,
+        direct_actions=direct,
     )
 
 
@@ -81,6 +85,7 @@ def verified_support():
             start,
             PRODUCTION_RESTRICTIONS + op_fee_restrictions(ChainId(chain)),
             PROMOTED_MODES,
+            DIRECT_ACTIONS,
         )
         for chain, start in PROMOTED_STARTS.items()
     )

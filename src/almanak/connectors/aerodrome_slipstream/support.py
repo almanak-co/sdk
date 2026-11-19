@@ -44,6 +44,9 @@ def candidate_support():
 
 PROMOTED_START = datetime(2026, 9, 7, 10, 0, tzinfo=UTC)
 PROMOTED_MODES = (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST)
+# Every production cell serves `almanak ax swap` as a direct operator action; each has
+# a fork rehearsal of the whole command (tests/fork/test_ax_swap.py).
+DIRECT_ACTIONS = (EconomicAction.SWAP,)
 PRODUCTION_RESTRICTIONS = (
     "configured compiled Slipstream factory, clone, periphery and fee modules",
     ONE_ALLOCATION_PER_FUND,
@@ -69,6 +72,7 @@ def verified_support():
                     ),
                 ),
                 "restrictions": PRODUCTION_RESTRICTIONS + op_fee_restrictions(candidate.chain),
+                "direct_actions": DIRECT_ACTIONS,
             }
         )
         for candidate in candidate_support()
