@@ -27,6 +27,7 @@ from almanak.gateway.fork_fixture import Fork
 from almanak.gateway.fork_funding import balance, fund_erc20, read_uint
 from almanak.gateway.read_endpoints import read_endpoint
 from almanak.models import AssetAmount, Chain
+from almanak.transaction_family import is_unsent
 from tests.fork.production_gateway_driver import RehearsalGateway
 
 pytestmark = pytest.mark.fork
@@ -407,6 +408,90 @@ def test_a_swap_refused_after_its_approval_reports_the_allowance_that_remains(se
     assert (operations(again), again["completed"]) == (["approve", "approve", "swap"], True)
     assert start[0] - setting.balances()[0] == other
     assert_no_allowance(setting, again)
+
+
+def pausing_at_the_swap(setting, sent):
+    """A wait that pauses mining once the swap is signed, and calls `sent` once it was
+    sent: the swap then sits unmined with the node, as one a chain is slow to include."""
+
+    def wait(self, state):
+        pending = state.pending
+        if pending is None or pending.operation.kind != "swap":
+            return
+        if is_unsent(pending):
+            setting.fork.rpc("evm_setAutomine", [False])
+        else:
+            sent(pending)
+
+    return wait
+
+
+def lapse(setting, transaction):
+    """The node forgets the unmined swap, and the chain moves past the swap's deadline."""
+    rpc = setting.fork.rpc
+    rpc("anvil_dropTransaction", [transaction])
+    rpc("evm_setAutomine", [True])
+    rpc("evm_increaseTime", [400])
+    rpc("evm_mine")
+
+
+def interrupt(pending):
+    raise KeyboardInterrupt
+
+
+def stopped_with_the_swap_unmined(setting, monkeypatch, capsys):
+    """Interrupt a swap once it was sent, then let its deadline pass without it mined.
+
+    Returns the kept record and the hash of the swap that will never be mined.
+    """
+    from almanak.operator_runtime import OperatorRuntime
+
+    with monkeypatch.context() as patched:
+        patched.setattr(OperatorRuntime, "wait", pausing_at_the_swap(setting, interrupt))
+        with pytest.raises(KeyboardInterrupt):
+            setting(execute=True)
+    capsys.readouterr()
+    (kept,) = ax_actions.kept_records()
+    lapse(setting, kept["unresolved"]["transaction"])
+    return Path(kept["path"]), kept["unresolved"]["transaction"]
+
+
+def executed_past_the_deadline(setting, monkeypatch):
+    """Run a swap to its end while its deadline passes with the sent swap unmined."""
+    from almanak.operator_runtime import OperatorRuntime
+
+    def expire(pending):
+        lapse(setting, pending.tx_hash)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(OperatorRuntime, "wait", pausing_at_the_swap(setting, expire))
+        return setting(execute=True)
+
+
+def assert_released(setting, result, earlier, start):
+    """The result names the swap that expired unsent, no swap is among its outcomes,
+    nothing was sold and no record holds the wallet."""
+    (released,) = result["released_expired"]
+    assert (released["operation"], operations(result)) == ("swap", earlier)
+    assert "unresolved" not in result and "record_kept" not in result
+    assert (ax_actions.kept_records(), setting.balances()) == ([], start)
+
+
+def test_a_swap_that_expires_unmined_is_released_and_the_result_says_so(
+    setting, monkeypatch, capsys
+):
+    start = setting.balances()
+    record, transaction = stopped_with_the_swap_unmined(setting, monkeypatch, capsys)
+    recovered = setting.recover(record)
+    assert (recovered["resolved"], record.exists()) == (True, False)
+    assert recovered["released_expired"] == [{"operation": "swap", "transaction": transaction}]
+    assert_released(setting, recovered, ["approve"], start)
+
+    # The wallet is free again. A command that waits through the same expiry ends
+    # without success and reports the release itself; the approval still stands.
+    waited = executed_past_the_deadline(setting, monkeypatch)
+    assert (waited["executed"], waited["completed"]) == (True, False)
+    assert_released(setting, waited, [], start)
 
 
 def test_every_declared_cell_has_a_trading_reference_to_rehearse():

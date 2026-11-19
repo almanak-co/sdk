@@ -24,8 +24,9 @@ from almanak.gateway.ethereum import DataError, EthereumReader
 from almanak.gateway.evm import erc20_address
 from almanak.gateway.fork_config import ForkTarget
 from almanak.gateway.fork_fixture import Fork
-from almanak.gateway.fork_funding import balance
+from almanak.gateway.fork_funding import balance, send_as
 from almanak.gateway.read_endpoints import read_endpoint
+from almanak.gateway.safe_fixture import calldata
 from almanak.models import AssetAmount, Chain
 from tests.fork import test_ax_swap as family
 
@@ -47,6 +48,8 @@ REFERENCES = {
 }
 NATIVE_REFERENCE = "uniswap_v4_ethereum_native_trading"
 NATIVE_COIN = "eip155:1/slip44:60"
+# The largest ERC-20 allowance, the largest Permit2 allowance and expiration.
+MAX_TOKEN, MAX_PERMIT, FAR = 2**256 - 1, 2**160 - 1, 2**48 - 1
 # Above the gas of either approval with its buffer on every chain, below that of a swap.
 APPROVALS_ONLY_GAS = 100_000
 
@@ -396,6 +399,103 @@ def test_the_native_coin_itself_is_refused_as_the_sold_asset(native):
     with pytest.raises(ValueError, match="sells as its wrapped token"):
         native(sell=NATIVE_COIN, execute=False)
     assert native.balances() == (native.cell.funded, 0)
+
+
+def approve_unlimited(setting, asset=None):
+    """The wallet gives Permit2 the largest ERC-20 allowance of a token, as wallets that
+    used the protocol's own application have."""
+    permit2 = setting.target().contracts.permit2
+    token = erc20_address(asset or setting.cell.asset, setting.cell.chain)
+    data = calldata("approve(address,uint256)", ("address", "uint256"), (permit2, MAX_TOKEN))
+    send_as(setting.fork, setting.owner, token, data)
+
+
+def permit_unlimited(setting):
+    """The wallet gives the router the largest Permit2 allowance of the sold token."""
+    contracts = setting.target().contracts
+    token = erc20_address(setting.cell.asset, setting.cell.chain)
+    types = ("address", "address", "uint160", "uint48")
+    stated = (token, contracts.router, MAX_PERMIT, FAR)
+    data = calldata("approve(address,address,uint160,uint48)", types, stated)
+    send_as(setting.fork, setting.owner, contracts.permit2, data)
+
+
+def after_spend(before, amount):
+    """What an ERC-20 allowance to Permit2 may be once `amount` was pulled through it."""
+    return (before, before - amount) if before == MAX_TOKEN else (before - amount,)
+
+
+def assert_unlimited_token_served(setting):
+    """A swap over an unlimited ERC-20 approval to Permit2 completes and is reconciled,
+    whether the token lowers that approval or leaves it."""
+    start = setting.balances()
+    approve_unlimited(setting)
+    result = setting(execute=True)
+    token, amount, _ = setting.authority()
+    assert (family.operations(result), result["completed"]) == (STEPS[1:], True)
+    assert token in after_spend(MAX_TOKEN, setting.cell.amount) and amount == 0
+    assert result["position_after"]["allowances"] == left(setting, token, 0, 0)
+    assert ("record_kept" in result, start[0] - setting.balances()[0]) == (
+        False,
+        setting.cell.amount,
+    )
+
+
+def assert_unlimited_permit_served(setting):
+    """A swap over the largest Permit2 allowance completes, and Permit2 leaves it whole."""
+    earlier = setting.authority()[0]
+    permit_unlimited(setting)
+    result = setting(execute=True)
+    token, amount, expiration = setting.authority()
+    assert (family.operations(result), result["completed"]) == (["swap"], True)
+    assert (amount, expiration) == (MAX_PERMIT, FAR)
+    assert token in after_spend(earlier, setting.cell.amount)
+    assert result["position_after"]["allowances"] == left(setting, token, amount, expiration)
+
+
+def test_standing_unlimited_allowances_are_spent_through_reconciled_and_reported(setting):
+    assert_unlimited_token_served(setting)
+    assert_unlimited_permit_served(setting)
+    assert ax_actions.kept_records() == []
+
+
+def test_a_token_that_keeps_and_one_that_lowers_its_unlimited_allowance(native):
+    # WETH9 never lowers an unlimited allowance.
+    assert_unlimited_token_served(native)
+    assert native.authority()[0] == MAX_TOKEN
+    assert_unlimited_permit_served(native)
+    # USDC lowers it like any other, here for the amount sold back.
+    usdc, amount = native.bought(), native.balances()[1] // 2
+    approve_unlimited(native, usdc)
+    back = native(amount, sell=usdc, execute=True)
+    assert (back["completed"], native.authority(usdc)[0]) == (True, MAX_TOKEN - amount)
+    assert ("record_kept" in back, ax_actions.kept_records()) == (False, [])
+
+
+def assert_lapsed(setting, recovered):
+    """Both approvals of the released swap stand; the Permit2 one has lapsed."""
+    cell = setting.cell
+    token, amount, expiration = setting.authority()
+    assert (token, amount) == (cell.amount, cell.amount) and expiration < setting.head_time()
+    assert recovered["position_after"]["allowances"] == left(setting, token, amount, expiration)
+
+
+def test_a_swap_that_expires_unmined_is_released_and_the_result_says_so(
+    setting, monkeypatch, capsys
+):
+    start = setting.balances()
+    record, transaction = family.stopped_with_the_swap_unmined(setting, monkeypatch, capsys)
+    recovered = setting.recover(record)
+    assert (recovered["resolved"], record.exists()) == (True, False)
+    assert recovered["released_expired"] == [{"operation": "swap", "transaction": transaction}]
+    family.assert_released(setting, recovered, STEPS[:2], start)
+    assert_lapsed(setting, recovered)
+
+    # The wallet is free again. A command that waits through the same expiry ends
+    # without success and reports the release itself, after renewing the lapsed allowance.
+    waited = family.executed_past_the_deadline(setting, monkeypatch)
+    assert (waited["executed"], waited["completed"]) == (True, False)
+    family.assert_released(setting, waited, STEPS[1:2], start)
 
 
 def test_every_declared_cell_has_a_trading_reference_to_rehearse():

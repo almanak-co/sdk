@@ -8,6 +8,7 @@ rehearsal of the whole command is tests/fork/test_ax_swap.py.
 import gzip
 import hashlib
 import json
+from datetime import UTC, datetime
 from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,14 +19,18 @@ from almanak import ax_actions
 from almanak.caip import ChainId
 from almanak.chains import evm_network
 from almanak.cli_arguments import build_parser, parse_validated
-from almanak.connectors import direct, v3_pool_direct
-from almanak.connectors.composition import connector_from_wire
+from almanak.connectors import direct, v3_pool_direct, v3_pool_reconciliation
+from almanak.connectors.composition import connector_for, connector_from_wire
 from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.resolution_evm import ResolutionRead, RetainedResolutionReader
+from almanak.gateway.service import GatewayService
 from almanak.models import AssetAmount, Block
 from almanak.operator_deployment import supports_operator
+from almanak.operator_runtime import OperatorRuntime
+from almanak.state import Journal
 from almanak.strategy import StrategyDefinition
+from tests.test_operator_runtime import GatewayJournal
 
 FIXTURES = Path(__file__).with_name("fixtures")
 # Retained resolution reads and the pool they resolve, per connector.
@@ -111,7 +116,7 @@ def operator_config(connector, market, **stated):
     return configuration(connector, positions, market)
 
 
-def observation(connector, config, owned, market, *, wallet=5000, allowance=0, **quotes):
+def observation(connector, config, owned, market, *, wallet=5000, bought=0, allowance=0, **quotes):
     """An on-chain observation of the deployment's one position at the resolved block."""
     snapshot = connector_from_wire({"connector": connector}).codec.snapshot
     target = config.target(ALLOCATION)
@@ -132,7 +137,7 @@ def observation(connector, config, owned, market, *, wallet=5000, allowance=0, *
         pool=pool,
         owned=owned,
         wallet0=AssetAmount(asset=target.assets[0], amount=wallet),
-        wallet1=AssetAmount(asset=target.assets[1], amount=0),
+        wallet1=AssetAmount(asset=target.assets[1], amount=bought),
         allowances=tuple(
             {
                 "asset": asset,
@@ -531,3 +536,194 @@ def test_the_command_refuses_an_undeclared_chain_and_passes_the_stated_swap_on(
     monkeypatch.setattr(ax_actions, "read_wallet", pytest.fail)
     with pytest.raises(ValueError, match=f"{connector} serves no direct swap on eip155:31337"):
         ax_actions.command(arguments(connector, "--chain", "eip155:31337"))
+
+
+class Observed:
+    """A gateway double that answers every read with the one observation it was given."""
+
+    def __init__(self, seen):
+        self.seen = seen
+
+    def observe(self):
+        return (self.seen,)
+
+    def verify_snapshot(self, observation):
+        return self.seen
+
+    def snapshot(self, allocation, block, observation):
+        return self.seen
+
+
+class SwapDesk:
+    """An operator deployment behind the real gateway service, over one stated observation.
+
+    The coordinator commits each update only after the service's own validation accepts
+    it, so a request it retains was admitted by the gateway. `observe` builds the
+    observation from the ownership the deployment was created with.
+    """
+
+    def __init__(self, tmp_path, config, observe):
+        self.config = config
+        self.store = Journal(tmp_path / "state.sqlite")
+        self.store.create(config, None)
+        self.gateway = Observed(observe(self.store.load().owned[0]))
+        self.service = GatewayService(
+            config, self.store.path, self.gateway, lease_seconds=2, operator_actions=True
+        )
+
+    def runtime(self):
+        runtime = object.__new__(OperatorRuntime)
+        runtime.connector = connector_for(self.config)
+        runtime.journal = GatewayJournal(self.store, self.service)
+        runtime.gateway = self.gateway
+        runtime.closed = False
+        runtime.clock = lambda: datetime(2026, 11, 19, tzinfo=UTC)
+        runtime.fault = lambda *arguments: None
+        runtime.poll = 0
+        return runtime
+
+
+def swap_desk(connector, tmp_path):
+    market = resolved(connector)
+    config = operator_config(connector, market)
+
+    def observe(owned):
+        return observation(
+            connector, config, owned, market, entry_quote=quote(connector, owned, market)
+        )
+
+    return market, config, SwapDesk(tmp_path, config, observe)
+
+
+def test_the_gateway_admits_the_swap_request_built_from_its_observation(connector, tmp_path):
+    market, config, desk = swap_desk(connector, tmp_path)
+    build = direct.binding(connector).intent
+    stated = request(market)
+    record = desk.runtime().submit(lambda state, observed: build(state.config, observed, stated))
+    retained_state = desk.store.load()
+    assert (record.intent.kind, record.trigger.kind) == ("swap_exact_input", "operator")
+    assert retained_state.decision == record and retained_state.initialized
+    assert record.intent.amount == AssetAmount(asset=market.pool.currency0, amount=AMOUNT)
+    assert record.observations == (desk.gateway.seen,)
+
+
+@pytest.mark.parametrize("refused", ["revoke_intent", "exit_intent"])
+def test_the_gateway_refuses_an_operator_request_that_is_not_the_swap(connector, tmp_path, refused):
+    _, config, desk = swap_desk(connector, tmp_path)
+    actions = connector_from_wire({"connector": connector}).codec.actions
+    other = getattr(actions, refused)(target=config.target(ALLOCATION))
+    with pytest.raises(ValueError, match="unsupported as a direct action"):
+        desk.runtime().submit(other)
+    assert desk.store.load().decision is None
+
+
+def test_an_operation_on_another_pool_is_refused_by_the_connectors_validation(connector):
+    market, config, state, seen = admitted(connector)
+    intent = v3_pool_direct.intent(config, (seen,), request(market))
+    deciding, step = planning(connector, config, state, intent, seen)
+    ready = observation(connector, config, state.owned[0], market, allowance=AMOUNT)
+    swap = step(ready)
+    bound = config.target(ALLOCATION)
+    elsewhere = bound.pool.model_copy(update={"pool": "0x" + "cd" * 20})
+    other = bound.model_copy(update={"pool": elsewhere})
+    execution = connector_from_wire({"connector": connector}).execution
+    # The bound request cannot carry an operation of another pool.
+    foreign = swap.model_copy(update={"target": other})
+    with pytest.raises(ValueError, match="operation and observation require the bound target"):
+        execution.validate_operation(None, deciding, foreign, ready)
+    # A request for another pool has no capability at all.
+    deciding.decision = SimpleNamespace(
+        intent=intent.model_copy(update={"target": other}), observations=(seen,)
+    )
+    with pytest.raises(ValueError, match="no exact retained target capability"):
+        execution.validate_operation(None, deciding, foreign, ready)
+
+
+def settled(connector, before_allowance, after_allowance):
+    """The family's own balance reconciliation over a mined swap of AMOUNT."""
+    market, config, state, _ = admitted(connector)
+    owned, target = state.owned[0], config.target(ALLOCATION)
+    before = observation(connector, config, owned, market, allowance=before_allowance)
+    swapped = owned.model_copy(
+        update={
+            "inventory0": AssetAmount(asset=market.pool.currency0, amount=0),
+            "inventory1": AssetAmount(asset=market.pool.currency1, amount=QUOTED),
+            "entry_complete": True,
+        }
+    )
+    after = observation(
+        connector,
+        config,
+        swapped,
+        market,
+        wallet=5000 - AMOUNT,
+        bought=QUOTED,
+        allowance=after_allowance,
+    )
+    operations = import_module(f"almanak.connectors.{connector}.operations")
+    operation = operations.Swap(
+        target=target,
+        amount=AssetAmount(asset=market.pool.currency0, amount=AMOUNT),
+        minimum=AssetAmount(asset=market.pool.currency1, amount=1),
+        deadline=market.block.timestamp + 300,
+    )
+    pending = SimpleNamespace(before=before, operation=operation)
+    effects = SimpleNamespace(delta0=-AMOUNT, delta1=QUOTED)
+    return v3_pool_reconciliation.validate_balances(pending, after, effects, 0, True)
+
+
+def test_a_swap_spends_an_exact_router_allowance_and_never_a_standing_unlimited_one(connector):
+    market, config, state, seen = admitted(connector)
+    intent = v3_pool_direct.intent(config, (seen,), request(market))
+    _, step = planning(connector, config, state, intent, seen)
+    owned = state.owned[0]
+    # An unlimited allowance differs from the amount: it is reset, then granted exactly.
+    unlimited = observation(connector, config, owned, market, allowance=2**256 - 1)
+    assert (step(unlimited).kind, step(unlimited).amount) == ("approve", 0)
+    assert (step(seen).kind, step(seen).amount) == ("approve", AMOUNT)
+    # One that already equals the amount is spent as it stands, and falls to zero.
+    equal = observation(connector, config, owned, market, allowance=AMOUNT)
+    assert step(equal).kind == "swap"
+    assert settled(connector, AMOUNT, 0) == ()
+    # The reconciliation admits no allowance that did not fall by the amount sold.
+    for stood in ((AMOUNT, AMOUNT), (2**256 - 1, 2**256 - 1), (AMOUNT * 2, AMOUNT + 1)):
+        with pytest.raises(DataError, match="allowance differs from the executed settlement"):
+            settled(connector, *stood)
+
+
+def released_state(connector):
+    """A deployment whose signed swap was released past its deadline, nothing else done."""
+    state = created(connector, operator_config(connector, resolved(connector)))
+    swap = SimpleNamespace(operation=SimpleNamespace(kind="swap"), tx_hash="0x" + "ab" * 32)
+    return SimpleNamespace(
+        config=state.config,
+        owned=state.owned,
+        baseline=(),
+        outcomes=(),
+        pending=None,
+        released=(swap,),
+    )
+
+
+def test_a_signed_step_released_as_expired_is_reported_and_is_not_a_success(
+    connector, monkeypatch, capsys
+):
+    state = released_state(connector)
+    result = ax_actions.executed_result(state, state.outcomes, None)
+    released = [{"operation": "swap", "transaction": "0x" + "ab" * 32}]
+    assert result["released_expired"] == released
+    # A step was signed and sent, so the command did execute; the request did not finish.
+    assert (result["executed"], result["completed"], "refused" in result) == (True, False, False)
+    # A deployment that released nothing says nothing of it.
+    state.released = ()
+    assert "released_expired" not in ax_actions.executed_result(state, state.outcomes, None)
+
+    # `ax recover` frees the wallet, and still does not report success for the swap.
+    args = SimpleNamespace(record=Path("record"), env_file=None, public_rpc=None)
+    resolved_record = {"resolved": True, "discarded_request": False}
+    monkeypatch.setattr(ax_actions, "recover", lambda record, backend_for: dict(resolved_record))
+    assert ax_actions.recover_command(args) == 0
+    resolved_record["released_expired"] = released
+    capsys.readouterr()
+    assert ax_actions.recover_command(args) == 1
+    assert json.loads(capsys.readouterr().out)["released_expired"] == released

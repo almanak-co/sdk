@@ -21,16 +21,21 @@ from almanak.connectors import direct
 from almanak.connectors.composition import connector_from_wire
 from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
 from almanak.connectors.support import RunMode, uniswap_candidate_entry, uniswap_support
+from almanak.connectors.uniswap_v4 import planning as v4_planning
+from almanak.connectors.uniswap_v4 import reconciliation
 from almanak.connectors.uniswap_v4.domain import PoolObservation, UniswapPool
+from almanak.connectors.uniswap_v4.models import Target
 from almanak.connectors.uniswap_v4.networks import roles_for
 from almanak.connectors.uniswap_v4.reader import Quote
 from almanak.connectors.uniswap_v4.resolution import MarketSelection, resolve_market
-from almanak.connectors.uniswap_v4.state import Snapshot
+from almanak.connectors.uniswap_v4.state import Snapshot, Swap
+from almanak.dex_intents import ExitExchange, RevokeExchange
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.resolution_evm import ResolutionRead, RetainedResolutionReader
 from almanak.models import ZERO_ADDRESS, AssetAmount, Block
 from almanak.operator_deployment import supports_operator
 from almanak.strategy import StrategyDefinition
+from tests import test_ax_swap as family
 
 FIXTURES = Path(__file__).with_name("fixtures")
 READS = FIXTURES / "uniswap-v4-ethereum-resolution-reads.json.gz"
@@ -95,7 +100,7 @@ def stated_allowances(target, token, permit):
     return tuple(rows)
 
 
-def observation(config, owned, market, *, wallet=5000, token=0, permit=(0, 0), **quotes):
+def observation(config, owned, market, *, wallet=5000, bought=0, token=0, permit=(0, 0), **quotes):
     """An on-chain observation of the deployment's one position at the resolved block.
 
     `token` is the sold asset's ERC-20 allowance to Permit2; `permit` is the amount and
@@ -113,7 +118,9 @@ def observation(config, owned, market, *, wallet=5000, token=0, permit=(0, 0), *
         protocol_fee=0,
         lp_fee=market.pool.fee,
     )
-    held = {asset: wallet if asset == target.funding_currency else 0 for asset in target.assets}
+    held = {
+        asset: wallet if asset == target.funding_currency else bought for asset in target.assets
+    }
     return Snapshot(
         target=target,
         pool=pool,
@@ -556,3 +563,193 @@ def test_the_command_refuses_an_undeclared_chain_and_passes_the_stated_swap_on(m
     }
     with pytest.raises(ValueError, match="uniswap_v4 serves no direct swap on eip155:59144"):
         ax_actions.command(arguments(chain="eip155:59144", **elsewhere))
+
+
+UNLIMITED_TOKEN, UNLIMITED_PERMIT = 2**256 - 1, 2**160 - 1
+EXPIRES = 2**48 - 1
+
+
+def mined_swap(before_token, before_permit, after_token, after_permit, *, success=True):
+    """Run the connector's own balance reconciliation over a mined swap of AMOUNT.
+
+    The sold token's ERC-20 allowance to Permit2 and its Permit2 allowance to the router
+    are stated before and after; wallets and inventory move as the swap moved them.
+    """
+    market, config, state, _ = admitted()
+    owned, target = state.owned[0], config.target(ALLOCATION)
+    before = observation(config, owned, market, token=before_token, permit=(before_permit, EXPIRES))
+    moved = (-AMOUNT, QUOTED) if success else (0, 0)
+    swapped = owned.model_copy(
+        update={
+            "inventory0": AssetAmount(asset=AssetType(USDC), amount=AMOUNT + moved[0]),
+            "inventory1": AssetAmount(asset=AssetType(WETH), amount=moved[1]),
+            "entry_complete": success,
+        }
+    )
+    after = observation(
+        config,
+        swapped,
+        market,
+        wallet=5000 + moved[0],
+        bought=moved[1],
+        token=after_token,
+        permit=(after_permit, EXPIRES),
+    )
+    operation = Swap(
+        target=target,
+        amount=AssetAmount(asset=AssetType(USDC), amount=AMOUNT),
+        minimum=AssetAmount(asset=AssetType(WETH), amount=1),
+        deadline=market.block.timestamp + 300,
+    )
+    pending = SimpleNamespace(before=before, operation=operation)
+    spent = (moved[0], 0) if success else None
+    return reconciliation.validate_balances(pending, after, moved, 0, success, spent)
+
+
+def refused_reconciliation(*allowances, **options):
+    with pytest.raises(DataError, match="ERC-20 or Permit2 allowance does not reconcile") as seen:
+        mined_swap(*allowances, **options)
+    return seen.value.kind == "receipt"
+
+
+def test_a_finite_allowance_falls_by_exactly_what_the_swap_spent():
+    assert mined_swap(AMOUNT, AMOUNT, 0, 0) == ()
+    assert mined_swap(AMOUNT * 3, AMOUNT * 2, AMOUNT * 2, AMOUNT) == ()
+    # Neither a finite ERC-20 allowance nor a finite Permit2 one may stay as it was,
+    # fall by another amount, or grow.
+    assert refused_reconciliation(AMOUNT * 3, AMOUNT * 2, AMOUNT * 3, AMOUNT)
+    assert refused_reconciliation(AMOUNT * 3, AMOUNT * 2, AMOUNT * 2, AMOUNT * 2)
+    assert refused_reconciliation(AMOUNT * 3, AMOUNT * 2, AMOUNT * 2 + 1, AMOUNT)
+    assert refused_reconciliation(AMOUNT * 3, AMOUNT * 2, AMOUNT * 2, AMOUNT - 1)
+    assert refused_reconciliation(AMOUNT, AMOUNT, AMOUNT * 2, 0)
+
+
+def test_an_unlimited_permit2_allowance_is_unchanged_by_the_swap_it_serves():
+    assert mined_swap(AMOUNT, UNLIMITED_PERMIT, 0, UNLIMITED_PERMIT) == ()
+    # Permit2 never lowers its largest allowance, so a lowered one is not this swap's.
+    assert refused_reconciliation(AMOUNT, UNLIMITED_PERMIT, 0, UNLIMITED_PERMIT - AMOUNT)
+    # One base unit less than the largest is finite and falls like any other.
+    assert mined_swap(AMOUNT, UNLIMITED_PERMIT - 1, 0, UNLIMITED_PERMIT - 1 - AMOUNT) == ()
+    assert refused_reconciliation(AMOUNT, UNLIMITED_PERMIT - 1, 0, UNLIMITED_PERMIT - 1)
+
+
+def test_an_unlimited_token_allowance_stays_or_falls_as_its_token_decides():
+    # WETH9, USDT, DAI and OpenZeppelin tokens leave it; USDC lowers it.
+    assert mined_swap(UNLIMITED_TOKEN, AMOUNT, UNLIMITED_TOKEN, 0) == ()
+    assert mined_swap(UNLIMITED_TOKEN, AMOUNT, UNLIMITED_TOKEN - AMOUNT, 0) == ()
+    assert refused_reconciliation(UNLIMITED_TOKEN, AMOUNT, UNLIMITED_TOKEN - AMOUNT + 1, 0)
+    assert refused_reconciliation(UNLIMITED_TOKEN, AMOUNT, 0, 0)
+    # Once lowered it is finite: the next swap must lower it by exactly its amount.
+    lowered = UNLIMITED_TOKEN - AMOUNT
+    assert mined_swap(lowered, AMOUNT, lowered - AMOUNT, 0) == ()
+    assert refused_reconciliation(lowered, AMOUNT, lowered, 0)
+    # Both unlimited at once, as a wallet that used the pool's own application has them.
+    assert mined_swap(UNLIMITED_TOKEN, UNLIMITED_PERMIT, UNLIMITED_TOKEN, UNLIMITED_PERMIT) == ()
+
+
+def test_a_reverted_swap_changes_no_allowance_and_a_modelled_step_assumes_no_decrement():
+    assert mined_swap(UNLIMITED_TOKEN, AMOUNT, UNLIMITED_TOKEN, AMOUNT, success=False) == ()
+    assert refused_reconciliation(
+        UNLIMITED_TOKEN, AMOUNT, UNLIMITED_TOKEN - AMOUNT, 0, success=False
+    )
+    market, config, state, _ = admitted()
+    before = observation(
+        config, state.owned[0], market, token=UNLIMITED_TOKEN, permit=(UNLIMITED_PERMIT, EXPIRES)
+    )
+    operation = Swap(
+        target=config.target(ALLOCATION),
+        amount=AssetAmount(asset=AssetType(USDC), amount=AMOUNT),
+        minimum=AssetAmount(asset=AssetType(WETH), amount=1),
+        deadline=market.block.timestamp + 300,
+    )
+    modelled = reconciliation.allowance_after(before, operation, (-AMOUNT, QUOTED), 0)
+    assert modelled == before.allowances
+
+
+def test_a_standing_permit2_allowance_must_outlast_the_swap_it_serves():
+    market, config, state, seen = admitted()
+    intent = direct.binding(CONNECTOR).intent(config, (seen,), request())
+    step = planning(config, state, intent, seen)
+    owned, now = state.owned[0], market.block.timestamp
+
+    def standing(expiration):
+        return observation(
+            config, owned, market, token=UNLIMITED_TOKEN, permit=(UNLIMITED_PERMIT, expiration)
+        )
+
+    # Unexpired now, but lapsing before the swap's deadline: it is granted again.
+    renewed = step(standing(now + 5))
+    assert (renewed.kind, renewed.amount, renewed.expiration) == (
+        "approve_permit2",
+        AMOUNT,
+        intent.deadline,
+    )
+    assert step(standing(intent.deadline - 1)).kind == "approve_permit2"
+    assert step(standing(intent.deadline)).kind == "swap"
+    # An exit leg takes its deadline from each observation, so the allowance its own
+    # approval granted is relied on while it has not lapsed.
+    asset, router = config.target(ALLOCATION).funding_currency, intent.target.contracts.router
+    relied = v4_planning.approval(standing(now + 5), asset, AMOUNT, router, intent.deadline)
+    assert relied is None
+    lapsed = v4_planning.approval(standing(now), asset, AMOUNT, router, intent.deadline)
+    assert lapsed.kind == "approve_permit2"
+
+
+def test_an_operation_on_another_pool_is_refused_by_the_connectors_validation():
+    market, config, state, seen = admitted()
+    intent = direct.binding(CONNECTOR).intent(config, (seen,), request())
+    step = planning(config, state, intent, seen)
+    ready = observation(
+        config, state.owned[0], market, token=AMOUNT, permit=(AMOUNT, intent.deadline)
+    )
+    swap = step(ready)
+    bound = config.target(ALLOCATION)
+    other = bound.model_copy(update={"pool": bound.pool.model_copy(update={"fee": 3000})})
+    execution = connector_from_wire({"connector": CONNECTOR}).execution
+    deciding = SimpleNamespace(
+        config=config,
+        owned=state.owned,
+        capabilities=state.capabilities,
+        decision=SimpleNamespace(intent=intent, observations=(seen,)),
+        outcomes=(),
+        mode="running",
+    )
+    # The bound request cannot carry an operation of another pool.
+    foreign = swap.model_copy(update={"target": other})
+    with pytest.raises(ValueError, match="operation and observation require the bound target"):
+        execution.validate_operation(None, deciding, foreign, ready)
+    # A request for another pool has no capability at all.
+    deciding.decision = SimpleNamespace(
+        intent=intent.model_copy(update={"target": other}), observations=(seen,)
+    )
+    with pytest.raises(ValueError, match="intent has no retained Uniswap capability"):
+        execution.validate_operation(None, deciding, foreign, ready)
+
+
+def test_the_gateway_admits_the_swap_request_and_no_other_action(tmp_path):
+    market, config, _, _ = admitted()
+    desk = family.SwapDesk(
+        tmp_path,
+        config,
+        lambda owned: observation(config, owned, market, entry_quote=quote(market)),
+    )
+    build = direct.binding(CONNECTOR).intent
+    record = desk.runtime().submit(lambda state, observed: build(state.config, observed, request()))
+    admitted_state = desk.store.load()
+    assert (record.intent.kind, record.trigger.kind) == ("swap_exact_input", "operator")
+    assert admitted_state.decision == record and admitted_state.initialized
+    assert admitted_state.owned[0].inventory0.amount == AMOUNT
+
+
+@pytest.mark.parametrize("refused", [RevokeExchange, ExitExchange])
+def test_the_gateway_refuses_an_operator_request_that_is_not_the_swap(tmp_path, refused):
+    market, config, _, _ = admitted()
+    desk = family.SwapDesk(
+        tmp_path,
+        config,
+        lambda owned: observation(config, owned, market, entry_quote=quote(market)),
+    )
+    other = refused[Target](target=config.target(ALLOCATION))
+    with pytest.raises(ValueError, match="unsupported as a direct action"):
+        desk.runtime().submit(other)
+    assert desk.store.load().decision is None
