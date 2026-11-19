@@ -449,6 +449,29 @@ def test_an_adopting_allocation_is_an_operators_and_states_no_swap(connector):
         created(connector, config, strategy)
 
 
+def test_an_ownership_names_an_nft_to_adopt_only_before_it_owns_one(connector):
+    market = resolved(connector)
+    config = deployed(connector, market, naming("close-liquidity"), {TOKEN: held(market)})
+    owned = created(connector, config).owned[0]
+    assert owned.adopts == nft_id(market) and "adopts" in owned.model_dump()
+    values = {
+        "target": owned.target,
+        "inventory0": owned.inventory0,
+        "inventory1": owned.inventory1,
+    }
+    stranger = AssetId(str(nft_id(market)).replace(market.contracts.position_manager, STRANGER))
+    trading = created(connector, deployed(connector, market, request("revoke-exchange"))).owned[0]
+    for changed in (
+        {"position": position(market), "adopts": nft_id(market)},
+        {"adopts": stranger},
+        {"target": trading.target, "adopts": nft_id(market)},
+    ):
+        with pytest.raises(ValueError, match="requires its manager, a fixed range and no position"):
+            type(owned)(**{**values, **changed})
+    # Once adopted, or for a strategy, the field is absent on the wire.
+    assert "adopts" not in type(owned)(**values, position=position(market)).model_dump()
+
+
 def test_an_open_adopts_exactly_the_stated_amounts_when_the_wallet_covers_both(connector):
     market = resolved(connector)
     config = deployed(connector, market, opening(market))
