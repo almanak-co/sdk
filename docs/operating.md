@@ -737,6 +737,26 @@ remains afterwards; `revoke-exchange` clears it. A mint is the largest step: wit
 its 25% buffer it stays under the default gas limit on the forks rehearsed, and the
 fee ceiling must cover it at the chain's gas price.
 
+On Curve a position is the wallet's balance of the pool's LP token, so there is no
+tick range and no token ID:
+
+| Command | Takes | Does |
+| --- | --- | --- |
+| `open-liquidity`, `increase-liquidity` | `--amount <CAIP-19 coin>=<base units>`, once per coin deposited, `--slippage-bps` | Deposits exactly those amounts. `open-liquidity` is for a wallet that holds none of the pool's LP token, `increase-liquidity` for one that does. |
+| `decrease-liquidity` | `--liquidity <LP shares>`, `--receive`, `--slippage-bps` | Burns that many shares, fewer than the balance. |
+| `close-liquidity` | `--receive`, `--slippage-bps` | Burns the whole balance. |
+| `revoke-exchange` | | Sets every allowance the wallet gave the pool to zero. |
+
+`--receive` is required for a burn: `balanced` pays every coin in the pool's current
+proportions, and a coin of the pool pays that coin alone, which trades against the
+pool and pays its fee. The deployment owns the wallet's whole LP balance in the
+pool, whoever deposited it. `--deadline-seconds` bounds only how late a step may be
+signed, since Curve calls carry no deadline. A deposit approves the pool for
+exactly each stated amount, so a completed one leaves no allowance.
+`ax liquidity-position --connector curve --chain <chain> --pool <pool> --account
+<address>` reads the account's LP shares, the total supply and what a balanced burn
+would pay.
+
 The action runs through the same planning, simulation, signing and receipt
 reconciliation as a strategy's, as an operator deployment that exists only for the
 command: its journal is a private record directory under

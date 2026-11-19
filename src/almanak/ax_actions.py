@@ -1,4 +1,5 @@
-"""`almanak ax supply`, `ax withdraw` and `ax swap`: one operator action in one process.
+"""The direct `almanak ax` actions, such as `ax supply`, `ax borrow` and `ax swap`: one
+operator action in one process.
 
 The command resolves the market, builds an operator deployment for exactly that
 account and market in a private record directory, and runs the action through the
