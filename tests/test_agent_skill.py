@@ -102,3 +102,27 @@ def test_reads_and_previews_take_either_transport_and_recovery_takes_the_key():
             assert "<transport>" in line and "--env-file" not in line, line
         keyed = line.replace("<transport>", "--env-file .env")
         parse_validated(build_parser(), filled(keyed))
+
+
+def test_the_agent_creates_its_wallet_before_any_command_needs_an_address():
+    """The address every read takes is the created wallet's, never one asked of the user."""
+    lines = commands()
+    created = next(i for i, line in enumerate(lines) if line.startswith("almanak wallet create"))
+    first_use = next(i for i, line in enumerate(lines) if "<address>" in line)
+    assert created < first_use
+    text = " ".join(SKILL.read_text().split())
+    for statement in (
+        "You create it on this machine",
+        "Do not ask the user for a wallet address, a private key or a seed phrase",
+        "Never ask the user for an address or a key to manage",
+    ):
+        assert statement in text, statement
+
+
+def test_setup_runs_first_whatever_the_user_asked():
+    text = " ".join(SKILL.read_text().split())
+    opening, on_load = text.index("The first time you read this skill"), text.index("## On load")
+    # Stated before the support table, so it is read before any reason to skip it.
+    assert opening < text.index("## What is supported") < on_load
+    assert "still finish the setup" in text
+    assert "a public endpoint covers Ethereum and Avalanche only" in text
