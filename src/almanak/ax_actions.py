@@ -740,7 +740,8 @@ def recover_command(args) -> int:
 
     result = recover(args.record, backend_for)
     print(json.dumps(result, indent=2))
-    return 0 if result["resolved"] else 1
+    # A record resolved by releasing an expired step is freed, not a step that happened.
+    return 0 if result["resolved"] and "released_expired" not in result else 1
 
 
 def record_endpoint(config, env_file: Path | None, public_rpc: str | None = None) -> str:
@@ -791,15 +792,30 @@ def executed_result(state, outcomes, refusal) -> dict:
     """
     final = outcomes[-1] if outcomes else None
     result = {
-        "executed": bool(outcomes) or state.pending is not None,
+        "executed": bool(outcomes) or state.pending is not None or bool(released(state)),
         "completed": final is not None and final.strategy_result().complete,
         "outcomes": [outcome_summary(item) for item in outcomes],
         "position_after": position(state),
         **unresolved(state),
+        **released(state),
     }
     if refusal is not None and not result["completed"]:
         result["refused"] = {"kind": refusal.kind, "message": str(refusal)}
     return result
+
+
+def released(state) -> dict:
+    """The signed steps released past their protocol deadline, as `released_expired`.
+
+    Such a step was never mined and can only revert if a copy still lands, so what it
+    carried did not happen: the request is over, and the operator states it again. The
+    wallet is free, since nothing signed is left pending.
+    """
+    steps = [
+        {"operation": item.operation.kind, "transaction": item.tx_hash}
+        for item in getattr(state, "released", ())
+    ]
+    return {"released_expired": steps} if steps else {}
 
 
 def position(state) -> dict:
