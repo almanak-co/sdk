@@ -20,8 +20,20 @@ from eth_utils import to_checksum_address
 from almanak import ax_actions
 from almanak.caip import AssetType, ChainId
 from almanak.connectors.composition import connector_from_wire
-from almanak.connectors.direct import ActionRequest
-from almanak.connectors.v3_pool_position_request import PositionRequest, read_liquidity_position
+from almanak.connectors.concentrated_math import (
+    addition_maximums,
+    liquidity_for,
+    sqrt_at_tick,
+)
+from almanak.connectors.concentrated_math import amounts as taken_amounts
+from almanak.connectors.direct import ALLOCATION, ActionRequest
+from almanak.connectors.v3_pool_position_request import (
+    PositionRequest,
+    accrued_fees,
+    read_liquidity_position,
+)
+from almanak.connectors.v3_pool_reader import nft_record
+from almanak.connectors.v3_pool_request import family
 from almanak.gateway.credentials import write_private
 from almanak.gateway.ethereum import DataError, EthereumReader
 from almanak.gateway.evm import chain_number, erc20_address
@@ -30,7 +42,7 @@ from almanak.gateway.fork_fixture import Fork
 from almanak.gateway.fork_funding import balance, fund_erc20, read_uint
 from almanak.gateway.read_endpoints import read_endpoint
 from almanak.gateway.safe_fixture import calldata
-from almanak.models import Chain
+from almanak.models import AssetAmount, Chain
 from tests.fork.test_ax_swap import NETWORKS, PASSWORD, as_mainnet, backend
 
 pytestmark = pytest.mark.fork
@@ -51,6 +63,16 @@ TRADE_LIMITS = ax_actions.FeeLimits(
     LIMITS.max_gas_price_wei, 5 * LIMITS.max_transaction_fee, max_gas_limit=5_000_000
 )
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+# One cell per connector for the scenarios in which another account acts between the
+# signing and the mining of a step.
+PROBES = [
+    ("uniswap_v3", "eip155:8453"),
+    ("pancakeswap_v3", "eip155:56"),
+    ("aerodrome_slipstream", "eip155:8453"),
+]
+# The trader holds this many times the reference's funding: selling all of it moves
+# the price of the deepest probed pool by several basis points.
+TRADER_FUNDING = 400
 FAR_DEADLINE = 2**40
 
 
@@ -167,13 +189,8 @@ class Setting:
         return Setting(self.fork, self.cell, wallet, signer, self.identity)
 
     def request(self, action, **stated):
-        priced = action in PRICED
-        return ActionRequest(
-            action,
-            slippage_bps=SLIPPAGE_BPS if priced else None,
-            deadline_seconds=300 if priced else None,
-            **stated,
-        )
+        bounds = {"slippage_bps": SLIPPAGE_BPS, "deadline_seconds": 300}
+        return ActionRequest(action, **{**(bounds if action in PRICED else {}), **stated})
 
     def config(self, action, limits=LIMITS, **stated):
         """The deployment as the command builds it, resolution included."""
@@ -187,12 +204,14 @@ class Setting:
             limits,
         )
 
-    def __call__(self, action, *, execute=True, limits=LIMITS, **stated):
+    def __call__(self, action, *, execute=True, limits=LIMITS, before_send=None, **stated):
         config = self.config(action, limits, **stated)
-        return self.run(config, self.request(action, **stated), execute=execute)
+        request = self.request(action, **stated)
+        return self.run(config, request, execute=execute, before_send=before_send)
 
-    def run(self, config, request, *, execute=True):
+    def run(self, config, request, *, execute=True, before_send=None):
         gateway = backend(self.fork, config, self.wallet, self.identity)
+        interpose(gateway, before_send)
         try:
             return ax_actions.run(config, gateway, request, execute=execute)
         finally:
@@ -246,10 +265,46 @@ class Setting:
         """What a collection would pay for the position, as the read reports it."""
         return [int(item["amount"]) for item in self.read(token_id)["owed"]]
 
-    def tick(self):
+    def pool_state(self):
         reads = import_module(f"almanak.connectors.{self.cell.connector}.reader")
         with self.reader() as reader:
-            return reads.read_pool(reader, self.pool, reader.pin_block("latest")).tick
+            return reads.read_pool(reader, self.pool, reader.pin_block("latest"))
+
+    def tick(self):
+        return self.pool_state().tick
+
+    def offered(self, stated):
+        """What an addition of the stated amounts offers at the pool's price: no more of
+        either currency than its range takes within the price tolerance."""
+        lower, upper = sqrt_at_tick(stated["tick_lower"]), sqrt_at_tick(stated["tick_upper"])
+        bps = stated.get("slippage_bps", SLIPPAGE_BPS)
+        price = self.pool_state().sqrt_price_x96
+        return addition_maximums(stated["amount0"], stated["amount1"], price, lower, upper, bps)
+
+    def sell_outside(self, amount):
+        """Approve the pool's router; returns the act that sells the funded asset through
+        it, outside `ax`."""
+        package = f"almanak.connectors.{self.cell.connector}"
+        operation = import_module(f"{package}.operations").Swap(
+            target=self.config("revoke-exchange").target(ALLOCATION),
+            amount=AssetAmount(asset=self.cell.asset, amount=amount),
+            minimum=AssetAmount(asset=self.assets[1 - self.funded], amount=1),
+            deadline=FAR_DEADLINE,
+        )
+        call = import_module(f"{package}.abi").call(operation)
+        approval = calldata("approve(address,uint256)", ("address", "uint256"), (call.to, amount))
+        self.send(self.tokens[self.funded], approval)
+        return lambda: self.send(call.to, call.data)
+
+    def add_outside(self, token_id, amounts):
+        """Approve the position manager; returns the act that adds to an NFT, outside
+        `ax`. The position manager lets any account add to any position."""
+        from almanak.connectors.v3_pool_abi import INCREASE_PARAMS
+
+        self.approve_outside(amounts)
+        params = (token_id, *amounts, 0, 0, FAR_DEADLINE)
+        data = calldata(f"increaseLiquidity({INCREASE_PARAMS})", (INCREASE_PARAMS,), (params,))
+        return lambda: self.send(self.manager, data)
 
     def send(self, to, data):
         """One transaction signed by the wallet and sent outside `ax`."""
@@ -317,11 +372,42 @@ class Setting:
             calldata(f"decreaseLiquidity({DECREASE_PARAMS})", (DECREASE_PARAMS,), (params,)),
         )
 
-    def around(self):
-        """Three tick spacings around the pool's tick: a range both currencies go into."""
+    def stake_outside(self, token_id):
+        """Deposit an NFT into the pool's gauge, outside `ax`; returns the gauge."""
+        gauge = self.pool_state().gauge
+        approval = calldata("approve(address,uint256)", ("address", "uint256"), (gauge, token_id))
+        self.send(self.manager, approval)
+        self.send(gauge, calldata("deposit(uint256)", ("uint256",), (token_id,)))
+        return gauge
+
+    def collects(self, holder, token_id):
+        """What the position manager would pay a collection by the NFT's holder now."""
+        from almanak.connectors.v3_pool_abi import COLLECT_PARAMS, MAX128
+
+        params = (token_id, holder, MAX128, MAX128)
+        call = {
+            "from": holder,
+            "to": self.manager,
+            "data": calldata(f"collect({COLLECT_PARAMS})", (COLLECT_PARAMS,), (params,)),
+        }
+        raw = self.fork.rpc("eth_call", [call, "latest"])
+        return [int(raw[2:66], 16), int(raw[66:130], 16)]
+
+    def unstaked_accrual(self, token_id):
+        """The fees the range's fee growth would have added to an unstaked position."""
+        selected = family(self.cell.connector)
+        with self.reader() as reader:
+            block = reader.pin_block("latest")
+            observation = selected.read_pool(reader, self.pool, block)
+            record = nft_record(reader, self.manager, token_id, block, "int24")
+            return accrued_fees(reader, selected, observation, block, record)
+
+    def around(self, width=1):
+        """A range both currencies go into: the tick spacing the pool's tick is in, and
+        `width` spacings either side of it."""
         spacing = self.pool.tick_spacing
         floor = self.tick() // spacing * spacing
-        return {"tick_lower": floor - spacing, "tick_upper": floor + 2 * spacing}
+        return {"tick_lower": floor - width * spacing, "tick_upper": floor + (width + 1) * spacing}
 
     def one_sided_range(self):
         """A range beside the price that takes only the funded asset."""
@@ -338,14 +424,39 @@ class Setting:
         return {"amount0": amounts[0], "amount1": amounts[1]}
 
 
+def interpose(gateway, before_send):
+    """Run an act once, between the gateway's checks of a signed step and its sending.
+
+    `before_send` is the kind of step and the act, or None. The act stands for what
+    another account does between the signing of a step and its mining. The gateway
+    checks a signed step more than once before it sends it, so the act is tied to the
+    send of the signed bytes themselves.
+    """
+    if before_send is None:
+        return
+    kind, act = before_send
+    checked, send, waiting = gateway.check_submission, gateway.reader._rpc, {}
+
+    def check(pending, permissions):
+        checked(pending, permissions)
+        if pending.operation.kind == kind:
+            waiting.setdefault(pending.raw_transaction, act)
+
+    def rpc(method, params, **options):
+        if method == "eth_sendRawTransaction":
+            waiting.pop(params[0], lambda: None)()
+        return send(method, params, **options)
+
+    gateway.check_submission, gateway.reader._rpc = check, rpc
+
+
 @pytest.fixture
 def setting(fork, cell, tmp_path, monkeypatch):
     # Records and claims stay out of the operator's own state: the first action sweeps
     # every record it finds there.
     monkeypatch.setattr("almanak.state.claims_root", lambda: tmp_path / "state/claims")
     wallet, signer = funded_wallet(fork, cell, tmp_path / "wallet", cell.funded * WALLET_MULTIPLE)
-    # One reference funding more than the trade, for a position of the trader's own.
-    trader = funded_wallet(fork, cell, tmp_path / "trader", cell.funded * (TRADER_MULTIPLE + 1))
+    trader = funded_wallet(fork, cell, tmp_path / "trader", cell.funded * TRADER_FUNDING)
     identity = as_mainnet(fork, cell.chain)
     found = Setting(fork, cell, wallet, signer, identity)
     found.trader = found.other(*trader)
@@ -409,8 +520,9 @@ def assert_released(setting, result, start):
     return released
 
 
-def approvals(stated):
-    return ["approve"] * sum(1 for amount in stated.values() if amount)
+def approvals(offer):
+    """One approval for each currency the offer holds."""
+    return ["approve"] * sum(1 for amount in offer if amount)
 
 
 def approved(setting, amounts):
@@ -445,24 +557,26 @@ def assert_previewed(setting, ticks, stated):
 
 def open_position(setting, ticks, stated):
     """Open a position; returns its report and what the mint used of each currency."""
-    start = setting.balances()
+    start, offer = setting.balances(), setting.offered({**ticks, **stated})
     opened = setting("open-liquidity", **ticks, **stated)
-    assert_clean(opened, [*approvals(stated), "mint"])
+    assert_clean(opened, [*approvals(offer), "mint"])
     used = [-moved for moved in assert_moved(setting, opened, start)]
     minted = opened["position_after"]["position"]
     assert minted["range"] == {"lower": ticks["tick_lower"], "upper": ticks["tick_upper"]}
     assert setting.nft_owner(int(minted["token_id"])) == setting.owner
-    assert_unused(setting, opened, stated, used)
+    assert_unused(setting, opened, stated, offer, used)
     return minted, used
 
 
-def assert_unused(setting, opened, stated, used):
-    """The mint used at most the stated amounts. What it left is reported unused, and
-    stays approved to the position manager and to nothing else."""
+def assert_unused(setting, opened, stated, offer, used):
+    """The mint used at most what it offered, which is at most the stated amounts. What
+    it left of the statement is reported unused; what it left of the offer stays
+    approved to the position manager, and nothing else is."""
     unused = amounts(opened, "position_after", "inventory")
     assert [most - spent for most, spent in zip(stated.values(), used, strict=True)] == unused
-    assert min(*used, *unused) >= 0
-    assert setting.allowances() == approved(setting, unused)
+    left = [most - spent for most, spent in zip(offer, used, strict=True)]
+    assert min(*used, *left) >= 0
+    assert setting.allowances() == approved(setting, left)
 
 
 def shortfalls(used, principal):
@@ -738,7 +852,7 @@ def assert_left(setting, result, stated, start):
     """Some of the open's approvals stand, exactly as the result reports them, and no
     balance moved."""
     left = setting.allowances()
-    most = approved(setting, (stated["amount0"], stated["amount1"]))
+    most = approved(setting, setting.offered(stated))
     assert (bool(left), left.items() <= most.items()) == (True, True)
     assert (reported_allowances(result), setting.balances()) == (left, start)
     return left
@@ -799,6 +913,175 @@ def test_an_open_that_is_refused_or_interrupted_reports_the_allowances_it_left(
 
     recover_interrupted_approval(setting, stated, start, monkeypatch, capsys)
     recover_interrupted_mint(setting, stated, start, monkeypatch, capsys)
+
+
+probes = pytest.mark.parametrize(
+    "cell", PROBES, indirect=True, ids=lambda cell: f"{cell[0]}-{NETWORKS[cell[1]]}"
+)
+
+
+def unbalanced(setting, bps):
+    """A statement in a wide range around the price holding all the wallet's funded asset
+    and a twentieth of the other currency: about twenty times the funded asset the range
+    takes."""
+    held = setting.balances()
+    stated = setting.stated(held[setting.funded], held[1 - setting.funded] // 20)
+    return {**setting.around(50), **stated, "slippage_bps": bps}
+
+
+def price_move(setting, amount):
+    """How far the trader's sale of `amount` moves the pool's price, in basis points.
+    The sale is measured on the fork and undone."""
+    rpc = setting.fork.rpc
+    before = setting.pool_state().sqrt_price_x96
+    snapshot = rpc("evm_snapshot")
+    setting.trader.sell_outside(amount)()
+    after = setting.pool_state().sqrt_price_x96
+    assert rpc("evm_revert", [snapshot]) is True
+    return abs(after**2 - before**2) * 10000 // before**2
+
+
+def sized_sale(setting):
+    """An amount of the funded asset whose sale by the trader moves the pool's price by
+    a few percent at most, and that move in basis points. A thin pool takes less."""
+    amount = setting.trader.balances()[setting.funded]
+    move = price_move(setting, amount)
+    while move > 300:
+        amount //= 4
+        move = price_move(setting, amount)
+    return amount, move
+
+
+def moved_beyond(before, after, bps):
+    """Whether the pool's price moved by more than the tolerance, as the gateway measures it."""
+    old, new = before**2, after**2
+    return abs(new - old) * 10000 > old * bps
+
+
+def assert_mint_reverted(setting, result, offer, start):
+    """The approvals stand as reported, the mint reverted on chain, and no token left
+    the wallet."""
+    ending = (result["completed"], operations(result)[-1], "record_kept" in result)
+    assert ending == (False, "mint", False)
+    assert (result["position_after"]["position"], setting.balances()) == (None, start)
+    assert setting.allowances() == approved(setting, offer) == reported_allowances(result)
+    assert (troubled(result), ax_actions.kept_records()) == ([result["outcomes"][-1]], [])
+
+
+def assert_surplus_was_exposed(setting, stated, offer, price):
+    """Offered whole, the same statement would have been mined at the moved price: the
+    other currency is still used in full, and more of the surplus is taken than the
+    bounded offer holds."""
+    lower, upper = sqrt_at_tick(stated["tick_lower"]), sqrt_at_tick(stated["tick_upper"])
+    whole = (stated["amount0"], stated["amount1"])
+    liquidity = liquidity_for(*whole, price, lower, upper)
+    taken = taken_amounts(liquidity, price, lower, upper, up=True)
+    funded, other = setting.funded, 1 - setting.funded
+    # The other currency is used but for the rounding of the liquidity it buys.
+    unused = (whole[other] - taken[other]) * 10**6
+    assert (taken[funded] > offer[funded], unused <= whole[other]) == (True, True)
+
+
+@probes
+def test_a_mint_mined_after_the_price_left_its_tolerance_reverts_and_takes_no_surplus(setting):
+    halves(setting)
+    trader = setting.trader
+    selling, move = sized_sale(setting)
+    # The tolerance is a third of what the sale moves the price by.
+    tolerance = move // 3
+    stated = unbalanced(setting, tolerance)
+    offer, start = setting.offered(stated), setting.balances()
+    price = setting.pool_state().sqrt_price_x96
+    # Another account sells the surplus currency once the mint is signed: the direction
+    # in which the range takes ever more of it.
+    push = trader.sell_outside(selling)
+    result = setting("open-liquidity", before_send=("mint", push), **stated)
+    moved = setting.pool_state().sqrt_price_x96
+    assert (tolerance >= 1, moved_beyond(price, moved, tolerance)) == (True, True)
+    assert_mint_reverted(setting, result, offer, start)
+    assert_surplus_was_exposed(setting, stated, offer, moved)
+
+
+def dust(setting):
+    """A hundredth of the trader's two balances, to add to a position it does not own."""
+    held = setting.trader.balances()
+    return held[0] // 100, held[1] // 100
+
+
+def assert_changed_outside(result, kind, success):
+    """The step is recorded as mined, with the position's outside change as an
+    accounting issue, and no record is kept."""
+    (outcome,) = result["outcomes"]
+    assert (outcome["operation"], outcome["success"], result["completed"]) == (
+        kind,
+        success,
+        success,
+    )
+    (issue,) = outcome["accounting_issues"]
+    assert issue.endswith("liquidity position includes unexplained external changes")
+    kept = ("record_kept" in result, "unresolved" in result, ax_actions.kept_records())
+    assert kept == (False, False, [])
+
+
+def observed_liquidity(setting, result, token_id):
+    """The liquidity the result reports for the NFT, which is what the chain holds."""
+    reported = int(result["position_after"]["position"]["liquidity"])
+    assert reported == int(setting.read(token_id)["position"]["liquidity"])
+    return reported
+
+
+@probes
+def test_a_position_another_account_adds_to_while_a_step_is_in_flight_is_recorded_as_observed(
+    setting,
+):
+    first, _ = halves(setting)
+    minted, _ = open_position(setting, setting.around(), first)
+    token_id, held = int(minted["token_id"]), int(minted["liquidity"])
+    trader = setting.trader
+    # The trader needs both currencies to add inside the range.
+    trader.swap(setting.cell.funded * 4)
+
+    # A decrease is mined after someone added to the NFT: its own effects are proven by
+    # its receipt, so it is recorded, with the position as the chain holds it.
+    add = trader.add_outside(token_id, dust(setting))
+    decreased = setting(
+        "decrease-liquidity", token_id=token_id, liquidity=held // 3, before_send=("decrease", add)
+    )
+    assert_changed_outside(decreased, "decrease", True)
+    left = observed_liquidity(setting, decreased, token_id)
+    assert left > held - held // 3
+
+    # A close signed for the liquidity it observed reverts when more was added: it is
+    # recorded as a failed step, and the NFT stays the wallet's.
+    add = trader.add_outside(token_id, dust(setting))
+    closed = setting("close-liquidity", token_id=token_id, before_send=("close", add))
+    assert_changed_outside(closed, "close", False)
+    assert observed_liquidity(setting, closed, token_id) > left
+    assert setting.nft_owner(token_id) == setting.owner
+
+    # Nothing is left locked: restated, the close adopts the position as it is.
+    close_position(setting, token_id)
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [("aerodrome_slipstream", "eip155:8453")],
+    indirect=True,
+    ids=["aerodrome_slipstream-base"],
+)
+def test_a_slipstream_position_staked_in_its_gauge_is_reported_staked_and_owed_no_fees(setting):
+    first, _ = halves(setting)
+    lower, upper = setting.around().values()
+    token_id = setting.mint_outside(lower, upper, *first.values())
+    gauge = setting.stake_outside(token_id)
+    setting.trader.swap(setting.cell.funded * TRADER_MULTIPLE, TRADE_LIMITS)
+
+    seen = setting.read(token_id)
+    assert (seen["owner"], seen["staked"], seen["owed"]) == (gauge, True, seen["owed_recorded"])
+    # The position manager pays the gauge's own collection exactly that and no fees,
+    # although the range's fee growth since the stake is positive.
+    assert setting.collects(gauge, token_id) == [int(item["amount"]) for item in seen["owed"]]
+    assert max(setting.unstaked_accrual(token_id)) > 0
 
 
 def test_every_declared_cell_has_a_liquidity_reference_to_rehearse():
