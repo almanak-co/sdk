@@ -282,17 +282,22 @@ def sync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+# Directories from the records directory up to the last one below the user's home:
+# actions, almanak-v3, state and .local.
+STATE_DEPTH = 4
+
+
 def durable_root() -> Path:
     """The records directory, with the directory entries that lead to it synced.
 
-    The entries of the records directory and of the state directory above it are synced
-    on every call, not only by the call that created them: an earlier command may have
-    stopped between creating a directory and syncing it.
+    Every entry below the user's home is synced on every call, not only by the call
+    that created it: an earlier command may have stopped between creating a directory
+    and syncing it. The home directory itself is the anchor taken as durable.
     """
     root = records_root()
     created = [path for path in (root, *root.parents) if not path.exists()]
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for path in dict.fromkeys((root, root.parent, *created)):
+    for path in dict.fromkeys((*(root, *root.parents)[:STATE_DEPTH], *created)):
         sync_directory(path.parent)
     return root
 

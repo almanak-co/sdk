@@ -698,15 +698,17 @@ def test_a_signed_step_without_an_outcome_is_reported_as_unresolved(recorded, ca
     }
 
 
-def test_every_directory_a_new_record_creates_is_synced_through_its_parent(state_home, monkeypatch):
+def test_the_whole_path_to_a_record_is_synced_on_every_action(state_home, monkeypatch):
     synced = []
     monkeypatch.setattr(ax_actions, "sync_directory", synced.append)
-    directory, lock = ax_actions.new_record()
-    lock.close()
-    root = state_home / "actions"
-    # The records directory and its new ancestor, then the record's own entry.
-    assert synced == [state_home, state_home.parent, root]
-    synced.clear()
-    # A later command syncs them again: the first may have stopped before it did.
+    # An earlier command created an ancestor and stopped before it synced anything.
+    state_home.mkdir()
     ax_actions.new_record()[1].close()
-    assert synced == [state_home, state_home.parent, root]
+    root = state_home / "actions"
+    path = [state_home, *state_home.parents[:3], root]
+    # Every entry up to the anchor, also for directories that already existed, then
+    # the record's own entry.
+    assert synced == path
+    synced.clear()
+    ax_actions.new_record()[1].close()
+    assert synced == path
