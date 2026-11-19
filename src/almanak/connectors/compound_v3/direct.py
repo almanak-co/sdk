@@ -9,7 +9,8 @@ Borrow and repay authority sits on the base position, which those commands reque
 health floor serves the wallet's whole position in the Comet, as the connector requires
 of a fund's allocations there. It is the operator's `--min-health-factor`. The connector
 risk-checks a borrow, and a collateral withdrawal while the wallet owes the base asset;
-without a floor that check tolerates no debt at all.
+without a floor that check tolerates no debt at all. A collateral asset can leave in
+full beside debt when the collateral that remains keeps the floor.
 
 A Comet keeps one signed base balance per account, so a base supply to an account in
 debt repays, and a base withdrawal above the supplied balance borrows. No command
@@ -18,11 +19,6 @@ a borrow never withdraws.
 """
 
 from almanak.connectors.direct import ALLOCATION, ActionRequest, DirectActions, Wallet
-
-# Repay authority belongs to an allocation that may borrow, which must state a floor. A
-# repayment is never risk-checked, so the lowest valid floor is stated for it: no floor
-# can then refuse a repayment.
-REPAY_FLOOR = 10**18 + 1
 
 
 def held_name(asset) -> str:
@@ -72,20 +68,19 @@ def require_statable(request: ActionRequest, reserve, others) -> None:
         )
 
 
-def health_floor(request: ActionRequest) -> int | None:
-    if request.min_health_factor is None and request.action == "repay":
-        return REPAY_FLOOR
-    return request.min_health_factor
-
-
-def with_policy(entry: dict, request: ActionRequest, indebted: bool) -> dict:
+def with_policy(entry: dict, request: ActionRequest, collateralized: bool) -> dict:
     """Add the request's borrow authority and the Comet's one health floor to a position.
 
-    A repayment takes its authority only while the wallet owes: without debt there is
-    nothing to repay, and the request is refused when its intent is built.
+    The connector grants borrow and repay authority only beside a collateral position.
+    A repayment takes it wherever the wallet holds one, with or without debt: a full
+    repayment stopped before its last step leaves an allowance that only a repayment
+    with no debt can then clear. A repayment that states no floor is given the lowest
+    valid one, as on a Pool, so no floor can refuse it.
     """
+    from almanak.connectors.pool_lending_direct import health_floor
+
     floor = health_floor(request)
-    authorized = request.action == "borrow" or (request.action == "repay" and indebted)
+    authorized = request.action == "borrow" or (request.action == "repay" and collateralized)
     if entry["name"] == ALLOCATION and authorized:
         entry = {**entry, "borrow": True}
     return entry if floor is None else {**entry, "minimum_health_factor": floor}
@@ -123,7 +118,7 @@ def positions(reader, block, resolved, wallet: Wallet, request: ActionRequest) -
     ]
     return {
         "connector": "compound_v3",
-        "allocations": [with_policy(entry, request, account.principal < 0) for entry in entries],
+        "allocations": [with_policy(entry, request, bool(others)) for entry in entries],
     }
 
 
@@ -162,7 +157,7 @@ def refuse_allowance(seen, amount: int | None, action: str, clearing: str) -> No
         )
 
 
-def refuse_supply(seen, request: ActionRequest) -> None:
+def refuse_supply(seen, request: ActionRequest, authorized: bool) -> None:
     """Refuse a supply that planning would refuse, in the operator's terms.
 
     The kinds are the connector's own where it has one for the same refusal.
@@ -178,7 +173,7 @@ def refuse_supply(seen, request: ActionRequest) -> None:
     refuse_allowance(seen, request.amount, "supply", "withdraw this asset")
 
 
-def refuse_withdraw(seen, request: ActionRequest) -> None:
+def refuse_withdraw(seen, request: ActionRequest, authorized: bool) -> None:
     """Refuse a withdrawal that planning would refuse, in the operator's terms."""
     from almanak.gateway.ethereum import DataError
 
@@ -206,7 +201,7 @@ def refuse_withdraw(seen, request: ActionRequest) -> None:
         )
 
 
-def refuse_borrow(seen, request: ActionRequest) -> None:
+def refuse_borrow(seen, request: ActionRequest, authorized: bool) -> None:
     """Refuse a borrow that would first withdraw the wallet's own base supply."""
     from almanak.gateway.ethereum import DataError
 
@@ -219,20 +214,36 @@ def refuse_borrow(seen, request: ActionRequest) -> None:
         )
 
 
-def refuse_repay(seen, request: ActionRequest) -> None:
-    """Refuse a repayment with no debt to repay, or with an allowance it cannot use.
+def refuse_repay(seen, request: ActionRequest, authorized: bool) -> None:
+    """Refuse a repayment with no debt, unless it only clears an allowance left behind.
 
-    A full repayment replaces an allowance below the debt and clears what remains.
+    A full repayment approves the held balance, repays, and revokes what the approval
+    left. Stopped before the revocation it leaves no debt and a standing allowance, and
+    the same command then plans the revocation alone. That needs repay authority, and
+    a base principal of zero: with base supplied the request would never report itself
+    complete. Where it cannot be planned, the refusal names what remains and the
+    command that clears it.
     """
     from almanak.gateway.ethereum import DataError
 
-    if seen.account.principal >= 0:
-        raise DataError(
-            "no_position",
-            f"nothing to repay: the wallet owes no {seen.target.asset} in this Comet",
-        )
-    if request.amount is not None:
-        refuse_allowance(seen, request.amount, "repayment", "repay the whole debt")
+    account, asset = seen.account, seen.target.asset
+    if account.principal < 0:
+        # A full repayment replaces an allowance below the debt and clears what remains.
+        if request.amount is not None:
+            refuse_allowance(seen, request.amount, "repayment", "repay the whole debt")
+        return
+    nothing = f"nothing to repay: the wallet owes no {asset} in this Comet"
+    if not seen.allowance:
+        raise DataError("no_position", nothing)
+    if authorized and not account.principal:
+        return
+    held = account.supplied_base
+    after = f" after withdrawing the {held} base units supplied" if held else ""
+    raise DataError(
+        "no_position",
+        f"{nothing}; an allowance of {seen.allowance} base units of {asset} to this Comet"
+        f" remains, and `ax withdraw` on that asset revokes it{after}",
+    )
 
 
 REFUSALS = {
@@ -251,7 +262,9 @@ def intent(config, observed, request: ActionRequest):
     amount = request.amount
     if request.action in ("supply", "borrow") and amount is None:
         raise ValueError(f"{request.action} requires --amount")
-    REFUSALS[request.action](requested(observed), request)
+    # Whether the requested position carries borrow and repay authority.
+    authorized = config.allocation(ALLOCATION).borrow
+    REFUSALS[request.action](requested(observed), request, authorized)
     if request.action in ("supply", "borrow"):
         return getattr(config, request.action)(ALLOCATION, amount)
     if amount is None:

@@ -230,18 +230,18 @@ def assert_part_withdrawn(desk, venue):
         desk("withdraw", venue.base, 2 * BASE_AMOUNT, execute=True)
 
 
-def stopped_after_the_first_send(desk, venue, monkeypatch, capsys):
-    """Run a supply that is interrupted while its approval waits for a receipt."""
+def interrupted(command, kind, monkeypatch, capsys):
+    """Run a command that is interrupted while its step of `kind` waits for a receipt."""
     from almanak.operator_runtime import OperatorRuntime
 
     def stop(self, state):
-        if state.pending is not None:
+        if state.pending is not None and state.pending.operation.kind == kind:
             raise KeyboardInterrupt
 
     with monkeypatch.context() as patched:
         patched.setattr(OperatorRuntime, "wait", stop)
         with pytest.raises(KeyboardInterrupt):
-            desk("supply", venue.base, BASE_AMOUNT, execute=True)
+            command()
     events = [json.loads(line) for line in capsys.readouterr().err.splitlines() if "event" in line]
     (kept,) = [event for event in events if event.get("event") == "record_kept"]
     return Path(kept["path"])
@@ -250,7 +250,12 @@ def stopped_after_the_first_send(desk, venue, monkeypatch, capsys):
 def test_an_interrupted_supply_is_recovered_and_the_wallet_is_freed(
     desk, venue, monkeypatch, capsys
 ):
-    record = stopped_after_the_first_send(desk, venue, monkeypatch, capsys)
+    record = interrupted(
+        lambda: desk("supply", venue.base, BASE_AMOUNT, execute=True),
+        "approve",
+        monkeypatch,
+        capsys,
+    )
     assert_blocked(desk, venue, record)
     assert_recovered(desk.recover(record), record)
     # The approval stands. A supply of another amount cannot use it and says so; the
@@ -367,3 +372,24 @@ def assert_repaid(desk, venue):
     assert owned(closed) == (0, 0)
     with pytest.raises(DataError, match="nothing to repay"):
         desk("repay", venue.base, execute=False)
+
+
+@pytest.mark.parametrize("venue", ["ethereum"], indirect=True)
+def test_a_full_repayment_stopped_before_its_revocation_is_finished_by_repaying_again(
+    desk, venue, monkeypatch, capsys
+):
+    desk("supply", venue.collateral, COLLATERAL_AMOUNT, execute=True)
+    desk("borrow", venue.base, DEBT_AMOUNT, execute=True, floor=FLOOR)
+    # The repayment is mined, and the command stops before it signs the revocation.
+    record = interrupted(
+        lambda: desk("repay", venue.base, execute=True), "repay", monkeypatch, capsys
+    )
+    recovered = desk.recover(record)
+    assert (recovered["resolved"], steps_sent(recovered)) == (True, ["approve", "repay"])
+    # No debt is left, and the approval of the held balance stands: the same command
+    # plans the revocation alone.
+    cleared = desk("repay", venue.base, execute=True)
+    assert (steps(cleared), owned(cleared)) == ((["revoke"], True), (0, 0))
+    with pytest.raises(DataError, match="nothing to repay") as nothing:
+        desk("repay", venue.base, execute=False)
+    assert "allowance" not in str(nothing.value)

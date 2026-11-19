@@ -28,6 +28,7 @@ from almanak.connectors.compound_v3.reader import read_account, read_market
 from almanak.connectors.compound_v3.reporting import report
 from almanak.connectors.compound_v3.state import Checkpoint
 from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
+from almanak.connectors.pool_lending_direct import REPAY_FLOOR
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm import native_asset
 from almanak.models import Account, AssetAmount
@@ -103,6 +104,7 @@ class Deployment:
     def __init__(self, venue, address, asset=None, request=SUPPLY, **snapshot):
         self.wallet = Wallet(account="treasury", address=address)
         self.fund = Account(chain=venue.market.source.chain, address=address)
+        self.market = venue.market
         self.account = read_account(venue.reader, venue.market, self.fund)
         self.request = request
         resolved = SimpleNamespace(reserve=reserve(venue.market, asset))
@@ -181,6 +183,22 @@ class Deployment:
     def without_debt(self, principal=0, supplied_base=0):
         """The same wallet as if it owed nothing, with an optional base supply."""
         values = {"principal": principal, "supplied_base": supplied_base, "borrowed_base": 0}
+        self.account = self.account.model_copy(update=values)
+        return self
+
+    def holding(self, asset, balance):
+        """The same wallet with another balance of one listed collateral asset, in use
+        as collateral or, at zero, out of use."""
+        offset = next(c.offset for c in self.market.collaterals if c.asset_type == asset)
+        balances = list(self.account.collaterals)
+        balances[offset] = balances[offset].model_copy(update={"balance": balance})
+        bits = self.account.assets_in | (self.account.extended_assets_in << 16)
+        bits = bits | (1 << offset) if balance else bits & ~(1 << offset)
+        values = {
+            "collaterals": tuple(balances),
+            "assets_in": bits & 65535,
+            "extended_assets_in": bits >> 16,
+        }
         self.account = self.account.model_copy(update=values)
         return self
 
@@ -371,7 +389,7 @@ def test_a_repayment_takes_borrow_authority_and_no_floor_can_refuse_it():
     for deployment in (whole, part):
         # The lowest floor the connector accepts, on every leg.
         assert deployment.authority() == [True, False]
-        assert deployment.floors() == [10**18 + 1] * 2 == [direct.REPAY_FLOOR] * 2
+        assert deployment.floors() == [10**18 + 1] * 2 == [REPAY_FLOOR] * 2
     assert stated.floors() == [UNREACHABLE] * 2
     # The whole debt is repaid from an approval of the wallet's held balance.
     for deployment in (whole, stated):
@@ -399,6 +417,56 @@ def test_a_repayment_needs_debt_and_an_allowance_it_can_use():
     assert stale.planned(stale.intent("repay", AMOUNT)).kind == "repay"
     # A full repayment replaces an allowance below the debt.
     assert stale.planned().kind == "revoke"
+
+
+def test_a_repayment_with_no_debt_clears_the_allowance_one_left_behind():
+    with comet() as venue:
+        address = venue.addresses[BORROWER]
+        repay = ActionRequest("repay")
+        left = Deployment(venue, address, request=repay, allowance=AMOUNT).without_debt()
+        part = Deployment(venue, address, request=ActionRequest("repay", 7), allowance=AMOUNT)
+        clean = Deployment(venue, address, request=repay).without_debt()
+    # The wallet still holds its collateral, so the position carries repay authority.
+    assert left.authority() == [True, False]
+    step = left.planned()
+    assert (step.kind, step.target) == ("revoke", left.config.target(ALLOCATION))
+    assert part.without_debt().planned().kind == "revoke"
+    with pytest.raises(DataError, match="nothing to repay: the wallet owes no ") as nothing:
+        clean.intent()
+    assert "allowance" not in str(nothing.value)
+
+
+def test_a_repayment_that_cannot_clear_an_allowance_names_it_and_the_command_that_does():
+    repay = ActionRequest("repay")
+    with comet(funded=False) as venue:
+        exited = Deployment(venue, NOBODY, request=repay, allowance=AMOUNT)
+    with comet() as venue:
+        lender = Deployment(venue, venue.addresses[SUPPLIER], request=repay, allowance=AMOUNT)
+        both = Deployment(venue, venue.addresses[BORROWER], request=repay, allowance=AMOUNT)
+    asset = exited.config.target(ALLOCATION).asset
+    remains = (
+        f"nothing to repay: the wallet owes no {asset} in this Comet; an allowance of"
+        f" {AMOUNT} base units of {asset} to this Comet remains, and `ax withdraw` on"
+        " that asset revokes it"
+    )
+    # After a full exit no collateral position is left to grant repay authority beside.
+    assert exited.authority() == [False]
+    with pytest.raises(DataError) as refused:
+        exited.intent()
+    assert (refused.value.kind, str(refused.value)) == ("no_position", remains)
+    assert exited.planned(exited.intent("withdraw")).kind == "revoke"
+    # With base supplied the withdrawal takes the supply first, with or without the
+    # authority: a repayment there would never report itself complete.
+    supplied = lender.account.supplied_base
+    first = f" after withdrawing the {supplied} base units supplied"
+    with pytest.raises(DataError) as refused:
+        lender.intent()
+    assert str(refused.value) == remains + first
+    both.without_debt(principal=lender.account.principal, supplied_base=supplied)
+    assert both.authority() == [True, False]
+    with pytest.raises(DataError) as refused:
+        both.intent()
+    assert str(refused.value) == remains + first
 
 
 def test_a_supply_never_repays_and_a_base_withdrawal_never_borrows():
@@ -446,12 +514,55 @@ def test_collateral_leaves_a_wallet_in_debt_only_under_a_stated_floor():
     assert (step.kind, step.full, step.amount.amount) == ("withdraw", False, AMOUNT)
     with pytest.raises(DataError, match="below the configured minimum"):
         strict.planned()
-    # The whole collateral cannot leave while it backs the debt, whatever the floor.
+    # The wallet's only collateral cannot leave while it backs the debt, whatever
+    # the floor.
     with pytest.raises(DataError, match="collateral cannot cover the projected debt"):
         floored.planned(floored.intent("withdraw", None, FLOOR))
     with pytest.raises(DataError, match=f"has {10**18} base units of .* supplied") as beyond:
         floored.intent("withdraw", 10**18 + 1, FLOOR)
     assert "would borrow" not in str(beyond.value)
+
+
+def second_collateral(deployment):
+    """A listed collateral asset the retained borrower does not hold, with a price and a
+    liquidation factor, so that it counts toward health."""
+    held = held_collateral(deployment.account)
+    return next(
+        c.asset_type
+        for c in deployment.market.collaterals
+        if c.asset_type != held and c.price and c.liquidate_factor and c.total_supply > AMOUNT
+    )
+
+
+def test_one_of_two_collateral_assets_leaves_in_full_while_the_other_keeps_the_floor():
+    with comet() as venue:
+        address = venue.addresses[BORROWER]
+        loan = Deployment(venue, address)
+        held, other = held_collateral(loan.account), second_collateral(loan)
+        whole = ActionRequest("withdraw", None, FLOOR)
+        bare = Deployment(venue, address, other, request=ActionRequest("withdraw"))
+        floored = Deployment(venue, address, other, request=whole)
+        strict = Deployment(
+            venue, address, other, request=ActionRequest("withdraw", None, UNREACHABLE)
+        )
+    for deployment in (bare, floored, strict):
+        assert deployment.names() == [ALLOCATION, *map(direct.held_name, (loan_base(loan), held))]
+        deployment.holding(other, AMOUNT)
+    # The full withdrawal is projected like a partial one: the debt stays, and the
+    # collateral that remains is measured against the floor.
+    with pytest.raises(ValueError, match="debt in this Comet.*state --min-health-factor"):
+        bare.intent()
+    step = floored.planned()
+    assert (step.kind, step.full, step.amount.amount) == ("withdraw", True, AMOUNT)
+    with pytest.raises(DataError, match="below the configured minimum"):
+        strict.planned()
+    # With nothing left behind that covers the debt, no floor admits it.
+    with pytest.raises(DataError, match="collateral cannot cover the projected debt"):
+        floored.holding(held, 0).planned()
+
+
+def loan_base(deployment):
+    return deployment.market.source.base_asset
 
 
 def test_no_stated_floor_refuses_a_full_withdrawal_of_an_unencumbered_leg():
