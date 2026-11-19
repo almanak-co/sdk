@@ -217,15 +217,18 @@ class EvmGateway:
         from almanak.connectors.support import RunMode
         from almanak.connectors.target_routing import connector_for_target
         from almanak.gateway.environments import origin_chain
+        from almanak.operator_deployment import is_operator
 
         if operation.target.fund.chain != self.reader.chain:
             raise ValueError("operation belongs to a different execution route")
         mode = RunMode.PRODUCTION if self.config.production else RunMode.FORK
         source = origin_chain(self.config, self.reader.chain)
         profile = self.config.accounts.binding(operation.account).profile.kind
-        connector_for_target(operation.target).require_target(
-            source.chain_id, operation.target, mode, state.decision.intent.kind, profile
-        )
+        connector = connector_for_target(operation.target)
+        action = state.decision.intent.kind
+        connector.require_target(source.chain_id, operation.target, mode, action, profile)
+        if is_operator(state):
+            connector.support_for(source.chain_id).require_direct(action)
         self.connector.execution.validate_operation(self, state, operation, before)
 
     def prepare(self, state, intent, before, attempt_id):

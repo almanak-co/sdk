@@ -93,7 +93,13 @@ class OperatorRuntime(Runtime):
             time.sleep(self.poll)
 
     def submit(self, intent, request: str | None = None):
-        """Retain one operator request as the active decision, before any planning."""
+        """Retain one operator request as the active decision, before any planning.
+
+        `intent` is the intent itself, or a function of the checkpoint and the
+        observations the request is admitted with that returns it. An intent whose
+        bounds come from an observed quote is built that way, so the gateway checks
+        it against the same observations.
+        """
         state = self.recover()
         if state.mode == "closed":
             raise ValueError("deployment is closed")
@@ -101,6 +107,10 @@ class OperatorRuntime(Runtime):
             raise ValueError("an earlier operator request is unfinished; resume or discard it")
         if state.work:
             raise ValueError("multi-chain operator deployments are not supported")
+        observed = self.gateway.observe()
+        validate_observed_ownership(state, observed)
+        if callable(intent):
+            intent = intent(state, observed)
         increases = self.connector.lifecycle.increases_exposure(intent)
         if state.mode == "teardown" and increases:
             raise ValueError("teardown admits only operator requests that reduce exposure")
@@ -112,8 +122,6 @@ class OperatorRuntime(Runtime):
         event = OperatorEvent(started_at=self.clock(), request=request or uuid4().hex)
         if request_executed(state.outcomes, event):
             raise ValueError("operator request was already executed")
-        observed = self.gateway.observe()
-        validate_observed_ownership(state, observed)
         self.connector.codec.capability.admit(state.capabilities, intent)
         if intent.target != state.config.target(intent.target.allocation):
             raise ValueError("operator request names an unbound position")

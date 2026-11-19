@@ -149,6 +149,20 @@ def test_supply_withdraw_and_close_without_a_strategy(desk, recorded):
     ]
 
 
+def test_a_request_may_be_built_from_the_observations_it_is_admitted_with(desk):
+    runtime = desk.runtime()
+    seen = []
+
+    def build(state, observed):
+        seen.append((state.decision, tuple(item.allocation for item in observed)))
+        return desk.intent("supply")
+
+    record = runtime.submit(build, REQUEST)
+    assert record.intent == desk.intent("supply")
+    # Built once, before admission, against the observations the record retains.
+    assert seen == [(None, tuple(item.allocation for item in record.observations))]
+
+
 def test_declined_preview_leaves_no_effect(desk):
     runtime = desk.runtime()
     runtime.submit(desk.intent("supply"), REQUEST)

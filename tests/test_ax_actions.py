@@ -12,7 +12,9 @@ import pytest
 
 from almanak import ax_actions, operator_runtime
 from almanak.cli_arguments import build_parser, parse_validated
+from almanak.connectors.aave_v4 import direct as aave_direct
 from almanak.connectors.aave_v4.lifecycle import adopt_ownership, commit_ownership
+from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
 from almanak.gateway.credentials import create_wallet
 from almanak.gateway.providers import AlchemyProvider
 from almanak.operator_deployment import adopts
@@ -49,7 +51,7 @@ def state_home(tmp_path, monkeypatch):
 @pytest.fixture
 def desk(tmp_path, recorded, monkeypatch):
     desk = Desk(tmp_path, recorded)
-    monkeypatch.setattr(ax_actions, "ALLOCATION", recorded.config.allocations[0].name)
+    monkeypatch.setattr(aave_direct, "ALLOCATION", recorded.config.allocations[0].name)
 
     def coordinator(*, gateway, create):
         runtime = desk.runtime()
@@ -66,7 +68,7 @@ def parse(*arguments):
 
 def test_preview_plans_the_first_step_and_signs_nothing(desk):
     amount = desk.intent("supply").amount.amount
-    result = ax_actions.perform(desk.service, "supply", amount, execute=False)
+    result = ax_actions.perform(desk.service, ActionRequest("supply", amount), execute=False)
     assert result["executed"] is False and "outcomes" not in result
     assert result["first_step"]["operation"]["kind"] == "approve"
     assert result["position_before"] == {"supplied_shares": "0", "debt_shares": "0"}
@@ -75,26 +77,30 @@ def test_preview_plans_the_first_step_and_signs_nothing(desk):
 
 def test_execute_runs_the_action_and_reports_the_position(desk):
     amount = desk.intent("supply").amount.amount
-    supplied = ax_actions.perform(desk.service, "supply", amount, execute=True)
+    supplied = ax_actions.perform(desk.service, ActionRequest("supply", amount), execute=True)
     assert [item["operation"] for item in supplied["outcomes"]] == ["approve", "supply"]
     assert all(item["success"] and item["transaction"] for item in supplied["outcomes"])
     assert supplied["executed"] and supplied["completed"] and "refused" not in supplied
     shares = desk.gateway.outcome("supply").shares
     assert supplied["position_after"]["supplied_shares"] == str(shares)
 
-    withdrawn = ax_actions.perform(desk.service, "withdraw", None, execute=True)
+    withdrawn = ax_actions.perform(desk.service, ActionRequest("withdraw"), execute=True)
     assert withdrawn["position_before"]["supplied_shares"] == str(shares)
     assert withdrawn["position_after"]["supplied_shares"] == "0"
 
 
 def test_an_action_states_its_amount_exactly_once(recorded, monkeypatch):
-    monkeypatch.setattr(ax_actions, "ALLOCATION", recorded.config.allocations[0].name)
-    assert ax_actions.intent(recorded.config, "withdraw", None).kind == "withdraw"
-    assert ax_actions.intent(recorded.config, "supply", 7).amount.amount == 7
+    monkeypatch.setattr(aave_direct, "ALLOCATION", recorded.config.allocations[0].name)
+
+    def intent(action, amount=None):
+        return aave_direct.intent(recorded.config, (), ActionRequest(action, amount))
+
+    assert intent("withdraw").kind == "withdraw"
+    assert intent("supply", 7).amount.amount == 7
     with pytest.raises(ValueError, match="requires --amount"):
-        ax_actions.intent(recorded.config, "supply", None)
+        intent("supply")
     with pytest.raises(ValueError, match="takes no --amount"):
-        ax_actions.intent(recorded.config, "withdraw", 7)
+        intent("withdraw", 7)
 
 
 def test_adoption_takes_ownership_from_the_observed_position(recorded):
@@ -126,18 +132,23 @@ def test_the_configuration_binds_one_wallet_one_market_and_explicit_fee_ceilings
     )
     document = json.loads(mainnet.model_dump_json().replace("eip155:31337", "eip155:1"))
     reserve = type(reserve).model_validate_json(json.dumps(document))
-    config = ax_actions.lending_config(
-        reserve,
-        {"account": "treasury", "address": "0x" + "Ab" * 20},
+    wallet = Wallet(account="treasury", address="0x" + "ab" * 20)
+    positions = aave_direct.positions(
+        None, None, SimpleNamespace(reserve=reserve), wallet, ActionRequest("supply", 1)
+    )
+    config = ax_actions.configuration(
+        "aave_v4",
+        positions,
+        wallet,
         ax_actions.alchemy(reserve.chain.chain_id),
-        max_gas_price_wei=5,
-        max_transaction_fee=9,
+        reserve.chain,
+        ax_actions.FeeLimits(max_gas_price_wei=5, max_transaction_fee=9),
     )
     binding = config.accounts.bindings[0]
     # The binding carries the keystore entry's own name, so any wallet's keystore loads.
     assert binding.name == "treasury" and binding.profile.kind == "eoa"
     assert binding.profile.fund.address == "0x" + "ab" * 20
-    assert config.target(ax_actions.ALLOCATION).reserve == reserve
+    assert config.target(ALLOCATION).reserve == reserve
     policy = config.production.policy("treasury")
     assert (policy.max_gas_price_wei, policy.max_transaction_fee.amount) == (5, 9)
     assert policy.total_budget is None
@@ -237,18 +248,20 @@ def records(state_home):
 def test_the_private_record_is_removed_when_nothing_is_in_flight(monkeypatch, stored, state_home):
     seen = {}
 
-    def perform(service, action, amount, *, execute, create, interrupt):
+    def perform(service, request, *, execute, create, interrupt):
         seen.update(service.options, create=create, records=len(records(state_home)))
-        return {"action": action}
+        return {"action": request.action}
 
     monkeypatch.setattr(ax_actions, "perform", perform)
-    assert ax_actions.run("config", None, "withdraw", None, execute=False) == {"action": "withdraw"}
+    assert ax_actions.run("config", None, ActionRequest("withdraw"), execute=False) == {
+        "action": "withdraw"
+    }
     assert seen == {"lease_seconds": 30, "operator_actions": True, "create": "config", "records": 1}
     assert records(state_home) == []
 
     monkeypatch.setattr(ax_actions, "perform", lambda *a, **k: (_ for _ in ()).throw(ValueError))
     with pytest.raises(ValueError):
-        ax_actions.run("config", None, "withdraw", None, execute=True)
+        ax_actions.run("config", None, ActionRequest("withdraw"), execute=True)
     assert records(state_home) == []
 
 
@@ -258,7 +271,7 @@ def test_a_service_that_cannot_start_leaves_no_record(monkeypatch, state_home):
 
     monkeypatch.setattr("almanak.gateway.service.GatewayService", refuse)
     with pytest.raises(ValueError, match="refused"):
-        ax_actions.run("config", None, "withdraw", None, execute=False)
+        ax_actions.run("config", None, ActionRequest("withdraw"), execute=False)
     assert records(state_home) == []
 
 
@@ -268,7 +281,7 @@ def test_a_signed_step_in_flight_keeps_its_record(monkeypatch, stored, state_hom
     monkeypatch.setattr(stored, "pending", pending)
     monkeypatch.setattr(ax_actions, "perform", lambda *a, **k: (_ for _ in ()).throw(OSError))
     with pytest.raises(OSError):
-        ax_actions.run("config", None, "supply", 5, execute=True)
+        ax_actions.run("config", None, ActionRequest("supply", 5), execute=True)
     (record,) = records(state_home)
     streams = capsys.readouterr()
     # Standard output stays free for the one result document.
@@ -281,7 +294,7 @@ def test_a_result_returned_with_a_signed_step_pending_keeps_its_record(
 ):
     monkeypatch.setattr(stored, "pending", object())
     monkeypatch.setattr(ax_actions, "perform", lambda *a, **k: {"completed": False})
-    result = ax_actions.run("config", None, "supply", 5, execute=True)
+    result = ax_actions.run("config", None, ActionRequest("supply", 5), execute=True)
     (record,) = records(state_home)
     # A returned result names the kept record itself, as one document.
     assert result == {"completed": False, "record_kept": str(record)}
@@ -385,7 +398,7 @@ def test_a_fee_refusal_on_a_later_step_still_reports_the_steps_sent(desk):
 
     desk.gateway.prepare = priced_out
     amount = desk.intent("supply").amount.amount
-    result = ax_actions.perform(desk.service, "supply", amount, execute=True)
+    result = ax_actions.perform(desk.service, ActionRequest("supply", amount), execute=True)
     assert [item["operation"] for item in result["outcomes"]] == ["approve"]
     assert result["outcomes"][0]["transaction"]
     assert result["executed"] and not result["completed"]
@@ -406,7 +419,7 @@ def test_an_unexpected_failure_reports_the_steps_already_sent(desk, capsys):
     desk.gateway.prepare = broken
     amount = desk.intent("supply").amount.amount
     with pytest.raises(OSError):
-        ax_actions.perform(desk.service, "supply", amount, execute=True)
+        ax_actions.perform(desk.service, ActionRequest("supply", amount), execute=True)
     event = json.loads(capsys.readouterr().err)
     assert event["event"] == "steps_sent"
     assert [item["operation"] for item in event["outcomes"]] == ["approve"]
@@ -462,6 +475,7 @@ def test_exit_status_follows_completion_only_when_executing(
     monkeypatch, capsys, execute, completed, status
 ):
     monkeypatch.setattr("almanak.ax.lending_request", lambda args: SimpleNamespace(chain="c"))
+    monkeypatch.setattr("almanak.connectors.direct.require_direct", lambda *a: None)
     monkeypatch.setattr(ax_actions, "read_wallet", lambda directory: {})
     monkeypatch.setattr(ax_actions, "transport", lambda args, chain: (None, "endpoint"))
     monkeypatch.setattr(ax_actions, "action_config", lambda *a: "config")
@@ -470,7 +484,12 @@ def test_exit_status_follows_completion_only_when_executing(
     result = {"executed": execute} if completed is None else {"completed": completed}
     monkeypatch.setattr(ax_actions, "run", lambda *a, **k: result)
     args = SimpleNamespace(
-        wallet=None, env_file=None, ax_command="supply", amount=1, execute=execute
+        wallet=None,
+        env_file=None,
+        connector="aave_v4",
+        ax_command="supply",
+        amount=1,
+        execute=execute,
     )
     assert ax_actions.command(args) == status
     assert json.loads(capsys.readouterr().out) == result
@@ -533,12 +552,12 @@ def test_a_signal_after_the_last_check_does_not_discard_the_result(monkeypatch, 
     import os
     import signal
 
-    def perform(service, action, amount, **options):
+    def perform(service, request, **options):
         os.kill(os.getpid(), signal.SIGTERM)
-        return {"action": action, "completed": True}
+        return {"action": request.action, "completed": True}
 
     monkeypatch.setattr(ax_actions, "perform", perform)
-    result = ax_actions.run("config", None, "withdraw", None, execute=True)
+    result = ax_actions.run("config", None, ActionRequest("withdraw"), execute=True)
     assert result == {"action": "withdraw", "completed": True}
     assert records(state_home) == []
 
@@ -549,7 +568,7 @@ def test_a_signal_between_steps_stops_the_action_and_reports_its_kept_record(
     import os
     import signal
 
-    def perform(service, action, amount, *, interrupt, **options):
+    def perform(service, request, *, interrupt, **options):
         os.kill(os.getpid(), signal.SIGTERM)
         interrupt()
         raise AssertionError("the check did not stop the action")
@@ -562,7 +581,7 @@ def test_a_signal_between_steps_stops_the_action_and_reports_its_kept_record(
     monkeypatch.setattr(stored, "load", inspected)
     monkeypatch.setattr(ax_actions, "perform", perform)
     with pytest.raises(ax_actions.Terminated):
-        ax_actions.run("config", None, "supply", 5, execute=True)
+        ax_actions.run("config", None, ActionRequest("supply", 5), execute=True)
     (record,) = records(state_home)
     streams = capsys.readouterr()
     # Standard output stays free for the one result document.
@@ -692,7 +711,9 @@ def test_a_new_record_is_never_visible_to_a_sweep_before_it_is_locked(state_home
 def test_a_signed_step_without_an_outcome_is_reported_as_unresolved(recorded, capsys):
     (approve,) = outcomes_of(recorded, "approve")
     pending = SimpleNamespace(operation=SimpleNamespace(kind="supply"), tx_hash="0xabc")
-    state = SimpleNamespace(owned=recorded.owned, outcomes=(approve,), pending=pending)
+    state = SimpleNamespace(
+        config=recorded.config, owned=recorded.owned, outcomes=(approve,), pending=pending
+    )
     expected = {"operation": "supply", "transaction": "0xabc"}
     result = ax_actions.executed_result(state, [approve], None)
     # It is not an outcome: nothing says yet whether it was mined.

@@ -53,12 +53,14 @@ def matrix(support):
 def connector_section(name, rows):
     lines = [f"## {name}", ""]
     lines.append(
-        "| Chain | Modes | Actions | Account profiles | Restrictions | Backtest models | Variants |"
+        "| Chain | Modes | Actions | Direct actions | Account profiles | Restrictions"
+        " | Backtest models | Variants |"
     )
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for row in sorted(rows, key=lambda r: r["chain"]):
         lines.append(
             f"| `{row['chain']}` | {joined(row['modes'])} | {joined(row['actions'])} | "
+            f"{joined(row.get('direct_actions', []))} | "
             f"{joined(row['account_profiles'])} | {joined(row['restrictions'])} | "
             f"{historical_cell(row.get('historical', []))} | {joined(row.get('variants', []))} |"
         )

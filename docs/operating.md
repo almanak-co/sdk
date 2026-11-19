@@ -469,10 +469,12 @@ allowance remains, the withdrawal is followed by a revocation, and with nothing
 supplied the revocation is its only step.
 
 Each fee ceiling applies to one transaction, so a supply, or a withdrawal that also
-revokes, can spend up to twice `--max-transaction-fee`. The quoted gas price is
-twice the base fee plus the tip, so `--max-gas-price-wei` refuses a step once the
-base fee passes about half of it. The command also uses a gas limit of at most
-1,000,000 with a 25% buffer over the estimate, and reads no older than 120 seconds.
+revokes, can spend up to twice `--max-transaction-fee`. A step bids as an author's
+[gas policy](configuration.md) defaults on the chain: the quoted gas price is twice
+the base fee plus the tip, or 1.25 times the base fee plus the tip on Arbitrum and
+Robinhood Chain, so `--max-gas-price-wei` refuses a step once the base fee passes
+that share of it. The gas limit is the estimate with a 25% buffer and at most
+`--max-gas-limit`, 1,200,000 unless stated. Reads are no older than 120 seconds.
 
 | Option | Meaning |
 | --- | --- |
@@ -482,9 +484,13 @@ base fee passes about half of it. The command also uses a gas limit of at most
 | `--env-file` | The provider key (`ALCHEMY_API_KEY`). |
 | `--public-rpc` | A named public endpoint instead of `--env-file`. |
 | `--max-gas-price-wei`, `--max-transaction-fee` | Required ceilings; a step quoted above either is refused. |
+| `--max-gas-limit` | Optional gas limit ceiling per step; a step whose buffered estimate is above it is refused. |
 
-Operator actions support Aave V4 with an EOA wallet. Safe/Roles accounts are not
-supported.
+Each connector declares the actions it serves directly, and `almanak support` lists
+them per chain as `direct_actions`. A command for a connector, chain or action that
+is not declared is refused before any read, and the gateway refuses the same request
+again when it plans. Operator actions run for an EOA wallet; Safe/Roles accounts are
+not supported. Aave V4 serves supply and full withdrawal.
 
 The action runs through the same planning, simulation, signing and receipt
 reconciliation as a strategy's, as an operator deployment that exists only for the

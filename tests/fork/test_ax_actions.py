@@ -6,14 +6,17 @@ planning, signing and reconciliation. It is rehearsal evidence, not a mainnet ru
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 from eth_account import Account as Signer
 from eth_utils import to_checksum_address
 
 from almanak import ax_actions
+from almanak.connectors.aave_v4 import direct
 from almanak.connectors.aave_v4.domain import AaveReserve
 from almanak.connectors.aave_v4.fork import ForkConfig
+from almanak.connectors.direct import ActionRequest, Wallet
 from almanak.gateway.credentials import write_private
 from almanak.gateway.evm import erc20_address
 from almanak.gateway.fork_fixture import Fork
@@ -73,7 +76,7 @@ def backend(fork, config, wallet, identity):
 def act(fork, config, wallet, identity, action, amount=None, *, execute):
     gateway = backend(fork, config, wallet, identity)
     try:
-        return ax_actions.run(config, gateway, action, amount, execute=execute)
+        return ax_actions.run(config, gateway, ActionRequest(action, amount), execute=execute)
     finally:
         gateway.close()
 
@@ -89,12 +92,15 @@ def setting(fork, tmp_path, monkeypatch):
     )
     wallet = funded_wallet(fork, reserve, tmp_path / "wallet")
     identity = as_mainnet(fork)
-    config = ax_actions.lending_config(
-        reserve,
-        wallet,
+    account = Wallet(account=wallet["account"], address=wallet["address"].lower())
+    resolved = SimpleNamespace(reserve=reserve)
+    config = ax_actions.configuration(
+        "aave_v4",
+        direct.positions(None, None, resolved, account, ActionRequest("supply", AMOUNT)),
+        account,
         ax_actions.alchemy(origin.chain_id),
-        max_gas_price_wei=500 * 10**9,
-        max_transaction_fee=10**17,
+        origin,
+        ax_actions.FeeLimits(max_gas_price_wei=500 * 10**9, max_transaction_fee=10**17),
     )
 
     def perform(action, amount=None, *, execute):

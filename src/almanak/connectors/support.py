@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from almanak.caip import ChainId
 from almanak.connectors.identifiers import ProtocolVariant
@@ -90,6 +90,10 @@ class ConnectorChainSupport(Model):
     restrictions: tuple[str, ...]
     historical: tuple[HistoricalSupport, ...] = ()
     variants: tuple[ProtocolVariant, ...] = ()
+    # Actions `almanak ax` runs as direct operator commands on this chain: production,
+    # for an EOA wallet, without a strategy. The gateway admits an operator request
+    # only for an action listed here.
+    direct_actions: tuple[EconomicAction, ...] = Field(default=(), exclude_if=lambda v: not v)
 
     @model_validator(mode="after")
     def consistent(self):
@@ -100,7 +104,18 @@ class ConnectorChainSupport(Model):
         if len(set(self.modes)) != len(self.modes) or len(set(self.actions)) != len(self.actions):
             raise ValueError("connector support entries must be unique")
         self.validate_variants()
+        self.validate_direct()
         return self
+
+    def validate_direct(self):
+        if not self.direct_actions:
+            return
+        if len(set(self.direct_actions)) != len(self.direct_actions):
+            raise ValueError("direct actions must be unique")
+        if set(self.direct_actions) - set(self.actions):
+            raise ValueError("a direct action must be a supported action")
+        if RunMode.PRODUCTION not in self.modes or "eoa" not in self.account_profiles:
+            raise ValueError("direct actions require production support for EOA accounts")
 
     def validate_variants(self):
         if len(set(self.variants)) != len(self.variants):
@@ -133,6 +148,11 @@ class ConnectorChainSupport(Model):
         if account_profile is not None and account_profile not in self.account_profiles:
             raise ValueError(f"account profile is unsupported on {self.chain}")
 
+    def require_direct(self, action):
+        """Refuse an operator request for an action this chain does not serve directly."""
+        if action not in self.direct_actions:
+            raise ValueError(f"{action} is unsupported as a direct action on {self.chain}")
+
 
 def declarations(
     actions: tuple[EconomicAction, ...],
@@ -140,6 +160,7 @@ def declarations(
     historical: dict[ChainId, tuple[HistoricalSupport, ...]],
     *,
     chains: tuple[ChainId, ...],
+    direct: tuple[EconomicAction, ...] = (),
 ) -> tuple[ConnectorChainSupport, ...]:
     if any(not isinstance(chain, ChainId) for chain in chains):
         raise ValueError("connector declarations require validated chain identities")
@@ -157,6 +178,7 @@ def declarations(
             account_profiles=("eoa", "safe_roles"),
             restrictions=restrictions,
             historical=historical.get(chain, ()),
+            direct_actions=direct,
         )
         for chain in chains
     )
@@ -202,6 +224,7 @@ def aave_support():
         ("verified V4 implementation", "local fund/Spoke collateral", "standard ERC-20 assets"),
         histories,
         chains=(ChainId("eip155:1"), ChainId("eip155:43114")),
+        direct=(EconomicAction.SUPPLY, EconomicAction.WITHDRAW),
     )
 
 

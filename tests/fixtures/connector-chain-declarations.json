@@ -484,6 +484,10 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "supply",
+    "withdraw"
+   ],
    "gas_lifecycle": {
     "lending": {
      "entry": 2,
@@ -553,6 +557,10 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "supply",
+    "withdraw"
+   ],
    "gas_lifecycle": {
     "lending": {
      "entry": 2,

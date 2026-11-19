@@ -291,9 +291,9 @@ independently.
 ## Connectors and support
 
 - Connectors advertise immutable, typed per-chain support for execution modes,
-  intents, account profiles and historical coverage. Runtime and gateway
-  enforce the same declaration. `almanak support` prints it. Provider
-  availability is a separate fact.
+  intents, account profiles, direct operator actions and historical coverage.
+  Runtime and gateway enforce the same declaration. `almanak support` prints it.
+  Provider availability is a separate fact.
 - A candidate deployment does not establish support. A supported pair needs a
   prepared offline backtest and an actual reference lifecycle proof for every
   advertised core intent.
@@ -362,6 +362,10 @@ independently.
   claim; it plans and signs nothing. Records live in durable local state; one
   with no signed step is removed, with its claim, by the next direct command.
   An unreadable record is kept.
+- A connector package that serves direct actions declares them in its
+  `direct.py`, and each chain's support lists them as `direct_actions`. Every
+  other installed connector is named with its reason. Accepted: GMX V2 and
+  Hyperliquid serve no direct action.
 - Operator actions have no amount ceiling or cumulative budget; the required
   fee ceilings and the wallet balance bound them. An operator-managed action
   policy is proposed, not accepted.

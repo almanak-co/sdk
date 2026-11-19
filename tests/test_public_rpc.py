@@ -210,12 +210,19 @@ def test_a_preview_configuration_records_the_public_provider_it_used(recorded):
     reserve = recorded.config.allocations[0].reserve
     document = json.loads(reserve.model_dump_json().replace("eip155:31337", "eip155:1"))
     document["chain"]["environment"] = "mainnet"
-    config = ax_actions.lending_config(
-        type(reserve).model_validate_json(json.dumps(document)),
-        {"account": "wallet", "address": "0x" + "ab" * 20},
+    from almanak.connectors.aave_v4 import direct
+    from almanak.connectors.direct import ActionRequest, Wallet
+
+    reserve = type(reserve).model_validate_json(json.dumps(document))
+    wallet = Wallet(account="wallet", address="0x" + "ab" * 20)
+    resolved = SimpleNamespace(reserve=reserve)
+    config = ax_actions.configuration(
+        "aave_v4",
+        direct.positions(None, None, resolved, wallet, ActionRequest("supply", 1)),
+        wallet,
         PublicProvider(kind="public_rpc", name="publicnode"),
-        max_gas_price_wei=5,
-        max_transaction_fee=9,
+        reserve.chain,
+        ax_actions.FeeLimits(max_gas_price_wei=5, max_transaction_fee=9),
     )
     provider = config.production.networks[0].provider
     assert provider == PublicProvider(kind="public_rpc", name="publicnode")
@@ -286,6 +293,7 @@ def test_a_preview_on_a_public_endpoint_proves_the_endpoint_before_resolving(mon
     )
     args = SimpleNamespace(public_rpc="publicnode", connector="aave_v4")
     request = SimpleNamespace(chain=ETHEREUM)
+    wallet = {"account": "wallet", "address": "0x" + "ab" * 20}
     with pytest.raises(DataError, match="500 seconds old"):
-        ax_actions.action_config(args, request, {}, None, "https://public.example")
+        ax_actions.action_config(args, request, None, wallet, None, "https://public.example")
     assert steps == [("open", "https://public.example"), "chain", "public", "closed"]
