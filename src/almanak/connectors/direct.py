@@ -86,7 +86,6 @@ class DirectActions:
 
 # Installed connectors `ax` runs no direct action for, and why.
 NOT_DIRECT: dict[str, str] = {
-    "aerodrome": "direct actions are not implemented for this connector",
     "gmx_v2": "a GMX request settles through keepers after its transaction is mined, "
     "and cancelling one needs a new signature; a direct command is one process that "
     "ends with its last receipt",

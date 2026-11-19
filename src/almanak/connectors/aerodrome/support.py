@@ -46,6 +46,10 @@ def candidate_support():
 
 PROMOTED_START = datetime(2026, 9, 7, 11, 0, tzinfo=UTC)
 PROMOTED_MODES = (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST)
+# The production cell serves `almanak ax swap` as a direct operator action, in stable
+# and in volatile pools; each has a fork rehearsal of the whole command
+# (tests/fork/test_ax_swap_aerodrome.py).
+DIRECT_ACTIONS = (EconomicAction.SWAP,)
 PRODUCTION_RESTRICTIONS = (
     "configured verified Aerodrome factory, clone, router and fee contracts",
     "fungible pool shares and separate account-wide fee claims",
@@ -71,6 +75,7 @@ def verified_support():
                     ),
                 ),
                 "restrictions": PRODUCTION_RESTRICTIONS + op_fee_restrictions(candidate.chain),
+                "direct_actions": DIRECT_ACTIONS,
             }
         )
         for candidate in candidate_support()
