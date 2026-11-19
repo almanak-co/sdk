@@ -207,11 +207,11 @@ def test_the_connector_supports_operator_deployments_and_serves_the_swap():
     assert len(production) == 8
     for cell in production:
         assert [str(action) for action in cell.direct_actions] == ["swap_exact_input"]
-        direct.require_direct(CONNECTOR, cell.chain, "swap")
+        direct.require_direct(CONNECTOR, cell.chain, direct.ActionRequest("swap", 5))
         with pytest.raises(ValueError, match="unsupported as a direct action"):
             cell.require_direct("exit_exchange")
     with pytest.raises(ValueError, match="uniswap_v4 serves no direct swap on eip155:31337"):
-        direct.require_direct(CONNECTOR, ChainId("eip155:31337"), "swap")
+        direct.require_direct(CONNECTOR, ChainId("eip155:31337"), direct.ActionRequest("swap", 5))
 
 
 def test_a_candidate_cell_serves_no_direct_action():
