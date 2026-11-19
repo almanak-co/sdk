@@ -18,9 +18,15 @@ later swap of the same amount spends it. An allowance the wallet gave the router
 the other currency or for the pool's shares is never changed, and is listed.
 
 A trading allocation owns no pool shares. A wallet that holds shares or stored fee
-claims of the pool is refused when the deployment first observes it, before anything
-is planned, because those claims are account-wide and cannot be kept apart from the
-deployment. Shares that sit in the pool's own balance do not matter to a swap.
+claims of the pool is refused whenever the deployment observes it before a step is
+sent: those claims are account-wide and cannot be kept apart from the deployment.
+Nothing is then planned, signed or sent. A step that was already signed and not yet
+sent stays recorded, and `almanak ax recover` refuses to send it for as long as the
+wallet holds the shares. Shares that reach the wallet once a step is sent cannot stop
+it. The step is reconciled from its own effects, and its outcome lists the shares as
+an accounting issue; they are never attributed to the deployment, and the wallet's
+next command is refused until they are gone. Shares that sit in the pool's own balance
+do not matter to a swap.
 
 The heavy imports stay inside the functions: the command line imports each connector's
 `direct` module to build its choices.

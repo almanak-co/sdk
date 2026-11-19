@@ -138,7 +138,17 @@ def operator_config(market, **stated):
 
 
 def observation(
-    config, owned, market, *, wallet=5000, allowance=0, shares_allowance=0, deposited=0, **more
+    config,
+    owned,
+    market,
+    *,
+    wallet=5000,
+    received=0,
+    native=10**18,
+    allowance=0,
+    shares_allowance=0,
+    deposited=0,
+    **more,
 ):
     """An on-chain observation of the deployment's one position at the resolved block."""
     target = config.target(ALLOCATION)
@@ -166,12 +176,12 @@ def observation(
         pool=pool,
         owned=owned,
         wallet0=AssetAmount(asset=target.assets[0], amount=wallet),
-        wallet1=AssetAmount(asset=target.assets[1], amount=0),
+        wallet1=AssetAmount(asset=target.assets[1], amount=received),
         allowances=tuple(
             {"asset": asset, "spender": target.contracts.router, "amount": granted.get(asset, 0)}
             for asset in (*target.assets, target.pool.shares_asset)
         ),
-        native_balance=AssetAmount(asset=evm_network(BASE).native_asset, amount=10**18),
+        native_balance=AssetAmount(asset=evm_network(BASE).native_asset, amount=native),
         payer=target.fund,
         position=None,
         **more,
@@ -430,6 +440,164 @@ def test_a_wallet_holding_pool_shares_or_fee_claims_is_refused_when_observed(var
     assert isinstance(position, Position) and position.shares.amount == 1
     with pytest.raises(ValueError, match="require the configured pool's liquidity authority"):
         Snapshot.model_validate({**seen.model_dump(), "position": position.model_dump()})
+
+
+def test_holdings_at_the_block_of_a_mined_step_are_left_out_of_a_trading_observation(variant):
+    market = resolved(variant)
+    config = operator_config(market)
+    target = config.target(ALLOCATION)
+    seen = observation(config, created(config).owned[0], market)
+    # Nothing the fund holds there can undo the step: the observation carries no
+    # position, and the holding is reported by reconciliation instead.
+    for held in (Holdings(), Holdings(shares=1), Holdings(claimable=1)):
+        assert observations.position(held, target, seen.pool, mined=True) is None
+    # An allocation with liquidity authority reads its position at every block.
+    liquid = configuration(allocation_document(market, liquidity_enabled=True), market)
+    for mined in (False, True):
+        position = observations.position(
+            Holdings(shares=1), liquid.target(ALLOCATION), seen.pool, mined=mined
+        )
+        assert position.shares.amount == 1
+
+
+def trading_steps(variant):
+    """The approval and the swap of one admitted request, with the observations before them."""
+    market, config, state, seen = admitted(variant)
+    intent = direct.binding(CONNECTOR).intent(config, (seen,), request(market))
+    target = config.target(ALLOCATION)
+    approval = ops.Approval(
+        target=target, asset=intent.amount.asset, spender=target.contracts.router, amount=AMOUNT
+    )
+    swap = ops.Swap(
+        target=target, amount=intent.amount, minimum=intent.minimum_output, deadline=intent.deadline
+    )
+    approved = observation(config, state.owned[0], market, allowance=AMOUNT)
+    return market, config, ((approval, seen), (swap, approved))
+
+
+def test_shares_on_a_trading_fund_never_change_what_its_mined_step_did(variant):
+    market, config, steps = trading_steps(variant)
+    target = config.target(ALLOCATION)
+    spent = Effects(delta0=-AMOUNT, delta1=QUOTED)
+    for holdings in (Holdings(shares=1), Holdings(claimable=1)):
+        held = observations.stored_position(holdings, target, steps[0][1].pool)
+        for operation, before in steps:
+            for success in (True, False):
+                # No position is attributed, whether the step succeeded or reverted.
+                assert (
+                    reconciliation.retained_position(
+                        before, operation, spent, held, before.pool, success
+                    )
+                    is None
+                )
+        (issue,) = reconciliation.unowned_holdings(target, held)
+        assert issue == (
+            f"{target.pool.shares_asset}: fund holds LP shares or fee claims that a "
+            "trading-only allocation does not own"
+        )
+    empty = observations.stored_position(Holdings(), target, steps[0][1].pool)
+    assert reconciliation.unowned_holdings(target, empty) == ()
+
+
+def test_an_allocation_with_liquidity_authority_still_refuses_a_changed_checkpoint(variant):
+    market = resolved(variant)
+    liquid = configuration(allocation_document(market, liquidity_enabled=True), market)
+    target = liquid.target(ALLOCATION)
+    state = created(liquid)
+    seen = observation(liquid, state.owned[0], market)
+    held = observations.stored_position(Holdings(shares=1), target, seen.pool)
+    approval = ops.Approval(
+        target=target, asset=target.assets[0], spender=target.contracts.router, amount=AMOUNT
+    )
+    # Its shares are owned, so shares no step explains cannot be told from its own.
+    with pytest.raises(DataError, match="unrelated operation changed the fund LP checkpoint"):
+        reconciliation.retained_position(
+            seen, approval, Effects(delta0=0, delta1=0), held, seen.pool, True
+        )
+    assert reconciliation.unowned_holdings(target, held) == ()
+
+
+def reconciled(variant, monkeypatch, holdings, *, status="0x1"):
+    """Reconcile a mined swap whose receipt block shows `holdings` on the fund.
+
+    The chain reads are replaced by what they would return for an exact swap of the
+    stated amount; the composition under test is the connector's own.
+    """
+    market, config, steps = trading_steps(variant)
+    swap, approved = steps[1]
+    success = status == "0x1"
+    spent = Effects(delta0=-AMOUNT, delta1=QUOTED) if success else Effects(delta0=0, delta1=0)
+    gas = AssetAmount(asset=evm_network(BASE).native_asset, amount=21)
+    asked = {}
+
+    def snapshot(backend, name, block, owned, **options):
+        asked.update(options)
+        return observation(
+            config,
+            owned,
+            market,
+            wallet=5000 + spent.delta0,
+            received=spent.delta1,
+            native=10**18 - gas.amount,
+            allowance=0 if success else AMOUNT,
+        )
+
+    monkeypatch.setattr(reconciliation, "read_pool", lambda *read: approved.pool)
+    monkeypatch.setattr(reconciliation, "movement", lambda *read: spent)
+    monkeypatch.setattr(
+        reconciliation,
+        "stored_position",
+        lambda reader, target, pool: observations.stored_position(holdings, target, pool),
+    )
+    monkeypatch.setattr(reconciliation, "snapshot", snapshot)
+    monkeypatch.setattr(reconciliation, "charged_fees", lambda *read: (gas, None))
+    monkeypatch.setattr(
+        "almanak.connectors.aerodrome.state.Outcome", lambda **fields: SimpleNamespace(**fields)
+    )
+    pending = SimpleNamespace(
+        operation=swap,
+        before=approved,
+        decision=SimpleNamespace(intent=SimpleNamespace(kind="swap_exact_input")),
+        tx_hash="0x" + "ab" * 32,
+        nonce=3,
+        call=None,
+        execution=None,
+    )
+    backend = SimpleNamespace(reader=None, config=config)
+    outcome = reconciliation.reconcile(backend, pending, {"status": status}, market.block)
+    return config.target(ALLOCATION), outcome, asked
+
+
+def test_a_mined_swap_is_reconciled_from_its_own_effects_with_the_shares_reported(
+    variant, monkeypatch
+):
+    target, outcome, asked = reconciled(variant, monkeypatch, Holdings(shares=1))
+    held = {
+        str(v.asset): v.amount
+        for v in (outcome.after.owned.inventory0, outcome.after.owned.inventory1)
+    }
+    assert (outcome.success, outcome.delta0, outcome.delta1) == (True, -AMOUNT, QUOTED)
+    assert held == {str(target.assets[0]): 0, str(target.assets[1]): QUOTED}
+    # The shares are reported and never attributed: no position is owned or observed.
+    assert (outcome.after.owned.position, outcome.after.position) == (None, None)
+    assert outcome.accounting_issues == (
+        f"{target.pool.shares_asset}: fund holds LP shares or fee claims that a "
+        "trading-only allocation does not own",
+    )
+    # The observation after the step is read as the block of a mined step.
+    assert asked == {"quotes": False, "residual": False, "mined": True}
+
+
+def test_a_mined_swap_with_no_shares_on_the_fund_reports_no_issue(variant, monkeypatch):
+    _, outcome, _ = reconciled(variant, monkeypatch, Holdings())
+    assert (outcome.success, outcome.accounting_issues) == (True, ())
+
+
+def test_a_reverted_swap_keeps_its_inventory_and_still_reports_the_shares(variant, monkeypatch):
+    target, outcome, _ = reconciled(variant, monkeypatch, Holdings(shares=1), status="0x0")
+    assert (outcome.success, outcome.delta0, outcome.delta1) == (False, 0, 0)
+    assert outcome.after.owned.inventory0.amount == AMOUNT
+    assert len(outcome.accounting_issues) == 1 and outcome.after.owned.position is None
 
 
 def admitted(variant, **observed):
