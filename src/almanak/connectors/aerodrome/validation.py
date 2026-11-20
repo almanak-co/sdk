@@ -200,29 +200,56 @@ def validate_current(backend, plan, current):
 def retained(config, plan):
     """The ownership check a plan is held to at the current head.
 
-    Unsigned work, and every plan of a strategy's allocation, is held to the fund's
-    stored position. Signed bytes of an adopting allocation are not: they cannot be
-    recalled, a share anyone sends the fund would hold them back for good, and their
+    Unsigned work, and every plan of a strategy's liquidity allocation, is held to the
+    fund's stored position. Signed bytes of an adopting allocation are not: they cannot
+    be recalled, a share anyone sends the fund would hold them back for good, and their
     outcome is reconciled with the difference listed.
+
+    A trading allocation owns no position. Where its signed bytes are observed as
+    such (`sent_past_shares`), the observation carries none either
+    (`observations.position`), so the same check passes for it whatever shares the
+    fund was sent after the signature.
     """
     adopting = config.allocation(plan.operation.allocation).adopt is not None
     return validate_retained if adopting and is_signed(plan) else validate_owned
 
 
+def sent_past_shares(config, plan) -> bool:
+    """Whether a plan's bytes are sent whatever pool shares reached a trading fund.
+
+    Never before they are signed, and never for a transaction family, whose next fee
+    candidate is still to be signed. Once signed, an operator's step always is: the
+    operator asked for exactly that step, and its record keeps the wallet's claim until
+    the step resolves. A strategy's step is, unless it both increases exposure and
+    carries a protocol deadline, which is its entry swap. A strategy whose fund holds
+    shares can no longer observe, decide or tear down, so it takes no new exposure
+    then: the entry swap is held back while the fund holds the shares and is never
+    sent past them. Past its deadline it can only be released. Under a gas policy the
+    gateway reads the fund before it checks the deadline, so that release follows the
+    removal of the shares. Its approval or revocation carries no deadline to release
+    it by, and its exit swap lowers exposure, so those are sent.
+    """
+    if not is_signed(plan) or getattr(plan, "family", None) is not None:
+        return False
+    if plan.decision.trigger.kind == "operator":
+        return True
+    operation = plan.operation
+    return not (carries_deadline(operation) and increases_exposure(config, operation))
+
+
+def carries_deadline(operation) -> bool:
+    """Whether the operation's calldata carries a deadline the protocol enforces."""
+    return isinstance(operation, (ops.Swap, ops.Addition, ops.Removal))
+
+
 def expired(operation, block) -> bool:
     """True once the signed operation's protocol deadline has passed; it can then only revert."""
-    return (
-        isinstance(operation, (ops.Swap, ops.Addition, ops.Removal))
-        and operation.deadline < block.timestamp
-    )
+    return carries_deadline(operation) and operation.deadline < block.timestamp
 
 
 def deadline_reached(operation, block) -> bool:
     """Whether preparation or signing at this head is too late for the encoded deadline."""
-    return (
-        isinstance(operation, (ops.Swap, ops.Addition, ops.Removal))
-        and operation.deadline <= block.timestamp
-    )
+    return carries_deadline(operation) and operation.deadline <= block.timestamp
 
 
 def validate_current_intent(config, plan, current):

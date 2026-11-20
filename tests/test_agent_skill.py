@@ -969,6 +969,44 @@ def test_the_skill_says_what_the_chain_enforces_and_what_it_does_not():
     assert without - {"curve"} == set(FLOOR_RULES)
 
 
+def test_the_skill_says_what_a_swap_does_about_shares_sent_to_the_wallet():
+    """The two endings a swap has when LP shares reach the wallet while it runs, and
+    what the agent offers after: each is what the connector's code does and declares."""
+    from almanak.connectors.aerodrome import direct, observations, reconciliation
+    from almanak.connectors.composition import connector_from_wire
+    from almanak.connectors.support import EconomicAction
+
+    swaps = " ".join(section("Swaps").split())
+    for statement in (
+        "Anyone can send the wallet LP shares of an Aerodrome or Curve pool",
+        "A completed swap then lists them under `accounting_issues`",
+        "On Aerodrome a swap can also end after its approval, with `executed` true, "
+        "`completed` false and `refused.kind` `ownership`",
+        "nothing was sold, and `position_after.allowances` lists the allowance that stands",
+        "report the shares and any allowance",
+        "the wallet's next swap in that pool is refused while it holds them",
+        "`ax close-liquidity` burns the shares, if the user decides so; then offer "
+        "`ax revoke-exchange` for the allowance",
+    ):
+        assert statement in swaps, statement
+
+    def literals(module) -> str:
+        return " ".join(strings(ast.parse(Path(module.__file__).read_text())))
+
+    # The refusal is an ownership one, the issue names the shares, and the module that
+    # serves the swap says the approval is sent and the swap refused.
+    assert '"ownership"' in Path(observations.__file__).read_text()
+    assert "a trading-only allocation cannot own" in literals(observations)
+    assert "fund holds LP shares or fee claims" in literals(reconciliation)
+    assert "that approval sent and the swap itself refused" in " ".join(direct.__doc__.split())
+    # Both commands the agent offers are declared wherever the swap is.
+    offered = {EconomicAction.CLOSE_LIQUIDITY, EconomicAction.REVOKE}
+    for name in ("aerodrome", "curve"):
+        for cell in connector_from_wire({"connector": name}).chain_support:
+            if EconomicAction.SWAP in cell.direct_actions:
+                assert offered <= set(cell.direct_actions), (name, cell.chain)
+
+
 def test_a_command_that_ended_badly_is_never_repeated_and_never_killed():
     """After an interruption the agent looks before it acts, and recovery is not a
     licence to send an old transaction or one of another wallet."""
