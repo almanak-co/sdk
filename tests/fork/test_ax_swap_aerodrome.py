@@ -367,9 +367,8 @@ def assert_ended_at_the_approval(setting, result, start):
         "approve",
         True,
     )
-    assert str(shares(setting)[0]) in issue
-    assert "unresolved" not in result
-    assert "record_kept" not in result
+    left = {"unresolved", "record_kept"} & set(result)
+    assert (str(shares(setting)[0]) in issue, left) == (True, set())
     assert (setting.balances(), shares(setting)[1:]) == (start, (1, 0))
     assert result["position_after"]["allowances"] == left_to_router(setting)
 
