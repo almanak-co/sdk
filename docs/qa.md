@@ -300,6 +300,20 @@ Avalanche. There the reference supplies WAVAX, which the Pool holds above its
 supply cap, so the entry is refused with `supply_cap` and the direct actions
 supply WETH.e instead. Neither rehearsal is hosted Fork Qualification.
 
+Open gates of the Aave V3 cells, on top of the ones every cell shares:
+
+- No Aave V3 cell has a hosted Fork Qualification at Pool revision 12.
+- Avalanche (`eip155:43114`) declares production for `safe_roles`, and its
+  reference `aave_v3_avalanche_lending` cannot enter at any block since the
+  upgrade: the Pool caps WAVAX supply at 12,000,000 and holds about 15,300,000.
+  The cell has no Safe/Roles lifecycle at revision 12, local or hosted.
+- `test_safe_deployment_created_before_the_pool_upgrade_plans_nothing_after_it`
+  in `tests/fork/test_aave_v3_cleanup.py` holds what a Safe/Roles deployment
+  created at revision 11 does once its Pool runs revision 12: the gateway refuses
+  its teardown plan and the approval it held stays. The plain-account case beside
+it revokes and closes. See
+  [the authority check](operating.md#production).
+
 The `select` job summary lists each cell with its references. When a scheduled
 run fails, the `report` job opens the issue "Weekly Fork Qualification failed on
 main", or comments on it if it is open, naming the jobs that did not pass; the

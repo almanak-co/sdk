@@ -405,6 +405,16 @@ and no default role. Grants beyond the strategy's own, other members of its role
 and other roles of the operator are not detected; Safes are dedicated to one
 strategy. The authority check before every plan, signature and broadcast replays
 the previous check's block-pinned reads in batches at its own observation block.
+The manifest a deployment was created with is retained and records the code of
+each contract it covers: for Aave V3, the Pool, its implementation, the reserve
+tokens and the price sources. That check compares them with the chain, so when a
+protocol upgrade replaces one of them, every plan of that deployment is refused
+with `manifest contract identities differ from the supported profile`, an exit
+or a teardown as much as an entry, whether or not the installed grants still
+fit. Every Aave V3 Pool moved from revision 11 to revision 12 on 2026-11-11: a
+Safe/Roles deployment created before that is refused this way, and one created
+since is served. A plain-account deployment retains no manifest and
+continues across such an upgrade.
 Production advances on canonical mined receipts and audits recorded canonicality
 before further work. Invalidated history halts with pending evidence retained.
 
@@ -1003,6 +1013,7 @@ optional assertions. A deployment the connector has not reviewed is refused. An
 Aave V3 Pool is admitted by the code it runs: the Pool implementation of revision
 11 or revision 12 on its chain, by code hash, reporting that same revision, with
 the reserve's aToken and variable debt token implementations by code hash. A Pool
+pin admits its code on its own chain only. A Pool
 or token running other code is refused with `deployment_changed`. A
 reserve state read the protocol refuses at that block leaves `observation`
 null with `observation_error`, and the price sources are still reported.
