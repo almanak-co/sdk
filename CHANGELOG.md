@@ -8,6 +8,19 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Added
+- Each connector declares the direct operator actions it serves, and `almanak support`
+  lists them per chain as `direct_actions`. `ax supply` and `ax withdraw` take their
+  connector choices from these declarations, refuse an undeclared connector, chain or
+  action before any read, and the gateway admits and plans an operator request only
+  for a declared action.
+- `ax supply` and `ax withdraw` take an optional `--max-gas-limit`.
+
+### Changed
+- A direct action bids as an author's gas policy defaults on its chain: the observed
+  block's base fee on Avalanche, 1.25 times the base fee on Arbitrum and Robinhood
+  Chain, and a gas limit of at most 1,200,000 unless `--max-gas-limit` states another.
+
 ## [3.2.1] - 2026-11-19
 
 ### Changed

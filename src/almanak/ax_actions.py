@@ -7,6 +7,10 @@ process. Nothing outlives a finished command: the account's existing position is
 adopted from the chain at the start, and the next command reads it again. Only the
 record of a signed step that is still unresolved is kept.
 
+Each connector declares the actions it serves and how its own part of the deployment
+is built (`connectors/direct.py`); the chains that serve an action are the connector's
+support declaration.
+
 Without `--execute` the command plans the first step and signs nothing.
 """
 
@@ -20,6 +24,7 @@ import sys
 import tempfile
 import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from almanak import state as durable
@@ -27,12 +32,23 @@ from almanak.gateway.client import GatewayClient
 from almanak.gateway.ethereum import DataError
 from almanak.models import Model
 
+# Help text per action command; the connectors that serve each are declared in
+# `connectors/direct.py`.
 ACTIONS = {
     "supply": "supply an amount of the reserve asset from the wallet",
     "withdraw": "withdraw the whole supplied balance, including interest",
 }
-CONNECTORS = ("aave_v4",)
-ALLOCATION = "position"
+
+
+@dataclass(frozen=True)
+class FeeLimits:
+    """The ceilings an operator states for every step of one action."""
+
+    max_gas_price_wei: int
+    # Base units of the chain's native asset.
+    max_transaction_fee: int
+    # None takes the gas limit an author's gas policy defaults to.
+    max_gas_limit: int | None = None
 
 
 class LocalGateway(GatewayClient):
@@ -89,14 +105,17 @@ class LocalGateway(GatewayClient):
 
 def command(args) -> int:
     from almanak.ax import lending_request
+    from almanak.connectors.direct import ActionRequest, require_direct
 
     request = lending_request(args)
+    require_direct(args.connector, request.chain, args.ax_command)
+    action = ActionRequest(action=args.ax_command, amount=args.amount)
     wallet = read_wallet(args.wallet)
     provider, endpoint = transport(args, request.chain)
-    config = action_config(args, request, wallet, provider, endpoint)
+    config = action_config(args, request, action, wallet, provider, endpoint)
     backend = production_backend(config, endpoint, wallet if args.execute else None)
     try:
-        result = run(config, backend, args.ax_command, args.amount, execute=args.execute)
+        result = run(config, backend, action, execute=args.execute)
     finally:
         backend.close()
     print(json.dumps(result, indent=2))
@@ -149,94 +168,93 @@ def production_backend(config, endpoint, wallet):
     )
 
 
-def action_config(args, request, wallet, provider, endpoint):
+def action_config(args, request, action, wallet, provider, endpoint):
+    """The operator deployment a command's arguments state."""
+    limits = FeeLimits(args.max_gas_price_wei, args.max_transaction_fee, args.max_gas_limit)
+    public = args.public_rpc is not None
+    return deployment(
+        args.connector, request, action, wallet, provider, endpoint, limits, public=public
+    )
+
+
+def deployment(connector, request, action, wallet, provider, endpoint, limits, *, public=False):
     """The operator deployment of one account in one resolved market, with explicit fees."""
+    from almanak.connectors.direct import Wallet, binding
     from almanak.connectors.lending_lookup import family, resolve
     from almanak.gateway.ethereum import EthereumReader
     from almanak.models import Chain
 
     chain = Chain(chain_id=request.chain, environment="mainnet")
+    account = Wallet(account=wallet["account"], address=wallet["address"].lower())
     with EthereumReader(chain, endpoint) as reader:
-        if args.public_rpc is not None:
+        if public:
             from almanak.gateway.read_endpoints import verify_public
 
             # The same genesis and head-age proof a public read gives.
             reader.verify_chain()
             verify_public(reader)
-        resolved = resolve(reader, family(args.connector), request, reader.pin_block("latest"))
-    return lending_config(
-        resolved.reserve,
-        wallet,
-        provider,
-        max_gas_price_wei=args.max_gas_price_wei,
-        max_transaction_fee=args.max_transaction_fee,
-    )
+        block = reader.pin_block("latest")
+        resolved = resolve(reader, family(connector), request, block)
+        positions = binding(connector).positions(reader, block, resolved, account, action)
+    return configuration(connector, positions, account, provider, chain, limits)
 
 
-def lending_config(reserve, wallet, provider, *, max_gas_price_wei, max_transaction_fee):
-    """Bind the wallet under the account name its keystore entry carries."""
-    from almanak.chains import evm_network
-    from almanak.connectors.aave_v4.models import LendingConfig
+def configuration(connector: str, positions: dict, wallet, provider, chain, limits: FeeLimits):
+    """Bind the wallet under the account name its keystore entry carries.
 
-    account, address = wallet["account"], wallet["address"]
-    chain = reserve.chain.model_dump(mode="json")
-    native = str(evm_network(reserve.chain.chain_id).native_asset)
+    `positions` is the connector's own part of the document. The accounts, the network
+    and the gas policy are the same for every connector.
+    """
+    from almanak.connectors.composition import connector_from_wire
+
+    scope = chain.model_dump(mode="json")
     document = {
         "decision_trigger": {"kind": "interval", "seconds": 60},
         "accounts": {
             "bindings": [
                 {
-                    "name": account,
-                    "profile": {
-                        "kind": "eoa",
-                        "fund": {"chain": chain, "address": address.lower()},
-                    },
+                    "name": wallet.account,
+                    "profile": {"kind": "eoa", "fund": {"chain": scope, "address": wallet.address}},
                 }
             ]
         },
-        "allocations": [
-            {
-                "name": ALLOCATION,
-                "account": account,
-                "reserve": reserve.model_dump(mode="json"),
-                "native_asset": native,
-            }
-        ],
+        **positions,
         "production": {
             "networks": [
                 {
-                    "chain": chain,
+                    "chain": scope,
                     "provider": provider.model_dump(mode="json"),
                     "max_observation_age_seconds": 120,
                 }
             ],
-            "gas": [
-                {
-                    "accounts": [account],
-                    "asset": native,
-                    "source": "network_rpc_fee_history",
-                    "reward_percentile": 50,
-                    "base_fee_multiplier_bps": 20000,
-                    "max_gas_price_wei": max_gas_price_wei,
-                    "max_gas_limit": 1_000_000,
-                    "max_transaction_fee": {"asset": native, "amount": max_transaction_fee},
-                    "exit_reserve": {"asset": native, "amount": 0},
-                    "gas_limit_buffer_bps": 2500,
-                }
-            ],
+            "gas": [gas_policy(wallet.account, chain.chain_id, limits)],
         },
     }
-    return LendingConfig.model_validate_json(json.dumps(document))
+    model = connector_from_wire({"connector": connector}).codec.config
+    return model.model_validate_json(json.dumps(document))
 
 
-def intent(config, action: str, amount: int | None):
-    if action == "supply":
-        if amount is None:
-            raise ValueError("supply requires --amount")
-        return config.supply(ALLOCATION, amount)
-    if amount is not None:
-        raise ValueError("withdraw takes no --amount: it withdraws the whole supplied balance")
-    return config.withdraw(ALLOCATION)
+def gas_policy(account: str, chain, limits: FeeLimits) -> dict:
+    """How a step bids, as an author's gas policy defaults on the chain; the ceilings
+    are the operator's own."""
+    from almanak.chains import evm_network
+    from almanak.configuration import gas
+
+    native = str(evm_network(chain).native_asset)
+    scope = {"chain": str(chain)}
+    return {
+        "accounts": [account],
+        "asset": native,
+        "source": "network_rpc_fee_history",
+        "base_fee_basis": gas.chain_base_fee_basis(scope),
+        "reward_percentile": gas.DEFAULT_REWARD_PERCENTILE,
+        "base_fee_multiplier_bps": gas.chain_multiplier(scope),
+        "max_gas_price_wei": limits.max_gas_price_wei,
+        "max_gas_limit": limits.max_gas_limit or gas.DEFAULT_MAX_GAS_LIMIT,
+        "max_transaction_fee": {"asset": native, "amount": limits.max_transaction_fee},
+        "exit_reserve": {"asset": native, "amount": 0},
+        "gas_limit_buffer_bps": gas.DEFAULT_GAS_LIMIT_BUFFER_BPS,
+    }
 
 
 class Terminated(SystemExit):
@@ -368,13 +386,13 @@ def clear_if_finished(directory: Path) -> None:
             discard(directory)
 
 
-def run(config, backend, action: str, amount: int | None, *, execute: bool) -> dict:
+def run(config, backend, request, *, execute: bool) -> dict:
     """Plan one action against the account's current position, and execute it when asked."""
     clear_finished_records()
     directory, lock = new_record()
 
     def act(service, check):
-        return perform(service, action, amount, execute=execute, create=config, interrupt=check)
+        return perform(service, request, execute=execute, create=config, interrupt=check)
 
     return in_record(directory, lock, config, backend, act)
 
@@ -463,22 +481,24 @@ def discard(directory: Path) -> None:
 
 def perform(
     service,
-    action: str,
-    amount: int | None,
+    request,
     *,
     execute: bool,
     create=None,
     interrupt=lambda: None,
 ) -> dict:
+    from almanak.connectors.direct import binding_for
     from almanak.operator_runtime import OperatorRuntime
 
     runtime = OperatorRuntime(gateway=LocalGateway(service), create=create)
     try:
         before = runtime.recover()
         interrupt()
-        runtime.submit(intent(before.config, action, amount))
+        build = binding_for(before.config).intent
+        # The intent is built against the observations it is admitted with.
+        runtime.submit(lambda state, observed: build(state.config, observed, request))
         result = {
-            "action": action,
+            "action": request.action,
             "executed": False,
             "position_before": position(before),
             "first_step": step(runtime.preview()),
@@ -658,8 +678,9 @@ def executed_result(state, outcomes, refusal) -> dict:
 
 
 def position(state) -> dict:
-    owned = state.owned[0]
-    return {"supplied_shares": str(owned.shares), "debt_shares": str(owned.drawn_shares)}
+    from almanak.connectors.direct import binding_for
+
+    return binding_for(state.config).position(state)
 
 
 def step(plan) -> dict:
@@ -706,13 +727,18 @@ def recover_arguments(commands) -> None:
 
 def arguments(commands, lending_source) -> None:
     from almanak.cli_arguments import public_rpc_option
+    from almanak.connectors.direct import connectors_for, served_actions
 
     recover_arguments(commands)
-    for name, text in ACTIONS.items():
+    for name in served_actions():
+        text = ACTIONS[name]
         action = commands.add_parser(name, help=text, description=text)
         action.set_defaults(product="operator-action")
         action.add_argument(
-            "--connector", required=True, choices=CONNECTORS, help="canonical connector ID"
+            "--connector",
+            required=True,
+            choices=connectors_for(name),
+            help="canonical connector ID",
         )
         lending_source(action)
         if name == "supply":
@@ -743,6 +769,12 @@ def arguments(commands, lending_source) -> None:
             help="refuse a step whose fee could exceed this, in base units of the native asset",
         )
         action.add_argument(
+            "--max-gas-limit",
+            type=gas_units,
+            help="refuse a step whose gas, with its buffer, is above this"
+            " (default: an author gas policy's own, 1200000)",
+        )
+        action.add_argument(
             "--execute",
             action="store_true",
             help="sign and send; without it the first step is planned and nothing is signed",
@@ -750,8 +782,16 @@ def arguments(commands, lending_source) -> None:
 
 
 def base_units(value: str) -> int:
+    return positive(value, "base units")
+
+
+def gas_units(value: str) -> int:
+    return positive(value, "gas units")
+
+
+def positive(value: str, unit: str) -> int:
     import argparse
 
     if not (value.isascii() and value.isdigit()) or int(value) <= 0:
-        raise argparse.ArgumentTypeError("expected a positive whole number of base units")
+        raise argparse.ArgumentTypeError(f"expected a positive whole number of {unit}")
     return int(value)

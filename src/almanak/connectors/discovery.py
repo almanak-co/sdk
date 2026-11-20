@@ -80,9 +80,9 @@ NOT_DISCOVERED: dict[str, str] = {
 }
 
 
-def declaration(connector: str):
-    """The connector's `discovery` module, or None when it declares none."""
-    name = f"almanak.connectors.{connector}.discovery"
+def declaration(connector: str, module: str = "discovery"):
+    """The connector's declaration module of that name, or None when it holds none."""
+    name = f"almanak.connectors.{connector}.{module}"
     try:
         return import_module(name)
     except ModuleNotFoundError as error:
@@ -91,15 +91,15 @@ def declaration(connector: str):
         return None
 
 
-def declared(attribute: str) -> dict:
+def declared(attribute: str, module: str = "discovery") -> dict:
     """Every installed connector's declaration of one kind, in installation order."""
     from almanak.connectors.composition import CONNECTOR_IDS
 
     found = {}
     for key in CONNECTOR_IDS:
-        module = declaration(str(key))
-        if module is not None and hasattr(module, attribute):
-            found[str(key)] = getattr(module, attribute)
+        module_found = declaration(str(key), module)
+        if module_found is not None and hasattr(module_found, attribute):
+            found[str(key)] = getattr(module_found, attribute)
     return found
 
 
