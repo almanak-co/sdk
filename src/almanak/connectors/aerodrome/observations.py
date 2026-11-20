@@ -98,14 +98,23 @@ class Snapshot(Model):
 def initial_owned(config, name):
     allocation = config.allocation(name)
     target = config.target(name)
+    counter = 0 if allocation.adopt is None else allocation.adopt.counter
     values = tuple(
         AssetAmount(
             asset=asset,
-            amount=allocation.capital.amount if asset == allocation.capital.asset else 0,
+            amount=allocation.capital.amount if asset == allocation.capital.asset else counter,
         )
         for asset in target.assets
     )
     return Ownership(target=target, inventory0=values[0], inventory1=values[1])
+
+
+def funded_owned(config, name):
+    """Initial ownership of a backtest: funded capital, never an adoption."""
+    from almanak.operator_deployment import refuse_adoption
+
+    refuse_adoption((config.allocation(name),))
+    return initial_owned(config, name)
 
 
 def ownership(config, name, reference):
@@ -186,7 +195,12 @@ def measured_quote(reader, target, block, amount):
 
 def quotes_for(config, owned, quote, *, entry=True):
     """Decision quotes; `entry=False` skips the entry quote an exit or teardown cannot use."""
-    amount = entry_amount(config.allocation(owned.target.allocation), owned) if entry else None
+    allocation = config.allocation(owned.target.allocation)
+    if allocation.adopt is not None:
+        # An adopting allocation trades nothing. With no quote in its observations the
+        # gateway's swap check has nothing to admit a swap along.
+        return {}
+    amount = entry_amount(allocation, owned) if entry else None
     result = (
         {} if amount is None else entry_or_reason(lambda: classified("entry_quote", quote(amount)))
     )

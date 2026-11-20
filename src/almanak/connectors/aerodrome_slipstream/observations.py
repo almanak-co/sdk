@@ -26,6 +26,7 @@ _observations = Observations(
     verify_periphery=verify_periphery,
 )
 initial_owned = _observations.initial_owned
+funded_owned = _observations.funded_owned
 ownership = _observations.ownership
 allowances = _observations.allowances
 decision_quotes = _observations.decision_quotes

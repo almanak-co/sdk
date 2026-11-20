@@ -678,6 +678,14 @@ AX_REQUESTS = {
         " resolution",
         pool_connectors("concentrated", "resolved"),
     ),
+    "liquidity-position": (
+        "one V3-style liquidity position by its NFT: owner, range, liquidity, principal at"
+        " the pool's price and the amounts a collection would pay; for curve and aerodrome,"
+        " one account's LP shares in a pool and what burning them would pay, and for"
+        " aerodrome what a fee claim would pay; a uniswap_v4 position's pool is named by"
+        " its key",
+        (*pool_connectors("concentrated", "keyed"), "curve", "aerodrome"),
+    ),
 }
 
 
@@ -718,8 +726,42 @@ def pool_source(command):
     command.add_argument("--pool", help="pool contract address, given with --chain")
 
 
+def position_source(command):
+    # One request, named either inline or by file; both validate as PositionRequest.
+    source = command.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--config",
+        type=Path,
+        help='JSON request file: {"chain": "<CAIP-2>", "pool": "0x...", "token_id": 1}',
+    )
+    source.add_argument(
+        "--chain", help="strict CAIP-2 chain of the pool, given with --pool and --token-id"
+    )
+    command.add_argument("--pool", help="pool contract address of the position")
+    # A Uniswap V4 position's pool is named by its key, as `ax pool-price` names it.
+    command.add_argument("--currency0", help="uniswap_v4 only: CAIP-19 currency0 of the pool key")
+    command.add_argument("--currency1", help="uniswap_v4 only: CAIP-19 currency1 of the pool key")
+    command.add_argument("--fee", type=int, help="uniswap_v4 only: pool key fee")
+    command.add_argument("--tick-spacing", type=int, help="uniswap_v4 only: pool key tick spacing")
+    command.add_argument(
+        "--hooks",
+        help="uniswap_v4 only: reviewed hook address of the pool key; omit for a hookless pool",
+    )
+    command.add_argument(
+        "--token-id",
+        type=positive,
+        help="the position's NFT at the pool's position manager (not curve)",
+    )
+    command.add_argument(
+        "--account",
+        help="curve and aerodrome only, in place of --token-id: the account whose LP"
+        " shares in the pool are the position",
+    )
+
+
 INLINE_SOURCES = {
     "pool": pool_source,
+    "liquidity-position": position_source,
     "perp-markets": perp_market_source,
     "pool-price": pool_price_source,
 }
@@ -759,8 +801,29 @@ def lending_source(command):
 # Inline request flags per ax subcommand, exclusive with --config.
 INLINE_FLAGS = {
     "ax-pool": ("chain", "pool"),
+    "ax-liquidity-position": ("chain", "pool", "token_id"),
     "ax-perp-markets": ("chain", "query"),
     "ax-pool-price": ("chain", "currency0", "currency1", "fee", "tick_spacing"),
+}
+# Inline flags of a request whose shape is its connector's own, in place of the
+# product's: a Curve or an Aerodrome position is an account's LP token balance, not an
+# NFT.
+CONNECTOR_INLINE_FLAGS: dict[tuple[str, str | None], tuple[str, ...]] = {
+    ("ax-liquidity-position", "curve"): ("chain", "pool", "account"),
+    ("ax-liquidity-position", "aerodrome"): ("chain", "pool", "account"),
+    ("ax-liquidity-position", "uniswap_v4"): (
+        "chain",
+        "currency0",
+        "currency1",
+        "fee",
+        "tick_spacing",
+        "token_id",
+    ),
+}
+# Optional inline flags of one connector's request: never required there, and refused
+# for another connector like the rest of its shape.
+CONNECTOR_INLINE_OPTIONS: dict[tuple[str, str | None], tuple[str, ...]] = {
+    ("ax-liquidity-position", "uniswap_v4"): ("hooks",),
 }
 # Optional inline flags: never required, but refused with --config like the rest.
 INLINE_OPTIONS = {"ax-pool-price": ("base", "hooks")}
@@ -780,7 +843,9 @@ def parse_validated(parser, argv=None):
         require_pair(parser, args, "gateway_url", "gateway_auth_file")
     product = getattr(args, "product", None)
     if product in INLINE_FLAGS:
-        require_inline(parser, args, INLINE_FLAGS[product], INLINE_OPTIONS.get(product, ()))
+        names = inline_flags(parser, args, product)
+        own = CONNECTOR_INLINE_OPTIONS.get((product, getattr(args, "connector", None)), ())
+        require_inline(parser, args, names, (*INLINE_OPTIONS.get(product, ()), *own))
     if product == "operator-action":
         from almanak.ax_actions import validate_arguments
 
@@ -815,6 +880,28 @@ def session_transport(parser: argparse.ArgumentParser, args) -> None:
             "(or set ALMANAK_AX_GATEWAY_URL and ALMANAK_AX_GATEWAY_AUTH_FILE)"
         )
     args.gateway_url, args.gateway_auth_file = url, Path(token)
+
+
+def inline_flags(parser, args, product: str) -> tuple[str, ...]:
+    """The inline flags the request takes for its connector; another shape's are refused."""
+    connector = getattr(args, "connector", None)
+    names = CONNECTOR_INLINE_FLAGS.get((product, connector), INLINE_FLAGS[product])
+    taken = (*names, *CONNECTOR_INLINE_OPTIONS.get((product, connector), ()))
+    shapes = [INLINE_FLAGS[product]]
+    for table in (CONNECTOR_INLINE_FLAGS, CONNECTOR_INLINE_OPTIONS):
+        shapes += [found for (name, _), found in table.items() if name == product]
+    foreign = sorted(
+        {
+            name
+            for shape in shapes
+            for name in shape
+            if name not in taken and getattr(args, name, None) is not None
+        }
+    )
+    if foreign:
+        flags = ", ".join("--" + name.replace("_", "-") for name in foreign)
+        parser.error(f"{connector} takes no {flags} for this request")
+    return names
 
 
 def require_inline(parser, args, names: tuple[str, ...], options: tuple[str, ...] = ()) -> None:

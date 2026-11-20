@@ -6,17 +6,34 @@ from almanak.gateway.ethereum import DataError
 def validate_owned(owned, before):
     """Admit work that is not yet signed against this observation."""
     refuse_unowned_shares(before)
+    if owned.position != before.position:
+        raise DataError(
+            "ownership",
+            "Curve observed LP shares differ from retained fund ownership: the fund wallet "
+            f"holds {amount(before.position)} base units of the pool's LP token and the "
+            f"deployment owns {amount(owned.position)}",
+        )
     validate_retained(owned, before)
 
 
 def validate_retained(owned, before):
-    if owned != before.owned or owned.position != before.position:
-        raise DataError("ownership", "Curve observed LP shares differ from retained fund ownership")
+    """What signed bytes still need of an observation: its own ownership and its inputs.
+
+    The fund's LP token balance is not among them. Anyone can send the fund LP tokens,
+    so a balance that moved after a signature holds nothing back: the step is still
+    sent, and a difference is an accounting issue on its outcome.
+    """
+    if owned != before.owned:
+        raise DataError("ownership", "Curve observation differs from retained fund ownership")
     if any(
         wallet.amount < inventory.amount
         for wallet, inventory in zip(before.wallets.root, owned.inventory.root, strict=True)
     ):
         raise DataError("inventory", "Curve fund wallet does not cover attributed inventory")
+
+
+def amount(position) -> int:
+    return 0 if position is None else position.shares.amount
 
 
 def unowned_shares(shares) -> DataError:

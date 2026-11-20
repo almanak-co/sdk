@@ -1,4 +1,5 @@
-"""`almanak ax supply`, `ax withdraw` and `ax swap`: one operator action in one process.
+"""The direct `almanak ax` actions, such as `ax supply`, `ax borrow` and `ax swap`: one
+operator action in one process.
 
 The command resolves the market, builds an operator deployment for exactly that
 account and market in a private record directory, and runs the action through the
@@ -41,10 +42,33 @@ ACTIONS = {
     "repay": "repay the whole debt, including interest, or an amount of it",
     "collateral": "enable or disable the supplied balance as collateral",
     "swap": "sell an exact amount of one pool currency for another, in one named pool",
+    "open-liquidity": "mint a concentrated-liquidity position in one tick range of one"
+    " named pool, from stated amounts of its two currencies, or for curve and aerodrome"
+    " deposit stated amounts of a pool's coins for its LP token; nothing is swapped",
+    "increase-liquidity": "add stated amounts of the pool's currencies to a position"
+    " the wallet owns; nothing is swapped",
+    "decrease-liquidity": "remove part of the liquidity of a position the wallet owns and"
+    " collect what it is owed; for curve and aerodrome, burn part of the wallet's LP shares",
+    "collect-liquidity-fees": "collect what a position the wallet owns is owed, without"
+    " changing its liquidity; for aerodrome, claim the fees the wallet's LP shares earned",
+    "close-liquidity": "remove all liquidity of a position the wallet owns, collect what"
+    " it is owed and burn its NFT; for curve and aerodrome, burn all of the wallet's LP"
+    " shares, and for aerodrome claim their fees",
+    "revoke-exchange": "set every allowance the wallet gave the pool's router and"
+    " position manager, or for curve the pool itself, in the pool currencies to zero; for"
+    " aerodrome also the router's allowance in the pool's LP token",
 }
 # Actions whose market is one pool; the others name a lending market, with the flags
 # `ax lending-reserve` takes.
-POOL_ACTIONS = ("swap",)
+POOL_ACTIONS = (
+    "swap",
+    "open-liquidity",
+    "increase-liquidity",
+    "decrease-liquidity",
+    "collect-liquidity-fees",
+    "close-liquidity",
+    "revoke-exchange",
+)
 LENDING_ACTIONS = tuple(name for name in ACTIONS if name not in POOL_ACTIONS)
 # Whether each lending command's --amount is required; one not named here takes none.
 AMOUNTS = {"supply": True, "borrow": True, "withdraw": False, "repay": False}
@@ -157,7 +181,7 @@ def market_request(args):
         return lending_request(args)
     values = {"connector": args.connector, "chain": args.chain}
     values.update(
-        (name, value) for name in POOL_FLAGS if (value := getattr(args, name)) is not None
+        (name, value) for name in POOL_FLAGS if (value := getattr(args, name, None)) is not None
     )
     return resolution(args.connector).MarketSelection.model_validate_json(json.dumps(values))
 
@@ -178,11 +202,16 @@ def validate_arguments(parser, args) -> None:
     fields = resolution(args.connector).MarketSelection.model_fields
     required = [name for name in POOL_FLAGS if name in fields and fields[name].is_required()]
     optional = [name for name in POOL_FLAGS if name in fields and name not in required]
-    given = [name for name in POOL_FLAGS if getattr(args, name) is not None]
+    # A command states only the pool flags its own parser has.
+    given = [name for name in POOL_FLAGS if getattr(args, name, None) is not None]
     refusal = pool_refusal(required, optional, given)
     if refusal is not None:
         also = f" and optionally {flags(optional)}" if optional else ""
         parser.error(f"{args.connector} names its pool with {flags(required)}{also}; {refusal}")
+    if args.ax_command != "swap":
+        from almanak.ax_liquidity import validate
+
+        validate(parser, args)
 
 
 def pool_refusal(required, optional, given) -> str | None:
@@ -207,6 +236,14 @@ def action_request(args):
         slippage_bps=getattr(args, "slippage_bps", None),
         deadline_seconds=getattr(args, "deadline_seconds", None),
         buy=getattr(args, "buy", None),
+        amount0=getattr(args, "amount0", None),
+        amount1=getattr(args, "amount1", None),
+        tick_lower=getattr(args, "tick_lower", None),
+        tick_upper=getattr(args, "tick_upper", None),
+        token_id=getattr(args, "token_id", None),
+        liquidity=getattr(args, "liquidity", None),
+        amounts=tuple(stated) if (stated := getattr(args, "amounts", None)) else None,
+        receive=getattr(args, "receive", None),
     )
 
 
@@ -887,8 +924,12 @@ def arguments(commands, lending_source) -> None:
             choices=connectors_for(name),
             help="canonical connector ID",
         )
-        if name in POOL_ACTIONS:
+        if name == "swap":
             swap_arguments(action)
+        elif name in POOL_ACTIONS:
+            from almanak.ax_liquidity import arguments as liquidity_arguments
+
+            liquidity_arguments(name, action)
         else:
             lending_source(action)
             request_arguments(name, action)
@@ -966,19 +1007,7 @@ def health_factor(value: str) -> int:
 def swap_arguments(action) -> None:
     """One pool by its address or its key, the asset sold, the exact amount and the price
     bound. `validate_arguments` holds the pool flags to what the connector takes."""
-    action.add_argument("--chain", required=True, help="strict CAIP-2 chain of the pool")
-    action.add_argument("--pool", help="pool address, for a connector whose pools are contracts")
-    action.add_argument("--currency0", help="CAIP-19 currency0 of a Uniswap V4 pool key")
-    action.add_argument("--currency1", help="CAIP-19 currency1 of a Uniswap V4 pool key")
-    action.add_argument(
-        "--fee", type=int, help="pool key fee in hundredths of a basis point (Uniswap V4)"
-    )
-    action.add_argument("--tick-spacing", type=int, help="pool key tick spacing (Uniswap V4)")
-    action.add_argument(
-        "--hooks",
-        help="reviewed hook address of a Uniswap V4 pool key; omit for a hookless pool"
-        " (a dynamic-fee hook takes --fee 8388608)",
-    )
+    pool_arguments(action)
     action.add_argument(
         "--sell",
         type=asset,
@@ -1011,6 +1040,24 @@ def swap_arguments(action) -> None:
         " reverts when mined later than that; a curve call carries no deadline, so a"
         " signed curve swap stays valid until it is mined or its nonce is used, bound"
         f" only by its minimum output (default: {DEFAULT_DEADLINE_SECONDS})",
+    )
+
+
+def pool_arguments(action) -> None:
+    """The chain and the flags that name one pool: its address, or the members of its
+    key. `validate_arguments` holds them to what the command's connector takes."""
+    action.add_argument("--chain", required=True, help="strict CAIP-2 chain of the pool")
+    action.add_argument("--pool", help="pool address, for a connector whose pools are contracts")
+    action.add_argument("--currency0", help="CAIP-19 currency0 of a Uniswap V4 pool key")
+    action.add_argument("--currency1", help="CAIP-19 currency1 of a Uniswap V4 pool key")
+    action.add_argument(
+        "--fee", type=int, help="pool key fee in hundredths of a basis point (Uniswap V4)"
+    )
+    action.add_argument("--tick-spacing", type=int, help="pool key tick spacing (Uniswap V4)")
+    action.add_argument(
+        "--hooks",
+        help="reviewed hook address of a Uniswap V4 pool key; omit for a hookless pool"
+        " (a dynamic-fee hook takes --fee 8388608)",
     )
 
 

@@ -55,6 +55,22 @@ class Target(DexTarget):
         return self
 
 
+class Adoption(Model):
+    """What an operator deployment owns at its start, stated by a direct action.
+
+    A strategy never states one: its deployment starts from funded capital alone.
+
+    `counter` is base units of the pool currency that is not the capital asset. With
+    the capital amount it is the inventory attributed to the deployment, and the wallet
+    must cover both. The fund's whole balance of the pool's shares, with the fee claims
+    and indices the pool stores for the fund, becomes the owned position as the
+    deployment's first observation reads it. Shares are fungible and their fee claims
+    are the account's, so a part of the balance cannot be owned apart from the rest.
+    """
+
+    counter: Annotated[UInt, Field(lt=2**127)]
+
+
 class Allocation(Model):
     name: Name
     account: Name
@@ -62,6 +78,8 @@ class Allocation(Model):
     contracts: Contracts
     liquidity_enabled: bool
     capital: AssetAmount
+    # Absent on the wire unless stated, so a strategy allocation keeps its form.
+    adopt: Adoption | None = Field(default=None, exclude_if=lambda v: v is None)
     entry_swap_bps: EntrySwapBps
     hold_seconds: PositiveSeconds | None = Field(
         default=None, exclude_if=lambda v: v is None, description=HOLD_SECONDS_DESCRIPTION
@@ -79,10 +97,19 @@ class Allocation(Model):
     def units(self):
         if self.native_asset != native_asset(self.pool.chain.chain_id):
             raise ValueError("payer policy must identify the chain native asset")
-        require_trading_entry(self.liquidity_enabled, self.entry_swap_bps)
+        if self.adopt is None:
+            require_trading_entry(self.liquidity_enabled, self.entry_swap_bps)
+        elif not self.liquidity_enabled or self.entry_swap_bps:
+            # It owns the fund's shares and trades nothing.
+            raise ValueError(
+                "an adopting allocation has liquidity authority and states no entry swap"
+            )
         if self.capital.asset not in (self.pool.currency0, self.pool.currency1):
             raise ValueError("capital must identify the explicit funding currency")
-        if not 0 < self.capital.amount < 2**127:
+        # Only an adopting allocation may state no capital: it can act on the fund's
+        # shares without bringing inventory.
+        least = 1 if self.adopt is None else 0
+        if not least <= self.capital.amount < 2**127:
             raise ValueError("capital requires a positive supported int128 quantity")
         return self
 

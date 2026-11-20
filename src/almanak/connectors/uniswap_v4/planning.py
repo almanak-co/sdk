@@ -2,7 +2,7 @@
 
 from almanak.connectors.erc20_approval import requires_zero_first
 from almanak.connectors.uniswap_v4 import abi
-from almanak.connectors.uniswap_v4.math import liquidity_for, sqrt_at_tick
+from almanak.connectors.uniswap_v4.math import amounts, liquidity_for, sqrt_at_tick
 from almanak.connectors.uniswap_v4.reader import concrete_range
 from almanak.connectors.uniswap_v4.state import Approval, Burn, Collect, Mint, Swap
 from almanak.dex_intents import (
@@ -72,11 +72,63 @@ def cleanup(before):
     )
 
 
-def open_operation(intent, before, *, through=None):
+def bounded_maximums(intent, before, tolerance_bps):
+    """The most of each token a mint planned at this observation may take.
+
+    A mint is for a fixed liquidity, the most the intent's amounts cover at this
+    observation's price, and the PositionManager reverts one that needs more than a
+    maximum. Each maximum is the intent's amount, trimmed to what that liquidity takes
+    at the edge of the tolerance around this observation's price where it takes the
+    most of that token: the price less the tolerance for the first token, the price
+    plus the tolerance for the second, rounded up as the PoolManager charges it.
+
+    So a mint mined at a price further than the tolerance from the price it was planned
+    at reverts. In the direction that needs more of the token limiting the liquidity
+    it reverts on any move: that token's maximum is the intent's amount, which the
+    liquidity takes whole at the planned price.
+
+    The range bounds what the tolerance cannot. Where an edge of the tolerance lies at
+    or beyond a bound of the range, the maximum is all the range holds of that token at
+    this liquidity, and no price in that direction reverts the mint. A range wholly
+    beside the price takes one token only, the same amount at every price on that side,
+    so no price further from the range reverts it either; a price that enters the range
+    past the tolerance does.
+    """
+    from math import isqrt
+
+    selected = concrete_range(intent.target, requested=intent.range)
+    lower, upper = sqrt_at_tick(selected.lower), sqrt_at_tick(selected.upper)
+    price = before.pool.sqrt_price_x96
+    stated = intent.maximum0, intent.maximum1
+    liquidity = liquidity_for(stated[0].amount, stated[1].amount, price, lower, upper)
+    # Square-root prices at this observation's price less and plus the tolerance.
+    low, high = (isqrt(price * price * (10000 + sign * tolerance_bps) // 10000) for sign in (-1, 1))
+    most = (
+        amounts(liquidity, low, lower, upper, up=True)[0],
+        amounts(liquidity, high, lower, upper, up=True)[1],
+    )
+    return tuple(
+        value.model_copy(update={"amount": min(value.amount, limit)})
+        for value, limit in zip(stated, most, strict=True)
+    )
+
+
+def open_operation(intent, before, *, through=None, tolerance_bps=None):
+    """The next step of a mint: an approval it still needs, or the mint itself.
+
+    Given `tolerance_bps`, as only an operator request gives it, the mint and its
+    approvals take `bounded_maximums` of this observation instead of the intent's whole
+    amounts. An approval mined for an earlier observation's smaller maximum is then
+    below what this one needs, and is planned again before the mint: a mint never
+    relies on more than is approved.
+    """
     if before.owned.position is not None:
         raise ValueError("mint cannot replace an owned NFT")
     target = intent.target
-    for maximum in (intent.maximum0, intent.maximum1):
+    maximums = (intent.maximum0, intent.maximum1)
+    if tolerance_bps is not None:
+        maximums = bounded_maximums(intent, before, tolerance_bps)
+    for maximum in maximums:
         step = approval(
             before,
             maximum.asset,
@@ -87,10 +139,14 @@ def open_operation(intent, before, *, through=None):
         )
         if step:
             return step
-    return liquidity_operation(intent, before)
+    return liquidity_operation(intent, before, maximums)
 
 
-def liquidity_operation(intent, before):
+def liquidity_operation(intent, before, maximums=None):
+    """The mint of the most liquidity the intent's amounts cover at this observation's
+    price, allowed to take at most `maximums`: the intent's whole amounts unless given."""
+    if maximums is None:
+        maximums = (intent.maximum0, intent.maximum1)
     target = intent.target
     selected = concrete_range(target, requested=intent.range)
     lower, upper = sqrt_at_tick(selected.lower), sqrt_at_tick(selected.upper)
@@ -102,8 +158,8 @@ def liquidity_operation(intent, before):
     return Mint(
         target=target,
         liquidity=liquidity,
-        maximum0=intent.maximum0,
-        maximum1=intent.maximum1,
+        maximum0=maximums[0],
+        maximum1=maximums[1],
         deadline=intent.deadline,
         range=selected if target.band is not None else None,
     )
@@ -156,7 +212,10 @@ def operation(config, state, intent, before):
             deadline=intent.deadline,
         )
     if isinstance(intent, OpenLiquidity):
-        return open_operation(intent, before, through=through)
+        # Only an operator's mint is bounded to its stated slippage on chain: a strategy
+        # plans, and its retained steps replay, with the intent's whole amounts.
+        tolerance = config.allocation(intent.target.allocation).slippage_bps if strict else None
+        return open_operation(intent, before, through=through, tolerance_bps=tolerance)
     if isinstance(intent, (CollectLiquidityFees, CloseLiquidity)):
         return exit_operation(intent, before)
     if isinstance(intent, RevokeExchange):

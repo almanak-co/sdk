@@ -124,6 +124,19 @@ def addition(r0: int, r1: int, supply: int, maximum0: int, maximum1: int):
     return amount0, amount1, shares
 
 
+def proportional(r0: int, r1: int, supply: int, maximum0: int, maximum1: int):
+    """What a deposit within these budgets takes of each currency at these reserves.
+
+    The router takes the two currencies in the proportion of the reserves, for a stable
+    pool as for a volatile one, so this is all of one budget and the other currency's
+    share of it. `addition` floors that share; taking the proportion of the result once
+    more gives a pair `addition` maps to itself, so a check can require an offer to be
+    exactly this pair.
+    """
+    first = addition(r0, r1, supply, maximum0, maximum1)
+    return addition(r0, r1, supply, first[0], first[1])[:2]
+
+
 def removal(balance0: int, balance1: int, supply: int, shares: int):
     """Burn uses actual pool balances, which need not equal stored reserves."""
     if not 0 < shares <= supply:

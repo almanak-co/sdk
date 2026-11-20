@@ -32,28 +32,49 @@ def validate_initial(state, observed):
 
 
 def adopt_owned(owned, observed):
-    """Ownership of an operator deployment at its start: the inventory its allocation states.
+    """Ownership of an operator deployment at its start: what its allocation states.
 
-    A wallet holds no venue position a swap could adopt, so nothing is read into
-    ownership. The stated inventory is attributed only when the wallet covers it; an
-    operator is refused here, before anything is planned, when it does not.
+    The stated inventory is attributed only when the wallet covers it; an operator is
+    refused here, before anything is planned, when it does not. An NFT the allocation
+    names becomes the owned position exactly as the observation read it from the chain,
+    which verified its owner, pool and range. Nothing else of the wallet is adopted.
     """
-    for item, seen in zip(owned, observed, strict=True):
-        for held, attributed in zip(
-            (seen.wallet0, seen.wallet1), (item.inventory0, item.inventory1), strict=True
-        ):
-            if held.amount < attributed.amount:
-                raise DataError(
-                    "inventory",
-                    f"the wallet holds {held.amount} base units of {held.asset}, "
-                    f"less than the {attributed.amount} the action needs",
-                )
-    return owned
+    return tuple(adopted(item, seen) for item, seen in zip(owned, observed, strict=True))
+
+
+def adopted(item, seen):
+    for held, attributed in zip(
+        (seen.wallet0, seen.wallet1), (item.inventory0, item.inventory1), strict=True
+    ):
+        if held.amount < attributed.amount:
+            raise DataError(
+                "inventory",
+                f"the wallet holds {held.amount} base units of {held.asset}, "
+                f"less than the {attributed.amount} the action needs",
+            )
+    # Only the V3 family's ownership can name an NFT to adopt; a connector that shares
+    # this function for its swap has none.
+    if getattr(item, "adopts", None) is None:
+        return item
+    if seen.position is None or seen.position.nft != item.adopts:
+        raise DataError("ownership", "the observation does not hold the NFT to adopt")
+    # The position was opened before this deployment, so its entry is already made.
+    return type(item)(
+        target=item.target,
+        inventory0=item.inventory0,
+        inventory1=item.inventory1,
+        position=seen.position,
+        entry_complete=True,
+    )
 
 
 def commit_owned(owned, outcome):
-    if not outcome.success:
-        return owned
+    """Ownership after a recorded step: what its reconciliation observed.
+
+    A reverted step leaves ownership as it was, unless its block holds the NFT changed
+    from outside; reconciliation then records the observed position (with an accounting
+    issue), and later steps must start from it.
+    """
     return tuple(outcome.after.owned if o.target == outcome.operation.target else o for o in owned)
 
 

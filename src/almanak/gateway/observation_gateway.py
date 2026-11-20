@@ -18,7 +18,7 @@ from pydantic import JsonValue, RootModel, ValidationError
 
 from almanak.caip import ChainId
 from almanak.gateway.auth import loopback_endpoint, read_token
-from almanak.gateway.ethereum import DataError, EthereumReader
+from almanak.gateway.ethereum import DataError, EthereumReader, Reverted
 from almanak.gateway.hypercore_info import HyperCoreInfo, InfoRequest
 from almanak.gateway.onchain_lookup import LookupRequest, VendorLookups
 from almanak.gateway.rate_limits import VARIABLES, configured_limit
@@ -157,6 +157,10 @@ class GatewayReader(EthereumReader):
             # The gateway already sanitized the failure and named the method.
             kind = payload.get("error", "gateway_error")
             message = payload.get("message", f"{method}: observation gateway refused the read")
+            if payload.get("reverted") is True:
+                # A contract revert stays a revert on this side. Its data stays with the
+                # gateway: the flag alone tells a revert from a refused read.
+                raise Reverted(str(message), None, refusal_code(payload))
             raise DataError(str(kind), str(message), code=refusal_code(payload))
         try:
             # JSON mode keeps strict semantics: JSON arrays validate as typed tuples.

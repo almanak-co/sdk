@@ -153,7 +153,7 @@ class Outcome(Model):
         if isinstance(self.decision.intent, ExitExchange):
             return exit_complete(self.after)
         if isinstance(self.decision.intent, CloseLiquidity):
-            return self.after.owned.position is None
+            return close_complete(self)
         return not isinstance(self.operation, Approval)
 
     def strategy_result(self):
@@ -213,6 +213,23 @@ class Checkpoint(Model):
         if self.delivered > len(self.outcomes):
             raise ValueError("outcome delivery cannot precede retained execution evidence")
         return self
+
+
+def close_complete(outcome):
+    """Whether nothing of a close's own is left to burn or to claim.
+
+    Either the deployment owns no position any more, or the step burned every share the
+    deployment owned and shares are still there. Those reached the fund from outside
+    while the step was in flight. They stay owned and are reported on the outcome, but
+    they are not this request's: it stated its minimums for the shares it had, and
+    burning the arrivals would take an approval nobody asked for.
+    """
+    left = outcome.after.owned.position
+    if left is None:
+        return True
+    held = outcome.before.owned.position
+    own = (0 if held is None else held.shares.amount) + outcome.shares_delta
+    return not isinstance(outcome.operation, Approval) and own == 0 and left.shares.amount > 0
 
 
 def exit_complete(after):

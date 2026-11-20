@@ -6,7 +6,7 @@ from almanak.connectors.dex_economic_parameters import wallet as wallet
 from almanak.connectors.uniswap_v3.economic_data import CONNECTOR
 from almanak.connectors.uniswap_v3.economic_state import EconomicPosition, State
 from almanak.connectors.uniswap_v3.models import Parameters
-from almanak.connectors.uniswap_v3.observations import initial_owned
+from almanak.connectors.uniswap_v3.observations import funded_owned
 from almanak.connectors.v3_economic_config import BAND_LIQUIDITY_MODEL
 from almanak.effects import Effects, Portfolio, Position, PositionChange
 
@@ -15,7 +15,7 @@ _binding = ParametersBinding(
     parameters_type=Parameters,
     position_type=EconomicPosition,
     state_type=State,
-    initial_owned=initial_owned,
+    initial_owned=funded_owned,
     position_record_type=Position[EconomicPosition],
     portfolio_type=Portfolio[EconomicPosition],
     effects_type=Effects[EconomicPosition],

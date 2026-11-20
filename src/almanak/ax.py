@@ -12,7 +12,16 @@ import json
 from almanak import ax_discovery, ax_hypercore, ax_lending_markets
 from almanak.balances import parse_balance_request, read_balance
 from almanak.caip import AssetType, ChainId
-from almanak.cli_arguments import LENDING_SELECTOR_FLAGS
+from almanak.cli_arguments import (
+    CONNECTOR_INLINE_FLAGS,
+    CONNECTOR_INLINE_OPTIONS,
+    INLINE_FLAGS,
+    LENDING_SELECTOR_FLAGS,
+)
+from almanak.connectors.aerodrome.position_request import (
+    PositionRequest as AerodromePositionRequest,
+)
+from almanak.connectors.curve.position_request import PositionRequest as CurvePositionRequest
 from almanak.connectors.discovery import pool_connectors
 from almanak.connectors.gmx_v2.market_request import GmxMarketRequest, read_gmx_market
 from almanak.connectors.gmx_v2.position_request import GmxPositionRequest, read_gmx_position
@@ -27,6 +36,10 @@ from almanak.connectors.uniswap_v4.domain import PoolPriceRequest
 from almanak.connectors.uniswap_v4.hook_terms import describe
 from almanak.connectors.uniswap_v4.networks import roles_for
 from almanak.connectors.uniswap_v4.pool import read_pool
+from almanak.connectors.uniswap_v4.position_request import (
+    PositionRequest as KeyedPositionRequest,
+)
+from almanak.connectors.v3_pool_position_request import PositionRequest, read_liquidity_position
 from almanak.connectors.v3_pool_request import (
     RESOLVED_POOL_CONNECTORS,
     PoolRequest,
@@ -52,6 +65,13 @@ CONNECTOR_REQUESTS: dict[tuple[str, str], type[Model]] = {
     ("ax-perp-markets", "gmx_v2"): GmxMarketRequest,
     # Every concentrated or resolved pool connector takes the same pool request.
     **{("ax-pool", c): PoolRequest for c in pool_connectors("concentrated", "resolved")},
+    # A position is an NFT of a V3-style position manager.
+    **{("ax-liquidity-position", c): PositionRequest for c in pool_connectors("concentrated")},
+    # A Curve or an Aerodrome position is an account's balance of the pool's LP token.
+    ("ax-liquidity-position", "curve"): CurvePositionRequest,
+    ("ax-liquidity-position", "aerodrome"): AerodromePositionRequest,
+    # A Uniswap V4 position is an NFT whose pool is named by its key.
+    ("ax-liquidity-position", "uniswap_v4"): KeyedPositionRequest,
 }
 
 
@@ -64,6 +84,7 @@ def command(args) -> int:
         "ax-perp-position": perp_position,
         "ax-perp-markets": perp_markets,
         "ax-pool": pool,
+        "ax-liquidity-position": liquidity_position,
         "ax-resolve": token_resolve,
         "ax-dex-pools": pool_discovery,
         "ax-lending-markets": lending_markets,
@@ -173,6 +194,25 @@ def pool(args):
         return read_pool_state(reader, args.connector, request, block, args.depth_bps)
 
 
+def liquidity_position(args):
+    request = parse_request(args)
+    chain = live_chain(mainnet(request.chain))
+    support_level(args.connector, request.chain)
+    with observation_reader(args, chain.chain_id) as reader:
+        block = reader.pin_block(args.block)
+        if not isinstance(request, PositionRequest):
+            return account_position_read(args.connector)(reader, request, block)
+        return read_liquidity_position(reader, args.connector, request, block)
+
+
+def account_position_read(connector: str):
+    """The position read of a connector whose position is an account's LP token balance:
+    its own `position_request.read_liquidity_position(reader, request, block)`."""
+    from importlib import import_module
+
+    return import_module(f"almanak.connectors.{connector}.position_request").read_liquidity_position
+
+
 def token_resolve(args):
     chain = live_chain(mainnet(ChainId(args.chain))).chain_id
     with lookup_source(args) as lookups, observation_reader(args, chain) as reader:
@@ -268,6 +308,13 @@ def inline_request(args) -> dict:
         return {"chain": args.chain, "pool": args.pool}
     if args.product == "ax-perp-markets":
         return {"chain": args.chain, "query": args.query}
+    if args.product == "ax-liquidity-position":
+        # An NFT position is named by its token ID, an LP token balance by its account.
+        shape = (args.product, args.connector)
+        names = CONNECTOR_INLINE_FLAGS.get(shape, INLINE_FLAGS[args.product])
+        optional = CONNECTOR_INLINE_OPTIONS.get(shape, ())
+        given = [name for name in optional if getattr(args, name) is not None]
+        return {name: getattr(args, name) for name in (*names, *given)}
     return pool_price_request(args)
 
 

@@ -54,6 +54,21 @@ def operation_range_value(target, selected):
     return selected if target.band is not None else None
 
 
+def bounding_price(config, state, intent, before):
+    """The sqrt price an addition's minimum amounts are derived around.
+
+    A strategy's addition is bounded around the price of the step's own observation.
+    A direct action's, which an adopting allocation states, is bounded around the price
+    its request was decided at. Its offer was trimmed around that same price, so offer
+    and minimums together make the step revert beyond the stated tolerance of that one
+    price, wherever inside the tolerance the step's own observation has drifted.
+    """
+    if config.allocation(intent.target.allocation).adopt is None:
+        return before.pool.sqrt_price_x96
+    (decided,) = [seen for seen in state.decision.observations if seen.target == intent.target]
+    return decided.pool.sqrt_price_x96
+
+
 @dataclass(frozen=True)
 class Planner:
     operations: ModuleType
@@ -100,10 +115,10 @@ class Planner:
                 deadline=intent.deadline,
             )
         if isinstance(intent, (OpenLiquidity, IncreaseLiquidity)):
-            return self.addition(config, intent, before)
+            return self.addition(config, state, intent, before)
         return self.removal(intent, before)
 
-    def addition(self, config, intent, before):
+    def addition(self, config, state, intent, before):
         position = before.owned.position
         if isinstance(intent, OpenLiquidity) == (position is not None):
             raise ValueError("liquidity addition must preserve existing NFT ownership")
@@ -111,7 +126,7 @@ class Planner:
             intent.target, position=position, requested=getattr(intent, "range", None)
         )
         lower, upper = sqrt_at_tick(selected.lower), sqrt_at_tick(selected.upper)
-        price = before.pool.sqrt_price_x96
+        price = bounding_price(config, state, intent, before)
         liquidity = liquidity_for(
             intent.maximum0.amount, intent.maximum1.amount, price, lower, upper
         )

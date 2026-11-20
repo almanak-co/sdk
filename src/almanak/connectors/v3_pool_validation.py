@@ -213,3 +213,8 @@ def validate_current(backend, plan, current):
         raise DataError("stale_plan", "prepared protocol deadline expired")
     if isinstance(plan.operation, (Mint, Increase)):
         price_movement(plan.before, current, allocation.slippage_bps)
+        if allocation.adopt is not None:
+            # A direct addition reverts beyond the tolerance of its decided price, so it
+            # is neither signed nor sent while the pool is beyond it.
+            decided = decision_observation(plan, plan.operation.target)
+            price_movement(decided, current, allocation.slippage_bps)

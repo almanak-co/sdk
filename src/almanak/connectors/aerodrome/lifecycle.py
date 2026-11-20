@@ -12,6 +12,7 @@ from almanak.connectors.dex_residual import counter_settled
 from almanak.connectors.ownership import protocol_ownership
 from almanak.connectors.v3_pool_lifecycle import adopt_owned as adopt_inventory
 from almanak.dex_intents import IncreaseLiquidity, OpenLiquidity, SwapExactInput
+from almanak.operator_deployment import refuse_adoption
 from almanak.work import initial_work
 
 
@@ -37,18 +38,52 @@ def validate_initial(state, observed):
 
 
 def adopt_owned(owned, observed):
-    """Ownership of an operator deployment at its start: the inventory its allocation states.
+    """Ownership of an operator deployment at its start: what its allocation states.
 
-    An operator deployment is trading-only, so it adopts no pool shares and no fee
-    claims. A wallet that holds either is refused when it is observed
-    (`observations.position`), before this is reached. Shares in the pool's own
-    balance are not checked: a swap never burns them. The stated inventory is
-    attributed only when the wallet covers it; an operator is refused here, before
-    anything is planned, when it does not.
+    The stated inventory is attributed only when the wallet covers it; an operator is
+    refused here, before anything is planned, when it does not.
+
+    An allocation with liquidity authority owns the fund's whole position in the pool
+    exactly as the observation read it from the chain: every share the fund holds, with
+    the fee claims and indices the pool stores for the fund. Those claims are the
+    account's and shares are fungible, so no part of the balance can be left out, and
+    later steps are reconciled against the stored values adopted here. A fund that
+    holds none starts without a position.
+
+    A trading allocation adopts no shares. A fund that holds any is refused when it is
+    observed (`observations.position`), before this is reached. Shares in the pool's own
+    balance are not checked here: a swap never burns them, and an addition or a removal
+    refuses them itself.
     """
-    if any(item.target.liquidity_enabled for item in owned):
-        raise ValueError("an Aerodrome operator deployment is trading-only")
-    return adopt_inventory(owned, observed)
+    covered = adopt_inventory(owned, observed)
+    return tuple(adopted(item, seen) for item, seen in zip(covered, observed, strict=True))
+
+
+def adopted(item, seen):
+    if not item.target.liquidity_enabled:
+        return item
+    return type(item)(
+        target=item.target,
+        inventory0=item.inventory0,
+        inventory1=item.inventory1,
+        position=seen.position,
+        # Shares the fund already holds were entered before this deployment.
+        entry_complete=seen.position is not None,
+    )
+
+
+def require_origin(config, strategy):
+    """Only an operator deployment adopts, and its liquidity allocations always do.
+
+    An adopting allocation's observations carry no quote. An operator allocation with
+    liquidity authority that did not adopt would be offered quotes a swap could follow.
+    """
+    if strategy is not None:
+        refuse_adoption(config.allocations)
+    adopting = [a.adopt is not None for a in config.allocations]
+    liquid = [a.liquidity_enabled for a in config.allocations]
+    if strategy is None and adopting != liquid:
+        raise ValueError("an operator allocation with liquidity authority states what it adopts")
 
 
 def commit_owned(owned, outcome):
@@ -93,6 +128,7 @@ class AerodromeLifecycle:
     def initial(cls, config, strategy, capabilities, permissions):
         from almanak.triggers import DecisionSchedule
 
+        require_origin(config, strategy)
         return cls.checkpoint_type(
             schedule=DecisionSchedule(),
             work=initial_work(config, cls.work_type),

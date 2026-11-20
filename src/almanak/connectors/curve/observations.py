@@ -197,6 +197,10 @@ def measured_quote(reader, target, block, amount, output_asset):
 def quotes_for(config, owned, quote, *, entry=True):
     """Decision quotes; `entry=False` skips the entry quote an exit or teardown cannot use."""
     allocation = config.allocation(owned.target.allocation)
+    if allocation.adopt:
+        # An adopting allocation trades nothing. With no quote in its observations the
+        # gateway's swap check has nothing to admit a swap along.
+        return {}
     result = entry_or_reason(lambda: entry_measurement(allocation, owned, quote)) if entry else {}
     if owned.position is None:
         result.update(exit_split(owned, quote))

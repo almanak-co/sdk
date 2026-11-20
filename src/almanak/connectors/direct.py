@@ -26,6 +26,12 @@ COMMAND_INTENTS: dict[str, tuple[str, ...]] = {
     "repay": ("repay", "repay_amount"),
     "collateral": ("collateral",),
     "swap": ("swap_exact_input",),
+    "open-liquidity": ("open_liquidity",),
+    "increase-liquidity": ("increase_liquidity",),
+    "decrease-liquidity": ("decrease_liquidity",),
+    "collect-liquidity-fees": ("collect_liquidity_fees",),
+    "close-liquidity": ("close_liquidity",),
+    "revoke-exchange": ("revoke_exchange",),
 }
 
 
@@ -51,6 +57,23 @@ class ActionRequest:
     deadline_seconds: int | None = None
     # The CAIP-19 asset type bought, stated only where `DirectActions.names_bought`.
     buy: str | None = None
+    # A liquidity action only. `amount0` and `amount1` are the most base units of the
+    # pool's currency0 and currency1 a mint or an increase may use. `tick_lower` and
+    # `tick_upper` are the range a new position is minted into. `token_id` names an
+    # existing position by its position-manager NFT. `liquidity` is how much of that
+    # position a decrease removes, in the position's own liquidity units.
+    amount0: int | None = None
+    amount1: int | None = None
+    tick_lower: int | None = None
+    tick_upper: int | None = None
+    token_id: int | None = None
+    liquidity: int | None = None
+    # A liquidity action in a pool whose position is its LP token balance. `amounts`
+    # pairs a CAIP-19 coin of the pool with the base units of it a deposit uses.
+    # `receive` is how a burn pays out: `balanced`, or the CAIP-19 coin it pays alone.
+    # There `liquidity` is the LP shares a decrease burns, in base units of the LP token.
+    amounts: tuple[tuple[str, int], ...] | None = None
+    receive: str | None = None
 
     @property
     def kind(self) -> str:
@@ -82,6 +105,11 @@ class DirectActions:
     # Whether a swap states the asset bought as well as the asset sold: the connector's
     # pools can hold more than two coins. Elsewhere the pool decides what is bought.
     names_bought: bool = False
+    # `liquidity_flags(command)`: the position flags a liquidity command takes for this
+    # connector, as `ActionRequest` field names: those it requires, then those it also
+    # takes. None takes the flags of a concentrated-liquidity position: a tick range or
+    # an NFT, and an amount of each of the two currencies.
+    liquidity_flags: Callable | None = None
 
 
 # Installed connectors `ax` runs no direct action for, and why.

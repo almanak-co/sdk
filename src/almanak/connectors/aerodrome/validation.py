@@ -3,7 +3,11 @@
 from almanak.connectors.aerodrome import math, planning
 from almanak.connectors.aerodrome import operations as ops
 from almanak.connectors.aerodrome.authority import admit
-from almanak.connectors.aerodrome.ownership import require_empty_pool_deposit, validate_owned
+from almanak.connectors.aerodrome.ownership import (
+    require_empty_pool_deposit,
+    validate_owned,
+    validate_retained,
+)
 from almanak.connectors.refusals import below_entry_minimum
 from almanak.dex_intents import (
     CloseLiquidity,
@@ -58,6 +62,8 @@ def addition_limits(intent, decision, before, allocation):
         intent.maximum0.amount,
         intent.maximum1.amount,
     )
+    if allocation.adopt is not None:
+        require_proportional_offer(intent, expected)
     current = math.addition(
         pool.reserve0,
         pool.reserve1,
@@ -73,6 +79,18 @@ def addition_limits(intent, decision, before, allocation):
         raise DataError(
             "liquidity_movement", "pool movement violates retained deposit or share minima"
         )
+
+
+def require_proportional_offer(intent, expected):
+    """A direct deposit offers exactly what it takes at the decision's proportion.
+
+    The minimums are the offer less the slippage, and the router takes at most the
+    offer. Only an offer in the proportion bounds the deposit on both sides: an amount
+    offered beyond it could be taken whole at a proportion pushed after signing. A
+    strategy's deposit offers its inventory as it always did and is not held to this.
+    """
+    if (intent.maximum0.amount, intent.maximum1.amount) != expected[:2]:
+        raise ValueError("a direct deposit offers exactly what it takes at the observed proportion")
 
 
 def removal_limits(intent, decision, allocation):
@@ -173,10 +191,22 @@ def validate_operation(backend, state, operation, before):
 def validate_current(backend, plan, current):
     if current.simulated:
         raise ValueError("simulated observations cannot authorize submission")
-    validate_owned(plan.before.owned, current)
+    retained(backend.config, plan)(plan.before.owned, current)
     if plan.before.allowances != current.allowances:
         raise DataError("precondition_changed", "spending authority changed after preparation")
     validate_current_intent(backend.config, plan, current)
+
+
+def retained(config, plan):
+    """The ownership check a plan is held to at the current head.
+
+    Unsigned work, and every plan of a strategy's allocation, is held to the fund's
+    stored position. Signed bytes of an adopting allocation are not: they cannot be
+    recalled, a share anyone sends the fund would hold them back for good, and their
+    outcome is reconciled with the difference listed.
+    """
+    adopting = config.allocation(plan.operation.allocation).adopt is not None
+    return validate_retained if adopting and is_signed(plan) else validate_owned
 
 
 def expired(operation, block) -> bool:

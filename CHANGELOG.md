@@ -31,11 +31,37 @@ its changelog is on the `v2` branch.
   on Uniswap V3, Uniswap V4, PancakeSwap V3, Aerodrome, Aerodrome Slipstream and
   Curve, with a required `--slippage-bps` below the pool's own quote at the observed
   block. The result lists what was sold and bought and any allowance left.
+- `ax open-liquidity`, `ax increase-liquidity`, `ax decrease-liquidity`,
+  `ax collect-liquidity-fees` and `ax close-liquidity` open and manage a
+  concentrated-liquidity position on Uniswap V3, PancakeSwap V3 and Aerodrome
+  Slipstream, in a tick range and from amounts the operator states. An existing
+  position is named by `--token-id`, whoever opened it. Nothing is swapped inside a
+  liquidity action. A mint or an increase reverts when mined at a price further than
+  `--slippage-bps` from the observed one in either direction, within what the range
+  itself holds. `ax revoke-exchange`
+  sets the allowances a command left to zero, and `ax liquidity-position` reads a
+  position.
+- A liquidity step mined after another account added to the position's NFT is
+  recorded with the position as its block holds it and an accounting issue, for
+  strategies and direct actions alike, so the step resolves.
+- The liquidity commands also serve Curve, whose position is the wallet's balance of
+  the pool's LP token: `open-liquidity` and `increase-liquidity` deposit an exact
+  `--amount` per named coin, and `decrease-liquidity` and `close-liquidity` state with
+  `--receive` whether the burn pays every coin in proportion or one coin. They serve
+  Aerodrome stable and volatile pools too, whose position is the wallet's balance of
+  the pool's share token. An Aerodrome deposit offers the stated amounts in the
+  proportion of the pool's reserves and reverts when that proportion moved further
+  than `--slippage-bps` in either direction.
+- `ax open-liquidity`, `ax collect-liquidity-fees` and `ax close-liquidity` serve
+  Uniswap V4, with the pool named by its key and a native pool provided in the wrapped
+  token. A mint reverts when mined at a price further than `--slippage-bps` from the
+  price its step was planned at, within what the range itself holds.
 - `--public-rpc` serves `almanak ax` reads on Base, Arbitrum, BNB, Optimism, Polygon and
   Robinhood beside Ethereum and Avalanche. `drpc` adds Base, Optimism, Polygon and
   Robinhood, and four chain operators' own endpoints are named `base`, `arbitrum`,
   `bnbchain` and `optimism`. Arbitrum, BNB, Polygon and Robinhood have one endpoint
-  each, and HyperEVM has none. Direct actions stay Aave V4 on Ethereum and Avalanche.
+  each, and HyperEVM has none. A direct action also runs through one, on the chains
+  where `almanak support` lists it.
   Compound V3 listings, Morpho Blue listings on Avalanche and BNB, and the lookups by
   name are refused through a public endpoint; `docs/operating.md` says what works.
 - `scripts/qualify_public_rpc.py` checks a public endpoint, live, against a sample of
