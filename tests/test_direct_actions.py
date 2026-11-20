@@ -43,7 +43,9 @@ def test_a_connector_serves_exactly_the_actions_its_chains_declare():
         cells = {str(a) for support in connector.chain_support for a in support.direct_actions}
         found = direct.direct_actions().get(str(name))
         commands = () if found is None else found.actions
-        assert cells == {kind for c in commands for kind in direct.COMMAND_INTENTS[c]}, name
+        # Every declared kind has a command, and every command a declared kind somewhere.
+        assert cells <= {kind for c in commands for kind in direct.COMMAND_INTENTS[c]}, name
+        assert all(cells & set(direct.COMMAND_INTENTS[c]) for c in commands), name
 
 
 def test_every_command_names_the_intents_it_admits():
@@ -76,13 +78,21 @@ def test_a_direct_action_is_a_supported_production_action_for_a_plain_account():
 
 
 def test_a_connector_chain_or_action_that_is_not_declared_is_refused():
-    direct.require_direct("aave_v4", ETHEREUM, "supply")
+    supply, withdraw = direct.ActionRequest("supply", 5), direct.ActionRequest("withdraw")
+    direct.require_direct("aave_v4", ETHEREUM, supply)
+    direct.require_direct("aave_v4", ETHEREUM, withdraw)
     with pytest.raises(ValueError, match="aave_v4 serves no direct supply on eip155:8453"):
-        direct.require_direct("aave_v4", BASE, "supply")
-    with pytest.raises(ValueError, match="aave_v4 serves no direct borrow"):
-        direct.require_direct("aave_v4", ETHEREUM, "borrow")
+        direct.require_direct("aave_v4", BASE, supply)
+    with pytest.raises(ValueError, match="aave_v4 serves no direct collateral"):
+        direct.require_direct("aave_v4", ETHEREUM, direct.ActionRequest("collateral", enable=True))
+    # A command the connector serves, in a form it does not: Aave V4 withdraws and
+    # repays in full.
+    with pytest.raises(ValueError, match="aave_v4 serves no direct withdraw --amount on eip155:1"):
+        direct.require_direct("aave_v4", ETHEREUM, direct.ActionRequest("withdraw", 5))
+    with pytest.raises(ValueError, match="aave_v4 serves no direct repay --amount on eip155:1"):
+        direct.require_direct("aave_v4", ETHEREUM, direct.ActionRequest("repay", 5))
     with pytest.raises(ValueError, match="no direct actions for gmx_v2: a GMX request"):
-        direct.require_direct("gmx_v2", ChainId("eip155:42161"), "supply")
+        direct.require_direct("gmx_v2", ChainId("eip155:42161"), supply)
     with pytest.raises(ValueError, match="unsupported as a direct action"):
         cell().require_direct("withdraw")
 
@@ -169,10 +179,21 @@ def operator_gateway(recorded, kind, *, operator):
 def test_the_gateway_admits_an_operator_request_only_for_a_declared_direct_action(
     recorded, monkeypatch
 ):
+    import dataclasses
+
+    from almanak.connectors import target_routing
     from almanak.connectors.aave_v4.execution import AaveExecution
 
     # The connector's own validation is proven elsewhere; only the declaration is asked.
     monkeypatch.setattr(AaveExecution, "validate_operation", lambda *arguments: None)
+    # A chain that serves fewer actions directly than a strategy may take there.
+    connector = target_routing.connector_for_target(recorded.outcomes[0].operation.target)
+    cells = tuple(
+        cell.model_copy(update={"direct_actions": (EconomicAction.SUPPLY,)})
+        for cell in connector.chain_support
+    )
+    narrowed = dataclasses.replace(connector, chain_support=cells)
+    monkeypatch.setattr(target_routing, "connector_for_target", lambda target: narrowed)
     operator_gateway(recorded, "supply", operator=True)()
     # A strategy may borrow on this chain; an operator request may not.
     operator_gateway(recorded, "borrow", operator=False)()

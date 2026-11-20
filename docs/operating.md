@@ -422,8 +422,9 @@ Explicit process management remains under `service gateway`, `service fork`,
 
 ### Operator actions
 
-`almanak ax supply` and `almanak ax withdraw` run one action for one wallet in one
-process, with no strategy, workspace or gateway process to start:
+`almanak ax supply`, `withdraw`, `borrow`, `repay` and `collateral` each run one
+action for one wallet in one process, with no strategy, workspace or gateway process
+to start:
 
 ```bash
 almanak ax supply --connector aave_v4 --chain eip155:1 \
@@ -437,10 +438,24 @@ almanak ax withdraw --connector compound_v3 --chain eip155:8453 \
   --max-gas-price-wei 1000000000 --max-transaction-fee 200000000000000
 ```
 
-Every lending connector serves both commands: Aave V4, Aave V3, SparkLend, Compound
-V3 and Morpho Blue, on each chain `almanak support` lists `supply` and `withdraw`
-under `direct_actions` for. The market is named with the flags of
-`ax lending-reserve`.
+The market is named with the flags of `ax lending-reserve`. What each lending
+connector serves:
+
+| Command | Does | Connectors |
+| --- | --- | --- |
+| `supply --amount N` | Supplies the asset from the wallet. | all five |
+| `withdraw` | Withdraws the whole supplied balance, with interest. | all five |
+| `withdraw --amount N` | Withdraws that much and leaves the rest. | Aave V3, SparkLend, Compound V3, Morpho Blue |
+| `borrow --amount N --min-health-factor H` | Borrows the asset to the wallet against the collateral it has supplied. | all five |
+| `repay` | Repays the whole debt, with interest. | all five |
+| `repay --amount N` | Repays that much. | Aave V3, SparkLend, Compound V3, Morpho Blue |
+| `collateral --enable` or `--disable` | Sets whether the supplied balance backs debt. | Aave V3, SparkLend |
+
+`almanak support` lists the intent kinds each chain serves under `direct_actions`;
+a partial withdrawal is `withdraw_amount` and a partial repayment `repay_amount`.
+A form a connector does not serve is refused before any read. On Compound V3 the
+borrowed and repaid asset is the Comet's base asset, and on Morpho Blue it is the
+loan leg.
 
 Without `--execute` the command resolves the market, reads the wallet's current
 position, plans the first step and prints it; nothing is signed, and the keystore is
@@ -478,33 +493,73 @@ protocol's own units, as strings; `ax lending-position` reports amounts in asset
 The deployment covers the wallet's whole position in the venue, read when the command
 starts, not only the requested market:
 
-- A supply on Aave V3 or SparkLend binds every reserve of the Pool that the account
-  uses as collateral or has borrowed, each with the price source the Pool uses for
-  it now, because the Pool risk check must account for all of them. A withdrawal
-  binds its own reserve only.
+- An action the Pool risk-checks on Aave V3 or SparkLend binds every reserve of the
+  Pool that the account uses as collateral or has borrowed, each with the price
+  source the Pool uses for it now, because the risk check must account for all of
+  them. A repayment, and a withdrawal the Pool does not risk-check, bind their own
+  reserve only.
 - Compound V3 binds the base asset and every collateral asset the wallet holds in
   the Comet, and Morpho Blue binds the other leg of the market when the wallet
   holds it.
 
 A position that appears in the venue between that read and the first step is refused:
-with `ownership_mismatch` on Compound V3 and Morpho Blue, and a supply on Aave V3 or
-SparkLend with `risk_unavailable`. Running the command again reads it. A supply into
+with `ownership_mismatch` on Compound V3 and Morpho Blue, and a risk-checked action
+on Aave V3 or SparkLend with `risk_unavailable`. Running the command again reads it. A supply into
 a reserve that is isolated collateral, or by a wallet that holds isolated collateral
 in the Pool, is refused on Aave V3 and SparkLend. A Compound V3 Comet
 with many collateral assets takes many reads, so a preview through a public endpoint
 can take minutes.
 
-These commands state no health floor, so what the protocol would check against one
-is refused while the wallet has debt in the venue, and the refusal says so:
-a supply and a withdrawal of collateral on Aave V3 and SparkLend, a withdrawal of
-collateral on Compound V3 and Morpho Blue, and a supply of the Compound V3 base
-asset, which would repay the debt. Supplying collateral on Compound V3 or Morpho
-Blue, and withdrawing a balance that backs no debt, still work.
+`--min-health-factor` is the lowest health factor the action may leave the account
+with, a decimal above 1, and one floor serves the wallet's whole position in the
+venue. The connector projects the account's health after the step and refuses the
+step below the floor; it is a check before signing, not a limit on chain. A borrow
+always states one. Any other action a connector projects is refused without one
+while the wallet has debt in the venue, and the refusal says to state it:
 
-A withdrawal on Aave V3 or SparkLend releases a reserve the Pool uses as collateral.
-On Aave V4 a withdrawal of a supply that is enabled as collateral is refused with
-`residual_collateral`, also when the account has no debt, and no direct command
-disables collateral there.
+| Connector | Projected against the floor |
+| --- | --- |
+| `aave_v3`, `sparklend` | a borrow, a supply, a collateral change, and a withdrawal of a reserve used as collateral |
+| `compound_v3` | a borrow, and a withdrawal of collateral, in full or in part |
+| `morpho_blue` | a borrow, and a withdrawal of collateral in part |
+| `aave_v4` | a borrow |
+
+A repayment is never projected, so no floor can refuse it, and it takes no
+`--min-health-factor`. Aave V4 refuses a floor on a supply or a withdrawal, which it
+would not check. Stated on any other action a connector does not project, the floor
+has no effect. Aave V3 and SparkLend project a supply and enabling collateral too,
+so an account already below the stated floor is refused even those: state a floor
+the account meets.
+
+What a connector does not project it refuses while the debt is open: Morpho Blue
+refuses to withdraw collateral in full, and Aave V4 refuses to withdraw a reserve
+that is enabled as collateral while the account owes anything on the Spoke. The Aave
+V4 check runs again when the step is planned and when it is signed, so a debt that
+appears after the command's first read still refuses the withdrawal; what the chain
+changes between signing and inclusion is not seen. Repay first. On Compound V3 the
+last collateral asset
+cannot leave either, since nothing would cover the debt. A supply of the
+Compound V3 base asset while the wallet owes it is refused, since it would repay the
+debt: use `repay`. A withdrawal of the base asset above the supplied balance is
+refused too, since it would borrow: use `borrow`.
+
+On Aave V4 a supply backs nothing until it is enabled as collateral. A borrow
+enables each supplied reserve that can back debt first, one `collateral` step each,
+so a preview of a first borrow shows a `collateral` step and has not yet tested the
+floor: the floor is projected when the borrow step itself is planned. A borrow the
+floor refuses can therefore leave its collateral steps mined; a repayment with no
+debt releases them, and a withdrawal works either way. A borrow is served for one
+debt reserve per wallet and Spoke. A repayment is served for any reserve the wallet
+owes: it disables the wallet's collateral after the debt is gone only when no other
+debt remains on the Spoke, and otherwise ends with the revocation.
+
+A full repayment approves the wallet's whole balance of the debt asset, repays with
+the protocol's full-repay form and revokes what is left of the approval, so the
+wallet must hold the whole debt with its interest; a shortfall is refused with the
+amount missing. When it stops after the repayment and before the revocation, the
+approval of the rest of that balance stands: `repay` again revokes it. On Compound
+V3 that works while the wallet still holds collateral in the Comet; otherwise the
+refusal names the allowance, and `withdraw` on the base asset revokes it.
 
 A supply plans against the wallet's allowance to the protocol: zero, or exactly the
 requested amount left by an earlier approval. Any other allowance is refused, and
@@ -513,8 +568,10 @@ allowance first. A withdrawal clears it: when an allowance remains, the withdraw
 is followed by a revocation, and with nothing supplied the revocation is its only
 step.
 
-Each fee ceiling applies to one transaction, so a supply, or a withdrawal that also
-revokes, can spend up to twice `--max-transaction-fee`. A step bids as an author's
+Each fee ceiling applies to one transaction, and an action can take several: a
+supply two, a full repayment three, an Aave V4 borrow one for each collateral reserve
+it enables and one more. So an action can spend `--max-transaction-fee` once per
+step, and a preview shows only the first. A step bids as an author's
 [gas policy](configuration.md) defaults on the chain: the quoted gas price is twice
 the base fee plus the tip, or 1.25 times the base fee plus the tip on Arbitrum and
 Robinhood Chain, so `--max-gas-price-wei` refuses a step once the base fee passes
@@ -526,7 +583,9 @@ seconds.
 | Option | Meaning |
 | --- | --- |
 | market selection | The same flags or `--config` file as `ax lending-reserve`. |
-| `--amount` | Base units of the reserve asset. `withdraw` takes none: it withdraws the whole supplied balance. |
+| `--amount` | Base units of the asset. Required for `supply` and `borrow`; without it `withdraw` and `repay` take the whole balance or debt. |
+| `--min-health-factor` | The lowest health factor a projected action may leave, a decimal above 1. Required for `borrow`; `repay` takes none. |
+| `--enable`, `--disable` | `collateral` only: one of the two. |
 | `--wallet` | The directory `almanak wallet create` wrote, under any account name. The keystore is unlocked with the recorded `password_file` or by asking. |
 | `--env-file` | The provider key (`ALCHEMY_API_KEY`). |
 | `--public-rpc` | A named public endpoint instead of `--env-file`. |

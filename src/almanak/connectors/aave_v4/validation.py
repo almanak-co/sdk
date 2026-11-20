@@ -1,10 +1,12 @@
 """Runtime-only debt and collateral preconditions. These are not Roles predicates."""
 
+from almanak.connectors.aave_v4.debt import collateral_enabled, owed_reserves
 from almanak.connectors.aave_v4.models import DebtAllocation
 from almanak.connectors.aave_v4.operations import (
     BorrowOperation,
     CollateralOperation,
     RepayOperation,
+    WithdrawOperation,
 )
 from almanak.connectors.repayment import require_repayment_funding
 from almanak.gateway.ethereum import DataError
@@ -80,6 +82,41 @@ def require_zero_debt(before):
         or before.premium_offset_ray
     ):
         raise DataError("residual_debt", "collateral release requires zero drawn and premium debt")
+
+
+def validate_account_release(reader, operation, block):
+    """Refuse an operator's release of collateral while the account owes on the Spoke.
+
+    An operator deployment binds part of the account's position on a Spoke: a withdrawal
+    binds one supply, and a repayment one debt. Its observations cannot show a debt in a
+    reserve it does not bind, and the Spoke itself lets collateral go down to a health
+    factor of 1. So the account's debt shares in every reserve are read at `block`, the
+    pinned block of the plan or the head at signing.
+    """
+    withdrawal = isinstance(operation, WithdrawOperation)
+    if not withdrawal and not (
+        isinstance(operation, CollateralOperation) and not operation.enabled
+    ):
+        return
+    released = operation.target if withdrawal else operation.collateral
+    spoke, reserve_id, account = (
+        released.reserve.spoke,
+        released.reserve.reserve_id,
+        released.fund.address,
+    )
+    # A plan is signed after the head has moved: its block is pinned again to read it.
+    if reader.pin_block(block.number) != block:
+        raise DataError("reorganization", "collateral release block is no longer canonical")
+    # A supply that is not collateral backs nothing, so its withdrawal releases none.
+    if withdrawal and not collateral_enabled(reader, spoke, reserve_id, account, block):
+        return
+    owed = owed_reserves(reader, spoke, account, block)
+    if owed:
+        raise DataError(
+            "residual_debt",
+            f"reserve {reserve_id} is collateral and the account owes reserve {owed[0]} of "
+            "its Spoke: collateral is released only after every debt there is repaid",
+        )
 
 
 def validate_repayment_funding(before, debt):

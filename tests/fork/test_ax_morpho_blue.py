@@ -19,16 +19,15 @@ from almanak.configuration.parameters import construct_parameters
 from almanak.configuration.unresolved import read_inputs
 from almanak.connectors.direct import ALLOCATION, ActionRequest
 from almanak.connectors.lending_lookup import selection
-from almanak.connectors.morpho_blue.direct import OTHER_LEG
 from almanak.connectors.morpho_blue.operations import (
     ApproveOperation,
-    BorrowOperation,
     SupplyOperation,
     plan_call,
 )
+from almanak.connectors.morpho_blue.reader import market_accounting
 from almanak.connectors.morpho_blue.support import DIRECT_CHAINS
 from almanak.gateway.credentials import write_private
-from almanak.gateway.ethereum import DataError
+from almanak.gateway.ethereum import DataError, EthereumReader
 from almanak.gateway.evm import chain_number
 from almanak.gateway.fixture_preparation import compile_fixture
 from almanak.gateway.fork_fixture import Fork
@@ -159,10 +158,10 @@ class Rehearsal:
             LIMITS, request, action, self.wallet, ax_actions.alchemy(chain), self.fork.rpc.endpoint
         )
 
-    def __call__(self, action, leg="loan", *, amount=None, execute):
+    def __call__(self, action, leg="loan", *, amount=None, floor=None, execute):
         if action == "supply" and amount is None:
             amount = self.amounts[leg]
-        request = ActionRequest(action, amount)
+        request = ActionRequest(action, amount, floor)
         config = self.configuration(leg, request)
         gateway = self.backend(config)
         try:
@@ -177,26 +176,33 @@ class Rehearsal:
         call = plan_call(step)
         self.fork.rpc.send(signer, to_checksum_address(call.to), call.data)
 
-    def approve(self, amount):
+    def approve(self, amount, leg="loan"):
         """Leave an allowance to the core that no request of this wallet asked for."""
-        target = self.configuration("loan", ActionRequest("withdraw")).target(ALLOCATION)
+        target = self.configuration(leg, ActionRequest("supply", amount)).target(ALLOCATION)
         stray = AssetAmount(asset=target.asset, amount=amount)
         self.send(self.signer, ApproveOperation(target=target, amount=stray, purpose="supply"))
 
-    def borrow(self, amount):
-        """Open debt as another tool would: no direct action borrows.
+    def idle_liquidity(self):
+        """Loan assets the market holds unborrowed at the fork's head."""
+        with EthereumReader(self.market.chain, self.fork.rpc.endpoint) as reader:
+            totals = market_accounting(reader, self.market, reader.pin_block("latest"))
+        return totals.supply_assets - totals.borrow_assets
 
-        Another account lends first, so a market with no idle liquidity can pay it out
-        and still return the wallet's own supply in full.
+    def ensure_liquidity(self, amount):
+        """Have another account lend where the market cannot pay `amount` out.
+
+        Returns whether it lent. A market whose supply is all borrowed at the fork's
+        block serves no borrow until someone lends, on the fork as on its chain.
         """
-        target = self.configuration("loan", ActionRequest("withdraw")).target(ALLOCATION)
+        if self.idle_liquidity() >= amount:
+            return False
+        target = self.configuration("loan", ActionRequest("supply", amount)).target(ALLOCATION)
         fund = Account(chain=target.fund.chain, address=self.lender.address.lower())
         lender = target.model_copy(update={"fund": fund})
         lent = AssetAmount(asset=target.asset, amount=self.liquidity)
         self.send(self.lender, ApproveOperation(target=lender, amount=lent, purpose="supply"))
         self.send(self.lender, SupplyOperation(target=lender, amount=lent))
-        borrowed = AssetAmount(asset=target.asset, amount=amount)
-        self.send(self.signer, BorrowOperation(target=target, amount=borrowed))
+        return True
 
 
 @pytest.fixture(params=CHAINS)
@@ -331,26 +337,94 @@ def test_each_leg_is_served_while_the_wallet_holds_the_other(setting):
     assert withdrawn["position_after"] == EMPTY_LOAN
 
 
-def assert_bound_without_authority(config):
-    """Both legs of the market, neither with borrow authority or a health floor."""
-    assert [item.name for item in config.allocations] == [ALLOCATION, OTHER_LEG]
-    policies = {(item.borrow, item.minimum_health_factor) for item in config.allocations}
-    assert policies == {(False, None)}
+FLOOR = 15 * 10**17
 
 
-def test_a_wallet_with_debt_keeps_its_collateral_and_every_safe_action(setting):
-    setting("supply", "collateral", execute=True)
-    setting.borrow(setting.amounts["loan"] // 100)
-    assert_bound_without_authority(setting.configuration("collateral", ActionRequest("withdraw")))
-    refusal = "cannot be withdrawn in full while that debt is open"
-    assert_refused(setting, DataError, refusal, "withdraw", "collateral", execute=True)
-    more = setting("supply", "collateral", execute=True)
-    assert_ran(more, ["approve", "supply"])
-    assert int(more["position_after"]["other_leg"]["borrow_shares"]) > 0
+def debt(result, moment, leg="loan"):
+    position = result[moment]
+    return int((position if leg == "loan" else position["other_leg"])["borrow_shares"])
+
+
+def test_a_debt_is_opened_and_closed_by_separate_commands(setting):
+    """Borrow against posted collateral, then every way out, each one command that
+    adopts what the earlier ones left."""
+    borrowed, posted = setting.amounts["loan"] // 10, setting.amounts["collateral"]
+    owed = assert_debt_opened(setting, borrowed, posted)
+    assert_debt_leaves_safe_actions_unfloored(setting, owed)
+    assert_collateral_leaves_only_floored(setting, posted)
+    assert_debt_repaid(setting, borrowed)
+    released = setting("withdraw", "collateral", execute=True)
+    assert_ran(released, ["withdraw"])
+    assert released["position_after"] == {"leg": "collateral", "collateral": "0"}
+
+
+FLOOR_REFUSAL = "violates the configured fund/market health floor"
+
+
+def assert_debt_opened(setting, borrowed, posted):
+    """A borrow needs the loan leg, posted collateral and a floor the position clears.
+
+    Returns the borrow shares the wallet then owes.
+    """
+    request = {"amount": borrowed, "floor": FLOOR, "execute": False}
+    wrong_leg = "a borrow is served on the loan leg"
+    assert_refused(setting, ValueError, wrong_leg, "borrow", "collateral", **request)
+    unbacked = "the wallet has no collateral in this market"
+    assert_refused(setting, ValueError, unbacked, "borrow", **request)
+    assert_supplied(setting("supply", "collateral", execute=True), 0, "collateral")
+    print(json.dumps({"lender_supplied_first": setting.ensure_liquidity(borrowed)}))
+    # A floor no position reaches, however small the debt.
+    assert_refused(setting, ValueError, FLOOR_REFUSAL, "borrow", **{**request, "floor": 10**60})
+    opened = setting("borrow", amount=borrowed, floor=FLOOR, execute=True)
+    assert_ran(opened, ["borrow"])
+    assert debt(opened, "position_before") == 0 < debt(opened, "position_after")
+    assert opened["position_after"]["other_leg"] == {"leg": "collateral", "collateral": str(posted)}
+    return debt(opened, "position_after")
+
+
+def assert_debt_leaves_safe_actions_unfloored(setting, owed):
+    """Lending and taking the lent balance back cannot lower health: no floor is asked."""
     lent = setting("supply", "loan", execute=True)
     assert_ran(lent, ["approve", "supply"])
-    owed = held(lent, "position_before", "borrow_shares")
-    assert owed > 0
+    assert debt(lent, "position_before") == owed
     withdrawn = setting("withdraw", "loan", execute=True)
-    assert_withdrawn(withdrawn, ["withdraw"])
-    assert held(withdrawn, "position_after", "borrow_shares") == owed
+    assert_ran(withdrawn, ["withdraw"])
+    assert (held(withdrawn, "position_after"), debt(withdrawn, "position_after")) == (0, owed)
+
+
+def assert_collateral_leaves_only_floored(setting, posted):
+    """Collateral that backs debt leaves in part, above a stated floor."""
+    part, leg = posted // 10, ("withdraw", "collateral")
+    full = "cannot be withdrawn in full while the debt is open"
+    assert_refused(setting, ValueError, full, *leg, floor=FLOOR, execute=False)
+    unfloored = "state --min-health-factor, or repay the debt"
+    assert_refused(setting, ValueError, unfloored, *leg, amount=part, execute=False)
+    most = {"amount": posted - 1, "floor": FLOOR, "execute": False}
+    assert_refused(setting, ValueError, FLOOR_REFUSAL, *leg, **most)
+    taken = setting(*leg, amount=part, floor=FLOOR, execute=True)
+    assert_ran(taken, ["withdraw"])
+    assert held(taken, "position_after", "collateral") == posted - part
+    assert debt(taken, "position_after", "collateral") == debt(
+        taken, "position_before", "collateral"
+    )
+    # An allowance left on the collateral is cleared by the same kind of withdrawal,
+    # while the debt that keeps a full withdrawal away is still open.
+    setting.approve(7, "collateral")
+    cleared = setting(*leg, amount=part, floor=FLOOR, execute=True)
+    assert_ran(cleared, ["withdraw", "revoke"])
+    assert held(cleared, "position_after", "collateral") == posted - 2 * part
+
+
+def assert_debt_repaid(setting, borrowed):
+    """A partial repayment, then the rest, after which there is nothing to repay."""
+    some = setting("repay", amount=borrowed // 2, execute=True)
+    assert_ran(some, ["approve", "repay"])
+    assert 0 < debt(some, "position_after") < debt(some, "position_before")
+    # The held balance is approved, so interest accrued since cannot leave the repayment
+    # short; what it does not take is revoked.
+    closed = setting("repay", execute=True)
+    assert_ran(closed, ["approve", "repay", "revoke"])
+    assert debt(closed, "position_after") == 0
+    assert_refused(
+        setting, DataError, "the wallet owes no debt in this market", "repay", execute=False
+    )

@@ -224,7 +224,7 @@ def aave_support():
         ("verified V4 implementation", "local fund/Spoke collateral", "standard ERC-20 assets"),
         histories,
         chains=(ChainId("eip155:1"), ChainId("eip155:43114")),
-        direct=(EconomicAction.SUPPLY, EconomicAction.WITHDRAW),
+        direct=actions,
     )
 
 

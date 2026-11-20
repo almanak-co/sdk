@@ -1,13 +1,13 @@
-"""`almanak ax supply` and `ax withdraw` on deployed Comets, in one process each.
+"""The `almanak ax` lending commands on deployed Comets, in one process each.
 
 An isolated Anvil fork of each declared chain stands in for it behind the production
-adapter's own planning, signing and reconciliation. Every command resolves the market
-and reads the wallet's legs on the fork, as the real command does on its endpoint. It
-is rehearsal evidence, not a mainnet run.
+adapter's own planning, signing and reconciliation, at the block the chain's reference
+fork fixture pins. Every command resolves the market and reads the wallet's legs on the
+fork, as the real command does on its endpoint. It is rehearsal evidence, not a mainnet
+run.
 """
 
 import json
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,11 +34,14 @@ from tests.fork.production_gateway_driver import RehearsalGateway
 ROOT = Path(__file__).parents[2]
 pytestmark = pytest.mark.fork
 PASSWORD = "public-test-password"
+LIMITS = ax_actions.FeeLimits(max_gas_price_wei=500 * 10**9, max_transaction_fee=10**17)
 # Base units: 100 USDC and 1 WETH.
 BASE_AMOUNT = 100 * 10**6
 COLLATERAL_AMOUNT = 10**18
 # Above every reference Comet's minimum borrow, and far inside 1 WETH of collateral.
 DEBT_AMOUNT = 200 * 10**6
+# A health factor of 1.5 at wad precision, which that debt clears with room.
+FLOOR = 15 * 10**17
 CHAINS = ("ethereum", "base", "arbitrum", "optimism")
 
 
@@ -97,10 +100,13 @@ def funded_wallet(fork, venue, directory):
 
 
 def as_origin_chain(fork, chain):
-    """Present the fork under the chain's own number, with a head as recent as a live one."""
+    """Present the fork under the chain's own number.
+
+    The fork keeps the pinned block's time: the adapter's clock is the fork's own, and a
+    jump to the present would age every price feed.
+    """
     fork.rpc("anvil_setChainId", [chain_number(chain.chain_id)])
     fork.rpc.signing_chain = chain.chain_id
-    fork.rpc("evm_setNextBlockTimestamp", [int(time.time())])
     fork.rpc("evm_mine")
     return fork.rpc("anvil_metadata")
 
@@ -124,27 +130,22 @@ class Desk:
         self.fork, self.venue, self.wallet, self.signer = fork, venue, wallet, signer
         self.identity = identity
 
-    def config(self, asset, action):
+    def config(self, asset, request):
         """The deployment the command builds: market resolution and the wallet's legs."""
         venue = self.venue
-        request = selection(
+        market = {"chain": str(venue.chain.chain_id), "comet": venue.comet, "asset": str(asset)}
+        return ax_actions.deployment(
             "compound_v3",
-            {"chain": str(venue.chain.chain_id), "comet": venue.comet, "asset": str(asset)},
-        )
-        args = SimpleNamespace(
-            connector="compound_v3",
-            public_rpc=None,
-            max_gas_price_wei=500 * 10**9,
-            max_transaction_fee=10**17,
-            max_gas_limit=None,
-        )
-        provider = ax_actions.alchemy(venue.chain.chain_id)
-        return ax_actions.action_config(
-            args, request, action, self.wallet, provider, self.fork.rpc.endpoint
+            selection("compound_v3", market),
+            request,
+            self.wallet,
+            ax_actions.alchemy(venue.chain.chain_id),
+            self.fork.rpc.endpoint,
+            LIMITS,
         )
 
-    def __call__(self, action, asset, amount=None, *, execute):
-        request = ActionRequest(action, amount)
+    def __call__(self, action, asset, amount=None, *, execute, floor=None):
+        request = ActionRequest(action, amount, min_health_factor=floor)
         config = self.config(asset, request)
         gateway = backend(self.fork, config, self.wallet, self.identity)
         try:
@@ -159,17 +160,12 @@ class Desk:
             record, lambda stored: backend(self.fork, stored, self.wallet, self.identity)
         )
 
-    def send(self, to, signature, *arguments):
-        """One transaction from the wallet outside the SDK, as its owner could send anywhere."""
-        types = signature[signature.index("(") + 1 : -1].split(",")
-        data = keccak(text=signature)[:4] + encode(types, arguments)
-        self.fork.rpc.send(self.signer, to_checksum_address(to), "0x" + data.hex())
-
-    def borrow(self, amount):
-        self.send(self.venue.comet, "withdraw(address,uint256)", self.venue.base.reference, amount)
-
     def approve(self, asset, amount):
-        self.send(asset.reference, "approve(address,uint256)", self.venue.comet, amount)
+        """Let the Comet spend an asset outside the SDK, as the wallet's owner could."""
+        selector = keccak(text="approve(address,uint256)")[:4]
+        data = selector + encode(("address", "uint256"), (self.venue.comet, amount))
+        token = to_checksum_address(asset.reference)
+        self.fork.rpc.send(self.signer, token, "0x" + data.hex())
 
 
 @pytest.fixture
@@ -192,7 +188,7 @@ def steps(result):
 
 
 def owned(result, moment="position_after"):
-    """Signed base principal and collateral base units of the requested position."""
+    """The wallet's signed base principal, and the requested asset's collateral units."""
     position = result[moment]
     return int(position["base_principal"]), int(position["collateral"])
 
@@ -218,24 +214,34 @@ def test_supply_then_withdraw_each_as_one_command(desk, venue):
     assert_supplied(first, 0)
     # A later command adopts the position the account already holds and adds to it.
     assert_supplied(desk("supply", venue.base, BASE_AMOUNT, execute=True), owned(first)[0])
+    assert_part_withdrawn(desk, venue)
     withdrawn = desk("withdraw", venue.base, execute=True)
     assert (steps(withdrawn), owned(withdrawn)) == (WITHDRAWN, (0, 0))
     with pytest.raises(DataError, match="nothing to withdraw"):
         desk("withdraw", venue.base, execute=True)
 
 
-def stopped_after_the_first_send(desk, venue, monkeypatch, capsys):
-    """Run a supply that is interrupted while its approval waits for a receipt."""
+def assert_part_withdrawn(desk, venue):
+    """An amount of the base supply leaves; an amount above it would borrow and is refused."""
+    part = desk("withdraw", venue.base, BASE_AMOUNT, execute=True)
+    assert steps(part) == WITHDRAWN
+    assert 0 < owned(part)[0] < owned(part, "position_before")[0]
+    with pytest.raises(DataError, match="would borrow, which `ax borrow` does"):
+        desk("withdraw", venue.base, 2 * BASE_AMOUNT, execute=True)
+
+
+def interrupted(command, kind, monkeypatch, capsys):
+    """Run a command that is interrupted while its step of `kind` waits for a receipt."""
     from almanak.operator_runtime import OperatorRuntime
 
     def stop(self, state):
-        if state.pending is not None:
+        if state.pending is not None and state.pending.operation.kind == kind:
             raise KeyboardInterrupt
 
     with monkeypatch.context() as patched:
         patched.setattr(OperatorRuntime, "wait", stop)
         with pytest.raises(KeyboardInterrupt):
-            desk("supply", venue.base, BASE_AMOUNT, execute=True)
+            command()
     events = [json.loads(line) for line in capsys.readouterr().err.splitlines() if "event" in line]
     (kept,) = [event for event in events if event.get("event") == "record_kept"]
     return Path(kept["path"])
@@ -244,12 +250,17 @@ def stopped_after_the_first_send(desk, venue, monkeypatch, capsys):
 def test_an_interrupted_supply_is_recovered_and_the_wallet_is_freed(
     desk, venue, monkeypatch, capsys
 ):
-    record = stopped_after_the_first_send(desk, venue, monkeypatch, capsys)
+    record = interrupted(
+        lambda: desk("supply", venue.base, BASE_AMOUNT, execute=True),
+        "approve",
+        monkeypatch,
+        capsys,
+    )
     assert_blocked(desk, venue, record)
     assert_recovered(desk.recover(record), record)
     # The approval stands. A supply of another amount cannot use it and says so; the
     # same supply needs only its own step.
-    with pytest.raises(DataError, match="Supply exactly that amount"):
+    with pytest.raises(DataError, match="State exactly that amount"):
         desk("supply", venue.base, BASE_AMOUNT + 1, execute=True)
     assert steps(desk("supply", venue.base, BASE_AMOUNT, execute=True)) == (["supply"], True)
 
@@ -280,9 +291,10 @@ def test_a_wallet_holding_another_leg_keeps_it_through_each_command(desk, venue)
     supplied = desk("supply", venue.base, BASE_AMOUNT, execute=True)
     assert supplied["allocations"] == ["position", held_name(venue.collateral)]
     assert_supplied(supplied, 0)
+    # A collateral command reports the base principal the wallet holds beside it.
     more = desk("supply", venue.collateral, COLLATERAL_AMOUNT, execute=True)
     assert more["allocations"] == ["position", held_name(venue.base)]
-    assert owned(more) == (0, 2 * COLLATERAL_AMOUNT)
+    assert owned(more) == (owned(supplied)[0], 2 * COLLATERAL_AMOUNT)
     assert_each_leg_withdrawn(desk, venue)
 
 
@@ -294,27 +306,90 @@ def assert_each_leg_withdrawn(desk, venue):
     assert (steps(released), owned(released)) == (WITHDRAWN, (0, 0))
 
 
-def test_a_wallet_in_debt_may_add_collateral_but_not_repay_or_release_it(desk, venue):
-    desk("supply", venue.collateral, COLLATERAL_AMOUNT, execute=True)
-    desk.borrow(DEBT_AMOUNT)
-    with pytest.raises(DataError, match="would repay that debt"):
-        desk("supply", venue.base, BASE_AMOUNT, execute=True)
-    with pytest.raises(DataError, match="nothing to withdraw.*the wallet owes"):
-        desk("withdraw", venue.base, execute=True)
-    with pytest.raises(DataError, match="needs a health floor"):
-        desk("withdraw", venue.collateral, execute=True)
-    added = desk("supply", venue.collateral, COLLATERAL_AMOUNT, execute=True)
-    assert (added["allocations"], steps(added)) == (["position", held_name(venue.base)], SUPPLIED)
-    assert owned(added) == (0, 2 * COLLATERAL_AMOUNT)
-    assert ax_actions.kept_records() == []
-
-
 def test_a_withdrawal_clears_an_allowance_left_for_the_comet(desk, venue):
     assert_supplied(desk("supply", venue.base, BASE_AMOUNT, execute=True), 0)
     # An unlimited allowance, as another interface may have asked the owner for.
     desk.approve(venue.base, 2**256 - 1)
-    with pytest.raises(DataError, match="Supply exactly that amount"):
+    with pytest.raises(DataError, match="State exactly that amount"):
         desk("supply", venue.base, BASE_AMOUNT, execute=True)
     withdrawn = desk("withdraw", venue.base, execute=True)
     assert (steps(withdrawn), owned(withdrawn)) == ((["withdraw", "revoke"], True), (0, 0))
     assert_supplied(desk("supply", venue.base, BASE_AMOUNT, execute=True), 0)
+
+
+def test_a_debt_is_opened_and_closed_by_separate_commands(desk, venue):
+    """Borrow the base asset against supplied collateral, then every way out, each one
+    command that adopts what the earlier ones left."""
+    held = desk("supply", venue.collateral, COLLATERAL_AMOUNT, execute=True)
+    assert (steps(held), owned(held)) == (SUPPLIED, (0, COLLATERAL_AMOUNT))
+    assert_borrowed(desk, venue)
+    assert_collateral_moves_beside_the_debt(desk, venue)
+    assert_repaid(desk, venue)
+    # Without debt the collateral leaves in full, and no floor is asked for.
+    released = desk("withdraw", venue.collateral, execute=True)
+    assert (released["allocations"], steps(released)) == (["position"], WITHDRAWN)
+    assert (owned(released), ax_actions.kept_records()) == ((0, 0), [])
+
+
+def assert_borrowed(desk, venue):
+    # With no base supply a base withdrawal has nothing to take: it never borrows.
+    with pytest.raises(DataError, match="nothing to withdraw"):
+        desk("withdraw", venue.base, DEBT_AMOUNT, execute=False)
+    # A floor no position with debt reaches.
+    with pytest.raises(DataError, match="below the configured minimum"):
+        desk("borrow", venue.base, DEBT_AMOUNT, execute=False, floor=10**60)
+    opened = desk("borrow", venue.base, DEBT_AMOUNT, execute=True, floor=FLOOR)
+    assert opened["allocations"] == ["position", held_name(venue.collateral)]
+    assert steps(opened) == (["borrow"], True)
+    assert owned(opened, "position_before")[0] == 0 > owned(opened)[0]
+    # In debt a base supply would repay, which is the repay command's to do.
+    with pytest.raises(DataError, match="would repay that debt; use `ax repay`"):
+        desk("supply", venue.base, BASE_AMOUNT, execute=False)
+
+
+def assert_collateral_moves_beside_the_debt(desk, venue):
+    part = COLLATERAL_AMOUNT // 10
+    # A collateral withdrawal is risk-checked while debt is open, so it states a floor.
+    with pytest.raises(ValueError, match="state --min-health-factor"):
+        desk("withdraw", venue.collateral, part, execute=False)
+    taken = desk("withdraw", venue.collateral, part, execute=True, floor=FLOOR)
+    assert steps(taken) == WITHDRAWN
+    # The command for the collateral asset reports the debt as a negative principal.
+    assert owned(taken)[0] < 0 and owned(taken)[1] == COLLATERAL_AMOUNT - part
+    # Adding collateral is not risk-checked and needs no floor.
+    added = desk("supply", venue.collateral, part, execute=True)
+    assert (steps(added), owned(added)[1]) == (SUPPLIED, COLLATERAL_AMOUNT)
+
+
+def assert_repaid(desk, venue):
+    some = desk("repay", venue.base, DEBT_AMOUNT // 2, execute=True)
+    assert steps(some) == (["approve", "repay"], True)
+    assert owned(some, "position_before")[0] < owned(some)[0] < 0
+    # The whole debt: an approval of the held balance, the repayment, then the
+    # revocation of what the approval left.
+    closed = desk("repay", venue.base, execute=True)
+    assert steps(closed) == (["approve", "repay", "revoke"], True)
+    assert owned(closed) == (0, 0)
+    with pytest.raises(DataError, match="nothing to repay"):
+        desk("repay", venue.base, execute=False)
+
+
+@pytest.mark.parametrize("venue", ["ethereum"], indirect=True)
+def test_a_full_repayment_stopped_before_its_revocation_is_finished_by_repaying_again(
+    desk, venue, monkeypatch, capsys
+):
+    desk("supply", venue.collateral, COLLATERAL_AMOUNT, execute=True)
+    desk("borrow", venue.base, DEBT_AMOUNT, execute=True, floor=FLOOR)
+    # The repayment is mined, and the command stops before it signs the revocation.
+    record = interrupted(
+        lambda: desk("repay", venue.base, execute=True), "repay", monkeypatch, capsys
+    )
+    recovered = desk.recover(record)
+    assert (recovered["resolved"], steps_sent(recovered)) == (True, ["approve", "repay"])
+    # No debt is left, and the approval of the held balance stands: the same command
+    # plans the revocation alone.
+    cleared = desk("repay", venue.base, execute=True)
+    assert (steps(cleared), owned(cleared)) == ((["revoke"], True), (0, 0))
+    with pytest.raises(DataError, match="nothing to repay") as nothing:
+        desk("repay", venue.base, execute=False)
+    assert "allowance" not in str(nothing.value)

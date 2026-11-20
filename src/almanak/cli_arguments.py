@@ -781,7 +781,9 @@ def parse_validated(parser, argv=None):
     product = getattr(args, "product", None)
     if product in INLINE_FLAGS:
         require_inline(parser, args, INLINE_FLAGS[product], INLINE_OPTIONS.get(product, ()))
-    lending = (*LENDING_REQUESTS, "supply", "withdraw")
+    from almanak.ax_actions import LENDING_ACTIONS
+
+    lending = (*LENDING_REQUESTS, *LENDING_ACTIONS)
     if getattr(args, "ax_command", None) in lending and args.config is not None:
         given = [name for name in LENDING_SELECTOR_FLAGS if getattr(args, name) is not None]
         if given:

@@ -36,8 +36,21 @@ from almanak.models import Model
 # `connectors/direct.py`.
 ACTIONS = {
     "supply": "supply an amount of the reserve asset from the wallet",
-    "withdraw": "withdraw the whole supplied balance, including interest",
+    "withdraw": "withdraw the whole supplied balance, including interest, or an amount of it",
+    "borrow": "borrow an amount of the reserve asset to the wallet",
+    "repay": "repay the whole debt, including interest, or an amount of it",
+    "collateral": "enable or disable the supplied balance as collateral",
 }
+# The commands that name a lending market, with the flags `ax lending-reserve` takes.
+LENDING_ACTIONS = tuple(ACTIONS)
+# Whether each command's --amount is required; a command not named here takes none.
+AMOUNTS = {"supply": True, "borrow": True, "withdraw": False, "repay": False}
+AMOUNT_HELP = {
+    "withdraw": "base units to withdraw; without it the whole supplied balance",
+    "repay": "base units to repay; without it the whole debt",
+}
+# Commands whose effect on the account's health the protocol can risk-check.
+FLOORED = {"supply": False, "withdraw": False, "borrow": True, "collateral": False}
 
 
 @dataclass(frozen=True)
@@ -113,8 +126,13 @@ def command(args) -> int:
     from almanak.connectors.direct import ActionRequest, require_direct
 
     request = lending_request(args)
-    require_direct(args.connector, request.chain, args.ax_command)
-    action = ActionRequest(action=args.ax_command, amount=args.amount)
+    action = ActionRequest(
+        action=args.ax_command,
+        amount=args.amount,
+        min_health_factor=getattr(args, "min_health_factor", None),
+        enable=getattr(args, "enable", None),
+    )
+    require_direct(args.connector, request.chain, action)
     wallet = read_wallet(args.wallet)
     provider, endpoint = transport(args, request.chain)
     config = action_config(args, request, action, wallet, provider, endpoint)
@@ -784,12 +802,7 @@ def arguments(commands, lending_source) -> None:
             help="canonical connector ID",
         )
         lending_source(action)
-        if name == "supply":
-            action.add_argument(
-                "--amount", type=base_units, required=True, help="base units of the reserve asset"
-            )
-        else:
-            action.set_defaults(amount=None)
+        request_arguments(name, action)
         action.add_argument(
             "--wallet",
             type=Path,
@@ -822,6 +835,43 @@ def arguments(commands, lending_source) -> None:
             action="store_true",
             help="sign and send; without it the first step is planned and nothing is signed",
         )
+
+
+def request_arguments(name: str, action) -> None:
+    """What one command states about its request: an amount, a health floor, a direction."""
+    if name in AMOUNTS:
+        text = AMOUNT_HELP.get(name, "base units of the reserve asset")
+        action.add_argument("--amount", type=base_units, required=AMOUNTS[name], help=text)
+    else:
+        action.set_defaults(amount=None)
+    if name in FLOORED:
+        action.add_argument(
+            "--min-health-factor",
+            type=health_factor,
+            required=FLOORED[name],
+            help="refuse the action if it would leave the account's projected health factor"
+            " below this, a decimal above 1; needed whenever the account has debt",
+        )
+    if name == "collateral":
+        direction = action.add_mutually_exclusive_group(required=True)
+        direction.add_argument("--enable", dest="enable", action="store_true", default=None)
+        direction.add_argument("--disable", dest="enable", action="store_false", default=None)
+
+
+def health_factor(value: str) -> int:
+    """A health factor above 1, at the wad precision the protocols report it in."""
+    import argparse
+
+    from almanak.cli_arguments import health_floor
+
+    wad = int(health_floor(value) * 10**18)
+    # A value that rounds down to 1 at wad precision is the liquidation line itself,
+    # and one a uint256 cannot hold is no health factor a protocol reports.
+    if not 10**18 < wad < 2**256:
+        raise argparse.ArgumentTypeError(
+            "expected a health factor above 1 at 18 decimals of precision"
+        )
+    return wad
 
 
 def base_units(value: str) -> int:

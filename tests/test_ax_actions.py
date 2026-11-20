@@ -49,9 +49,14 @@ def state_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def desk(tmp_path, recorded, monkeypatch):
-    desk = Desk(tmp_path, recorded)
+def named(recorded, monkeypatch):
+    """The capture's allocation under the name a direct deployment gives its position."""
     monkeypatch.setattr(aave_direct, "ALLOCATION", recorded.config.allocations[0].name)
+
+
+@pytest.fixture
+def desk(tmp_path, recorded, monkeypatch, named):
+    desk = Desk(tmp_path, recorded)
 
     def coordinator(*, gateway, create):
         runtime = desk.runtime()
@@ -187,21 +192,79 @@ def test_wallet_record_comes_from_wallet_create(tmp_path):
         ax_actions.read_wallet(tmp_path / "other")
 
 
-def test_supply_requires_an_amount_and_fee_ceilings_and_withdraw_takes_none(capsys):
+def test_supply_requires_an_amount_and_fee_ceilings_and_withdraw_may_state_one(capsys):
     supply = parse("supply", *COMMON, "--amount", "5")
     assert (supply.product, supply.amount, supply.execute) == ("operator-action", 5, False)
     withdraw = parse("withdraw", *COMMON, "--execute")
     assert withdraw.amount is None and withdraw.execute
+    assert parse("withdraw", *COMMON, "--amount", "5").amount == 5
     for arguments in (
         ("supply", *COMMON),
         ("supply", *COMMON, "--amount", "0"),
-        ("withdraw", *COMMON, "--amount", "5"),
+        ("withdraw", *COMMON, "--amount", "0"),
         ("withdraw", *COMMON[:-2]),
         ("supply", *COMMON, "--amount", "5", "--config", "market.json"),
     ):
         with pytest.raises(SystemExit):
             parse(*arguments)
     capsys.readouterr()
+
+
+POOL = [
+    *COMMON[:1],
+    "aave_v3",
+    *COMMON[2:4],
+    "--asset",
+    "eip155:1/erc20:0x" + "a" * 40,
+    *COMMON[8:],
+]
+
+
+def test_each_lending_command_states_its_own_request(capsys):
+    borrow = parse("borrow", *POOL, "--amount", "5", "--min-health-factor", "1.5")
+    assert (borrow.amount, borrow.min_health_factor) == (5, 15 * 10**17)
+    repay = parse("repay", *POOL)
+    assert repay.amount is None and not hasattr(repay, "min_health_factor")
+    assert parse("repay", *POOL, "--amount", "7").amount == 7
+    assert parse("supply", *POOL, "--amount", "5").min_health_factor is None
+    assert parse("withdraw", *POOL, "--min-health-factor", "2").min_health_factor == 2 * 10**18
+    enabled = parse("collateral", *POOL, "--enable")
+    assert (enabled.enable, enabled.amount) == (True, None)
+    assert parse("collateral", *POOL, "--disable").enable is False
+    for arguments in (
+        ("borrow", *POOL, "--amount", "5"),
+        ("borrow", *POOL, "--min-health-factor", "1.5"),
+        ("borrow", *POOL, "--amount", "5", "--min-health-factor", "1"),
+        ("repay", *POOL, "--min-health-factor", "1.5"),
+        ("collateral", *POOL),
+        ("collateral", *POOL, "--enable", "--disable"),
+        ("collateral", *POOL, "--enable", "--amount", "5"),
+    ):
+        with pytest.raises(SystemExit):
+            parse(*arguments)
+    capsys.readouterr()
+
+
+def test_a_health_floor_is_above_one_at_the_precision_the_protocols_report(capsys):
+    def floor(value):
+        return parse("borrow", *POOL, "--amount", "5", "--min-health-factor", value)
+
+    assert floor("1.000000000000000001").min_health_factor == 10**18 + 1
+    # Below wad precision the value would round down to the liquidation line itself.
+    for value in ("1.0000000000000000001", "1", "0.9", "1e60", "nan"):
+        with pytest.raises(SystemExit):
+            floor(value)
+    assert "health factor above 1" in capsys.readouterr().err
+
+
+def test_a_request_names_the_intent_it_admits():
+    assert ActionRequest("supply", 5).kind == "supply"
+    assert ActionRequest("withdraw").kind == "withdraw"
+    assert ActionRequest("withdraw", 5).kind == "withdraw_amount"
+    assert ActionRequest("repay").kind == "repay"
+    assert ActionRequest("repay", 5).kind == "repay_amount"
+    assert ActionRequest("borrow", 5).kind == "borrow"
+    assert ActionRequest("collateral", enable=False).kind == "collateral"
 
 
 def test_an_action_never_reads_through_the_session_read_gateway(monkeypatch):
@@ -353,6 +416,7 @@ def finished(recorded, outcomes, refused=None):
     return ax_actions.executed_result(recorded, outcomes, refused)
 
 
+@pytest.mark.usefixtures("named")
 def test_only_the_finished_request_completes_the_action(recorded):
     from almanak.gateway.ethereum import DataError
 
@@ -368,6 +432,7 @@ def test_only_the_finished_request_completes_the_action(recorded):
     assert unsent["refused"]["kind"] == "deadline_margin"
 
 
+@pytest.mark.usefixtures("named")
 def test_a_withdrawal_is_complete_only_once_no_allowance_remains(recorded):
     (withdraw,) = outcomes_of(recorded, "withdraw")
     assert finished(recorded, [withdraw])["completed"] is True
@@ -708,6 +773,7 @@ def test_a_new_record_is_never_visible_to_a_sweep_before_it_is_locked(state_home
     lock.close()
 
 
+@pytest.mark.usefixtures("named")
 def test_a_signed_step_without_an_outcome_is_reported_as_unresolved(recorded, capsys):
     (approve,) = outcomes_of(recorded, "approve")
     pending = SimpleNamespace(operation=SimpleNamespace(kind="supply"), tx_hash="0xabc")

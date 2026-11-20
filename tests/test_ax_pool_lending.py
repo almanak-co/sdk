@@ -67,7 +67,9 @@ def test_the_pool_connectors_serve_operator_deployments():
     for name in ("aave_v3", "sparklend"):
         connector = connector_from_wire({"connector": name})
         assert supports_operator(connector.codec.checkpoint)
-        assert binding(name).actions == ("supply", "withdraw")
+        assert binding(name).actions == ("supply", "withdraw", "borrow", "repay", "collateral")
+        # Every action a strategy may take on a Pool cell is also a direct action.
+        assert all(cell.direct_actions == cell.actions for cell in connector.chain_support)
         assert connector.lifecycle.adopt is adopt
 
 
@@ -137,18 +139,78 @@ def test_the_user_bitmap_names_the_reserves_the_account_holds():
     }
 
 
-def test_an_action_the_pool_risk_checks_is_refused_while_the_account_has_debt():
+def test_a_risk_checked_action_needs_a_stated_floor_while_the_account_has_debt():
     debt = {WETH: pool.COLLATERAL, DAI: pool.DEBT}
-    # The refusal names the reserve the wallet owes.
-    with pytest.raises(ValueError, match=rf"has debt in this Pool \({DAI}\): a supply"):
-        pool.refuse_unbounded_risk(SUPPLY, debt, USDC)
-    with pytest.raises(ValueError, match="a withdraw there is risk-checked"):
-        pool.refuse_unbounded_risk(WITHDRAW, debt, WETH)
-    # Releasing a reserve that backs nothing is not risk-checked, and neither is
-    # anything on an account without debt.
-    pool.refuse_unbounded_risk(WITHDRAW, debt, USDC)
-    pool.refuse_unbounded_risk(SUPPLY, {WETH: pool.COLLATERAL}, USDC)
-    pool.refuse_unbounded_risk(WITHDRAW, {WETH: pool.COLLATERAL}, WETH)
+    floored = {"min_health_factor": 15 * 10**17}
+    refused = (
+        (SUPPLY, USDC),
+        (WITHDRAW, WETH),
+        (ActionRequest("withdraw", 3), WETH),
+        (ActionRequest("collateral", enable=False), WETH),
+        (ActionRequest("collateral", enable=True), USDC),
+    )
+    for request, asset in refused:
+        # The refusal names the reserve the wallet owes.
+        expected = rf"has debt in this Pool \({DAI}\): a {request.action} there is risk-checked"
+        with pytest.raises(ValueError, match=expected):
+            pool.require_floor(request, debt, asset)
+        pool.require_floor(ActionRequest(request.action, request.amount, **floored), debt, asset)
+        # Nothing on an account without debt needs a floor.
+        pool.require_floor(request, {WETH: pool.COLLATERAL}, asset)
+    # Releasing a reserve that backs nothing is not risk-checked, and a repayment never is.
+    pool.require_floor(WITHDRAW, debt, USDC)
+    pool.require_floor(ActionRequest("repay"), debt, DAI)
+
+
+def test_the_binding_binds_the_pool_exactly_where_the_connector_checks_risk():
+    """`risk_checked` restates the connector's `requires_risk` for a request: a supply, a
+    borrow and enabling collateral always; with debt, disabling collateral and
+    withdrawing a reserve used as collateral."""
+    free, debt = {WETH: pool.COLLATERAL}, {WETH: pool.COLLATERAL, DAI: pool.DEBT}
+    enable = ActionRequest("collateral", enable=True)
+    disable = ActionRequest("collateral", enable=False)
+    part = ActionRequest("withdraw", 3)
+    checked = {
+        (SUPPLY, USDC): (True, True),
+        (ActionRequest("borrow", 5), DAI): (True, True),
+        (enable, WETH): (True, True),
+        (disable, WETH): (False, True),
+        (WITHDRAW, WETH): (False, True),
+        (part, WETH): (False, True),
+        # A reserve that backs nothing, and a repayment, are never checked.
+        (WITHDRAW, USDC): (False, False),
+        (ActionRequest("repay"), DAI): (False, False),
+        (ActionRequest("repay", 3), DAI): (False, False),
+    }
+    for (request, asset), (without_debt, with_debt) in checked.items():
+        assert pool.risk_checked(request, free, asset) is without_debt, request
+        assert pool.risk_checked(request, debt, asset) is with_debt, request
+
+
+def test_one_health_floor_serves_the_whole_pool(market):
+    reader = Reader(bits(weth=pool.COLLATERAL, usdc=0, dai=pool.DEBT))
+    floor = 15 * 10**17
+    borrow = ActionRequest("borrow", 5, min_health_factor=floor)
+    document = pool.positions("aave_v3", reader, None, market(DAI), WALLET, borrow)
+    requested, held = document["allocations"]
+    assert (requested["name"], requested["borrow"]) == (ALLOCATION, True)
+    assert "borrow" not in held
+    assert [a["minimum_health_factor"] for a in document["allocations"]] == [floor, floor]
+    supply = ActionRequest("supply", 5, min_health_factor=floor)
+    floored = pool.positions("aave_v3", reader, None, market(USDC), WALLET, supply)
+    assert all("borrow" not in a for a in floored["allocations"])
+    assert {a["minimum_health_factor"] for a in floored["allocations"]} == {floor}
+
+
+def test_a_repayment_states_the_lowest_floor_so_none_can_refuse_it(market):
+    reader = Reader(bits(weth=pool.COLLATERAL, usdc=0, dai=pool.DEBT))
+    document = pool.positions("aave_v3", reader, None, market(DAI), WALLET, ActionRequest("repay"))
+    # A repayment is not risk-checked, so it binds its own reserve only.
+    (requested,) = document["allocations"]
+    assert (requested["minimum_health_factor"], requested["borrow"]) == (10**18 + 1, True)
+    stated = ActionRequest("repay", 3, min_health_factor=2 * 10**18)
+    document = pool.positions("aave_v3", reader, None, market(DAI), WALLET, stated)
+    assert {a["minimum_health_factor"] for a in document["allocations"]} == {2 * 10**18}
 
 
 @pytest.fixture
@@ -235,7 +297,7 @@ def test_a_withdrawal_binds_its_own_reserve_only(market, monkeypatch):
     reader = Reader(bits(weth=pool.COLLATERAL, usdc=0, dai=pool.DEBT))
     document = pool.positions("aave_v3", reader, None, market(USDC), WALLET, WITHDRAW)
     assert names(document) == [(ALLOCATION, USDC, True)]
-    with pytest.raises(ValueError, match="has debt in this Pool"):
+    with pytest.raises(ValueError, match="state --min-health-factor"):
         pool.positions("aave_v3", reader, None, market(USDC), WALLET, SUPPLY)
 
 
@@ -269,10 +331,18 @@ def test_an_action_states_its_amount_exactly_once(recorded):
     )
     assert pool.intent(config, (), SUPPLY).amount.amount == 5
     assert pool.intent(config, (), WITHDRAW).kind == "withdraw"
-    with pytest.raises(ValueError, match="requires --amount"):
-        pool.intent(config, (), ActionRequest("supply"))
-    with pytest.raises(ValueError, match="takes no --amount"):
-        pool.intent(config, (), ActionRequest("withdraw", 5))
+    assert pool.intent(config, (), ActionRequest("withdraw", 3)).kind == "withdraw_amount"
+    assert pool.intent(config, (), ActionRequest("borrow", 3)).kind == "borrow"
+    assert pool.intent(config, (), ActionRequest("repay")).kind == "repay"
+    assert pool.intent(config, (), ActionRequest("repay", 3)).amount.amount == 3
+    released = pool.intent(config, (), ActionRequest("collateral", enable=False))
+    assert (released.kind, released.enabled) == ("collateral", False)
+    for action in ("supply", "borrow"):
+        with pytest.raises(ValueError, match=f"{action} requires --amount"):
+            pool.intent(config, (), ActionRequest(action))
+    # Every request names the kind its own intent carries.
+    for request in (SUPPLY, WITHDRAW, ActionRequest("withdraw", 3), ActionRequest("repay", 3)):
+        assert pool.intent(config, (), request).kind == request.kind
 
 
 def test_the_result_reports_the_requested_position():

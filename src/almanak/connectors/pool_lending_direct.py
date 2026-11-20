@@ -4,6 +4,10 @@ The deployment covers the account's whole risk position in the Pool. Every reser
 Pool's user bitmap marks as collateral or debt becomes a position beside the requested
 one: the connector's risk check refuses a bitmap it cannot fully account for, and a
 supply is always risk-checked.
+
+One health floor serves the whole Pool, as the connector requires of a fund's
+allocations there. It is the operator's `--min-health-factor`; without one the risk
+check tolerates no debt at all.
 """
 
 from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
@@ -89,22 +93,45 @@ def refuse_isolation(reader, block, pool: str, requested: str, flags: dict[str, 
             )
 
 
-def refuse_unbounded_risk(request: ActionRequest, flags: dict[str, int], requested: str) -> None:
-    """Refuse the actions a Pool risk-checks while the account carries debt.
+def risk_checked(request: ActionRequest, flags: dict[str, int], requested: str) -> bool:
+    """Whether the Pool risk-checks the request against the account's health floor.
 
-    A direct action states no health floor, and without one the risk check tolerates no
-    debt at all. Saying so here names the cause; the planning refusal would only report
-    a health factor below its minimum.
+    The connector's own rule: a supply, a borrow and enabling collateral always; with
+    debt open, also disabling collateral and withdrawing a reserve used as collateral.
     """
-    if not any(value & DEBT for value in flags.values()):
-        return
-    releases = request.action == "withdraw" and flags.get(requested, 0) & COLLATERAL
-    if request.action == "supply" or releases:
-        owed = ", ".join(sorted(asset for asset, value in flags.items() if value & DEBT))
+    if request.action in ("supply", "borrow"):
+        return True
+    indebted = any(value & DEBT for value in flags.values())
+    if request.action == "collateral":
+        return bool(request.enable) or indebted
+    releases = bool(flags.get(requested, 0) & COLLATERAL)
+    return request.action == "withdraw" and indebted and releases
+
+
+def require_floor(request: ActionRequest, flags: dict[str, int], requested: str) -> None:
+    """Refuse a risk-checked action on an account with debt that states no health floor.
+
+    Without a floor the risk check tolerates no debt at all. Saying so here names the
+    cause; the planning refusal would only report a health factor below its minimum.
+    """
+    owed = sorted(asset for asset, value in flags.items() if value & DEBT)
+    if owed and request.min_health_factor is None and risk_checked(request, flags, requested):
         raise ValueError(
-            f"the wallet has debt in this Pool ({owed}): a {request.action} there is "
-            "risk-checked against a health floor, and a direct action states none"
+            f"the wallet has debt in this Pool ({', '.join(owed)}): a {request.action} there "
+            "is risk-checked against a health floor; state --min-health-factor"
         )
+
+
+# Repay authority belongs to an allocation that may borrow, which must state a floor. A
+# repayment is never risk-checked, so the lowest valid floor is stated for it: no floor
+# can then refuse a repayment.
+REPAY_FLOOR = 10**18 + 1
+
+
+def health_floor(request: ActionRequest) -> int | None:
+    if request.min_health_factor is None and request.action == "repay":
+        return REPAY_FLOOR
+    return request.min_health_factor
 
 
 def allocation(connector: str, reader, block, resolved, wallet: Wallet, name: str, flags: int):
@@ -127,6 +154,14 @@ def allocation(connector: str, reader, block, resolved, wallet: Wallet, name: st
     }
 
 
+def with_policy(entry: dict, request: ActionRequest) -> dict:
+    """Add the request's borrow authority and the Pool's one health floor to a position."""
+    floor = health_floor(request)
+    if entry["name"] == ALLOCATION and request.action in ("borrow", "repay"):
+        entry = {**entry, "borrow": True}
+    return entry if floor is None else {**entry, "minimum_health_factor": floor}
+
+
 def held_market(connector: str, reader, block, requested, asset: str):
     """Resolve another reserve of the requested reserve's Pool, as the connector does."""
     from almanak.connectors.lending_lookup import family, resolve, selection
@@ -144,12 +179,14 @@ def positions(connector: str, reader, block, resolved, wallet: Wallet, request: 
     reserve = resolved.reserve
     requested = erc20_address(reserve.asset, resolved.selection.chain).lower()
     flags = held_reserves(reader, block, reserve.pool, wallet.address)
-    refuse_unbounded_risk(request, flags, requested)
+    require_floor(request, flags, requested)
     entries = [(ALLOCATION, resolved, flags.get(requested, 0))]
     if request.action == "supply":
         refuse_isolation(reader, block, reserve.pool, requested, flags)
+    if risk_checked(request, flags, requested):
         # Only an action the Pool risk-checks needs the other reserves: binding them for
-        # a withdrawal would let one the connector cannot verify block an unrelated exit.
+        # a repayment or a plain withdrawal would let one the connector cannot verify
+        # block an unrelated exit.
         others = sorted(asset for asset in flags if asset != requested)
         entries += [
             (f"held_{index}", held_market(connector, reader, block, resolved, asset), flags[asset])
@@ -158,20 +195,26 @@ def positions(connector: str, reader, block, resolved, wallet: Wallet, request: 
     return {
         "connector": connector,
         "allocations": [
-            allocation(connector, reader, block, market, wallet, name, value)
+            with_policy(allocation(connector, reader, block, market, wallet, name, value), request)
             for name, market, value in entries
         ],
     }
 
 
 def intent(config, observed, request: ActionRequest):
-    if request.action == "supply":
-        if request.amount is None:
-            raise ValueError("supply requires --amount")
-        return config.supply(ALLOCATION, request.amount)
-    if request.amount is not None:
-        raise ValueError("withdraw takes no --amount: it withdraws the whole supplied balance")
-    return config.withdraw(ALLOCATION)
+    """The request as the Pool connector's intent; argparse has settled which flags it has."""
+    amount = request.amount
+    if request.action == "collateral":
+        if request.enable is None:
+            raise ValueError("collateral requires --enable or --disable")
+        return config.set_collateral(ALLOCATION, request.enable)
+    if request.action in ("supply", "borrow"):
+        if amount is None:
+            raise ValueError(f"{request.action} requires --amount")
+        return getattr(config, request.action)(ALLOCATION, amount)
+    if amount is None:
+        return getattr(config, request.action)(ALLOCATION)
+    return getattr(config, f"{request.action}_amount")(ALLOCATION, amount)
 
 
 def position(state) -> dict:

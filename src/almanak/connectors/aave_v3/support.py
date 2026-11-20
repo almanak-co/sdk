@@ -13,7 +13,6 @@ from almanak.connectors.support import (
 
 
 def verified_support():
-    direct = (EconomicAction.SUPPLY, EconomicAction.WITHDRAW)
     actions = (
         EconomicAction.SUPPLY,
         EconomicAction.WITHDRAW,
@@ -29,7 +28,7 @@ def verified_support():
             modes=(RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST),
             actions=actions,
             account_profiles=("eoa", "safe_roles"),
-            direct_actions=direct,
+            direct_actions=actions,
             restrictions=(
                 "verified Pool and reserve-token revision 11 implementations",
                 "ordinary collateral mode and variable-rate debt",
@@ -49,7 +48,7 @@ def verified_support():
             modes=(RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST),
             actions=actions,
             account_profiles=("eoa", "safe_roles"),
-            direct_actions=direct,
+            direct_actions=actions,
             restrictions=(
                 "verified Pool and reserve-token revision 11 implementations",
                 "ordinary collateral mode and variable-rate debt",
@@ -69,7 +68,7 @@ def verified_support():
             modes=(RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST),
             actions=actions,
             account_profiles=("eoa", "safe_roles"),
-            direct_actions=direct,
+            direct_actions=actions,
             restrictions=(
                 "verified revision-11 L2Pool, aToken and variable-debt semantics",
                 "full runtime fingerprints retain documented proxy metadata differences",
@@ -89,7 +88,7 @@ def verified_support():
             modes=(RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST),
             actions=actions,
             account_profiles=("eoa", "safe_roles"),
-            direct_actions=direct,
+            direct_actions=actions,
             restrictions=(
                 "verified revision-11 L2Pool and reserve-token implementations",
                 "complete proxy fingerprints and explicitly configured oracle sources",
@@ -108,7 +107,7 @@ def verified_support():
             modes=(RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST),
             actions=actions,
             account_profiles=("eoa", "safe_roles"),
-            direct_actions=direct,
+            direct_actions=actions,
             restrictions=(
                 "verified revision-11 PoolInstance and reserve-token implementations",
                 "complete proxy fingerprints; reserve proxy metadata difference retained",
@@ -127,7 +126,7 @@ def verified_support():
             modes=(RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST),
             actions=actions,
             account_profiles=("eoa", "safe_roles"),
-            direct_actions=direct,
+            direct_actions=actions,
             restrictions=(
                 "verified revision-11 PoolInstance and reserve-token implementations",
                 "complete proxy fingerprints and explicitly configured oracle sources",
@@ -146,7 +145,7 @@ def verified_support():
             modes=(RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST),
             actions=actions,
             account_profiles=("eoa", "safe_roles"),
-            direct_actions=direct,
+            direct_actions=actions,
             restrictions=(
                 "verified revision-11 PoolInstance and reserve-token implementations",
                 "complete proxy fingerprints and explicitly configured oracle sources",
