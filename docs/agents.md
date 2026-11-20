@@ -175,8 +175,10 @@ the agent says so once and stops when the user objects.
 The user can ask the agent to look at the wallet regularly. The agent then
 creates a schedule with the scheduler of the environment the agent runs in (a
 scheduled task, a routine, a heartbeat), which starts it again later, also after
-its machine was stopped. Where the environment has no scheduler, the agent says
-so and creates nothing; it never stands in for one with a background process.
+its machine was stopped. Where the environment has no scheduler, or does not
+keep the files under `~/.almanak/agent/` between runs, the agent says so and
+creates nothing; it never stands in for a scheduler with a background process.
+A `cron` entry of the machine counts only while that machine stays on.
 
 The user decides what to be told about, each level, how often, and which action
 to have previewed when a watch triggers:
@@ -195,15 +197,24 @@ A run reads the positions and the overview, compares them with the levels and
 with the last check it saved in `~/.almanak/agent/watches.json`, and reports
 what needs attention. For a trigger the user named an action for, it previews
 that action and asks the user to confirm it. A scheduled run never executes and
-never resolves a kept record, and a standing instruction to act is not a
-confirmation. When the user confirms later, the agent previews again and asks
-again if anything differs.
+never resolves a kept record. A standing instruction to act is not a
+confirmation, and neither is a "yes" found in the history of a scheduled run: a
+confirmation counts only in a turn the user's own message started. The agent
+then previews again and asks again if anything differs. This is an instruction
+to the agent, as the confirmation is, not a control the CLI enforces: a
+scheduled run has the same wallet files as a conversation.
+
+There is one schedule, at the shortest interval the user chose, and each watch
+is checked when it is due. A watch that stays triggered is reported in full
+once, then in one line, and in full again after 24 hours or when it got worse.
+A run that could not check a watch always reports, also when quiet runs are
+silent.
 
 A schedule is a regular look, not protection. A position can be liquidated
 between two checks, a run can fail to happen or to read, and a read that failed
 is reported as not checked. Only Aave V3 and SparkLend reads report a health
-factor; elsewhere the agent compares supplied and owed amounts and treats the
-vendor's health figure as a hint. Each run costs what a conversation with the
+factor; elsewhere the watch rests on the vendor's unverified health figure,
+which the agent says before it creates the watch. Each run costs what a conversation with the
 agent costs.
 
 ## Limits
