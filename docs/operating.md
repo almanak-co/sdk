@@ -477,7 +477,8 @@ passed without it being mined is released, since it can no longer take effect, a
 is listed under `released_expired` with its operation and transaction hash;
 `executed` is true for it and `completed` false. A signed step whose nonce another
 transaction of the wallet used is released once that transaction is final, and is
-listed under `released_consumed_nonce`. A first step refused at planning
+listed under `released_consumed_nonce`. A command that fails after such a release
+prints it in its `steps_sent` event too. A first step refused at planning
 fails the command with that refusal and signs nothing.
 
 Standard output carries one JSON document, the result. Events and the error are
@@ -667,9 +668,13 @@ neither sent nor released: `ax recover` reports `signed_attempt_unsendable` and
 exits 1, and the record and the wallet's claim on that chain stay. Until then the
 signed bytes can still be mined at their old minimum, by `ax recover` once the pool
 pays it again or by anyone who holds them. The other way out is the operator's own:
-use the swap's nonce with another transaction of the wallet. Once that transaction is
-final, `ax recover` releases the record as a
-[step whose nonce was used](#a-step-whose-nonce-was-used).
+use the swap's nonce with another transaction of the wallet. A node that still holds
+the swap accepts another transaction at its nonce only at a higher fee, and until the
+replacement is final the swap can still be mined in its place. Once it is final,
+`ax recover` releases the record as a
+[step whose nonce was used](#a-step-whose-nonce-was-used). No SDK command sends that
+transaction, and an agent following the bundled skill never does: the choice between
+waiting and replacing is the operator's, with the wallet's own tools.
 
 A swap deployment trades one pool and holds no liquidity position. On Aerodrome and
 Curve a wallet that holds the pool's LP shares, however few, is refused before
@@ -918,8 +923,8 @@ A signed step that was never mined, and whose nonce another transaction of the s
 wallet has used since, can never be mined: sending it again is refused by every node,
 and waiting changes nothing. This holds for every step of every direct action,
 whether it carries a deadline or not, and whether it was sent or not. `ax recover`
-releases such a step once the transaction that used the nonce is in a block at or
-below the chain's `finalized` block. Its result, without the position:
+releases such a step once the transaction that used the nonce is final. Its result,
+without the position:
 
 ```json
 {
@@ -935,8 +940,7 @@ below the chain's `finalized` block. Its result, without the position:
         "transaction": "0x9c02...",
         "block": 25927622,
         "block_hash": "0x5b1d..."
-      },
-      "finalized_block": 25927690
+      }
     }
   ]
 }
@@ -945,26 +949,59 @@ below the chain's `finalized` block. Its result, without the position:
 `transaction` is the step that was released and `consumed_by` the transaction that
 took its nonce, with the block that holds it. The step did not happen, so the command
 exits 1 although `resolved` is true; the record is removed and the wallet is free.
-Nothing is planned or signed in its place: state the action again.
+Nothing is planned or signed in its place: state the action again. Steps mined before
+the released one stay in force. An approval that was mined still stands, the result
+lists it under `position_after`, and the action stated again uses it.
+
+The proof is recorded in the record's checkpoint by the same update that drops the
+step, and the result is read from there. A command or an `ax recover` that is stopped
+or fails after the drop prints it in its `steps_sent` event on standard error. A
+process that is killed outright prints nothing, as for any step.
 
 The gateway does not take a missing receipt as proof, since a lagging provider also
 answers none. It finds the block in which the wallet's transaction count passed the
 step's nonce, reads that block and requires exactly one transaction of the wallet
-with that nonce in it, other than the recorded one. Otherwise the record stays and
-`resolved` is false:
+with that nonce in it, other than the recorded one. That block must be final in two
+ways, and both are required:
 
-- with `nonce_conflict` while the other transaction is pending or in a block that is
-  not final yet, because a reorganization could drop it and leave the signed step
-  valid again. Ask again later; on Ethereum a block is final about 13 minutes after
-  it is mined.
-- with `nonce_conflict` when the count rose without such a transaction, as it does
-  when another account's transaction carries an authorization the wallet signed.
+- it is at or below the block the endpoint serves as `finalized`;
+- it is behind the endpoint's head by the network's own margin, the chain's
+  documented time to finality. Some endpoints serve their head as `finalized`, and
+  nothing in the answer tells that apart from fast finality, so the tag alone
+  releases nothing.
+
+| Network | Margin | From the chain's documentation |
+| --- | --- | --- |
+| Ethereum | 1152 s | A block is final two to three epochs after it is proposed; three epochs. |
+| Arbitrum One, Robinhood Chain | 1152 s | Final once the batch is posted and Ethereum finalizes it. No batch time is documented, so this is Ethereum's part alone. |
+| OP Mainnet | 1800 s | Finalized within about 15 to 30 minutes of submission. |
+| Base | 1320 s | Batch inclusion in about 2 minutes, then about 20 minutes to its finality. |
+| BNB Smart Chain | 180 s | The fallback when fast finality votes are missing: 120 blocks, about 180 seconds. |
+| Avalanche C-Chain | 5 s | Final on acceptance and never reorganized; `finalized` is the settled block, 5 seconds behind. |
+| Polygon PoS, HyperEVM | none | No documented bound that holds without the tag, so no step is released there. |
+
+Otherwise the record stays and `resolved` is false:
+
+- with `nonce_conflict` while the other transaction is pending, above the `finalized`
+  block or within the margin, because a reorganization could drop it and leave the
+  signed step valid again. Ask again later.
+- with `nonce_conflict` on a network that states no margin.
+- with `nonce_conflict` when the count rose without exactly one such transaction, as
+  it does when another account's transaction carries an authorization the wallet
+  signed.
+- with `inconsistent` when the block holds the recorded transaction itself although
+  the endpoint serves no receipt for it, or when the nonce was already used at the
+  block the step was planned at. Neither shows the step dead; try another endpoint.
 - with the provider's own refusal when it does not serve the wallet's transaction
   count at the blocks since the step was planned, as a provider without archive
   state may not for an old record. Name one that does with `--env-file`.
 
-This check runs in the gateway process and is not enforced on chain. It rests on the
-endpoint's report of the finalized block and of that block's transactions.
+This check runs in the gateway process and is not enforced on chain. It rests on one
+endpoint's report of its head, its finalized block and that block's transactions. An
+endpoint that lies about them can cause the release of a step that is still valid. For
+a step that was sent and carries no deadline, such as a Curve swap, the signed bytes
+can then still be mined at their old minimum, and an operator who states the swap
+again is exposed to both.
 
 ### Market resolution
 

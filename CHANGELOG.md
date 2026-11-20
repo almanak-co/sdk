@@ -111,7 +111,10 @@ its changelog is on the `v2` branch.
 - The `--public-rpc` help no longer says the endpoint is for reads and previews only:
   direct actions execute through it.
 - `ax recover` releases a signed step that was never mined and whose nonce another
-  transaction of the wallet used, once that transaction is in a finalized block. Such
+  transaction of the wallet used, once that transaction is final: at or below the
+  endpoint's `finalized` block and behind its head by the network's documented time
+  to finality, which `docs/operating.md` lists. Polygon PoS and HyperEVM state no such
+  margin, so nothing is released there. Such
   a record answered `nonce_conflict` on every `ax recover` and kept the wallet's claim
   for good, for every direct action and step. The result lists the step under
   `released_consumed_nonce` with the transaction that used the nonce and its block,
