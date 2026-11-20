@@ -671,11 +671,24 @@ the signed bytes can no longer be mined, but no command drops the record.
 A swap deployment trades one pool and holds no liquidity position. On Aerodrome and
 Curve a wallet that holds the pool's LP shares, however few, is refused before
 anything is signed, as a trading-only strategy there is. Anyone can send such shares
-to a wallet. Shares that arrive once a step is mined do not block it: the step is
-reconciled from its own receipt and its outcome lists them under `accounting_issues`.
-On Curve the same holds from the moment the step is signed. On Aerodrome, shares
-that arrive after a swap step is signed and before it is first sent leave its record
-kept, and `ax recover` refuses again until the shares are moved out of the wallet.
+to a wallet. Shares that arrive once a step is signed do not block it, whether it
+was sent yet or not: the step is sent, by the command or by `ax recover`, and
+reconciled from its own receipt, and its outcome lists the shares under
+`accounting_issues`. On Aerodrome a swap takes an approval and then the swap itself.
+When the shares arrive after the approval is signed, the approval is sent, the swap
+is refused before it is signed, no record is kept, and the result lists the
+allowance that remains.
+
+A strategy with a trading-only Aerodrome allocation, composed or not, follows a
+narrower rule, since a fund that holds shares can no longer be observed, so the
+strategy can neither decide nor tear down. Its signed approval or revocation, which
+carries no deadline, and its signed exit swap, which lowers exposure, are sent as
+above. Its signed entry swap is not: it is held back while the fund holds the
+shares and is never sent past them, so the strategy takes no new exposure it could
+not leave. Once its deadline has passed the swap can only be released, and a
+production run releases it after the shares are removed: until then each attempt
+to send it is refused for the shares first. The approval that preceded it stays
+standing for as long.
 
 #### Liquidity
 

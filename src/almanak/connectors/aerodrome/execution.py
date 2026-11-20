@@ -11,6 +11,7 @@ from almanak.connectors.aerodrome.simulation import validate_simulation
 from almanak.connectors.aerodrome.validation import (
     expired,
     increases_exposure,
+    sent_past_shares,
     validate_current,
     validate_operation,
 )
@@ -21,6 +22,22 @@ from almanak.connectors.funding import (
 )
 from almanak.connectors.gas_lifecycle import AERODROME_LIFECYCLE
 from almanak.gateway.ethereum import DataError
+
+
+def current_snapshot(backend, plan, block):
+    """The head observation a plan is validated against before it is signed or sent.
+
+    Bytes that are sent whatever shares reached a trading fund
+    (`validation.sent_past_shares`) are observed as signed bytes
+    (`observations.position`).
+    """
+    return snapshot(
+        backend,
+        plan.operation.allocation,
+        block,
+        plan.before,
+        signed=sent_past_shares(backend.config, plan),
+    )
 
 
 class AerodromeExecution:
@@ -64,10 +81,20 @@ class AerodromeExecution:
         return {}
 
     @staticmethod
+    def current_observer(plan):
+        """Every plan's head observation is the connector's own (`current_snapshot`)."""
+        return current_snapshot
+
+    @staticmethod
     def current_checks(backend, plan, block=None):
         block = block or backend.reader.pin_block("latest")
         current = snapshot(
-            backend, plan.operation.allocation, block, plan.before.owned, quotes=False
+            backend,
+            plan.operation.allocation,
+            block,
+            plan.before.owned,
+            quotes=False,
+            signed=sent_past_shares(backend.config, plan),
         )
         validate_current(backend, plan, current)
 

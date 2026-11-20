@@ -277,6 +277,32 @@ def share_sent_with(kind, setting, asset, monkeypatch, *, stop=False):
     monkeypatch.setattr(OperatorRuntime, "wait", wait)
 
 
+def share_sent_before(kind, setting, asset, monkeypatch, *, stop=False):
+    """Send the wallet one share of the pool, `asset`, once its next step of this kind
+    is signed and before the gateway's checks for sending it.
+
+    With `stop`, the command is interrupted there: its record then holds signed bytes
+    that were never sent, on a wallet that holds the share.
+    """
+    from almanak.operator_runtime import OperatorRuntime
+
+    rpc, sender = setting.fork.rpc, share_sender(setting, asset)
+    token = erc20_address(asset, setting.cell.chain)
+    transfer = calldata("transfer(address,uint256)", ("address", "uint256"), (setting.owner, 1))
+    sent = []
+
+    def wait(self, state):
+        pending = state.pending
+        if sent or pending is None or pending.operation.kind != kind or not pending.unsent:
+            return
+        sent.append(pending.tx_hash)
+        moved = {"from": sender, "to": token, "data": transfer}
+        rpc("eth_sendTransaction", [{**moved, "gasPrice": rpc("eth_gasPrice")}])
+        interrupt_if(stop)
+
+    monkeypatch.setattr(OperatorRuntime, "wait", wait)
+
+
 def interrupt_if(stop):
     if stop:
         raise KeyboardInterrupt
@@ -327,6 +353,70 @@ def test_a_swap_mined_with_a_share_sent_to_the_wallet_is_recovered_with_the_shar
     assert_swapped(setting, recovered, start, 1)
     assert_no_allowance(setting, recovered)
     assert_share_reported(setting, recovered)
+    assert_refused_for_the_share(setting)
+
+
+def assert_ended_at_the_approval(setting, result, start):
+    """The approval is reconciled with the share reported, nothing was sold, and no
+    signed step is left: the approval stands as the result lists it."""
+    (approval,) = result["outcomes"]
+    (issue,) = approval["accounting_issues"]
+    ending = (result["executed"], result["completed"], result["refused"]["kind"])
+    assert (ending, approval["operation"], approval["success"]) == (
+        (True, False, "ownership"),
+        "approve",
+        True,
+    )
+    left = {"unresolved", "record_kept"} & set(result)
+    assert (str(shares(setting)[0]) in issue, left) == (True, set())
+    assert (setting.balances(), shares(setting)[1:]) == (start, (1, 0))
+    assert result["position_after"]["allowances"] == left_to_router(setting)
+
+
+def test_a_share_sent_before_the_signed_swap_is_sent_does_not_hold_the_swap_back(
+    setting, monkeypatch
+):
+    start = setting.balances()
+    with monkeypatch.context() as patched:
+        share_sent_before("swap", setting, shares(setting)[0], patched)
+        result = setting(execute=True)
+    # The wallet held the share when the signed swap passed its last check before the
+    # send. The swap is sent all the same, and its outcome names the share.
+    assert result["completed"]
+    assert_swapped(setting, result, start, 1)
+    assert_no_allowance(setting, result)
+    assert_share_reported(setting, result)
+    assert_refused_for_the_share(setting)
+
+
+def test_a_signed_swap_kept_unsent_is_sent_by_recovery_past_a_share_on_the_wallet(
+    setting, monkeypatch
+):
+    start = setting.balances()
+    with monkeypatch.context() as patched:
+        share_sent_before("swap", setting, shares(setting)[0], patched, stop=True)
+        with pytest.raises(KeyboardInterrupt):
+            setting(execute=True)
+    (kept,) = ax_actions.kept_records()
+    assert (kept["unresolved"]["operation"], setting.balances()) == ("swap", start)
+    recovered = setting.recover(Path(kept["path"]))
+    assert (recovered["resolved"], recovered["discarded_request"]) == (True, False)
+    assert_swapped(setting, recovered, start, 1)
+    assert_no_allowance(setting, recovered)
+    assert_share_reported(setting, recovered)
+    assert_refused_for_the_share(setting)
+
+
+def test_a_share_sent_before_the_signed_approval_is_sent_ends_the_swap_with_no_record(
+    setting, monkeypatch
+):
+    start = setting.balances()
+    with monkeypatch.context() as patched:
+        share_sent_before("approve", setting, shares(setting)[0], patched)
+        result = setting(execute=True)
+    # The approval carries no deadline to release it by: it is sent, and its outcome
+    # names the share. The swap after it is then refused before it is signed.
+    assert_ended_at_the_approval(setting, result, start)
     assert_refused_for_the_share(setting)
 
 
