@@ -721,6 +721,9 @@ class GatewayService:
     def validate_pending_resolution(self, before, after):
         if after.plan is not None and after.pending is not None:
             raise ValueError("a deployment admits only one transaction attempt")
+        if recorded_superseded(before) != recorded_superseded(after):
+            if before.pending is None or superseded_change(before, after) is None:
+                raise ValueError("a proof is recorded only with the drop of its signed step")
         if before.pending is not None and after.pending != before.pending:
             if after.pending is None and after.outcomes == before.outcomes:
                 self.validate_released_attempt(before, after)
@@ -739,22 +742,20 @@ class GatewayService:
     def superseded_drop(self, before, after) -> bool:
         """Whether an operator deployment drops a signed step a final transaction superseded.
 
-        The drop retains nothing, so for a never-sent step it is the same update as a
-        release. That one stays a release while its nonce is unused, and needs this
-        proof once the nonce is taken.
+        The update records the proof it rests on, which sets it apart from every release.
+        It is admitted only when that record is exactly what the gateway proves now.
         """
         from almanak.request_runtime import drop_superseded
 
-        if not is_operator(before) or after != drop_superseded(before):
+        recorded = superseded_change(before, after)
+        if recorded is None:
             return False
-        if is_unsent(before.pending):
-            try:
-                self.adapter.require_releasable(before.pending)
-                return True
-            except DataError as exc:
-                if exc.kind != "nonce_conflict":
-                    raise
-        self.adapter.superseded(before.pending)
+        if not is_operator(before):
+            raise ValueError("only an operator deployment drops a superseded signed step")
+        if after != drop_superseded(before, recorded):
+            raise ValueError("a superseded step is dropped only with its proof and its decision")
+        if recorded != self.adapter.superseded(before.pending):
+            raise ValueError("recorded proof differs from the gateway's own")
         return True
 
     def validate_released_record(self, before, after):
@@ -771,7 +772,8 @@ class GatewayService:
             if after.outcomes == before.outcomes:
                 # Exactness: validate_released_attempt. A never-sent attempt is not retained,
                 # nor is an operator deployment's step that a final transaction superseded.
-                dropped = is_unsent(before.pending) or self.drops_superseded(before, after)
+                proof = superseded_change(before, after)
+                dropped = is_unsent(before.pending) or proof is not None
                 expected = retained if dropped else (*retained, before.pending)
             else:
                 expected = settle_released(before, before.pending).get("released", retained)
@@ -780,12 +782,6 @@ class GatewayService:
         elif retained == changed:
             return
         raise ValueError("released attempts are retained until an attempt at their nonce settles")
-
-    @staticmethod
-    def drops_superseded(before, after) -> bool:
-        from almanak.request_runtime import drop_superseded
-
-        return is_operator(before) and after == drop_superseded(before)
 
     def validate_resolved_outcome(self, before, after):
         if after.pending is not None or len(after.outcomes) != len(before.outcomes) + 1:
@@ -892,6 +888,20 @@ def differing(plan, prepared) -> list[str]:
     names = getattr(type(prepared), "model_fields", None) or vars(prepared)
     parts = [name for name in names if getattr(plan, name, None) != getattr(prepared, name)]
     return parts or ["plan"]
+
+
+def recorded_superseded(state) -> tuple:
+    return getattr(state, "superseded", ())
+
+
+def superseded_change(before, after):
+    """The one proof `after` adds while it drops `before`'s signed step, or None."""
+    earlier, later = recorded_superseded(before), recorded_superseded(after)
+    if after.pending is not None or after.outcomes != before.outcomes:
+        return None
+    if len(later) != len(earlier) + 1 or later[:-1] != earlier:
+        return None
+    return later[-1]
 
 
 def keeps_lock(method, request, state) -> bool:

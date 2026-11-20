@@ -941,9 +941,8 @@ def test_recovery_that_cannot_resolve_reports_the_step_and_keeps_it(desk, monkey
     assert desk.store.load().pending is not None
 
 
-def test_recovery_drops_a_step_whose_nonce_was_taken_and_reports_the_evidence(
-    desk, monkeypatch, capsys
-):
+def nonce_taken(desk):
+    """A signed approval whose nonce another transaction took, with the proof served."""
     from almanak.gateway.ethereum import DataError
     from tests.test_operator_runtime import superseded_evidence
 
@@ -955,7 +954,6 @@ def test_recovery_drops_a_step_whose_nonce_was_taken_and_reports_the_evidence(
 
     desk.gateway.receipt = lambda pending: None
     desk.gateway.broadcast, desk.gateway.superseded = occupied, superseded_evidence
-    result = ax_actions.resolve(desk.service, lambda: None)
     released = {
         "operation": "approve",
         "transaction": pending.tx_hash,
@@ -965,8 +963,15 @@ def test_recovery_drops_a_step_whose_nonce_was_taken_and_reports_the_evidence(
             "block": proof.block.number,
             "block_hash": proof.block.hash,
         },
-        "finalized_block": proof.finalized.number,
     }
+    return pending, released
+
+
+def test_recovery_drops_a_step_whose_nonce_was_taken_and_reports_the_evidence(
+    desk, monkeypatch, capsys
+):
+    _, released = nonce_taken(desk)
+    result = ax_actions.resolve(desk.service, lambda: None)
     assert result["released_consumed_nonce"] == [released]
     # The record is free and nothing is left of the request, yet no step happened.
     assert (result["resolved"], result["discarded_request"]) == (True, False)
@@ -974,17 +979,64 @@ def test_recovery_drops_a_step_whose_nonce_was_taken_and_reports_the_evidence(
     state = desk.store.load()
     assert (state.pending, state.decision, state.outcomes) == (None, None, ())
 
-    # A command that met the same drop while it ran did execute, and did not complete.
-    ran = ax_actions.executed_result(state, (), None, ((pending, proof),))
+    # The report is read from the checkpoint: a command that met the same drop while
+    # it ran did execute, and did not complete.
+    ran = ax_actions.executed_result(state, (), None)
     assert (ran["executed"], ran["completed"]) == (True, False)
     assert ran["released_consumed_nonce"] == [released]
-    assert "released_consumed_nonce" not in ax_actions.executed_result(state, (), None)
+    bare = state.model_copy(update={"superseded": ()})
+    assert "released_consumed_nonce" not in ax_actions.executed_result(bare, (), None)
 
     # `ax recover` frees the wallet and still exits 1: the step did not happen.
     args = SimpleNamespace(record=Path("record"), env_file=None, public_rpc=None)
     monkeypatch.setattr(ax_actions, "recover", lambda record, backend_for: result)
     assert ax_actions.recover_command(args) == 1
     assert json.loads(capsys.readouterr().out)["released_consumed_nonce"] == [released]
+
+
+def test_a_recovery_stopped_after_the_drop_still_reports_it(desk):
+    """A stop asked for once the step is dropped ends nothing: the result is printed."""
+    _, released = nonce_taken(desk)
+
+    def stop():
+        if desk.store.load().pending is None:
+            raise KeyboardInterrupt
+
+    result = ax_actions.resolve(desk.service, stop)
+    assert (result["resolved"], result["released_consumed_nonce"]) == (True, [released])
+
+
+def test_a_recovery_that_fails_after_the_drop_reports_it_on_standard_error(
+    desk, monkeypatch, capsys
+):
+    """The record is removed once it holds no signed step, so the drop is reported
+    before the failure propagates."""
+    _, released = nonce_taken(desk)
+    build = desk.runtime
+
+    def failing():
+        runtime = build()
+        recover = runtime.recover
+
+        def then_fail(interrupt):
+            recover(interrupt)
+            raise KeyboardInterrupt
+
+        runtime.recover = then_fail
+        return runtime
+
+    monkeypatch.setattr(desk, "runtime", failing)
+    with pytest.raises(KeyboardInterrupt):
+        ax_actions.resolve(desk.service, lambda: None)
+    (event,) = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
+    assert (event["event"], event["released_consumed_nonce"]) == ("steps_sent", [released])
+
+    # A live command reports it the same way, and says nothing when nothing happened.
+    ax_actions.report_sent(desk.runtime(), 0)
+    assert json.loads(capsys.readouterr().err)["released_consumed_nonce"] == [released]
+    desk.store.update(lambda state: state.model_copy(update={"superseded": ()}))
+    ax_actions.report_sent(desk.runtime(), 0)
+    assert capsys.readouterr().err == ""
 
 
 def test_the_proof_reaches_the_coordinator_in_its_wire_form(tmp_path, recorded):

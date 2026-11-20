@@ -668,9 +668,7 @@ def executed(runtime, start: int, interrupt) -> dict:
         if refusal is None:
             raise
         raise refusal from None
-    return executed_result(
-        state, state.outcomes[start:], refusal or runtime.refused, runtime.superseded
-    )
+    return executed_result(state, state.outcomes[start:], refusal or runtime.refused)
 
 
 def report_sent(runtime, start: int) -> None:
@@ -679,8 +677,8 @@ def report_sent(runtime, start: int) -> None:
     except Exception:
         return
     event = {"outcomes": [outcome_summary(item) for item in state.outcomes[start:]]}
-    event.update(unresolved(state))
-    if event["outcomes"] or "unresolved" in event:
+    event.update({**unresolved(state), **released(state), **consumed(state)})
+    if len(event) > 1 or event["outcomes"]:
         print(json.dumps({"event": "steps_sent", **event}), file=sys.stderr, flush=True)
 
 
@@ -754,6 +752,11 @@ def resolve(service, interrupt) -> dict:
             runtime.recover(interrupt)
         except DataError as exc:
             refusal = exc
+        except BaseException:
+            # A stop or a failure must not lose what the record already resolved or
+            # dropped: the record is removed once it holds no signed step.
+            report_sent(runtime, 0)
+            raise
         state = runtime.journal.load()
         result = {"resolved": state.pending is None, "discarded_request": False}
         if state.pending is None and state.decision is not None:
@@ -761,7 +764,7 @@ def resolve(service, interrupt) -> dict:
             # again against the position as it is now.
             runtime.discard()
             result["discarded_request"] = True
-        result.update(executed_result(state, state.outcomes, refusal, runtime.superseded))
+        result.update(executed_result(state, state.outcomes, refusal))
         del result["executed"], result["completed"]
         return result
     finally:
@@ -825,7 +828,7 @@ def proven_public(chain, endpoint: str) -> str:
 RELEASES = frozenset({"released_expired", "released_consumed_nonce"})
 
 
-def executed_result(state, outcomes, refusal, superseded=()) -> dict:
+def executed_result(state, outcomes, refusal) -> dict:
     """What an execution did: `completed` only when the request itself finished.
 
     The connector decides that from the final outcome: an approval alone does not
@@ -835,13 +838,14 @@ def executed_result(state, outcomes, refusal, superseded=()) -> dict:
     """
     final = outcomes[-1] if outcomes else None
     result = {
-        "executed": bool(outcomes or superseded or released(state)) or state.pending is not None,
+        "executed": bool(outcomes or released(state) or consumed(state))
+        or state.pending is not None,
         "completed": final is not None and final.strategy_result().complete,
         "outcomes": [outcome_summary(item) for item in outcomes],
         "position_after": position(state),
         **unresolved(state),
         **released(state),
-        **consumed(superseded),
+        **consumed(state),
     }
     if refusal is not None and not result["completed"]:
         result["refused"] = {"kind": refusal.kind, "message": str(refusal)}
@@ -862,16 +866,16 @@ def released(state) -> dict:
     return {"released_expired": steps} if steps else {}
 
 
-def consumed(superseded) -> dict:
+def consumed(state) -> dict:
     """The signed steps dropped because their nonce was taken, as `released_consumed_nonce`.
 
-    Each names the gateway's evidence: the other transaction of the wallet that used the
-    step's nonce, the block that holds it and the finalized block it was proven at. The
-    step can never be mined, so what it carried did not happen and the wallet is free.
+    Each names the proof the checkpoint retains: the other transaction of the wallet
+    that used the step's nonce and the block that holds it. The step can never be mined,
+    so what it carried did not happen and the wallet is free.
     """
     steps = [
         {
-            "operation": pending.operation.kind,
+            "operation": evidence.operation,
             "transaction": evidence.transaction,
             "nonce": evidence.nonce,
             "consumed_by": {
@@ -879,9 +883,8 @@ def consumed(superseded) -> dict:
                 "block": evidence.block.number,
                 "block_hash": evidence.block.hash,
             },
-            "finalized_block": evidence.finalized.number,
         }
-        for pending, evidence in superseded
+        for evidence in getattr(state, "superseded", ())
     ]
     return {"released_consumed_nonce": steps} if steps else {}
 

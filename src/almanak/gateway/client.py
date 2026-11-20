@@ -276,7 +276,7 @@ class GatewayClient:
         return _decode(self.connector.codec.outcome, self.scoped("reconcile"))
 
     def superseded(self, pending):
-        from almanak.gateway.consumed_nonce import ConsumedNonce
+        from almanak.operator_deployment import ConsumedNonce
 
         return _decode(ConsumedNonce, self.scoped("superseded"))
 

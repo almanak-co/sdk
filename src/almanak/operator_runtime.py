@@ -27,9 +27,6 @@ class OperatorRuntime(Runtime):
     poll = 1.0
     # The latest refusal that dropped the active request's plan; nobody re-decides it.
     refused: DataError | None = None
-    # Each signed step this coordinator dropped because a final transaction took its
-    # nonce, with the gateway's evidence for it.
-    superseded: tuple = ()
 
     def count_replan(self, exc, *arguments, **options):
         self.refused = exc
@@ -87,13 +84,16 @@ class OperatorRuntime(Runtime):
         request ends and the operator states it again.
         """
         evidence = self.gateway.superseded(pending)
+        if evidence.transaction != pending.tx_hash:
+            raise DataError("inconsistent", "the gateway's proof names another signed step")
         saved = self.journal.update(
             lambda current: (
-                request_runtime.drop_superseded(current) if current.pending == pending else current
+                request_runtime.drop_superseded(current, evidence)
+                if current.pending == pending
+                else current
             )
         )
         if saved.pending is None:
-            self.superseded = (*self.superseded, (pending, evidence))
             self.fault("released", pending)
         return False
 
@@ -105,12 +105,14 @@ class OperatorRuntime(Runtime):
         step and may raise to stop.
         """
         while True:
-            interrupt()
             state = self.journal.load()
             if state.mode == "closed" or not self.retained(state):
+                # Nothing is left to do, so a stop requested meanwhile ends nothing: the
+                # caller still reports what was resolved or dropped.
                 return state
+            interrupt()
             self.held_tick()
-            self.wait(state)
+            self.wait(self.journal.load())
 
     @staticmethod
     def retained(state) -> bool:
