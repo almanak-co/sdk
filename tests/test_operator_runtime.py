@@ -364,3 +364,103 @@ def test_connectors_without_the_marker_refuse_operator_deployments(tmp_path):
 
     assert supports_operator(AaveCheckpoint)
     assert not supports_operator(GmxCheckpoint)
+
+
+def superseded_evidence(pending):
+    from almanak.operator_deployment import ConsumedNonce
+
+    return ConsumedNonce(
+        operation=pending.operation.kind,
+        transaction=pending.tx_hash,
+        submitter=pending.call.fund.address,
+        nonce=pending.nonce,
+        consumed_by="0x" + "bb" * 32,
+        block=pending.before.position.reserve.block,
+    )
+
+
+def nonce_taken(desk, proof):
+    """Stop a supply with its approval signed, then let another transaction take its nonce."""
+    interrupted = desk.runtime(crash_at("prepared", "approve"))
+    interrupted.submit(desk.intent("supply"), REQUEST)
+    with pytest.raises(Interrupted):
+        interrupted.execute()
+    asked = []
+
+    def occupied(pending):
+        raise DataError("nonce_conflict", "unknown execution occupies the recorded nonce")
+
+    def superseded(pending):
+        asked.append(pending)
+        return proof(pending)
+
+    desk.gateway.broadcast, desk.gateway.superseded = occupied, superseded
+    return desk.store.load().pending, asked
+
+
+def test_a_signed_step_whose_nonce_a_final_transaction_took_is_dropped_with_its_evidence(desk):
+    pending, asked = nonce_taken(desk, superseded_evidence)
+    state = desk.runtime().recover()
+    # The step and its request are gone, nothing was sent or planned in their place, and
+    # the gateway proved the drop again when it was recorded with its proof.
+    assert (state.pending, state.decision, state.plan, desk.kinds()) == (None, None, None, [])
+    assert state.superseded == (superseded_evidence(pending),)
+    assert asked == [pending, pending] and desk.gateway.broadcasts == []
+    # The proof is in the checkpoint, so another process reads the same record.
+    assert desk.store.load().superseded == state.superseded
+
+
+def test_a_stop_requested_after_the_drop_does_not_end_the_recovery(desk):
+    """Nothing is left to do once the step is dropped, so the caller still gets the
+    state to report instead of an interrupt that would remove the record unreported."""
+    pending, _ = nonce_taken(desk, superseded_evidence)
+
+    def stop():
+        if desk.store.load().pending is None:
+            raise KeyboardInterrupt
+
+    state = desk.runtime().recover(stop)
+    assert (state.pending, state.superseded) == (None, (superseded_evidence(pending),))
+
+
+def test_a_nonce_that_is_only_occupied_keeps_the_signed_step(desk):
+    def unproven(pending):
+        raise DataError("nonce_conflict", "not consumed at the finalized block")
+
+    pending, asked = nonce_taken(desk, unproven)
+    with pytest.raises(DataError, match="not consumed at the finalized block"):
+        desk.runtime().recover()
+    state = desk.store.load()
+    assert (state.pending, state.superseded, asked) == (pending, (), [pending])
+
+
+def test_a_proof_that_names_another_step_is_refused(desk):
+    def other(pending):
+        return superseded_evidence(pending).model_copy(update={"transaction": "0x" + "cd" * 32})
+
+    pending, _ = nonce_taken(desk, other)
+    with pytest.raises(DataError, match="names another signed step") as refusal:
+        desk.runtime().recover()
+    assert (refusal.value.kind, desk.store.load().pending) == ("inconsistent", pending)
+
+
+def test_any_other_refusal_of_a_signed_step_is_not_a_drop(desk):
+    pending, asked = nonce_taken(desk, superseded_evidence)
+
+    def unsendable(pending):
+        raise DataError("signed_attempt_unsendable", "current validation refuses it")
+
+    desk.gateway.broadcast = unsendable
+    with pytest.raises(DataError, match="current validation refuses it"):
+        desk.runtime().recover()
+    assert (desk.store.load().pending, asked) == (pending, [])
+
+
+def test_a_strategy_coordinator_never_drops_a_step_for_its_nonce(desk):
+    from tests.test_runtime_recovery import coordinator
+
+    pending, asked = nonce_taken(desk, superseded_evidence)
+    strategy = coordinator(desk.store, desk.gateway)
+    with pytest.raises(DataError, match="occupies the recorded nonce"):
+        strategy.resolve_pending(pending)
+    assert (desk.store.load().pending, asked) == (pending, [])

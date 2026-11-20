@@ -25,7 +25,7 @@ from almanak.gateway.accounts import ContractCall, HexData, PreparedCall
 from almanak.gateway.evm_fees import OpFeeEvidence, validate_fee_evidence
 from almanak.lending_intents import BorrowIntent, RepayIntent, WithdrawIntent
 from almanak.models import AssetAmount, Hash32, Model, UInt
-from almanak.operator_deployment import validate_origin
+from almanak.operator_deployment import ConsumedNonce, validate_origin
 from almanak.state import FeeQuote
 from almanak.strategy import StrategyDefinition
 from almanak.transaction_family import TransactionFamily
@@ -132,6 +132,9 @@ class Checkpoint(Model):
     strategy: StrategyDefinition | None = None
     # Set once at creation for a deployment that takes operator requests.
     operator: bool = Field(default=False, exclude_if=lambda v: not v)
+    # Signed steps an operator deployment dropped because a final transaction took their
+    # nonce, each with the gateway's proof. Omitted when empty.
+    superseded: tuple[ConsumedNonce, ...] = Field(default=(), exclude_if=lambda v: not v)
     capabilities: AaveCapabilities | None = None
     permissions: PermissionManifest | None = None
     mode: Literal["running", "teardown", "closed"]

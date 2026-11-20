@@ -200,6 +200,37 @@ independently.
   is released on a current-state refusal. A maybe-sent attempt with no calldata
   deadline that current validation refuses stops with
   `signed_attempt_unsendable`.
+- Accepted: an operator deployment's signed step whose submitter
+  nonce was consumed is dropped, with or without a calldata deadline, sent or
+  not. The gateway proves, when asked and again when the drop is recorded, that
+  the step has no canonical receipt and that exactly one other transaction of
+  the submitter with the recorded nonce is in a final block, and names that
+  transaction and block. Final means both: at or below the endpoint's
+  `finalized` block, and behind its head by the network's
+  `finality_margin_seconds`, required because some endpoints serve their head
+  as `finalized`. Each margin is stated in the network definition with its
+  source and with what it stands for: the chain's own time to finality on
+  Ethereum and BNB Smart Chain, and only a floor for normal operation on a
+  rollup, where time on the rollup does not measure the finality of its batch
+  and the endpoint's `finalized` tag is what is trusted. A network with no
+  stated margin releases nothing; Polygon PoS and HyperEVM state none, and
+  using a stuck step's nonce there leaves its record unresolvable. A nonce that
+  is only
+  occupied keeps the step with `nonce_conflict`. The proof is recorded in the
+  checkpoint's `superseded` by the update that drops the step, the gateway
+  admits that update only when the record equals its own proof, and reports are
+  read from it. The drop plans nothing and retains nothing in `released`. A
+  never-sent step is dropped only by this proof, so a connector that cannot
+  release gains no release. A strategy deployment still stops at an occupied
+  recorded nonce. Never describe this proof as on-chain enforcement.
+- Accepted risk of the rule above: the proof rests on one
+  endpoint's report of its head, its finalized block and a block's
+  transactions. An endpoint that lies can cause the release of a step that is
+  still valid. For a sent step with no calldata deadline, such as a Curve swap,
+  the signed bytes are then still minable at their old minimum, and an operator
+  who restates the swap is exposed to two swaps. This widens the accepted
+  public-endpoint risk, where a false report can lose up to the amount of the
+  action.
 - Fee-only replacement of legacy transactions is opt-in under explicit payer
   bounds. All same-nonce candidates are retained and their maximum exposure is
   reserved.
@@ -394,6 +425,12 @@ independently.
   strands a claim. Records live in durable local state; one with no signed step
   is removed, with its claim, by the next direct command. An unreadable record
   is kept.
+- Accepted: `ax recover` also releases a signed step whose nonce
+  another finalized transaction of the wallet consumed, under the proof stated
+  in "Execution and recovery". The result lists it under
+  `released_consumed_nonce` with the consuming transaction and its block, and
+  the command exits 1 because the step did not happen. A command stopped after
+  the drop reports it in its `steps_sent` event.
 - A connector package that serves direct actions declares them in its
   `direct.py`, and each chain's support lists them as `direct_actions`. Every
   other installed connector is named with its reason. Accepted: GMX V2 and

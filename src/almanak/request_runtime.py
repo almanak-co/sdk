@@ -41,6 +41,28 @@ def release_pending(state):
     )
 
 
+def drop_superseded(state, evidence):
+    """Drop a signed attempt that a final transaction superseded, and retain the proof.
+
+    The gateway proved the attempt can never be mined, so no copy of it can land and its
+    identity is not needed in `released` to reconcile its nonce. Nor is that of any
+    attempt released earlier at the same submitter nonce: the same final transaction
+    took their place, so they are settled here, as by an outcome at that nonce. The
+    proof is recorded in the same update. The request the attempt belonged to ends, as
+    after any release.
+    """
+    if "superseded" not in type(state).model_fields:
+        raise ValueError("this connector cannot drop a superseded signed step")
+    return state.model_copy(
+        update={
+            "pending": None,
+            "superseded": (*state.superseded, evidence),
+            "decision": state.decision if unresolved(state) else None,
+            **settle_released(state, state.pending),
+        }
+    )
+
+
 def settle_released(state, pending):
     """Drop released attempts at a reconciled attempt's nonce; they can no longer land."""
     if not getattr(state, "released", ()):

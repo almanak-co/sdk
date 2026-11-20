@@ -492,6 +492,7 @@ position again and report both:
 | `outcomes` | Each step that was mined, with its `transaction` hash. `success` false is a step that failed on chain and still cost its fee; no `refused` goes with it. `accounting_issues` lists wallet movements the step does not explain: report them. |
 | `refused` | The kind and message of the refusal that stopped a later step. |
 | `released_expired` | A signed step whose deadline passed before it was mined. It did not happen and the wallet is free; `ax recover` exits 1 for it although `resolved` is true. |
+| `released_consumed_nonce` | A signed step that was never mined and whose `nonce` another transaction of the wallet used, named under `consumed_by` with its `block`. The step was released and the wallet is free; `ax recover` exits 1 for it although `resolved` is true. The release rests on the report of the endpoint used: were that report false, the released step could still execute, and repeating the action could then execute it twice. Report both hashes and tell the user this before they repeat the action. |
 | `unresolved` | A step that was signed and may have been sent but has no result yet: neither done nor failed. |
 | `record_kept` | The wallet is now blocked; follow "A blocked wallet". |
 
@@ -768,8 +769,8 @@ tell the user what it says, and preview what it names if they want it.
 | `inventory`, `funding_unavailable`, `supply_unavailable` or `funds are unavailable for supply` | The wallet holds less than the action states, or the market cannot take it. | Check the balances and tell the user what is missing, as "Convert the amounts" says. |
 | `retained deadline expired` | A step was not signed within `--deadline-seconds`, for example after a slow approval. Nothing more was sent. | Report the steps that ran and any allowance left, then preview again. |
 | `price moved beyond` | The pool price moved more than `--slippage-bps` since the action read it. | Preview again; a wider bound is the user's choice. |
-| `signed_attempt_unsendable` | On `ax recover`: a signed step with no deadline, such as a Curve swap, may have been sent and would now fail its own minimum, so it is neither sent again nor dropped. It can still execute at that old minimum, through `ax recover` or anyone who holds the signed transaction, once the pool pays it again. The wallet stays blocked on that chain. | Tell the user all of that. Running `ax recover` again will send it if the pool then allows, so ask before every further attempt. Never send another transaction from the wallet to get past it. |
-| `nonce_conflict` | The wallet has a pending or unknown transaction at its next nonce. | Wait and ask the user before trying again. |
+| `signed_attempt_unsendable` | On `ax recover`: a signed step with no deadline, such as a Curve swap, may have been sent and would now fail its own minimum, so it is neither sent again nor dropped. It can still execute at that old minimum, through `ax recover` or anyone who holds the signed transaction, once the pool pays it again. The wallet stays blocked on that chain. | Tell the user all of that. Running `ax recover` again will send it if the pool then allows, so ask before every further attempt. Never send another transaction from the wallet to get past it: replacing the step is the user's own decision and takes their own tools, and until the replacement is final the step can still execute. |
+| `nonce_conflict` | The wallet has a pending or unknown transaction at its next nonce. On `ax recover`: another transaction used the signed step's nonce and is not final yet, the network releases no step this way (Polygon, HyperEVM), or what used it could not be identified. The step is released only once that transaction is final, usually within about 30 minutes; the endpoint decides when, and there is no upper bound. On Polygon and HyperEVM it is never released. | Report the message. Wait and ask the user before trying again. |
 | `public endpoint head is` or `public endpoint has a different genesis` | The public endpoint is lagging or is not the real network. | Treat it as a failed endpoint under "Public endpoints". |
 
 ### A command without a result
@@ -798,8 +799,10 @@ and the `unresolved` step with its `transaction`. Resolve only a record whose
 
 Resolving signs nothing new. It reads the step's result if the step was mined.
 If not, it sends the same signed transaction again, which then executes as it was
-signed, however long ago; only a step whose own deadline has passed is released
-instead. The listing does not say which will happen, so:
+signed, however long ago. Only a step that can no longer happen is released
+instead: one whose own deadline has passed, or one whose nonce another transaction
+of the wallet used and that transaction is final. The listing does not say which
+will happen, so:
 
 - Resolve at once a record your own command just kept, for an action the user
   confirmed in this conversation: sending those bytes is what they confirmed.

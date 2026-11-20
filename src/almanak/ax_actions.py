@@ -694,8 +694,8 @@ def report_sent(runtime, start: int) -> None:
     except Exception:
         return
     event = {"outcomes": [outcome_summary(item) for item in state.outcomes[start:]]}
-    event.update(unresolved(state))
-    if event["outcomes"] or "unresolved" in event:
+    event.update({**unresolved(state), **released(state), **consumed(state)})
+    if len(event) > 1 or event["outcomes"]:
         print(json.dumps({"event": "steps_sent", **event}), file=sys.stderr, flush=True)
 
 
@@ -764,23 +764,32 @@ def resolve(service, interrupt) -> dict:
 
     runtime = OperatorRuntime(gateway=LocalGateway(service), create=None)
     try:
-        refusal = None
-        try:
-            runtime.recover(interrupt)
-        except DataError as exc:
-            refusal = exc
-        state = runtime.journal.load()
-        result = {"resolved": state.pending is None, "discarded_request": False}
-        if state.pending is None and state.decision is not None:
-            # What was left of the request was never signed; the operator states it
-            # again against the position as it is now.
-            runtime.discard()
-            result["discarded_request"] = True
-        result.update(executed_result(state, state.outcomes, refusal))
-        del result["executed"], result["completed"]
-        return result
+        return resolved(runtime, interrupt)
+    except BaseException:
+        # A stop or a failure anywhere must not lose what the record already resolved
+        # or dropped: the record is removed once it holds no signed step.
+        report_sent(runtime, 0)
+        raise
     finally:
         runtime.close()
+
+
+def resolved(runtime, interrupt) -> dict:
+    refusal = None
+    try:
+        runtime.recover(interrupt)
+    except DataError as exc:
+        refusal = exc
+    state = runtime.journal.load()
+    result = {"resolved": state.pending is None, "discarded_request": False}
+    if state.pending is None and state.decision is not None:
+        # What was left of the request was never signed; the operator states it
+        # again against the position as it is now.
+        runtime.discard()
+        result["discarded_request"] = True
+    result.update(executed_result(state, state.outcomes, refusal))
+    del result["executed"], result["completed"]
+    return result
 
 
 def recover_command(args) -> int:
@@ -794,8 +803,8 @@ def recover_command(args) -> int:
 
     result = recover(args.record, backend_for)
     print(json.dumps(result, indent=2))
-    # A record resolved by releasing an expired step is freed, not a step that happened.
-    return 0 if result["resolved"] and "released_expired" not in result else 1
+    # A record resolved by releasing a step is freed, not a step that happened.
+    return 0 if result["resolved"] and not RELEASES & set(result) else 1
 
 
 def record_endpoint(config, env_file: Path | None, public_rpc: str | None = None) -> str:
@@ -836,6 +845,10 @@ def proven_public(chain, endpoint: str) -> str:
     return endpoint
 
 
+# The result keys that list signed steps released without an outcome.
+RELEASES = frozenset({"released_expired", "released_consumed_nonce"})
+
+
 def executed_result(state, outcomes, refusal) -> dict:
     """What an execution did: `completed` only when the request itself finished.
 
@@ -846,12 +859,14 @@ def executed_result(state, outcomes, refusal) -> dict:
     """
     final = outcomes[-1] if outcomes else None
     result = {
-        "executed": bool(outcomes) or state.pending is not None or bool(released(state)),
+        "executed": bool(outcomes or released(state) or consumed(state))
+        or state.pending is not None,
         "completed": final is not None and final.strategy_result().complete,
         "outcomes": [outcome_summary(item) for item in outcomes],
         "position_after": position(state),
         **unresolved(state),
         **released(state),
+        **consumed(state),
     }
     if refusal is not None and not result["completed"]:
         result["refused"] = {"kind": refusal.kind, "message": str(refusal)}
@@ -870,6 +885,29 @@ def released(state) -> dict:
         for item in getattr(state, "released", ())
     ]
     return {"released_expired": steps} if steps else {}
+
+
+def consumed(state) -> dict:
+    """The signed steps dropped because their nonce was taken, as `released_consumed_nonce`.
+
+    Each names the proof the checkpoint retains: the other transaction of the wallet
+    that used the step's nonce and the block that holds it. The step can never be mined,
+    so what it carried did not happen and the wallet is free.
+    """
+    steps = [
+        {
+            "operation": evidence.operation,
+            "transaction": evidence.transaction,
+            "nonce": evidence.nonce,
+            "consumed_by": {
+                "transaction": evidence.consumed_by,
+                "block": evidence.block.number,
+                "block_hash": evidence.block.hash,
+            },
+        }
+        for evidence in getattr(state, "superseded", ())
+    ]
+    return {"released_consumed_nonce": steps} if steps else {}
 
 
 def position(state) -> dict:

@@ -122,7 +122,29 @@ class EvmGateway:
             is not None
         ):
             return
+        self.refuse_taken_nonce(state)
         self.validate_fee_budget(state, state.pending, self.payer_balance(state))
+
+    def refuse_taken_nonce(self, state) -> None:
+        """Refuse an operator deployment's signed step whose nonce is already taken.
+
+        Once the submitter's count is past the step's nonce the bytes cannot be mined,
+        so the payer's balance says nothing about them. The refusal is `nonce_conflict`,
+        raised here so that no send depends on a later read agreeing with this one, and
+        it is what lets the coordinator ask for the consumed-nonce proof. A strategy
+        deployment keeps its fee check first, as before.
+        """
+        from almanak.operator_deployment import is_operator
+
+        slot = submission_slot(state.pending) if is_operator(state) else None
+        if slot is None:
+            return
+        submitter, nonce = slot
+        if int(self.reader._rpc("eth_getTransactionCount", [submitter, "latest"]), 16) > nonce:
+            raise DataError(
+                "nonce_conflict",
+                "unknown execution occupies the recorded nonce; reconcile before continuing",
+            )
 
     def payer_balance(self, state):
         """The gas payer's balance that a signed attempt's fee budget is checked against.
@@ -691,6 +713,16 @@ class EvmGateway:
                 "only a transaction never sent or past its protocol deadline can be released"
             )
 
+    def superseded(self, pending):
+        """Evidence that a final transaction took the attempt's nonce, or a refusal.
+
+        Unlike `require_releasable` this needs no deadline and no unused nonce: the
+        attempt can never be mined at all. See `almanak.gateway.consumed_nonce`.
+        """
+        from almanak.gateway.consumed_nonce import prove
+
+        return prove(self, pending)
+
     def broadcast(self, pending, permissions=None, *, state=None):
         if pending.family is not None:
             from almanak.gateway.replacement import broadcast
@@ -807,19 +839,35 @@ def unsendable_refusal(pending, refusal) -> bool:
 
 
 def unsendable(config, pending, refusal):
-    submitter = config.accounts.binding(pending.operation.account).profile.submitter.address
+    profile = config.accounts.binding(pending.operation.account).profile
     return Unsendable(
         refusal.kind,
-        f"the signed attempt at nonce {pending.nonce} from submitter {submitter} no longer"
-        f" passes current validation ({refusal.kind}: {refusal}). It may already have been"
-        " sent and its calldata enforces no deadline, so it is never released. Restore what"
-        " validation requires (for example fund the gas payer, or wait for the market) and"
-        " resume. Cancelling the nonce instead retires the deployment: no"
-        " reconciliation of a foreign transaction at a recorded nonce exists yet, so every"
-        " resume then stops at the occupied nonce. A cancel must replace any copy a"
-        f" provider holds, so it needs a higher fee than the signed attempt's at nonce"
-        f" {pending.nonce}",
+        f"the signed attempt at nonce {pending.nonce} from submitter"
+        f" {profile.submitter.address} no longer passes current validation"
+        f" ({refusal.kind}: {refusal}). It may already have been"
+        " sent and its calldata enforces no deadline, so no deadline releases it. Restore"
+        " what validation requires (for example fund the gas payer, or wait for the market)"
+        " and resume. Cancelling the nonce instead retires a strategy deployment: it has no"
+        " reconciliation of a foreign transaction at a recorded nonce, so every resume"
+        f" then stops at the occupied nonce. {cancelled_record(profile.fund.chain.chain_id)}"
+        " A cancel must replace any copy a provider holds, so it needs a higher fee than"
+        f" the signed attempt's at nonce {pending.nonce}",
         code=refusal.code,
+    )
+
+
+def cancelled_record(chain) -> str:
+    """What cancelling the nonce does to a direct action's record on this network."""
+    from almanak.chains import finality_margin
+
+    if finality_margin(chain) is None:
+        return (
+            f"On {chain} a used nonce releases no direct action's record either, so"
+            " cancelling there frees nothing and leaves the record unresolvable."
+        )
+    return (
+        "A direct action's record is released by `ax recover` once the cancelling"
+        " transaction is final."
     )
 
 

@@ -7,6 +7,25 @@ creation and never changes, so a strategy deployment cannot start taking operato
 requests and an operator deployment cannot start running scheduled decisions.
 """
 
+from almanak.models import Address, Block, Hash32, Model, UInt
+
+
+class ConsumedNonce(Model):
+    """A signed step that can never be mined, and the final transaction that took its nonce.
+
+    The gateway's proof, retained in the checkpoint by the update that drops the step, so
+    a report of the drop never depends on the process that made it.
+    """
+
+    operation: str
+    transaction: Hash32
+    submitter: Address
+    nonce: UInt
+    consumed_by: Hash32
+    # The block that holds `consumed_by`: final by the endpoint's tag and by the
+    # network's own margin behind the head when the gateway proved it.
+    block: Block
+
 
 def is_operator(state) -> bool:
     return getattr(state, "operator", False)
@@ -40,6 +59,9 @@ def refuse_adoption(positions) -> None:
 def validate_origin(state) -> None:
     if state.operator and state.strategy is not None:
         raise ValueError("an operator deployment retains no strategy")
+    superseded: tuple = getattr(state, "superseded", ())
+    if superseded and not state.operator:
+        raise ValueError("only an operator deployment drops a superseded signed step")
 
 
 def validate_exclusive_origin(state) -> None:

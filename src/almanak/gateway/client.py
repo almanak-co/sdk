@@ -275,6 +275,11 @@ class GatewayClient:
     def reconcile(self, pending, receipt):
         return _decode(self.connector.codec.outcome, self.scoped("reconcile"))
 
+    def superseded(self, pending):
+        from almanak.operator_deployment import ConsumedNonce
+
+        return _decode(ConsumedNonce, self.scoped("superseded"))
+
     def family(self, pending, action, index):
         return _decode(
             self.connector.codec.checkpoint,
