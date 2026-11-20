@@ -419,6 +419,11 @@ independently.
 - Declare a direct action on a cell only after its fork rehearsal passed there.
   Morpho Blue on HyperEVM declares none: the provider runs head-pinned reads at
   a later block, which the reader refuses.
+- Accepted: the agent skill may create scheduled checks with the scheduler of
+  the agent's own environment. A scheduled run reads, reports and previews. It
+  never passes `--execute`, never resolves a kept record, and a standing
+  instruction is not a confirmation. Unattended execution stays with the
+  proposed action policy below.
 - Operator actions have no amount ceiling or cumulative budget; the required
   fee ceilings and the wallet balance bound them. An operator-managed action
   policy is proposed, not accepted.
