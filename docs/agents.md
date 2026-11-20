@@ -111,8 +111,9 @@ it never picks one silently:
   Uniswap V4 serves an open, a collect, a close and a revocation. Its
   revocation also sets the token's approval to Permit2 to zero, which other
   applications share, and the agent says so before it. On Curve and Aerodrome
-  classic the position is the wallet's balance of the pool's LP token. A Curve deposit uses exactly the stated amounts, and on
-  Curve the user chooses whether a burn pays every coin or one. An Aerodrome
+  classic the position is the wallet's balance of the pool's LP token. A Curve
+  deposit uses exactly the stated amounts, and on Curve the user chooses
+  whether a burn pays every coin or one. An Aerodrome
   deposit offers the stated amounts in the proportion of the pool's reserves and
   reverts when that proportion moved further than the slippage in either
   direction. Nothing is swapped inside a liquidity action. A step mined after

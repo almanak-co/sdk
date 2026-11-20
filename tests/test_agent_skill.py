@@ -945,6 +945,8 @@ def test_the_skill_says_what_the_chain_enforces_and_what_it_does_not():
         "The preview's `note` names the tokens this applies to; read it to the user",
         "tell the user what remains approved, and that `ax revoke-exchange` clears it",
         "`position_after.permit2_unexpired`: a spent Permit2 allowance that grants nothing",
+        "or is about to start a Uniswap V4 strategy in that wallet: the start is refused "
+        "until the row lapses or is revoked",
     ):
         assert statement in flat(), statement
     # The refused empty collect and the staked flag are the code's own words.

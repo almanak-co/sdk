@@ -585,7 +585,9 @@ does not spend remains; tell the user what remains approved, and that
 `ax revoke-exchange` clears it. A Uniswap V4 result can also list
 `position_after.permit2_unexpired`: a spent Permit2 allowance that grants nothing
 and lapses at the swap's deadline. Mention it only when the user asks to clear
-everything; `ax revoke-exchange` expires it. Report what
+everything, or is about to start a Uniswap V4 strategy in that wallet: the start
+is refused until the row lapses or is revoked. `ax revoke-exchange` expires it.
+Report what
 `position_after.inventory` lists as bought.
 
 ## Liquidity

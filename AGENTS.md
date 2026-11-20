@@ -426,8 +426,8 @@ independently.
   ERC-20 approval of each pool token to Permit2 to zero, beside the Permit2
   allowances to the router and the position manager. That approval is shared
   with every other application that spends the token through Permit2 from the
-  same wallet, and each needs it approved again afterwards. The result states
-  this in `note` before anything is signed.
+  same wallet, and each needs it approved again afterwards. When it will zero
+  one, the result states this in `note` before anything is signed.
 
 ## Check output and dashboards
 
