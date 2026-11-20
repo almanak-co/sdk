@@ -667,12 +667,17 @@ that may have been sent, and that the pool would now pay below its minimum, is
 neither sent nor released: `ax recover` reports `signed_attempt_unsendable` and
 exits 1, and the record and the wallet's claim on that chain stay. Until then the
 signed bytes can still be mined at their old minimum, by `ax recover` once the pool
-pays it again or by anyone who holds them. The other way out is the operator's own:
-use the swap's nonce with another transaction of the wallet. A node that still holds
-the swap accepts another transaction at its nonce only at a higher fee, and until the
-replacement is final the swap can still be mined in its place. Once it is final,
-`ax recover` releases the record as a
-[step whose nonce was used](#a-step-whose-nonce-was-used). No SDK command sends that
+pays it again or by anyone who holds them.
+
+On a network that states a [finality margin](#a-step-whose-nonce-was-used) there is
+another way out, the operator's own: use the swap's nonce with another transaction of
+the wallet. A node that still holds the swap accepts another transaction at its nonce
+only at a higher fee, and until the replacement is final the swap can still be mined
+in its place. Once it is final, `ax recover` releases the record. On a network that
+states no margin, Polygon PoS today, do not do this: a used nonce releases nothing
+there, the signed swap can then never be sent either, and every later `ax recover`
+answers `nonce_conflict`, so the record stays for good. The refusal's message says
+which of the two holds on the record's network. No SDK command sends such a
 transaction, and an agent following the bundled skill never does: the choice between
 waiting and replacing is the operator's, with the wallet's own tools.
 
@@ -961,23 +966,27 @@ process that is killed outright prints nothing, as for any step.
 The gateway does not take a missing receipt as proof, since a lagging provider also
 answers none. It finds the block in which the wallet's transaction count passed the
 step's nonce, reads that block and requires exactly one transaction of the wallet
-with that nonce in it, other than the recorded one. That block must be final in two
-ways, and both are required:
+with that nonce in it, other than the recorded one. Two things are then required of
+that block:
 
 - it is at or below the block the endpoint serves as `finalized`;
-- it is behind the endpoint's head by the network's own margin, the chain's
-  documented time to finality. Some endpoints serve their head as `finalized`, and
-  nothing in the answer tells that apart from fast finality, so the tag alone
-  releases nothing.
+- it is behind the endpoint's head by the network's margin. Some endpoints serve
+  their head as `finalized`, and nothing in the answer tells that apart from fast
+  finality, so the tag alone releases nothing.
 
-| Network | Margin | From the chain's documentation |
+What the margin stands for differs by chain. On Ethereum and BNB Smart Chain it is
+the chain's own time to finality. On a rollup it is only a floor for normal
+operation: a rollup block is final once its batch is final on Ethereum, the sequencer
+keeps producing blocks while a batch is late, and it can reorganize a block until
+that block's data is on Ethereum. Seconds behind the rollup's head do not measure
+that, so on a rollup the release rests on the endpoint's `finalized` tag.
+
+| Network | Margin | What it is |
 | --- | --- | --- |
-| Ethereum | 1152 s | A block is final two to three epochs after it is proposed; three epochs. |
-| Arbitrum One, Robinhood Chain | 1152 s | Final once the batch is posted and Ethereum finalizes it. No batch time is documented, so this is Ethereum's part alone. |
-| OP Mainnet | 1800 s | Finalized within about 15 to 30 minutes of submission. |
-| Base | 1320 s | Batch inclusion in about 2 minutes, then about 20 minutes to its finality. |
-| BNB Smart Chain | 180 s | The fallback when fast finality votes are missing: 120 blocks, about 180 seconds. |
-| Avalanche C-Chain | 5 s | Final on acceptance and never reorganized; `finalized` is the settled block, 5 seconds behind. |
+| Ethereum | 1152 s | The chain's finality time: a block is final two to three epochs after it is proposed; three epochs. |
+| OP Mainnet, Base, Arbitrum One, Robinhood Chain | 1800 s | A floor. The longest documented normal case among them, about 15 to 30 minutes on OP Mainnet. The `finalized` tag is what is trusted. |
+| BNB Smart Chain | 252 s | The fallback when fast finality votes are missing, taken as one turn of all 21 validators under the larger of the chain's two documented parameter sets. |
+| Avalanche C-Chain | 1 s | The documented time to acceptance. The chain documents that an accepted block is never reorganized, and the release rests on that. |
 | Polygon PoS, HyperEVM | none | No documented bound that holds without the tag, so no step is released there. |
 
 Otherwise the record stays and `resolved` is false:

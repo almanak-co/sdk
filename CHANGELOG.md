@@ -127,14 +127,15 @@ its changelog is on the `v2` branch.
   direct actions execute through it.
 - `ax recover` releases a signed step that was never mined and whose nonce another
   transaction of the wallet used, once that transaction is final: at or below the
-  endpoint's `finalized` block and behind its head by the network's documented time
-  to finality, which `docs/operating.md` lists. Polygon PoS and HyperEVM state no such
-  margin, so nothing is released there. Such
-  a record answered `nonce_conflict` on every `ax recover` and kept the wallet's claim
-  for good, for every direct action and step. The result lists the step under
-  `released_consumed_nonce` with the transaction that used the nonce and its block,
-  and the command exits 1 because the step did not happen. While that transaction is
-  not final the answer is still `nonce_conflict`. Strategy deployments are unchanged.
+  endpoint's `finalized` block and behind its head by the network's margin, which
+  `docs/operating.md` lists. Such a record answered `nonce_conflict` on every
+  `ax recover` and kept the wallet's claim for good, for every direct action and step.
+  The result lists the step under `released_consumed_nonce` with the transaction that
+  used the nonce and its block, and the command exits 1 because the step did not
+  happen. While that transaction is not final the answer is still `nonce_conflict`.
+  Polygon PoS and HyperEVM state no margin: nothing is released there, and using the
+  nonce of a stuck step there leaves its record unresolvable. Strategy deployments are
+  unchanged.
 
 ## [3.2.1] - 2026-11-19
 

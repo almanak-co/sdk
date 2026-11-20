@@ -207,10 +207,15 @@ independently.
   the submitter with the recorded nonce is in a final block, and names that
   transaction and block. Final means both: at or below the endpoint's
   `finalized` block, and behind its head by the network's
-  `finality_margin_seconds`. The margin is the chain's documented time to
-  finality, stated in the network definition with its source, because some
-  endpoints serve their head as `finalized`. A network with no stated margin
-  releases nothing; Polygon PoS and HyperEVM state none. A nonce that is only
+  `finality_margin_seconds`, required because some endpoints serve their head
+  as `finalized`. Each margin is stated in the network definition with its
+  source and with what it stands for: the chain's own time to finality on
+  Ethereum and BNB Smart Chain, and only a floor for normal operation on a
+  rollup, where time on the rollup does not measure the finality of its batch
+  and the endpoint's `finalized` tag is what is trusted. A network with no
+  stated margin releases nothing; Polygon PoS and HyperEVM state none, and
+  using a stuck step's nonce there leaves its record unresolvable. A nonce that
+  is only
   occupied keeps the step with `nonce_conflict`. The proof is recorded in the
   checkpoint's `superseded` by the update that drops the step, the gateway
   admits that update only when the record equals its own proof, and reports are
