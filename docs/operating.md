@@ -1012,8 +1012,10 @@ Otherwise the record stays and `resolved` is false:
   it does when another account's transaction carries an authorization the wallet
   signed.
 - with `inconsistent` when the block holds the recorded transaction itself although
-  the endpoint serves no receipt for it, or when the nonce was already used at the
-  block the step was planned at. Neither shows the step dead; try another endpoint.
+  the endpoint serves no receipt for it, when the nonce was already used at the
+  block the step was planned at, or when the block as read whole is not the one the
+  endpoint holds at that height in a second read. None shows the step dead; try
+  again or another endpoint.
 - with the provider's own refusal when it does not serve the wallet's transaction
   count at the blocks since the step was planned, as a provider without archive
   state may not for an old record. Name one that does with `--env-file`.

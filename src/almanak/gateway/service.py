@@ -772,9 +772,7 @@ class GatewayService:
             if after.outcomes == before.outcomes:
                 # Exactness: validate_released_attempt. A never-sent attempt is not retained,
                 # nor is an operator deployment's step that a final transaction superseded.
-                proof = superseded_change(before, after)
-                dropped = is_unsent(before.pending) or proof is not None
-                expected = retained if dropped else (*retained, before.pending)
+                expected = self.released_after_release(before, after)
             else:
                 expected = settle_released(before, before.pending).get("released", retained)
             if changed == expected:
@@ -782,6 +780,22 @@ class GatewayService:
         elif retained == changed:
             return
         raise ValueError("released attempts are retained until an attempt at their nonce settles")
+
+    @staticmethod
+    def released_after_release(before, after):
+        """What `released` holds once a signed attempt leaves without an outcome.
+
+        A never-sent attempt is not retained. An operator deployment's step that a final
+        transaction superseded is not retained either, and settles the attempts released
+        earlier at its nonce, which that transaction took as well. Any other release
+        retains the attempt.
+        """
+        from almanak.request_runtime import settle_released
+
+        retained = getattr(before, "released", ())
+        if superseded_change(before, after) is not None:
+            return settle_released(before, before.pending).get("released", retained)
+        return retained if is_unsent(before.pending) else (*retained, before.pending)
 
     def validate_resolved_outcome(self, before, after):
         if after.pending is not None or len(after.outcomes) != len(before.outcomes) + 1:

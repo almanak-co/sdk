@@ -47,6 +47,14 @@ def block_hash(number: int) -> str:
     return "0x" + f"{number:064x}"
 
 
+def height(selector) -> int:
+    """The block a count is read at: a number, or a hash that must be canonical."""
+    if isinstance(selector, dict):
+        assert selector["requireCanonical"] is True
+        return int(selector["blockHash"], 16)
+    return int(selector, 16)
+
+
 def transaction(sender, nonce, tx_hash):
     return {"from": sender, "nonce": hex(nonce), "hash": tx_hash}
 
@@ -65,6 +73,8 @@ class Chained:
         self.chain = CHAIN
         self.calls = []
         self.counts = {}
+        # Headers a pin by number returns in place of the scripted chain's own.
+        self.headers = {}
         self.transactions = [
             transaction(OTHER, NONCE, "0x" + "cc" * 32),
             transaction(shouted(SUBMITTER), NONCE, consumer),
@@ -72,6 +82,8 @@ class Chained:
 
     def pin_block(self, selector):
         self.calls.append(("pin_block", selector))
+        if type(selector) is int:
+            return self.headers.get(selector, self.block(selector))
         return self.block({"finalized": self.finalized, "latest": self.head}[selector])
 
     def block(self, number):
@@ -92,7 +104,7 @@ class Chained:
         self.calls.append((method, params))
         if method == "eth_getTransactionCount":
             assert params[0] == SUBMITTER
-            return hex(self.count(int(params[1], 16)))
+            return hex(self.count(height(params[1])))
         assert (method, params[1]) == ("eth_getBlockByNumber", True)
         number = int(params[0], 16)
         return {
@@ -138,7 +150,7 @@ def test_the_proof_names_the_final_transaction_that_took_the_nonce(used):
     reader = Chained(finalized=5000, used=used)
     assert consumed_nonce.prove(backend(reader), attempt()) == proof(reader, used)
     # The block is found by bisection, and only that one block is read whole.
-    assert len(reader.read("eth_getTransactionCount")) <= 15
+    assert len(reader.read("eth_getTransactionCount")) <= 16
     assert reader.read("eth_getBlockByNumber") == [("eth_getBlockByNumber", [hex(used), True])]
 
 
@@ -251,6 +263,43 @@ def test_hashes_served_in_upper_case_are_read_in_lower_case():
 
     reader._rpc = upper
     assert consumed_nonce.prove(backend(reader), attempt()) == proof(reader, 200)
+
+
+def other_block(reader, number):
+    return reader.block(number).model_copy(update={"hash": "0x" + "ee" * 32})
+
+
+def test_a_whole_block_that_is_not_the_pinned_header_at_its_height_is_refused():
+    """The whole block and the header are separate reads; a provider may serve them
+    from nodes that disagree."""
+    reader = Chained(finalized=5000, used=200)
+    reader.headers[200] = other_block(reader, 200)
+    with pytest.raises(DataError, match="not the block the endpoint's pinned history") as refusal:
+        consumed_nonce.prove(backend(reader), attempt())
+    assert refusal.value.kind == "inconsistent"
+
+    # At the finalized height the pinned finalized block itself is the header.
+    reader = Chained(finalized=5000, used=5000)
+    pinned = reader.pin_block
+    reader.pin_block = lambda tag: other_block(reader, 5000) if tag == "finalized" else pinned(tag)
+    with pytest.raises(DataError, match="not the block the endpoint's pinned history"):
+        consumed_nonce.prove(backend(reader), attempt())
+
+
+def test_a_block_whose_own_state_does_not_count_the_nonce_is_refused():
+    """Read by its hash, the block's state must have the count past the nonce."""
+    reader = Chained(finalized=5000, used=200)
+    counted = reader.count
+    by_hash = []
+
+    def count(number):
+        # The bisection reads each height once; the read by hash repeats the block's.
+        by_hash.append(number)
+        return NONCE if by_hash.count(200) > 1 and number == 200 else counted(number)
+
+    reader.count = count
+    with pytest.raises(DataError, match="not the block the endpoint's pinned history"):
+        consumed_nonce.prove(backend(reader), attempt())
 
 
 def test_a_nonce_consumed_without_a_transaction_of_the_submitter_is_not_identified():
@@ -511,7 +560,7 @@ class Scripted(Chained):
             return self.receipts.get(params[0])
         if method == "eth_getTransactionCount":
             assert params[0] == self.submitter
-            return hex(self.count(int(params[1], 16)))
+            return hex(self.count(height(params[1])))
         block = self.block(int(params[0], 16))
         return {
             "number": hex(block.number),
@@ -593,3 +642,65 @@ MARGINS: dict[str, int | None] = {
     "eip155:4663": 1800,
     "eip155:999": None,
 }
+
+
+def test_a_drop_settles_the_attempts_released_earlier_at_its_nonce(production_attempt):
+    """The final transaction that took the step's nonce took theirs too, so none of
+    them blocks the deployment's next request."""
+    state, pending, _ = production_attempt
+    earlier = pending.model_copy(update={"tx_hash": "0x" + "a1" * 32})
+    elsewhere = pending.model_copy(update={"tx_hash": "0x" + "a2" * 32, "nonce": pending.nonce + 5})
+    before = operated(releasable(state)).model_copy(update={"released": (earlier, elsewhere)})
+    evidence = evidence_for(pending)
+    after = drop_superseded(before, evidence)
+    assert (after.released, after.superseded) == ((elsewhere,), (evidence,))
+    service = gateway_service(before, proving([], evidence))
+    service.validate_pending_resolution(before, after)
+    service.validate_released_record(before, after)
+    # Keeping the settled attempt, or settling one at another nonce, is not that update.
+    for kept in ((earlier, elsewhere), ()):
+        changed = after.model_copy(update={"released": kept})
+        with pytest.raises(ValueError, match="only with its proof and its decision"):
+            service.validate_pending_resolution(before, changed)
+        with pytest.raises(ValueError, match="retained until an attempt at their nonce settles"):
+            service.validate_released_record(before, changed)
+
+
+class Payer:
+    """An adapter whose payer fails the fee check, with the submitter's count scripted."""
+
+    def __init__(self, state, pending, count):
+        self.adapter = backend_for(state.config, pending.before.block)
+        self.adapter.reader.responses.update(
+            {"eth_getTransactionByHash": None, "eth_getTransactionCount": hex(count)}
+        )
+        self.adapter.payer_balance = lambda current: None
+        self.adapter.validate_fee_budget = self.refuse
+
+    @staticmethod
+    def refuse(state, plan, balance):
+        raise DataError("gas_budget", "the gas payer no longer covers the fee")
+
+
+def test_a_payer_that_fails_the_fee_check_does_not_hide_a_consumed_nonce(production_attempt):
+    state, pending, _ = production_attempt
+    operator = operated(state)
+    # Nonce unused: the funding refusal applies, for an operator as for a strategy.
+    unused = Payer(state, pending, pending.nonce).adapter
+    for deployment in (operator, state):
+        with pytest.raises(DataError, match="no longer covers the fee"):
+            unused.authorize_submission(deployment)
+    # Nonce taken: the step can spend nothing, so the fee check is not what refuses it,
+    # and the submission check answers `nonce_conflict`, which leads to the proof.
+    taken = Payer(state, pending, pending.nonce + 1).adapter
+    taken.authorize_submission(operator)
+    service = gateway_service(operator, taken)
+    service.check_execution_authority = type(service).check_execution_authority.__get__(service)
+    taken.audit_history = lambda current: None
+    service.check_execution_authority("broadcast", operator)
+    with pytest.raises(DataError, match="occupies the recorded nonce") as refusal:
+        taken.require_nonce_unused(pending)
+    assert refusal.value.kind == "nonce_conflict"
+    # A strategy deployment keeps its fee check first.
+    with pytest.raises(DataError, match="no longer covers the fee"):
+        taken.authorize_submission(state)

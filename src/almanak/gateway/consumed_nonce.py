@@ -60,6 +60,7 @@ def prove(backend, pending) -> ConsumedNonce:
         finalized = reader.pin_block("finalized")
         number = first_block_past(reader, submitter, nonce, pending.before.block.number, finalized)
         block, consumer = consuming_transaction(reader, number, submitter, nonce)
+        require_bound(reader, block, finalized, submitter, nonce)
     require_other(pending, block, consumer)
     require_margin(block, head, margin, nonce)
     return ConsumedNonce(
@@ -81,6 +82,27 @@ def finality_margin(chain) -> int:
             " by its consumed nonce there"
         )
     return margin
+
+
+def require_bound(reader, block: Block, finalized: Block, submitter: str, nonce: int) -> None:
+    """Bind the block that was read whole to the history the proof pinned.
+
+    The whole block and the headers come from separate reads, which a provider may
+    serve from different nodes. The block must be the one the pinned history has at its
+    height: the pinned finalized block itself, or the header a fresh pin by number
+    returns. Its own state, read by its hash and required canonical, must also have the
+    submitter's count past the nonce, so the transaction that was read is the one the
+    chain counted.
+    """
+    at_height = finalized if block.number == finalized.number else reader.pin_block(block.number)
+    selector = {"blockHash": block.hash, "requireCanonical": True}
+    counted = int(reader._rpc("eth_getTransactionCount", [submitter, selector]), 16)
+    if at_height.hash != block.hash or counted <= nonce:
+        raise DataError(
+            "inconsistent",
+            f"block {block.number} as read whole is not the block the endpoint's pinned"
+            " history holds at that height; try again, or another endpoint",
+        )
 
 
 def require_other(pending, block: Block, consumer: str) -> None:

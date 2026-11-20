@@ -122,7 +122,26 @@ class EvmGateway:
             is not None
         ):
             return
+        if self.nonce_taken(state):
+            return
         self.validate_fee_budget(state, state.pending, self.payer_balance(state))
+
+    def nonce_taken(self, state) -> bool:
+        """Whether an operator deployment's signed step can no longer spend its fee.
+
+        Once the submitter's count is past the step's nonce the bytes cannot be mined,
+        so no fee is reserved for them and the payer's balance says nothing. The
+        submission check that follows refuses with `nonce_conflict`, which is what lets
+        the coordinator ask for the consumed-nonce proof. A strategy deployment keeps
+        its fee check first, as before.
+        """
+        from almanak.operator_deployment import is_operator
+
+        slot = submission_slot(state.pending) if is_operator(state) else None
+        if slot is None:
+            return False
+        submitter, nonce = slot
+        return int(self.reader._rpc("eth_getTransactionCount", [submitter, "latest"]), 16) > nonce
 
     def payer_balance(self, state):
         """The gas payer's balance that a signed attempt's fee budget is checked against.
