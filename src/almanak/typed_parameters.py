@@ -20,7 +20,7 @@ from typing import Annotated, Union, get_args, get_origin
 
 from pydantic import ConfigDict, Field, PrivateAttr, ValidationError, field_validator
 
-from almanak.models import Model
+from almanak.models import Model, refusals
 from almanak.strategy_api import InvalidConfig
 
 PositiveDecimal = Annotated[Decimal, Field(gt=0)]
@@ -250,7 +250,7 @@ def sandboxed_fields(filename, source) -> frozenset[str] | None:
 
 
 class ParametersRefused(InvalidConfig):
-    """The typed model refused `strategy.parameters`; `field` is the first value at fault."""
+    """The typed model refused `strategy.parameters`; `field` is the first of `refusals`."""
 
     def __init__(self, message: str, field: str):
         super().__init__(message)
@@ -258,7 +258,7 @@ class ParametersRefused(InvalidConfig):
 
     @classmethod
     def from_error(cls, error: ValidationError) -> "ParametersRefused":
-        errors = error.errors()
+        errors = refusals(error)
         return cls("; ".join(f"{_dotted(e)}: {_reason(e)}" for e in errors), _dotted(errors[0]))
 
 

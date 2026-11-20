@@ -39,7 +39,7 @@ from almanak.configuration.strategy_parameters import (
 from almanak.configuration.yaml import ConfigurationError, Document, load
 from almanak.connectors.support import RunMode
 from almanak.gateway.operator_config import Name, OperatorConfig, content_digest
-from almanak.models import Model
+from almanak.models import Model, refusals
 
 TAGS = frozenset(str(binding.connector) for binding in BINDINGS)
 
@@ -138,7 +138,7 @@ def diagnostic(source: Document, error, prefix="") -> ConfigurationError:
     field = error.field if isinstance(error, ConfigurationError) else ""
     message = str(error)
     if isinstance(error, ValidationError):
-        detail = error.errors(include_input=False, include_url=False)[0]
+        detail = refusals(error)[0]
         field = author_field(detail["loc"])
         message = detail["msg"]
     field = ".".join(part for part in (prefix, field) if part)
