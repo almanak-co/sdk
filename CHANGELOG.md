@@ -95,6 +95,19 @@ its changelog is on the `v2` branch.
   endpoint, position field, health floor and result field tables to the parser, the
   declarations and the models. A refusal the skill names is a kind the SDK raises or
   part of a message it raises. The rules an agent must keep are checked only as text.
+- The agent skill reads `almanak support` filtered, by `direct_actions` and
+  `restrictions`, and treats an entry without `direct_actions` as serving nothing.
+  It states the Curve limit (pools of the reviewed StableSwap NG, TwoCrypto NG and
+  TriCrypto NG factories, no metapool), names a Curve coin by its CAIP-19 asset, and
+  has rows for `unsupported_pool`, `unsupported_revision` and a refused event-history
+  listing, which it recognises by its words and never retries. It defers creating
+  the wallet until a request needs the agent's own address, never reads
+  `gateway-auth.token`, and takes no address from its own examples. It reports
+  `rates` from `ax lending-reserve`, computes prices with a tool, reports a health
+  factor of 2^256 - 1 as no debt, copies a Uniswap V4 key whole, and asks for both
+  limits of a tick-range open, since no read reports the ratio a range needs. It
+  previews only once the wallet holds the funds, and gives a preview the time limit
+  of an execution.
 
 ### Removed
 - `--public-rpc drpc` no longer serves Avalanche. Its keyless tier intermittently
