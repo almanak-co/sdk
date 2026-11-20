@@ -1,4 +1,5 @@
-"""Direct liquidity actions for Uniswap V4: one position in one pool named by its key.
+"""Direct liquidity actions for Uniswap V4, and the revocation of what a direct action
+leaves approved: one position in one pool named by its key.
 
 Each command is one operator deployment with one allocation that adopts what the
 command states (`Allocation.adopt`) and swaps nothing: its entry share is zero and its
@@ -46,8 +47,23 @@ mint's deadline. An approval mined at an earlier price for less than the mint no
 is planned again before the mint. The mint takes at most what is approved, and what it
 does not take stays approved: the Permit2 allowance until it expires, the ERC-20
 approval to Permit2 without limit of time. An approval the wallet already gave that
-covers the amount is used as it stands. Nothing here revokes either; the result lists
+covers the amount is used as it stands. No mint revokes either; the result lists
 both. A collection and a close approve nothing.
+
+`revoke-exchange` is its own command, for a swap's allowances as well as a mint's. Its
+allocation states no range, no inventory and no NFT, and its steps are the connector's
+own allowance cleanup, one transaction each: for each held token, the ERC-20 approval
+to Permit2 is set to zero, then the Permit2 allowance to the router and the one to the
+PositionManager are set to zero and expired. What it clears is what the connector's
+own cleanup counts (`Allowance.needs_cleanup`): an allowance that holds an amount, and
+a Permit2 allowance that holds none and has not expired, which a completed swap leaves
+until its deadline and on which a strategy's start in the wallet is refused. With
+neither, the command is refused. The ERC-20 approval to Permit2 is not this venue's
+alone: every application that spends the token through Permit2 relies on it, and needs
+it approved again afterwards; the result's `note` says so before anything is signed.
+Permit2 allowances to any other spender are neither read nor changed. The cleanup
+takes the allowances in order, so a token whose approval of zero reverts stops it
+there.
 
 The heavy imports stay inside the functions: the command line imports each connector's
 `direct` module to build its choices.
@@ -57,15 +73,18 @@ from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
 
 # Commands that act on an existing position, named by its token ID.
 NFT_ACTIONS = ("collect-liquidity-fees", "close-liquidity")
-ACTIONS = ("open-liquidity", *NFT_ACTIONS)
+ACTIONS = ("open-liquidity", *NFT_ACTIONS, "revoke-exchange")
 # What each command must state besides its range or its NFT, as `ActionRequest` field names.
 REQUIRED = {
     "open-liquidity": ("tick_lower", "tick_upper", "slippage_bps", "deadline_seconds"),
     "collect-liquidity-fees": (),
     "close-liquidity": ("slippage_bps", "deadline_seconds"),
+    "revoke-exchange": (),
 }
 # Seconds after the observed block within which a collection is still planned and
-# signed, and mined: its call carries that deadline.
+# signed, and mined: its call carries that deadline. A revocation's allocation states
+# them only because the field is required: its calls carry no deadline, and nothing
+# holds its steps to this bound.
 ADMISSION_SECONDS = 300
 
 
@@ -76,13 +95,13 @@ def positions(reader, block, resolved, wallet: Wallet, request: ActionRequest) -
 
     require_stated(request)
     pool = resolved.pool
-    nft = None
+    selected, nft = None, None
+    amount0, amount1 = 0, 0
     if request.action == "open-liquidity":
         selected = stated_range(pool, request)
         amount0, amount1 = stated_amounts(request)
-    else:
+    elif request.action in NFT_ACTIONS:
         selected, nft = named_position(reader, block, resolved, wallet, request)
-        amount0, amount1 = 0, 0
     return {
         "allocations": [
             {
@@ -95,7 +114,7 @@ def positions(reader, block, resolved, wallet: Wallet, request: ActionRequest) -
                 "adopt": {"counter": amount1, "nft": nft},
                 # Stated, since the default offers the whole capital as an entry swap.
                 "entry_swap_bps": 0,
-                # A collection has no price bound.
+                # A collection and a revocation have no price bound.
                 "slippage_bps": request.slippage_bps or 0,
                 "deadline_seconds": request.deadline_seconds or ADMISSION_SECONDS,
                 "native_asset": str(evm_network(pool.chain.chain_id).native_asset),
@@ -252,10 +271,40 @@ def close_liquidity(allocation, seen):
     return build(allocation, seen)
 
 
+def revoke_exchange(allocation, seen):
+    """The connector's allowance cleanup, refused when it would have nothing to clear."""
+    from almanak.connectors.uniswap_v4.models import Target
+    from almanak.dex_intents import RevokeExchange
+
+    if not seen.needs_cleanup:
+        raise ValueError(
+            "nothing to revoke: no approval of a pool token to Permit2 holds an amount, "
+            "and no Permit2 allowance to the pool's router or position manager holds an "
+            "amount or has yet to expire"
+        )
+    return RevokeExchange[Target](target=seen.target)
+
+
+def note(config, observed, request: ActionRequest) -> str | None:
+    """What a revocation does beyond this venue: the approvals to Permit2 it zeroes."""
+    if request.action != "revoke-exchange":
+        return None
+    (seen,) = observed
+    shared = [str(a.asset) for a in seen.allowances if a.expiration is None and a.amount]
+    if not shared:
+        return None
+    return (
+        f"revoke-exchange sets the wallet's ERC-20 approval to Permit2 to zero for "
+        f"{' and '.join(shared)}. Permit2 is shared: every other application that spends "
+        "these tokens from this wallet through Permit2 needs them approved again afterwards"
+    )
+
+
 BUILDERS = {
     "open-liquidity": open_liquidity,
     "collect-liquidity-fees": collect_liquidity_fees,
     "close-liquidity": close_liquidity,
+    "revoke-exchange": revoke_exchange,
 }
 
 

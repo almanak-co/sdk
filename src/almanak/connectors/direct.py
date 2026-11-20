@@ -110,6 +110,11 @@ class DirectActions:
     # takes. None takes the flags of a concentrated-liquidity position: a tick range or
     # an NFT, and an amount of each of the two currencies.
     liquidity_flags: Callable | None = None
+    # `note(config, observed, request)`: what the operator must know before the request
+    # is executed and that no step of it states, in one sentence, or None. It is built
+    # from the observations the request is admitted with and reported as the result's
+    # `note`, in a preview as in an execution.
+    note: Callable | None = None
 
 
 # Installed connectors `ax` runs no direct action for, and why.

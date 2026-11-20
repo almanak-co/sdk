@@ -61,6 +61,13 @@ its changelog is on the `v2` branch.
   Uniswap V4, with the pool named by its key and a native pool provided in the wrapped
   token. A mint reverts when mined at a price further than `--slippage-bps` from the
   price its step was planned at, within what the range itself holds.
+- `ax revoke-exchange` serves Uniswap V4. For each of the pool's two tokens it sets the
+  ERC-20 approval to Permit2 to zero, then the Permit2 allowances to the router and
+  the position manager. The approval to Permit2 is shared with every other
+  application that spends the token through Permit2, which needs it approved again
+  afterwards; the result says so in `note` before anything is signed. A Uniswap V4
+  result lists a Permit2 allowance that holds no amount and has not expired under
+  `permit2_unexpired`, and the revocation expires it.
 - `--public-rpc` serves `almanak ax` reads on Base, Arbitrum, BNB, Optimism, Polygon and
   Robinhood beside Ethereum and Avalanche. `drpc` adds Base, Optimism, Polygon and
   Robinhood, and four chain operators' own endpoints are named `base`, `arbitrum`,

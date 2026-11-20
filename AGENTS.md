@@ -467,6 +467,12 @@ independently.
 - Operator actions have no amount ceiling or cumulative budget; the required
   fee ceilings and the wallet balance bound them. An operator-managed action
   policy is proposed, not accepted.
+- Accepted: `ax revoke-exchange` on Uniswap V4 sets the wallet's ERC-20
+  approval of each pool token to Permit2 to zero, beside the Permit2
+  allowances to the router and the position manager. That approval is shared
+  with every other application that spends the token through Permit2 from the
+  same wallet, and each needs it approved again afterwards. When it will zero
+  one, the result states this in `note` before anything is signed.
 
 ## Check output and dashboards
 
