@@ -104,6 +104,13 @@ its changelog is on the `v2` branch.
   Avalanche resolves with `ax recover --record <record> --public-rpc publicnode`.
 
 ### Fixed
+- An Aerodrome trading allocation's signed step is sent although pool shares reached
+  its fund after the signature, for strategies and `ax swap` alike. The step is
+  reconciled from its own receipt with the shares listed under `accounting_issues`,
+  and they are never attributed to the allocation. Such a step was held back before
+  its first send for as long as the fund held the shares, which kept the record and
+  the wallet's claim of an `ax swap`: a signed approval carries no deadline to release
+  it by. A fund that holds shares is still refused before anything is signed.
 - `ax withdraw` on Aave V4 refuses a reserve that backs the wallet's open debt on the
   Spoke. It was held back only by the Spoke's own limit of a health factor of 1,
   while the documentation said every withdrawal of collateral was refused. A
