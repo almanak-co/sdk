@@ -66,6 +66,60 @@ def test_observed_submission_does_not_reserve_spending_again():
     )
 
 
+def test_a_plan_is_observed_at_the_head_as_its_connector_states_it():
+    block = SimpleNamespace(number=7, hash="canonical")
+    plan = SimpleNamespace(operation=SimpleNamespace(allocation="position"), before="before")
+    shared = SimpleNamespace(
+        connector=SimpleNamespace(execution=SimpleNamespace()),
+        snapshot=Mock(return_value="shared"),
+    )
+    assert EvmGateway.current_snapshot(shared, plan, block) == "shared"
+    shared.snapshot.assert_called_once_with("position", block, "before")
+
+    own = Mock(return_value="own")
+    stated = SimpleNamespace(
+        connector=SimpleNamespace(execution=SimpleNamespace(current_snapshot=own)),
+        reader=SimpleNamespace(pin_block=Mock(return_value=block)),
+        snapshot=Mock(side_effect=AssertionError("the connector states its own observation")),
+    )
+    assert EvmGateway.current_snapshot(stated, plan, block) == "own"
+    own.assert_called_once_with(stated, plan, block)
+    stated.reader.pin_block.assert_called_once_with(7)
+    # The connector's own observation is refused at a block that left the chain, as
+    # the shared one is.
+    stated.reader.pin_block.return_value = SimpleNamespace(number=7, hash="other")
+    with pytest.raises(DataError, match="snapshot block is no longer canonical") as refusal:
+        EvmGateway.current_snapshot(stated, plan, block)
+    assert (refusal.value.kind, own.call_count) == ("reorganization", 1)
+
+
+def test_the_fee_budget_of_a_signed_attempt_reads_the_payer_as_its_connector_observes():
+    pending = SimpleNamespace(operation=SimpleNamespace(target="target"))
+    state = SimpleNamespace(pending=pending)
+    seen = (
+        SimpleNamespace(target="other", native_balance=3),
+        SimpleNamespace(target="target", native_balance=5),
+    )
+    shared = SimpleNamespace(
+        connector=SimpleNamespace(execution=SimpleNamespace()), observe=Mock(return_value=seen)
+    )
+    assert EvmGateway.payer_balance(shared, state) == 5
+    shared.observe.assert_called_once_with(state)
+
+    block = object()
+    stated = SimpleNamespace(
+        guard=Mock(),
+        connector=SimpleNamespace(execution=SimpleNamespace(current_snapshot=Mock())),
+        reader=SimpleNamespace(_rpc=Mock(return_value="0x9"), pin_block=Mock(return_value=block)),
+        current_snapshot=Mock(return_value=SimpleNamespace(native_balance=6)),
+        observe=Mock(side_effect=AssertionError("signed bytes are observed as such")),
+    )
+    assert EvmGateway.payer_balance(stated, state) == 6
+    stated.guard.assert_called_once_with()
+    stated.reader.pin_block.assert_called_once_with(9)
+    stated.current_snapshot.assert_called_once_with(pending, block)
+
+
 def test_signing_rejects_changed_protocol_call_before_signer_access():
     plan = SimpleNamespace(
         attempt_id="durable-attempt",

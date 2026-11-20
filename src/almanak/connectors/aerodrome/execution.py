@@ -21,6 +21,7 @@ from almanak.connectors.funding import (
 )
 from almanak.connectors.gas_lifecycle import AERODROME_LIFECYCLE
 from almanak.gateway.ethereum import DataError
+from almanak.transaction_family import is_signed
 
 
 class AerodromeExecution:
@@ -64,10 +65,26 @@ class AerodromeExecution:
         return {}
 
     @staticmethod
+    def current_snapshot(backend, plan, block):
+        """The head observation a plan is validated against before it is signed or sent.
+
+        Signed bytes are observed as such (`observations.position`): shares sent to a
+        trading fund after the signature do not hold them back.
+        """
+        return snapshot(
+            backend, plan.operation.allocation, block, plan.before, signed=is_signed(plan)
+        )
+
+    @staticmethod
     def current_checks(backend, plan, block=None):
         block = block or backend.reader.pin_block("latest")
         current = snapshot(
-            backend, plan.operation.allocation, block, plan.before.owned, quotes=False
+            backend,
+            plan.operation.allocation,
+            block,
+            plan.before.owned,
+            quotes=False,
+            signed=is_signed(plan),
         )
         validate_current(backend, plan, current)
 

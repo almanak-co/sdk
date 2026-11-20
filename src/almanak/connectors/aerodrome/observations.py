@@ -123,24 +123,27 @@ def ownership(config, name, reference):
     return reference if isinstance(reference, Ownership) else reference.owned
 
 
-def position(reader, target, pool, *, mined=False):
+def position(reader, target, pool, *, signed=False):
     """The fund's stored pool position at the pool's block; None when it holds none.
 
     Shares and fee claims belong to the whole account. A trading allocation owns none,
-    so it cannot keep the fund's own apart from its inventory, and nothing is planned,
-    signed or sent for a fund that holds any: that observation is refused.
+    so it cannot keep the fund's own apart from its inventory, and nothing is planned
+    or signed for a fund that holds any: that observation is refused.
 
-    `mined` observes the block of a step that is already mined. What the fund holds
-    there cannot undo the step, and anyone can send it shares. The trading allocation
-    still owns none, so the observation carries no position, and reconciliation reports
-    the holding as an accounting issue (`reconciliation.unowned_holdings`).
+    `signed` observes for a step whose bytes are already signed: the head it is sent
+    at, or the block it was mined in. Anyone can send the fund shares, and what it
+    holds there cannot recall the bytes or undo the step. Refusing would hold an
+    approval, which carries no deadline, back for good. The trading allocation still
+    owns none, so the observation carries no position, the step is sent, and its
+    reconciliation reports the holding as an accounting issue
+    (`reconciliation.unowned_holdings`).
     """
     value = stored_position(reader, target, pool)
     if value.empty:
         return None
     if target.liquidity_enabled:
         return value
-    if mined:
+    if signed:
         return None
     raise DataError(
         "ownership",
@@ -226,7 +229,7 @@ def exit_amount(owned):
     return counter if owned.position is None and counter.amount else None
 
 
-def snapshot(backend, name, block, reference=None, *, quotes=True, residual=False, mined=False):
+def snapshot(backend, name, block, reference=None, *, quotes=True, residual=False, signed=False):
     config, reader = backend.config, backend.reader
     target = config.target(name)
     owned = ownership(config, name, reference)
@@ -260,7 +263,7 @@ def snapshot(backend, name, block, reference=None, *, quotes=True, residual=Fals
         allowances=allowances(reader, target, block),
         native_balance=AssetAmount(asset=config.allocation(name).native_asset, amount=native),
         payer=profile.submitter,
-        position=position(reader, target, pool, mined=mined),
+        position=position(reader, target, pool, signed=signed),
         quotes_included=quotes,
         **snapshot_quotes(
             config,

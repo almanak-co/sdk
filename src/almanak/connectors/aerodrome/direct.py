@@ -19,14 +19,16 @@ the other currency or for the pool's shares is never changed, and is listed.
 
 A trading allocation owns no pool shares. A wallet that holds shares or stored fee
 claims of the pool is refused whenever the deployment observes it before a step is
-sent: those claims are account-wide and cannot be kept apart from the deployment.
-Nothing is then planned, signed or sent. A step that was already signed and not yet
-sent stays recorded, and `almanak ax recover` refuses to send it for as long as the
-wallet holds the shares. Shares that reach the wallet once a step is sent cannot stop
-it. The step is reconciled from its own effects, and its outcome lists the shares as
-an accounting issue; they are never attributed to the deployment, and the wallet's
-next command is refused until they are gone. Shares that sit in the pool's own balance
-do not matter to a swap.
+signed: those claims are account-wide and cannot be kept apart from the deployment.
+Nothing is then planned or signed. Shares that reach the wallet once a step is signed
+cannot stop it, whether it was sent yet or not: anyone can send them, signed bytes
+cannot be recalled, and an approval carries no deadline to release it by. The step is
+sent, by the command or by `almanak ax recover`, and reconciled from its own effects,
+and its outcome lists the shares as an accounting issue. They are never attributed to
+the deployment. A swap whose approval was signed before the shares arrived ends with
+that approval mined and the swap itself refused, unsigned. The wallet's next command
+is refused until the shares are gone. Shares that sit in the pool's own balance do not
+matter to a swap.
 
 The heavy imports stay inside the functions: the command line imports each connector's
 `direct` module to build its choices.

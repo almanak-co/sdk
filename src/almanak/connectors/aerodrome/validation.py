@@ -200,10 +200,14 @@ def validate_current(backend, plan, current):
 def retained(config, plan):
     """The ownership check a plan is held to at the current head.
 
-    Unsigned work, and every plan of a strategy's allocation, is held to the fund's
-    stored position. Signed bytes of an adopting allocation are not: they cannot be
-    recalled, a share anyone sends the fund would hold them back for good, and their
+    Unsigned work, and every plan of a strategy's liquidity allocation, is held to the
+    fund's stored position. Signed bytes of an adopting allocation are not: they cannot
+    be recalled, a share anyone sends the fund would hold them back for good, and their
     outcome is reconciled with the difference listed.
+
+    A trading allocation owns no position, and the observation its signed bytes are
+    checked against carries none (`observations.position`), so the same check passes
+    for it whatever shares the fund was sent after the signature.
     """
     adopting = config.allocation(plan.operation.allocation).adopt is not None
     return validate_retained if adopting and is_signed(plan) else validate_owned

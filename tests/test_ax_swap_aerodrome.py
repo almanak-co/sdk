@@ -20,10 +20,11 @@ from almanak.chains import evm_network
 from almanak.cli_arguments import build_parser, parse_validated
 from almanak.connectors import direct
 from almanak.connectors.aerodrome import direct as aerodrome_direct
-from almanak.connectors.aerodrome import observations, reconciliation
+from almanak.connectors.aerodrome import execution, observations, reconciliation, validation
 from almanak.connectors.aerodrome import operations as ops
 from almanak.connectors.aerodrome.domain import PoolObservation
 from almanak.connectors.aerodrome.observations import Snapshot
+from almanak.connectors.aerodrome.ownership import validate_owned
 from almanak.connectors.aerodrome.positions import Position, Quote
 from almanak.connectors.aerodrome.receipts import Effects
 from almanak.connectors.composition import connector_from_wire
@@ -434,22 +435,74 @@ def test_a_wallet_holding_pool_shares_or_fee_claims_is_refused_when_observed(var
         Snapshot.model_validate({**seen.model_dump(), "position": position.model_dump()})
 
 
-def test_holdings_at_the_block_of_a_mined_step_are_left_out_of_a_trading_observation(variant):
+def test_holdings_seen_for_signed_bytes_are_left_out_of_a_trading_observation(variant):
     market = resolved(variant)
     config = operator_config(market)
     target = config.target(ALLOCATION)
     seen = observation(config, created(config).owned[0], market)
-    # Nothing the fund holds there can undo the step: the observation carries no
-    # position, and the holding is reported by reconciliation instead.
+    # Nothing the fund holds can recall signed bytes or undo a mined step: the
+    # observation carries no position, and the holding is reported by reconciliation.
     for held in (Holdings(), Holdings(shares=1), Holdings(claimable=1)):
-        assert observations.position(held, target, seen.pool, mined=True) is None
+        assert observations.position(held, target, seen.pool, signed=True) is None
     # An allocation with liquidity authority reads its position at every block.
     liquid = configuration(allocation_document(market, liquidity_enabled=True), market)
-    for mined in (False, True):
+    for signed in (False, True):
         position = observations.position(
-            Holdings(shares=1), liquid.target(ALLOCATION), seen.pool, mined=mined
+            Holdings(shares=1), liquid.target(ALLOCATION), seen.pool, signed=signed
         )
         assert position.shares.amount == 1
+
+
+def test_a_plan_is_observed_as_signed_only_once_it_carries_signed_bytes(variant, monkeypatch):
+    market, config, steps = trading_steps(variant)
+    asked, checked = [], []
+
+    def snapshot(backend, name, block, reference, **options):
+        asked.append((name, block, reference, options))
+        return reference
+
+    monkeypatch.setattr(execution, "snapshot", snapshot)
+    monkeypatch.setattr(
+        execution, "validate_current", lambda backend, plan, current: checked.append(current)
+    )
+    backend = SimpleNamespace(config=config, reader=None)
+    for operation, before in steps:
+        for raw, signed in ((None, False), ("0x02", True)):
+            plan = SimpleNamespace(operation=operation, before=before, raw_transaction=raw)
+            observed = execution.AerodromeExecution.current_snapshot(backend, plan, market.block)
+            execution.AerodromeExecution.current_checks(backend, plan, market.block)
+            # Before the send the gateway reads the plan's own observation again, and
+            # the connector's check its ownership: both as signed bytes, or neither.
+            assert (observed, asked[-2:]) == (
+                before,
+                [
+                    (ALLOCATION, market.block, before, {"signed": signed}),
+                    (ALLOCATION, market.block, before.owned, {"quotes": False, "signed": signed}),
+                ],
+            )
+    assert checked == [before.owned for _, before in steps for _ in range(2)]
+
+
+def test_a_signed_trading_step_is_still_held_to_its_ownership_and_inventory(variant):
+    market, config, steps = trading_steps(variant)
+    swap, approved = steps[1]
+    owned = approved.owned
+    signed = SimpleNamespace(operation=swap, before=approved, raw_transaction="0x02")
+    # Leaving the shares out of the observation relaxes nothing else: a trading
+    # allocation's signed bytes keep the check every unsigned plan is held to.
+    check = validation.retained(config, signed)
+    assert check is validate_owned
+    check(owned, approved)
+    short = observation(config, owned, market, wallet=AMOUNT - 1, allowance=AMOUNT)
+    with pytest.raises(DataError, match="does not cover attributed inventory") as refusal:
+        check(owned, short)
+    assert refusal.value.kind == "inventory"
+    other = owned.model_copy(
+        update={"inventory1": owned.inventory1.model_copy(update={"amount": 1})}
+    )
+    with pytest.raises(DataError, match="differ from owned amounts") as refusal:
+        check(owned, observation(config, other, market, allowance=AMOUNT))
+    assert refusal.value.kind == "ownership"
 
 
 def trading_steps(variant):
@@ -576,8 +629,8 @@ def test_a_mined_swap_is_reconciled_from_its_own_effects_with_the_shares_reporte
         f"{target.pool.shares_asset}: fund holds LP shares or fee claims that a "
         "trading-only allocation does not own",
     )
-    # The observation after the step is read as the block of a mined step.
-    assert asked == {"quotes": False, "residual": False, "mined": True}
+    # The observation after the step is read as one for signed bytes.
+    assert asked == {"quotes": False, "residual": False, "signed": True}
 
 
 def test_a_mined_swap_with_no_shares_on_the_fund_reports_no_issue(variant, monkeypatch):
