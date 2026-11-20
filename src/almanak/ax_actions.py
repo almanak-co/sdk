@@ -56,7 +56,10 @@ ACTIONS = {
     " shares, and for aerodrome claim their fees",
     "revoke-exchange": "set every allowance the wallet gave the pool's router and"
     " position manager, or for curve the pool itself, in the pool currencies to zero; for"
-    " aerodrome also the router's allowance in the pool's LP token",
+    " aerodrome also the router's allowance in the pool's LP token; for uniswap_v4 the"
+    " Permit2 allowances of the router and position manager and the ERC-20 approval of"
+    " each pool token to Permit2, which every other application that spends the token"
+    " through Permit2 shares",
 }
 # Actions whose market is one pool; the others name a lending market, with the flags
 # `ax lending-reserve` takes.

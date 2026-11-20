@@ -855,8 +855,7 @@ def test_the_skill_says_what_the_chain_enforces_and_what_it_does_not():
     for statement, passage in (
         ("tell the user it can use less than stated and that the rest stays in the wallet", ranged),
         ("Only what a mint offers is approved", ranged),
-        ("Nothing here revokes the approval to Permit2", ranged),
-        ("tell the user that before an open there, and that you cannot clear it", ranged),
+        ("`ax revoke-exchange` clears it", ranged),
         ("except on Uniswap V4, it is refused when nothing is owed", ranged),
         ("Only that offer is approved, and the rest stays in the wallet", shares),
         ("what the router did not take of the offer stays approved", shares),
@@ -865,8 +864,14 @@ def test_the_skill_says_what_the_chain_enforces_and_what_it_does_not():
         ("report them, they are not a failure", " ".join(section("Liquidity").split())),
     ):
         assert statement in passage, statement
-    assert "uniswap_v4" not in connectors_for("revoke-exchange")
-    assert "except on Uniswap V4, which it does not serve" in flat()
+    # A Uniswap V4 revocation reaches an approval other applications share.
+    assert "uniswap_v4" in connectors_for("revoke-exchange")
+    for statement in (
+        "On Uniswap V4 it also sets each pool token's approval to Permit2 to zero",
+        "tell the user, before they confirm, that every other application that spends "
+        "that token through Permit2 needs it approved again afterwards",
+    ):
+        assert statement in flat(), statement
     # The refused empty collect and the staked flag are the code's own words.
     from almanak.connectors import v3_pool_liquidity_direct, v3_pool_position_request
     from almanak.connectors.aerodrome import liquidity_direct as aerodrome

@@ -35,7 +35,7 @@ from almanak.connectors.uniswap_v4.math import liquidity_for, sqrt_at_tick
 from almanak.connectors.uniswap_v4.models import Allocation, Target
 from almanak.connectors.uniswap_v4.position_request import PositionRequest
 from almanak.connectors.uniswap_v4.state import Burn, Collect, Mint, Snapshot
-from almanak.dex_intents import SwapExactInput
+from almanak.dex_intents import RevokeExchange, SwapExactInput
 from almanak.gateway.ethereum import DataError, Reverted
 from almanak.models import AssetAmount
 from almanak.operator_deployment import refuse_adoption
@@ -46,8 +46,14 @@ from tests import test_ax_swap_uniswap_v4 as swaps
 CONNECTOR = "uniswap_v4"
 USDC, WETH, NATIVE = swaps.USDC, swaps.WETH, swaps.NATIVE
 WALLET = swaps.WALLET
-KINDS = ("swap_exact_input", "open_liquidity", "collect_liquidity_fees", "close_liquidity")
-COMMANDS = ("open-liquidity", "collect-liquidity-fees", "close-liquidity")
+KINDS = (
+    "swap_exact_input",
+    "open_liquidity",
+    "collect_liquidity_fees",
+    "close_liquidity",
+    "revoke_exchange",
+)
+COMMANDS = ("open-liquidity", "collect-liquidity-fees", "close-liquidity", "revoke-exchange")
 # The range the tests open: around the observed tick 0, aligned to the pool's spacing 10.
 LOWER, UPPER = -600, 600
 AMOUNT0, AMOUNT1 = 5000, 7000
@@ -60,9 +66,9 @@ def stated(action, **changes):
     values = {"slippage_bps": 50, "deadline_seconds": 300}
     if action == "open-liquidity":
         values.update(tick_lower=LOWER, tick_upper=UPPER, amount0=AMOUNT0, amount1=AMOUNT1)
-    if action == "collect-liquidity-fees":
+    if action in ("collect-liquidity-fees", "revoke-exchange"):
         values = {}
-    if action != "open-liquidity":
+    if action in liquidity_direct.NFT_ACTIONS:
         values["token_id"] = TOKEN
     return ActionRequest(action, **{**values, **changes})
 
@@ -105,14 +111,15 @@ def config_for(market, action, reader=None, **changes):
     return swaps.configuration(positions(market, action, reader, **changes), market)
 
 
-def allowances(target, tokens=(0, 0), permits=((0, 0), (0, 0))):
-    """Every allowance an observation reads; `tokens` are the ERC-20 approvals to Permit2
-    and `permits` the amount and expiration of each Permit2 allowance to the manager."""
+def allowances(target, tokens=(0, 0), permits=((0, 0), (0, 0)), routed=((0, 0), (0, 0))):
+    """Every allowance an observation reads; `tokens` are the ERC-20 approvals to Permit2,
+    `permits` the amount and expiration of each Permit2 allowance to the manager and
+    `routed` those of each Permit2 allowance to the router."""
     contracts, rows = target.contracts, []
-    for asset, token, permit in zip(target.assets, tokens, permits, strict=True):
+    for asset, token, permit, route in zip(target.assets, tokens, permits, routed, strict=True):
         rows.append({"asset": asset, "spender": contracts.permit2, "amount": token})
         for spender in (contracts.router, contracts.position_manager):
-            amount, expiration = permit if spender == contracts.position_manager else (0, 0)
+            amount, expiration = permit if spender == contracts.position_manager else route
             row = {"asset": asset, "spender": spender, "amount": amount}
             rows.append({**row, "expiration": expiration, "nonce": 0})
     return tuple(rows)
@@ -133,7 +140,10 @@ def observed(config, owned, market, *, wallets=(9000, 9000), **stated_fields):
         lp_fee=market.pool.fee,
     )
     granted = allowances(
-        target, stated_fields.pop("tokens", (0, 0)), stated_fields.pop("permits", ((0, 0), (0, 0)))
+        target,
+        stated_fields.pop("tokens", (0, 0)),
+        stated_fields.pop("permits", ((0, 0), (0, 0))),
+        stated_fields.pop("routed", ((0, 0), (0, 0))),
     )
     native = AssetAmount(asset=evm_network(market.pool.chain.chain_id).native_asset, amount=10**18)
     return Snapshot(
@@ -203,7 +213,7 @@ def validating(config, state, intent, seen, *, operator=True):
     return deciding, step
 
 
-def test_the_connector_serves_open_collect_and_close_and_no_partial_change():
+def test_the_connector_serves_open_collect_close_and_revoke_and_no_partial_change():
     found = connector_from_wire({"connector": CONNECTOR})
     assert direct.binding(CONNECTOR).actions == ("swap", *COMMANDS)
     production = [cell for cell in found.chain_support if RunMode.PRODUCTION in cell.modes]
@@ -212,7 +222,7 @@ def test_the_connector_serves_open_collect_and_close_and_no_partial_change():
         assert tuple(str(action) for action in cell.direct_actions) == KINDS
         for command in COMMANDS:
             direct.require_direct(CONNECTOR, cell.chain, ActionRequest(command))
-    for unserved in ("increase-liquidity", "decrease-liquidity", "revoke-exchange"):
+    for unserved in ("increase-liquidity", "decrease-liquidity"):
         assert CONNECTOR not in direct.connectors_for(unserved)
         with pytest.raises(ValueError, match=f"uniswap_v4 serves no direct {unserved}"):
             direct.require_direct(CONNECTOR, production[0].chain, ActionRequest(unserved))
@@ -293,14 +303,24 @@ def test_an_adopting_allocation_trades_nothing_and_only_an_operator_states_one()
 
     assert allocation().adopt.counter == AMOUNT1
     # The default entry share offers the whole capital as a swap, so it must be zero.
-    for refused in ({"entry_swap_bps": 10000}, {"range": None}, {"band": {"width": 100}}):
-        with pytest.raises(ValidationError, match="fixed range, no entry swap and no band"):
+    for refused in ({"entry_swap_bps": 10000}, {"band": {"width": 100}}):
+        with pytest.raises(ValidationError, match="states no entry swap and no band"):
             allocation(**refused)
+    # Without a range there is nothing to mint into and no NFT to take over.
+    empty, bare = {"asset": USDC, "amount": 0}, {"counter": 0}
+    for held in (
+        {},
+        {"capital": empty},
+        {"capital": empty, "adopt": {"counter": 1}},
+        {"capital": empty, "adopt": {"counter": 0, "nft": str(nft(market))}},
+    ):
+        with pytest.raises(ValidationError, match="without a fixed range holds nothing"):
+            allocation(range=None, **held)
+    assert allocation(range=None, capital=empty, adopt=bare).liquidity_enabled is False
     elsewhere = f"eip155:1/erc721:0x{'55' * 20}/7"
     with pytest.raises(ValidationError, match="one of the allocation's PositionManager"):
         allocation(adopt={"counter": 0, "nft": elsewhere})
     # Only an adopting allocation may state no capital.
-    empty = {"asset": USDC, "amount": 0}
     assert allocation(capital=empty).capital.amount == 0
     with pytest.raises(ValidationError, match="capital must fit positive uint128"):
         allocation(capital=empty, adopt=None, entry_swap_bps=0)
@@ -660,6 +680,126 @@ def test_a_position_command_acts_on_the_adopted_nft_and_no_other(action):
         liquidity_direct.intent(config, (seen,), stated(action, token_id=TOKEN + 1))
 
 
+def revoking(**granted):
+    """A revocation deployment with the observation its request is admitted with."""
+    market = swaps.resolved()
+    config = config_for(market, "revoke-exchange")
+    state = swaps.created(config)
+    return market, config, state, observed(config, state.owned[0], market, **granted)
+
+
+def test_a_revocation_states_no_range_no_inventory_and_no_nft():
+    market, config, state, _ = revoking()
+    (allocation,) = config.allocations
+    assert (allocation.range, allocation.band, allocation.entry_swap_bps) == (None, None, 0)
+    assert (allocation.capital.amount, allocation.adopt.counter, allocation.adopt.nft) == (
+        0,
+        0,
+        None,
+    )
+    assert (allocation.slippage_bps, allocation.deadline_seconds) == (0, 300)
+    # No read of an NFT builds it, and its deployment owns and reports no position.
+    built = positions(market, "revoke-exchange", reader=object())["allocations"][0]
+    assert (built["range"], built["adopt"]) == (None, {"counter": 0, "nft": None})
+    owned = state.owned[0]
+    assert (owned.position, owned.adopts, owned.target.liquidity_enabled) == (None, None, False)
+    assert set(direct.binding(CONNECTOR).position(state)) == {"inventory", "allowances"}
+
+
+def revoked(config, state, seen):
+    """Every step a revocation plans from one observation, each checked as the gateway
+    checks it and applied as its reconciliation models it."""
+    intent = liquidity_direct.intent(config, (seen,), stated("revoke-exchange"))
+    found = connector_from_wire({"connector": CONNECTOR})
+    found.codec.capability.admit(state.capabilities, intent)
+    assert intent.kind == "revoke_exchange" and not found.lifecycle.increases_exposure(intent)
+    _, step = validating(config, state, intent, seen)
+    steps = []
+    while seen.needs_cleanup:
+        planned = step(seen)
+        after = reconciliation.allowance_after(seen, planned, (0, 0), seen.block.timestamp)
+        pending = SimpleNamespace(before=seen, operation=planned)
+        seen = seen.model_copy(update={"allowances": after})
+        assert reconciliation.allowances_reconcile(pending, seen, (0, 0), True)
+        steps.append(planned)
+    return steps, seen
+
+
+def test_a_revocation_zeroes_the_approvals_to_permit2_and_both_permit2_allowances():
+    market = swaps.resolved()
+    soon, past = market.block.timestamp + 100, market.block.timestamp - 1
+    # A mint's leftover in the first token; in the second an unlimited approval, a
+    # lapsed allowance to the router that still holds an amount, and an unexpired one
+    # to the manager that holds none.
+    _, config, state, seen = revoking(
+        tokens=(7, UNLIMITED_TOKEN),
+        permits=((7, soon), (0, soon)),
+        routed=((0, 0), (UNLIMITED_PERMIT, past)),
+    )
+    steps, after = revoked(config, state, seen)
+    contracts = config.target(ALLOCATION).contracts
+    assert [(s.kind, str(s.asset), s.spender) for s in steps] == [
+        ("revoke_erc20", USDC, contracts.permit2),
+        ("revoke_permit2", USDC, contracts.position_manager),
+        ("revoke_erc20", WETH, contracts.permit2),
+        ("revoke_permit2", WETH, contracts.router),
+        ("revoke_permit2", WETH, contracts.position_manager),
+    ]
+    assert {(s.amount, s.expiration) for s in steps} == {(0, None), (0, 0)}
+    # Permit2 writes the block's own time for an expiration of zero: nothing outlasts it.
+    assert not after.needs_cleanup and not any(item.amount for item in after.allowances)
+    assert {a.expiration for a in after.allowances} == {None, 0, market.block.timestamp}
+    # Each step is the connector's own call: an ERC-20 approve, or Permit2's approve.
+    call = connector_from_wire({"connector": CONNECTOR}).execution.call
+    assert [call(config, s).to for s in steps] == [
+        USDC.rsplit(":", 1)[1],
+        contracts.permit2,
+        WETH.rsplit(":", 1)[1],
+        contracts.permit2,
+        contracts.permit2,
+    ]
+    closed = RevokeExchange[Target](target=after.target)
+    with pytest.raises(ValueError, match="spending authority is already closed"):
+        validating(config, state, closed, after)[1](after)
+
+
+def test_a_revocation_is_refused_when_no_allowance_holds_an_amount():
+    market = swaps.resolved()
+    soon = market.block.timestamp + 100
+    refusal = "the wallet has given Permit2 no allowance in either pool token"
+    for granted in ({}, {"permits": ((0, soon), (0, 0)), "routed": ((0, 0), (0, soon))}):
+        _, config, _, bare = revoking(**granted)
+        with pytest.raises(ValueError, match=refusal):
+            liquidity_direct.intent(config, (bare,), stated("revoke-exchange"))
+    # A single base unit left to Permit2 is revoked.
+    _, config, state, seen = revoking(tokens=(0, 1))
+    assert [s.kind for s in revoked(config, state, seen)[0]] == ["revoke_erc20"]
+
+
+def test_a_revocation_deployment_admits_no_mint_and_no_position_command():
+    _, config, state, seen = revoking(tokens=(7, 0))
+    assert (seen.entry_quote, seen.exit_quote, seen.rebalance_quote) == (None, None, None)
+    for action in ("collect-liquidity-fees", "close-liquidity"):
+        with pytest.raises(ValueError, match="does not own the position the command names"):
+            liquidity_direct.intent(config, (seen,), stated(action))
+    _, minting_config, _, minting = opening()
+    mint = liquidity_direct.intent(minting_config, (minting,), stated("open-liquidity"))
+    admit = connector_from_wire({"connector": CONNECTOR}).codec.capability.admit
+    with pytest.raises(ValueError, match="intent has no retained Uniswap capability"):
+        admit(state.capabilities, mint)
+
+
+def test_the_gateway_admits_a_revocation_of_what_the_wallet_left(tmp_path):
+    market, config, _, _ = revoking()
+    desk = desk_over(tmp_path, config, lambda owned: observed(config, owned, market, tokens=(7, 0)))
+    record = desk.runtime().submit(
+        lambda state, seen: liquidity_direct.intent(state.config, seen, stated("revoke-exchange"))
+    )
+    held = desk.store.load()
+    assert (record.intent.kind, record.trigger.kind) == ("revoke_exchange", "operator")
+    assert (held.decision, held.owned[0].position) == (record, None)
+
+
 def test_a_close_states_its_minimum_outputs_from_the_principal_less_the_slippage():
     market, config, state, seen = adopting("close-liquidity")
     intent = liquidity_direct.intent(config, (seen,), stated("close-liquidity"))
@@ -861,10 +1001,17 @@ def test_the_commands_name_the_pool_by_its_key_and_the_position_by_its_token_id(
     assert (
         "uniswap_v3 names its pool with --pool; it takes no --currency0" in capsys.readouterr().err
     )
-    for unserved in ("increase-liquidity", "decrease-liquidity", "revoke-exchange"):
+    for unserved in ("increase-liquidity", "decrease-liquidity"):
         with pytest.raises(SystemExit):
             parse(unserved, {**KEY, **ACTING, "--token-id": str(TOKEN)})
         assert "invalid choice: 'uniswap_v4'" in capsys.readouterr().err
+    # A revocation names the pool and nothing of a position.
+    assert ax_actions.action_request(parse("revoke-exchange", {**KEY, **ACTING})) == stated(
+        "revoke-exchange"
+    )
+    with pytest.raises(SystemExit):
+        parse("revoke-exchange", {**KEY, **ACTING, "--token-id": str(TOKEN)})
+    assert "unrecognized arguments: --token-id" in capsys.readouterr().err
 
 
 READ = {**KEY, "--token-id": str(TOKEN), "--env-file": ".env"}

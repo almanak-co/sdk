@@ -52,7 +52,8 @@ every protocol on the chain.
 | `ax collateral` (`collateral`) | `aave_v3`, `sparklend` |
 | `ax swap` (`swap_exact_input`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
 | `ax open-liquidity` (`open_liquidity`), `ax close-liquidity` (`close_liquidity`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
-| `ax increase-liquidity` (`increase_liquidity`), `ax decrease-liquidity` (`decrease_liquidity`), `ax revoke-exchange` (`revoke_exchange`) | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
+| `ax increase-liquidity` (`increase_liquidity`), `ax decrease-liquidity` (`decrease_liquidity`) | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
+| `ax revoke-exchange` (`revoke_exchange`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
 | `ax collect-liquidity-fees` (`collect_liquidity_fees`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome` |
 
 Tell the user plainly when a request is outside what is served, and still finish
@@ -500,8 +501,10 @@ position adds below. For every kind:
   report them, they are not a failure. A tick-range close mined that way
   reverts; preview it again.
 - `ax revoke-exchange` sets every allowance the wallet gave the pool's contracts
-  to zero, except on Uniswap V4, which it does not serve. Offer it when
-  `position_after.allowances` lists any:
+  to zero. Offer it when `position_after.allowances` lists any. On Uniswap V4 it
+  also sets each pool token's approval to Permit2 to zero, which is not Uniswap's
+  alone: tell the user, before they confirm, that every other application that
+  spends that token through Permit2 needs it approved again afterwards.
 
 ```bash
 almanak ax revoke-exchange --connector <connector> --chain <chain> <market> <wallet and ceilings>
@@ -548,9 +551,8 @@ earns nothing.
   takes there only the one currency the range holds, at most what it offered.
 - Only what a mint offers is approved, and what it does not take of that stays
   approved: to the position manager, or on Uniswap V4 to Permit2, with no expiry.
-  Nothing here revokes the approval to Permit2: tell the user that before an
-  open there, and that you cannot clear it. A Uniswap V4 open can repeat an
-  approval before its mint.
+  `ax revoke-exchange` clears it. A Uniswap V4 open can repeat an approval before
+  its mint.
 - For a position you have no record of, ask the user for the token ID; the wallet
   must own the NFT, whoever opened it.
 - `ax decrease-liquidity` removes `--liquidity`, in the position's own units and

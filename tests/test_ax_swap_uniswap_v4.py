@@ -746,15 +746,18 @@ def test_the_gateway_admits_the_swap_request_and_no_other_action(tmp_path):
     assert admitted_state.owned[0].inventory0.amount == AMOUNT
 
 
-@pytest.mark.parametrize("refused", [RevokeExchange, ExitExchange])
-def test_the_gateway_refuses_an_operator_request_that_is_not_the_swap(tmp_path, refused):
+def test_the_gateway_refuses_an_operator_request_that_is_not_declared_direct(tmp_path):
+    """An exit is no direct action on these cells; a revocation is, and only zeroes
+    allowances."""
     market, config, _, _ = admitted()
     desk = family.SwapDesk(
         tmp_path,
         config,
         lambda owned: observation(config, owned, market, entry_quote=quote(market)),
     )
-    other = refused[Target](target=config.target(ALLOCATION))
+    target = config.target(ALLOCATION)
     with pytest.raises(ValueError, match="unsupported as a direct action"):
-        desk.runtime().submit(other)
+        desk.runtime().submit(ExitExchange[Target](target=target))
     assert desk.store.load().decision is None
+    revoke = desk.runtime().submit(RevokeExchange[Target](target=target))
+    assert revoke.intent.kind == "revoke_exchange"

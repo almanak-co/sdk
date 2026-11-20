@@ -1,7 +1,7 @@
 """Uniswap V4 direct operator actions in one pool named by its key.
 
 This module holds the exact-input swap and the report every command shares. The
-liquidity commands are `liquidity_direct`.
+liquidity commands and `revoke-exchange` are `liquidity_direct`.
 
 The deployment holds one trading allocation whose capital is the amount sold, in the
 asset sold, offered whole as one entry. The gateway then sizes its entry quote at
@@ -25,7 +25,7 @@ written.
 A swap that is refused or reverts after its approvals were mined leaves them standing:
 the Permit2 allowance lapses at its expiration, the ERC-20 approval to Permit2 does not.
 A signed swap whose deadline passes unmined is released, and leaves them the same way.
-Nothing here revokes either; the result lists both.
+No swap revokes either; the result lists both, and `revoke-exchange` sets them to zero.
 
 The heavy imports stay inside the functions: the command line imports each connector's
 `direct` module to build its choices.
@@ -160,7 +160,13 @@ def last_observed(state):
 
 
 DIRECT = DirectActions(
-    actions=("swap", "open-liquidity", "collect-liquidity-fees", "close-liquidity"),
+    actions=(
+        "swap",
+        "open-liquidity",
+        "collect-liquidity-fees",
+        "close-liquidity",
+        "revoke-exchange",
+    ),
     positions=positions,
     intent=intent,
     position=position,
