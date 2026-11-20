@@ -9,6 +9,11 @@ its changelog is on the `v2` branch.
 ## [Unreleased]
 
 ### Added
+- `almanak ax portfolio --account` reports an account's wallet tokens and protocol
+  positions on every chain, with US dollar values, as Rabby's backend reports them. It
+  needs no key and takes no transport. Every figure is the vendor's and unverified: the
+  report is an overview, never identity, a price input or the basis of an action. The
+  agent skill reads it when it loads.
 - Each connector declares the direct operator actions it serves, and `almanak support`
   lists them per chain as `direct_actions`. `ax supply` and `ax withdraw` take their
   connector choices from these declarations, refuse an undeclared connector, chain or
@@ -101,6 +106,21 @@ its changelog is on the `v2` branch.
   endpoint, position field, health floor and result field tables to the parser, the
   declarations and the models. A refusal the skill names is a kind the SDK raises or
   part of a message it raises. The rules an agent must keep are checked only as text.
+- The agent skill reads `almanak support` filtered, by `direct_actions` and the
+  lines of `restrictions` that name pools or markets, and treats an entry without
+  `direct_actions` as serving nothing. It states the Curve limit (pools of the
+  reviewed StableSwap NG, TwoCrypto NG and TriCrypto NG factories, no metapool),
+  names a Curve coin by its CAIP-19 asset, and has rows for `unsupported_pool`,
+  `unsupported_revision` and a refused event-history listing, which it does not
+  retry through a public endpoint. It creates the wallet when a request it can
+  serve first needs the agent's own address, never reads `gateway-auth.token`, and
+  takes no address from its own examples. It reports `rates` from
+  `ax lending-reserve` and the reason where there is none, computes prices with a
+  tool, reports a health factor of 2^256 - 1 as no debt, copies a Uniswap V4 key
+  whole, and asks for both limits of a tick-range open inside the price, since no
+  read reports the ratio a range needs. It previews a supply, a swap or a deposit
+  only once the wallet holds the funds, and gives a preview the time limit of an
+  execution.
 
 ### Removed
 - `--public-rpc drpc` no longer serves Avalanche. Its keyless tier intermittently

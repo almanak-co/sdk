@@ -68,10 +68,11 @@ def parse(text: str, *, file="<configuration>") -> Document:
     try:
         for event in yaml.parse(text, Loader=Loader):
             if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None):
+                start = event.start_mark
                 raise ConfigurationError(
                     "YAML anchors and aliases are not supported; use named markets",
                     file=file,
-                    line=event.start_mark.line + 1,
+                    line=start.line + 1 if start else None,
                 )
         node = yaml.compose(text, Loader=Loader)
         value = decode(node, "", locations, file, 0)
