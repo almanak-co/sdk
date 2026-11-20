@@ -430,7 +430,17 @@ almanak ax supply --connector aave_v4 --chain eip155:1 \
   --spoke 0x94e7a5dcbe816e498b89ab752661904e2f56c485 --reserve-id 0 \
   --amount 10000000000000000 --wallet /private/operator --env-file /private/providers.env \
   --max-gas-price-wei 5000000000 --max-transaction-fee 5000000000000000
+almanak ax withdraw --connector compound_v3 --chain eip155:8453 \
+  --comet 0xb125e6687d4313864e53df431d5425969c15eb2f \
+  --asset eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913 \
+  --wallet /private/operator --public-rpc base \
+  --max-gas-price-wei 1000000000 --max-transaction-fee 200000000000000
 ```
+
+Every lending connector serves both commands: Aave V4, Aave V3, SparkLend, Compound
+V3 and Morpho Blue, on each chain `almanak support` lists `supply` and `withdraw`
+under `direct_actions` for. The market is named with the flags of
+`ax lending-reserve`.
 
 Without `--execute` the command resolves the market, reads the wallet's current
 position, plans the first step and prints it; nothing is signed, and the keystore is
@@ -453,20 +463,55 @@ fails the command with that refusal and signs nothing.
 Standard output carries one JSON document, the result. Events and the error are
 JSON lines on standard error. While a signed step is unresolved, a transient
 provider or storage failure is held and asked again instead of ending the command.
-`position_before` and `position_after` are share counts; `ax lending-position`
-reports the amount in assets. An outcome lists `accounting_issues` when the step
-does not explain a wallet movement.
+An outcome lists `accounting_issues` when the step does not explain a wallet movement.
 
-A withdrawal of a supply that is enabled as collateral is refused with
-`residual_collateral`, also when the account has no debt. No direct command
-disables collateral.
+`position_before` and `position_after` state the requested position in the
+protocol's own units, as strings; `ax lending-position` reports amounts in assets.
 
-A supply plans against the wallet's allowance to the spoke: zero, or exactly the
-requested amount left by an earlier approval. Any other allowance is refused with
-"supply allowance differs from the requested amount". Retry a half-finished supply
-with the same amount, or clear the allowance first. A withdrawal clears it: when an
-allowance remains, the withdrawal is followed by a revocation, and with nothing
-supplied the revocation is its only step.
+| Connector | Position fields |
+| --- | --- |
+| `aave_v4` | `supplied_shares`, `debt_shares` |
+| `aave_v3`, `sparklend` | `supplied_scaled`, `debt_scaled` (scaled token balances), `collateral_enabled` |
+| `compound_v3` | `asset`, `base_principal` (the Comet's signed principal: negative is debt, zero for a collateral asset), `collateral` (base units, zero for the base asset) |
+| `morpho_blue` | `leg`, then `supply_shares` and `borrow_shares` on the loan leg or `collateral` (base units) on the collateral leg; `other_leg` in the same form when the wallet holds it |
+
+The deployment covers the wallet's whole position in the venue, read when the command
+starts, not only the requested market:
+
+- A supply on Aave V3 or SparkLend binds every reserve of the Pool that the account
+  uses as collateral or has borrowed, each with the price source the Pool uses for
+  it now, because the Pool risk check must account for all of them. A withdrawal
+  binds its own reserve only.
+- Compound V3 binds the base asset and every collateral asset the wallet holds in
+  the Comet, and Morpho Blue binds the other leg of the market when the wallet
+  holds it.
+
+A position that appears in the venue between that read and the first step is refused:
+with `ownership_mismatch` on Compound V3 and Morpho Blue, and a supply on Aave V3 or
+SparkLend with `risk_unavailable`. Running the command again reads it. A supply into
+a reserve that is isolated collateral, or by a wallet that holds isolated collateral
+in the Pool, is refused on Aave V3 and SparkLend. A Compound V3 Comet
+with many collateral assets takes many reads, so a preview through a public endpoint
+can take minutes.
+
+These commands state no health floor, so what the protocol would check against one
+is refused while the wallet has debt in the venue, and the refusal says so:
+a supply and a withdrawal of collateral on Aave V3 and SparkLend, a withdrawal of
+collateral on Compound V3 and Morpho Blue, and a supply of the Compound V3 base
+asset, which would repay the debt. Supplying collateral on Compound V3 or Morpho
+Blue, and withdrawing a balance that backs no debt, still work.
+
+A withdrawal on Aave V3 or SparkLend releases a reserve the Pool uses as collateral.
+On Aave V4 a withdrawal of a supply that is enabled as collateral is refused with
+`residual_collateral`, also when the account has no debt, and no direct command
+disables collateral there.
+
+A supply plans against the wallet's allowance to the protocol: zero, or exactly the
+requested amount left by an earlier approval. Any other allowance is refused, and
+the refusal says so. Retry a half-finished supply with the same amount, or clear the
+allowance first. A withdrawal clears it: when an allowance remains, the withdrawal
+is followed by a revocation, and with nothing supplied the revocation is its only
+step.
 
 Each fee ceiling applies to one transaction, so a supply, or a withdrawal that also
 revokes, can spend up to twice `--max-transaction-fee`. A step bids as an author's
@@ -491,8 +536,9 @@ seconds.
 Each connector declares the actions it serves directly, and `almanak support` lists
 them per chain as `direct_actions`. A command for a connector, chain or action that
 is not declared is refused before any read, and the gateway refuses the same request
-again when it admits it and when it plans a step. Operator actions run for an EOA wallet; Safe/Roles accounts are
-not supported. Aave V4 serves supply and full withdrawal.
+again when it admits it and when it plans a step. Operator actions run for an EOA
+wallet; Safe/Roles accounts are not supported. Morpho Blue on HyperEVM, GMX V2 and
+Hyperliquid serve no direct action.
 
 The action runs through the same planning, simulation, signing and receipt
 reconciliation as a strategy's, as an operator deployment that exists only for the

@@ -59,6 +59,23 @@ def commit_owned(owned, outcome):
     )
 
 
+def adopt(owned, observed):
+    """Ownership of each position as its observation states it, for an operator deployment."""
+    if tuple(seen.target for seen in observed) != tuple(item.target for item in owned):
+        raise DataError(
+            "ownership_mismatch", "observations do not cover the configured Pool positions"
+        )
+    return tuple(
+        type(item)(
+            target=item.target,
+            supply_scaled=seen.position.supplied_scaled,
+            debt_scaled=seen.position.debt_scaled,
+            collateral_enabled=seen.position.collateral_enabled,
+        )
+        for item, seen in zip(owned, observed, strict=True)
+    )
+
+
 def validate_closure(state, observations):
     validate_owned(state, observations)
     require_closed(

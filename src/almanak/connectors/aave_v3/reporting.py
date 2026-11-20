@@ -87,7 +87,9 @@ def report(state):
         "schema_version": state.schema_version,
         "connector": "aave_v3",
         "deployment_id": state.deployment_id,
-        "strategy": {"filename": state.strategy.filename, "sha256": state.strategy.sha256},
+        "strategy": {"filename": state.strategy.filename, "sha256": state.strategy.sha256}
+        if state.strategy is not None
+        else None,
         "mode": state.mode,
         "execution_environment": "production" if state.config.production else "fork",
         "receipt_confirmation": "canonical_mined" if state.config.production else "fork_mined",

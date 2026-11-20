@@ -58,14 +58,10 @@ class DirectActions:
 # Installed connectors `ax` runs no direct action for, and why.
 NOT_DIRECT: dict[str, str] = {
     "uniswap_v4": "direct actions are not implemented for this connector",
-    "aave_v3": "direct actions are not implemented for this connector",
     "uniswap_v3": "direct actions are not implemented for this connector",
-    "sparklend": "direct actions are not implemented for this connector",
     "pancakeswap_v3": "direct actions are not implemented for this connector",
     "aerodrome_slipstream": "direct actions are not implemented for this connector",
     "aerodrome": "direct actions are not implemented for this connector",
-    "compound_v3": "direct actions are not implemented for this connector",
-    "morpho_blue": "direct actions are not implemented for this connector",
     "curve": "direct actions are not implemented for this connector",
     "gmx_v2": "a GMX request settles through keepers after its transaction is mined, "
     "and cancelling one needs a new signature; a direct command is one process that "

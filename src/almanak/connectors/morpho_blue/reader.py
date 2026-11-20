@@ -157,16 +157,19 @@ def read_account(reader, market: MarketObservation, fund) -> AccountObservation:
     source, block = market.source, market.block
     if reader._pinned != block or reader.chain != block.chain or fund.chain != block.chain:
         raise DataError("block_mismatch", "Morpho fund observation requires the same pinned market")
+    return AccountObservation(
+        market=market, fund=fund, position=read_position(reader, source, fund.address, block)
+    )
+
+
+def read_position(reader, market: Market, holder, block) -> Position:
+    """What one address holds in a market at the block: both share kinds and collateral."""
     values = reader.call(
-        source.core,
+        market.core,
         "position(bytes32,address)",
         block,
         inputs=("bytes32", "address"),
-        args=(bytes.fromhex(str(source.market_id)[2:]), fund.address),
+        args=(bytes.fromhex(str(market.market_id)[2:]), holder),
         outputs=("uint256", "uint128", "uint128"),
     )
-    return AccountObservation(
-        market=market,
-        fund=fund,
-        position=Position(supply_shares=values[0], borrow_shares=values[1], collateral=values[2]),
-    )
+    return Position(supply_shares=values[0], borrow_shares=values[1], collateral=values[2])

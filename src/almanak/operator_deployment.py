@@ -30,6 +30,17 @@ def validate_origin(state) -> None:
         raise ValueError("an operator deployment retains no strategy")
 
 
+def validate_exclusive_origin(state) -> None:
+    """A deployment is an operator deployment or retains its strategy, never neither.
+
+    For a checkpoint whose strategy was always required: making it optional for operator
+    deployments must not admit a strategy deployment without one.
+    """
+    validate_origin(state)
+    if not state.operator and state.strategy is None:
+        raise ValueError("a strategy deployment retains its strategy")
+
+
 def request_executed(outcomes, event) -> bool:
     """Whether an outcome already records this operator request, whenever it was admitted."""
     triggers = (getattr(getattr(item, "decision", None), "trigger", None) for item in outcomes)
