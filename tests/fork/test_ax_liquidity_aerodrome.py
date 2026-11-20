@@ -55,7 +55,7 @@ from tests.fork.test_ax_liquidity import (
     troubled,
 )
 from tests.fork.test_ax_liquidity import Setting as RangedSetting
-from tests.fork.test_ax_swap_aerodrome import as_mainnet, share_sender, share_sent_with
+from tests.fork.test_ax_swap_aerodrome import as_mainnet, share_sent_before, share_sent_with
 
 pytestmark = pytest.mark.fork
 ROOT = Path(__file__).parents[2]
@@ -533,27 +533,6 @@ def test_a_deposit_mined_after_a_move_inside_its_tolerance_takes_no_more_than_it
     assert_took_within(setting, offer, used, tolerance)
 
 
-def share_sent_before(kind, setting, monkeypatch):
-    """Send the wallet one share of the pool once its next step of this kind is signed
-    and before the gateway's checks for sending it."""
-    from almanak.operator_runtime import OperatorRuntime
-
-    rpc, asset = setting.fork.rpc, setting.pool.shares_asset
-    sender = share_sender(setting, asset)
-    transfer = calldata("transfer(address,uint256)", ("address", "uint256"), (setting.owner, 1))
-    sent = []
-
-    def wait(self, state):
-        pending = state.pending
-        if sent or pending is None or pending.operation.kind != kind or not pending.unsent:
-            return
-        sent.append(pending.tx_hash)
-        moved = {"from": sender, "to": setting.pool.pool, "data": transfer}
-        rpc("eth_sendTransaction", [{**moved, "gasPrice": rpc("eth_gasPrice")}])
-
-    monkeypatch.setattr(OperatorRuntime, "wait", wait)
-
-
 def test_a_share_sent_before_a_signed_claim_is_sent_does_not_hold_the_claim_back(
     setting, monkeypatch
 ):
@@ -561,7 +540,7 @@ def test_a_share_sent_before_a_signed_claim_is_sent_does_not_hold_the_claim_back
     earn_fees(setting)
     start = setting.balances()
     with monkeypatch.context() as patched:
-        share_sent_before("collect", setting, patched)
+        share_sent_before("collect", setting, setting.pool.shares_asset, patched)
         collected = setting("collect-liquidity-fees")
     # The claim carries no deadline: held back, it could never be sent or released.
     assert_share_adopted(setting, collected, start, "collect")
@@ -574,7 +553,7 @@ def test_a_share_sent_before_a_signed_share_approval_is_sent_does_not_hold_the_c
     deposit_outside(setting)
     start = setting.balances()
     with monkeypatch.context() as patched:
-        share_sent_before("approve", setting, patched)
+        share_sent_before("approve", setting, setting.pool.shares_asset, patched)
         closed = setting("close-liquidity")
     # The approval is sent and recorded with the arrival. The deployment owns the whole
     # balance, so the close then burns the share that arrived with the rest.
