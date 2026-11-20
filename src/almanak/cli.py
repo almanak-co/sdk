@@ -57,6 +57,7 @@ def error_document(exc: Exception) -> dict | None:
     from almanak.backtest.types import AvailabilityError
     from almanak.configuration.yaml import ConfigurationError
     from almanak.gateway.ethereum import DataError
+    from almanak.models import refusals
     from almanak.workspace import Unanswered
 
     if isinstance(exc, Unanswered):
@@ -67,8 +68,7 @@ def error_document(exc: Exception) -> dict | None:
         return {"error": "backtest_unavailable", **exc.failure.model_dump(mode="json")}
     if isinstance(exc, ValidationError):
         problems = [
-            {"field": ".".join(map(str, e["loc"])), "message": e["msg"]}
-            for e in exc.errors(include_input=False, include_url=False)
+            {"field": ".".join(map(str, e["loc"])), "message": e["msg"]} for e in refusals(exc)
         ]
         return {"error": "invalid_config", "problems": problems}
     if isinstance(exc, DataError):

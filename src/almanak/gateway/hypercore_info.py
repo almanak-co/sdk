@@ -26,7 +26,7 @@ from almanak.gateway.auth import loopback_endpoint
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.hypercore_shapes import RESPONSES, Cloid, Millis
 from almanak.gateway.rate_limits import ProviderLimit
-from almanak.models import Address, Model
+from almanak.models import Address, Model, refusals
 
 API = "https://api.hyperliquid.xyz/info"
 
@@ -342,7 +342,7 @@ def candles_mismatch(asked: CandleRange, answer) -> str | None:
 
 
 def shape_error(error: ValidationError) -> str:
-    location = ".".join(str(part) for part in error.errors()[0]["loc"])
+    location = ".".join(str(part) for part in refusals(error)[0]["loc"])
     return f" at {location}" if location else ""
 
 

@@ -505,7 +505,7 @@ def test_legacy_root_fails_the_configuration_stage_with_its_line(tmp_path):
         check(arguments(directory, fork=True))
     detail = failure.value.diagnostic()
     assert detail["stages"][0]["status"] == "failed" and detail["line"]
-    assert detail["field"] in ("execution", "strategy.connector")
+    assert detail["field"] == "execution"
 
 
 def test_fixture_anchors_must_cover_the_authored_chains(fork_case, tmp_path):
