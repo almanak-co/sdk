@@ -690,17 +690,23 @@ def test_a_payer_that_fails_the_fee_check_does_not_hide_a_consumed_nonce(product
     for deployment in (operator, state):
         with pytest.raises(DataError, match="no longer covers the fee"):
             unused.authorize_submission(deployment)
-    # Nonce taken: the step can spend nothing, so the fee check is not what refuses it,
-    # and the submission check answers `nonce_conflict`, which leads to the proof.
+    # Nonce taken: the step can spend nothing, so the fee check is not what refuses it.
+    # The authorization itself answers `nonce_conflict`, which leads to the proof, and
+    # no send depends on a later read of the count.
     taken = Payer(state, pending, pending.nonce + 1).adapter
-    taken.authorize_submission(operator)
     service = gateway_service(operator, taken)
-    service.check_execution_authority = type(service).check_execution_authority.__get__(service)
     taken.audit_history = lambda current: None
-    service.check_execution_authority("broadcast", operator)
-    with pytest.raises(DataError, match="occupies the recorded nonce") as refusal:
-        taken.require_nonce_unused(pending)
-    assert refusal.value.kind == "nonce_conflict"
+    for refused in (
+        lambda: taken.authorize_submission(operator),
+        lambda: service.check_execution_authority("broadcast", operator),
+    ):
+        with pytest.raises(DataError, match="occupies the recorded nonce") as refusal:
+            refused()
+        assert refusal.value.kind == "nonce_conflict"
+    # A transaction the provider already knows is reconciled, not refused here.
+    taken.reader.responses["eth_getTransactionByHash"] = {"hash": pending.tx_hash}
+    taken.authorize_submission(operator)
+    taken.reader.responses["eth_getTransactionByHash"] = None
     # A strategy deployment keeps its fee check first.
     with pytest.raises(DataError, match="no longer covers the fee"):
         taken.authorize_submission(state)

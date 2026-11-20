@@ -1016,9 +1016,11 @@ Otherwise the record stays and `resolved` is false:
   block the step was planned at, or when the block as read whole is not the one the
   endpoint holds at that height in a second read. None shows the step dead; try
   again or another endpoint.
-- with the provider's own refusal when it does not serve the wallet's transaction
-  count at the blocks since the step was planned, as a provider without archive
-  state may not for an old record. Name one that does with `--env-file`.
+- with the provider's own refusal when it does not serve a read the proof needs: the
+  wallet's transaction count at the blocks since the step was planned, as a provider
+  without archive state may not for an old record, or a transaction count at a block
+  hash, which some endpoints reject. Another endpoint of the record's chain, named
+  with `--env-file` or `--public-rpc`, resolves it.
 
 This check runs in the gateway process and is not enforced on chain. It rests on one
 endpoint's report of its head, its finalized block and that block's transactions. An

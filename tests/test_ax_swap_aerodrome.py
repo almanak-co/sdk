@@ -1057,3 +1057,33 @@ def test_the_command_refuses_an_undeclared_chain_and_passes_the_stated_swap_on(
     monkeypatch.setattr(ax_actions, "read_wallet", pytest.fail)
     with pytest.raises(ValueError, match="aerodrome serves no direct swap on eip155:31337"):
         ax_actions.command(arguments(variant, "--chain", "eip155:31337"))
+
+
+class Counted(Head):
+    """A head that also answers the submitter's transaction count."""
+
+    count = 0
+
+    def _rpc(self, method, params, **options):
+        if method == "eth_getTransactionCount":
+            return hex(self.count)
+        return super()._rpc(method, params, **options)
+
+
+def test_a_signed_swap_whose_nonce_was_taken_is_refused_for_the_nonce_not_the_share(
+    variant, monkeypatch
+):
+    """With a share in the wallet and the nonce used by another transaction, the
+    submission check answers `nonce_conflict`, which is what leads to the proof that
+    releases the step; the share is not what refuses it."""
+    market, config, state, plan = swap_plan(variant)
+    at_the_head(monkeypatch, config, market, plan.before.owned)
+    step = SimpleNamespace(**vars(signed(plan)), tx_hash="0x" + "ab" * 32)
+    head = Counted(config.target(ALLOCATION), market.block, shares=1)
+    held = Gateway(config, head)
+    # Nonce unused: the signed bytes pass every check of the submission, share or not.
+    held.check_submission(step, None)
+    head.count = step.nonce + 1
+    with pytest.raises(DataError, match="occupies the recorded nonce") as refusal:
+        held.check_submission(step, None)
+    assert refusal.value.kind == "nonce_conflict"

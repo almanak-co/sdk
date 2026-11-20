@@ -122,26 +122,29 @@ class EvmGateway:
             is not None
         ):
             return
-        if self.nonce_taken(state):
-            return
+        self.refuse_taken_nonce(state)
         self.validate_fee_budget(state, state.pending, self.payer_balance(state))
 
-    def nonce_taken(self, state) -> bool:
-        """Whether an operator deployment's signed step can no longer spend its fee.
+    def refuse_taken_nonce(self, state) -> None:
+        """Refuse an operator deployment's signed step whose nonce is already taken.
 
         Once the submitter's count is past the step's nonce the bytes cannot be mined,
-        so no fee is reserved for them and the payer's balance says nothing. The
-        submission check that follows refuses with `nonce_conflict`, which is what lets
-        the coordinator ask for the consumed-nonce proof. A strategy deployment keeps
-        its fee check first, as before.
+        so the payer's balance says nothing about them. The refusal is `nonce_conflict`,
+        raised here so that no send depends on a later read agreeing with this one, and
+        it is what lets the coordinator ask for the consumed-nonce proof. A strategy
+        deployment keeps its fee check first, as before.
         """
         from almanak.operator_deployment import is_operator
 
         slot = submission_slot(state.pending) if is_operator(state) else None
         if slot is None:
-            return False
+            return
         submitter, nonce = slot
-        return int(self.reader._rpc("eth_getTransactionCount", [submitter, "latest"]), 16) > nonce
+        if int(self.reader._rpc("eth_getTransactionCount", [submitter, "latest"]), 16) > nonce:
+            raise DataError(
+                "nonce_conflict",
+                "unknown execution occupies the recorded nonce; reconcile before continuing",
+            )
 
     def payer_balance(self, state):
         """The gas payer's balance that a signed attempt's fee budget is checked against.
