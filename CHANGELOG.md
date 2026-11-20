@@ -27,6 +27,10 @@ its changelog is on the `v2` branch.
   `--min-health-factor` states the lowest health factor a projected action may leave
   the account with: it is required to borrow, and for any other projected action
   while the wallet has debt in the venue. No floor can refuse a repayment.
+- `ax swap` sells an exact amount of one pool currency for another in one named pool,
+  on Uniswap V3, Uniswap V4, PancakeSwap V3, Aerodrome, Aerodrome Slipstream and
+  Curve, with a required `--slippage-bps` below the pool's own quote at the observed
+  block. The result lists what was sold and bought and any allowance left.
 - `--public-rpc` serves `almanak ax` reads on Base, Arbitrum, BNB, Optimism, Polygon and
   Robinhood beside Ethereum and Avalanche. `drpc` adds Base, Optimism, Polygon and
   Robinhood, and four chain operators' own endpoints are named `base`, `arbitrum`,

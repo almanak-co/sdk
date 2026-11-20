@@ -422,9 +422,9 @@ Explicit process management remains under `service gateway`, `service fork`,
 
 ### Operator actions
 
-`almanak ax supply`, `withdraw`, `borrow`, `repay` and `collateral` each run one
-action for one wallet in one process, with no strategy, workspace or gateway process
-to start:
+`almanak ax supply`, `withdraw`, `borrow`, `repay`, `collateral` and `swap` each run
+one action for one wallet in one process, with no strategy, workspace or gateway
+process to start. The lending commands:
 
 ```bash
 almanak ax supply --connector aave_v4 --chain eip155:1 \
@@ -472,7 +472,10 @@ is not a refusal prints the steps already sent as one
 `{"event": "steps_sent", "outcomes": ...}` line on standard error before its error.
 A step that was signed and has no reconciled outcome yet is reported apart from
 `outcomes`, as `unresolved` with its operation and transaction hash; it may or may
-not have been sent, and `executed` is true for it. A first step refused at planning
+not have been sent, and `executed` is true for it. A signed step whose deadline
+passed without it being mined is released, since it can no longer take effect, and
+is listed under `released_expired` with its operation and transaction hash;
+`executed` is true for it and `completed` false. A first step refused at planning
 fails the command with that refusal and signs nothing.
 
 Standard output carries one JSON document, the result. Events and the error are
@@ -599,6 +602,80 @@ again when it admits it and when it plans a step. Operator actions run for an EO
 wallet; Safe/Roles accounts are not supported. Morpho Blue on HyperEVM, GMX V2 and
 Hyperliquid serve no direct action.
 
+#### Swaps
+
+`almanak ax swap` sells an exact amount of one pool currency for another, in one
+named pool, on every chain where `almanak support` lists `swap_exact_input` under
+`direct_actions`:
+
+```bash
+almanak ax swap --connector uniswap_v3 --chain eip155:8453 \
+  --pool 0xd0b53d9277642d899df5c87a3966a349a798f224 \
+  --sell eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913 \
+  --amount 25000000 --slippage-bps 50 \
+  --wallet /private/operator --public-rpc base \
+  --max-gas-price-wei 1000000000 --max-transaction-fee 200000000000000
+```
+
+| Connector | Names its pool with | Also takes |
+| --- | --- | --- |
+| `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome` | `--pool <address>` | |
+| `uniswap_v4` | `--currency0`, `--currency1`, `--fee`, `--tick-spacing` and, for a reviewed hook, `--hooks` | |
+| `curve` | `--pool <address>` | `--buy <asset>`, required: a Curve pool can hold more than two coins |
+
+`--sell` is the CAIP-19 asset sold and `--amount` its base units. The native coin is
+never named: where a Uniswap V4 pool key holds it, the wallet holds and sells its
+wrapped token, and the router wraps and unwraps inside the swap. The pool itself is
+resolved by its connector, which refuses an unreviewed deployment or hook.
+
+`--slippage-bps` is required, 1 to 9999. The swap is quoted on the pool at the
+observed block, and its minimum output is that quote less the slippage; the swap
+reverts on chain below it. The quote is the pool's own price at that block. Nothing
+compares it with another venue, so a pool whose price was already moved quotes that
+price. `--deadline-seconds`, 300 unless stated, is how long after the observed block
+the swap may still be mined. Curve calls carry no deadline: there it bounds only how
+long after the observed block the swap may be signed, and a signed swap stays valid
+until it is mined or its nonce is used, protected by its minimum output alone.
+
+The wallet must hold the amount. `position_before` and `position_after` list the
+`inventory` of the pool currencies the action owns, the amount sold and then what
+it bought, and the nonzero `allowances` left to the venue:
+
+| Connector | Steps | Allowance after a completed swap |
+| --- | --- | --- |
+| `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome` | `approve` to the router for exactly the amount, after a reset to zero when another allowance stands, then `swap` | none |
+| `uniswap_v4` | `approve_erc20` to Permit2, `approve_permit2` to the router until the deadline, then `swap` | none from a wallet with none; see below for a wallet with standing allowances |
+| `curve` | `approve` to the pool for exactly the amount, then the exchange | none |
+
+On Uniswap V4 a standing ERC-20 approval to Permit2 that covers the amount is used
+as it stands, and a standing Permit2 allowance to the router is used only when it
+outlasts the swap's deadline; otherwise it is granted again for exactly the amount.
+What the swap does not spend remains. An unlimited allowance stays: Permit2 leaves
+its own whole, and a token leaves an unlimited approval to Permit2 whole or lowers
+it by the amount sold, depending on the token.
+
+A swap refused or reverted after its approval was mined leaves that approval: the
+result lists it, and a later swap of the same amount uses it, on Uniswap V4 after
+granting the Permit2 allowance again. No command only revokes an allowance.
+
+`ax recover` resolves an interrupted swap as it does any action. A signed Curve swap
+that may have been sent, and that the pool would now pay below its minimum, is
+neither sent nor released: `ax recover` reports `signed_attempt_unsendable` and
+exits 1, and the record and the wallet's claim on that chain stay. The only way out
+is the pool paying the minimum again, after which `ax recover` sends the same bytes.
+Using the nonce with another transaction does not release the record: every later
+`ax recover` then reports `nonce_conflict`. No funds are at risk in that state, since
+the signed bytes can no longer be mined, but no command drops the record.
+
+A swap deployment trades one pool and holds no liquidity position. On Aerodrome and
+Curve a wallet that holds the pool's LP shares, however few, is refused before
+anything is signed, as a trading-only strategy there is. Anyone can send such shares
+to a wallet. Shares that arrive once a step is mined do not block it: the step is
+reconciled from its own receipt and its outcome lists them under `accounting_issues`.
+On Curve the same holds from the moment the step is signed. On Aerodrome, shares
+that arrive after a step is signed and before it is first sent leave its record
+kept, and `ax recover` refuses again until the shares are moved out of the wallet.
+
 The action runs through the same planning, simulation, signing and receipt
 reconciliation as a strategy's, as an operator deployment that exists only for the
 command: its journal is a private record directory under
@@ -645,7 +722,10 @@ step has its outcome, whatever the request had not yet signed is dropped
 (`discarded_request`), the record is removed and the claim released; state the
 action again against the position as it now is. A step that cannot be resolved
 leaves `resolved` false with the reason under `refused`, keeps the record and exits
-1. A record a running command still uses is refused.
+1. A signed step whose deadline passed unmined is released instead: it is listed
+under `released_expired`, `resolved` is true and the wallet is free, and the command
+exits 1 because the step did not happen. A record a running command still uses is
+refused.
 
 A record with no signed step holds nothing worth keeping. When a command is killed
 before it signs, the next operator action removes that record and releases its

@@ -357,7 +357,8 @@ independently.
 - `ax resolve`, `ax dex-pools` and `ax lending-markets` name candidates for
   authoring under the discovery rules above.
 - Accepted: operator actions that do not come from a strategy are direct
-  commands (`ax supply`, `ax withdraw`), each one process with no workspace,
+  commands (such as `ax supply`, `ax borrow` and `ax swap`), each one process
+  with no workspace,
   gateway process or state kept between commands. Inside the command they run
   as an operator deployment through the shared planning, simulation, signing
   and reconciliation path, with the gateway service in the same process. The
@@ -378,11 +379,12 @@ independently.
   `direct.py`, and each chain's support lists them as `direct_actions`. Every
   other installed connector is named with its reason. Accepted: GMX V2 and
   Hyperliquid serve no direct action.
-- A direct deployment binds the wallet's whole position in the venue, read at
-  the command's pinned block, not only the requested market: every Pool reserve
-  the account uses as collateral or has borrowed, every leg held in a Comet or a
-  Morpho market. Never relax a connector's ownership or risk check for an
-  operator deployment; bind what the check needs, or refuse with the cause.
+- A direct lending deployment binds the wallet's whole position in the venue,
+  read at the command's pinned block, not only the requested market: every Pool
+  reserve the account uses as collateral or has borrowed, every leg held in a
+  Comet or a Morpho market. A direct swap binds only the stated amount of the
+  sold asset. Never relax a connector's ownership or risk check for an operator
+  deployment; bind what the check needs, or refuse with the cause.
 - A direct action a connector projects against a health floor takes the
   operator's `--min-health-factor`, one floor for the wallet's whole position in
   the venue. It is required to borrow, and for any other projected action while
@@ -390,6 +392,11 @@ independently.
   configuration demands a floor beside repay authority, the lowest valid one is
   stated, so no floor can refuse a repayment. Never describe the floor as
   on-chain enforcement.
+- A direct swap is the gateway's own exact-size quote of the operator's stated
+  amount: the deployment's capital is that amount in the sold asset. Its minimum
+  output is that quote less the operator's required `--slippage-bps`; no default
+  chooses a slippage, and no other venue's price is consulted. A swap inside a
+  liquidity action is never admitted; the operator swaps separately.
 - Declare a direct action on a cell only after its fork rehearsal passed there.
   Morpho Blue on HyperEVM declares none: the provider runs head-pinned reads at
   a later block, which the reader refuses.

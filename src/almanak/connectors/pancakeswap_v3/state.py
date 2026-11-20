@@ -18,6 +18,7 @@ from almanak.gateway.accounts import ContractCall, HexData, PreparedCall
 from almanak.gateway.evm_fees import OpFeeEvidence, validate_fee_evidence
 from almanak.gateway.permission_models import PermissionManifest
 from almanak.models import AssetAmount, Block, Hash32, Model, UInt
+from almanak.operator_deployment import validate_exclusive_origin
 from almanak.state import FeeQuote
 from almanak.strategy import StrategyDefinition
 from almanak.strategy_api import (
@@ -182,7 +183,9 @@ class Checkpoint(Model):
     scheduler_cursor: UInt = 0
     deployment_id: str
     config: Config
-    strategy: StrategyDefinition
+    strategy: StrategyDefinition | None = None
+    # Set once at creation for a deployment that takes operator requests.
+    operator: bool = Field(default=False, exclude_if=lambda v: not v)
     capabilities: Capabilities
     permissions: PermissionManifest[Capabilities] | None
     mode: Literal["running", "teardown", "closed"]
@@ -205,6 +208,7 @@ class Checkpoint(Model):
     def scope(self):
         self.schedule.validate_trigger(self.config.decision_trigger)
         validate_work(self)
+        validate_exclusive_origin(self)
         if tuple(value.target for value in self.owned) != tuple(
             self.config.target(a.name) for a in self.config.positions
         ):

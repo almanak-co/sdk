@@ -709,6 +709,9 @@
     "stable",
     "volatile"
    ],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -780,6 +783,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -1149,6 +1155,9 @@
     "twocrypto_ng",
     "tricrypto_ng"
    ],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -1246,6 +1255,9 @@
     "twocrypto_ng",
     "tricrypto_ng"
    ],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -1342,6 +1354,9 @@
     "twocrypto_ng",
     "tricrypto_ng"
    ],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -1417,6 +1432,9 @@
    ],
    "variants": [
     "stableswap_ng"
+   ],
+   "direct_actions": [
+    "swap_exact_input"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -1511,6 +1529,9 @@
    "variants": [
     "stableswap_ng",
     "twocrypto_ng"
+   ],
+   "direct_actions": [
+    "swap_exact_input"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -1609,6 +1630,9 @@
     "twocrypto_ng",
     "tricrypto_ng_2024"
    ],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -1705,6 +1729,9 @@
     "twocrypto_ng",
     "tricrypto_ng_2024"
    ],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -1800,6 +1827,9 @@
     "stableswap_ng",
     "twocrypto_ng",
     "tricrypto_ng_2024"
+   ],
+   "direct_actions": [
+    "swap_exact_input"
    ],
    "gas_lifecycle": {
     "trade": {
@@ -2683,6 +2713,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -2753,6 +2786,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -2824,6 +2860,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -2894,6 +2933,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3036,6 +3078,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3107,6 +3152,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3177,6 +3225,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3248,6 +3299,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3318,6 +3372,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3388,6 +3445,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3458,6 +3518,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3528,6 +3591,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 2,
@@ -3610,6 +3676,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -3692,6 +3761,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -3775,6 +3847,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -3857,6 +3932,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -3940,6 +4018,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -4008,6 +4089,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -4075,6 +4159,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,
@@ -4142,6 +4229,9 @@
     }
    ],
    "variants": [],
+   "direct_actions": [
+    "swap_exact_input"
+   ],
    "gas_lifecycle": {
     "trade": {
      "entry": 3,

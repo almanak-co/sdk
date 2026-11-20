@@ -14,7 +14,9 @@ def retained_position(before, operation, effects, current, pool, success):
     old = before.owned.position
     observed = None if current.empty else current
     if not success or isinstance(operation, (ops.Approval, ops.Swap)):
-        if observed != old:
+        # A trading allocation owns no position, so one seen on its fund is not its
+        # own changing: `unowned_holdings` reports it and the step keeps its effects.
+        if observed != old and operation.target.liquidity_enabled:
             raise DataError("ownership", "unrelated operation changed the fund LP checkpoint")
         return old
     expected = (old.shares.amount if old else 0) + effects.shares_delta
@@ -22,6 +24,23 @@ def retained_position(before, operation, effects, current, pool, success):
         raise DataError("ownership", "observed LP shares differ from retained receipt effects")
     validate_claims(before, operation, effects, current, pool)
     return observed
+
+
+def unowned_holdings(target, current):
+    """Pool shares or fee claims on the fund of a trading allocation, as accounting issues.
+
+    The allocation owns none and no step of it moves any, so they reached the fund from
+    outside, possibly in the mined step's own block. They are never attributed to the
+    deployment and never change what the step did. Refusing the step for them would
+    leave a mined transaction without its outcome for good: the block it is reconciled
+    at never changes.
+    """
+    if target.liquidity_enabled or current.empty:
+        return ()
+    return (
+        f"{current.shares.asset}: fund holds LP shares or fee claims that a "
+        "trading-only allocation does not own",
+    )
 
 
 def validate_claims(before, operation, effects, current, pool):
@@ -138,9 +157,12 @@ def reconcile(backend, pending, receipt, block):
     # An exit leg measures what counter inventory remains so the exit can complete
     # with residual dust; other operations record no quotes.
     exiting = pending.decision.intent.kind == "exit_exchange"
-    after = snapshot(backend, op.allocation, block, owned, quotes=False, residual=exiting)
+    after = snapshot(
+        backend, op.allocation, block, owned, quotes=False, residual=exiting, mined=True
+    )
     gas_paid, fee_evidence = charged_fees(backend, pending, receipt, block)
     issues = validate_balances(pending, after, effects, gas_paid.amount, success)
+    issues += unowned_holdings(op.target, current)
     if success and isinstance(op, ops.Addition) and effects.shares_delta < op.minimum_shares.amount:
         issues += ("mined LP shares fall below the retained simulation minimum",)
     return Outcome(

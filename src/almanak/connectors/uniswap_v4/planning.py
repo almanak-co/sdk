@@ -16,7 +16,16 @@ from almanak.dex_intents import (
 from almanak.gateway.ethereum import DataError
 
 
-def approval(before, asset, amount, spender, deadline):
+def approval(before, asset, amount, spender, deadline, *, through=None):
+    """The next approval a spend of `amount` by `spender` still needs, or None.
+
+    A Permit2 allowance is relied on while it has not lapsed. Given `through`, the
+    latest time the spend may be mined, it is relied on only while it outlasts that,
+    so one that would lapse before the spend's own deadline is granted again. Only an
+    operator request passes it: its allowances may be standing ones from before the
+    command. A strategy's are its own, granted for the decision that spends them, and
+    its retained steps replay under the rule they were planned with.
+    """
     if not amount:
         return None
     token = next(a for a in before.allowances if a.asset == asset and a.expiration is None)
@@ -32,7 +41,10 @@ def approval(before, asset, amount, spender, deadline):
             amount=0 if clear else amount,
         )
     permit = next(a for a in before.allowances if a.asset == asset and a.spender == spender)
-    if permit.amount < amount or permit.expiration <= before.block.timestamp:
+    lapses = permit.expiration <= before.block.timestamp
+    if through is not None:
+        lapses = permit.expiration < through
+    if permit.amount < amount or lapses:
         return Approval(
             target=before.target,
             kind="approve_permit2",
@@ -60,7 +72,7 @@ def cleanup(before):
     )
 
 
-def open_operation(intent, before):
+def open_operation(intent, before, *, through=None):
     if before.owned.position is not None:
         raise ValueError("mint cannot replace an owned NFT")
     target = intent.target
@@ -71,6 +83,7 @@ def open_operation(intent, before):
             maximum.amount,
             target.contracts.position_manager,
             intent.deadline,
+            through=through,
         )
         if step:
             return step
@@ -116,10 +129,17 @@ def exit_operation(intent, before):
 
 
 def operation(config, state, intent, before):
-    if isinstance(intent, ExitExchange):
+    from almanak.operator_deployment import is_operator
+
+    exiting = isinstance(intent, ExitExchange)
+    if exiting:
         from almanak.connectors.uniswap_v4.exit import leg
 
         intent = leg(config, before)
+    # An exit leg derives its deadline afresh from each observation, so the allowance
+    # its own approval granted ends at an earlier leg's deadline.
+    strict = is_operator(state) and not exiting
+    through = getattr(intent, "deadline", None) if strict else None
     if isinstance(intent, SwapExactInput):
         step = approval(
             before,
@@ -127,6 +147,7 @@ def operation(config, state, intent, before):
             intent.amount.amount,
             intent.target.contracts.router,
             intent.deadline,
+            through=through,
         )
         return step or Swap(
             target=intent.target,
@@ -135,7 +156,7 @@ def operation(config, state, intent, before):
             deadline=intent.deadline,
         )
     if isinstance(intent, OpenLiquidity):
-        return open_operation(intent, before)
+        return open_operation(intent, before, through=through)
     if isinstance(intent, (CollectLiquidityFees, CloseLiquidity)):
         return exit_operation(intent, before)
     if isinstance(intent, RevokeExchange):

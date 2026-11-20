@@ -10,6 +10,7 @@ from almanak.connectors.aerodrome.ownership import validate_owned
 from almanak.connectors.aerodrome.state import Checkpoint, Work
 from almanak.connectors.dex_residual import counter_settled
 from almanak.connectors.ownership import protocol_ownership
+from almanak.connectors.v3_pool_lifecycle import adopt_owned as adopt_inventory
 from almanak.dex_intents import IncreaseLiquidity, OpenLiquidity, SwapExactInput
 from almanak.work import initial_work
 
@@ -33,6 +34,21 @@ def validate_initial(state, observed):
         validate_initial_snapshot(value)
     if any(o.needs_cleanup for o in observed):
         raise ValueError("new deployment cannot adopt pre-existing spending authority")
+
+
+def adopt_owned(owned, observed):
+    """Ownership of an operator deployment at its start: the inventory its allocation states.
+
+    An operator deployment is trading-only, so it adopts no pool shares and no fee
+    claims. A wallet that holds either is refused when it is observed
+    (`observations.position`), before this is reached. Shares in the pool's own
+    balance are not checked: a swap never burns them. The stated inventory is
+    attributed only when the wallet covers it; an operator is refused here, before
+    anything is planned, when it does not.
+    """
+    if any(item.target.liquidity_enabled for item in owned):
+        raise ValueError("an Aerodrome operator deployment is trading-only")
+    return adopt_inventory(owned, observed)
 
 
 def commit_owned(owned, outcome):
@@ -70,6 +86,7 @@ class AerodromeLifecycle:
     validate_initial = staticmethod(validate_initial)
     validate_owned = staticmethod(validate_observed)
     commit_owned = staticmethod(commit_owned)
+    adopt = staticmethod(adopt_owned)
     validate_closure = staticmethod(validate_closure)
 
     @classmethod
@@ -82,6 +99,7 @@ class AerodromeLifecycle:
             deployment_id=uuid4().hex,
             config=config,
             strategy=strategy,
+            operator=strategy is None,
             capabilities=capabilities,
             permissions=permissions,
             mode="running",

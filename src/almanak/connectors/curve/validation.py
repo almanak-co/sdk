@@ -3,7 +3,7 @@
 from almanak.connectors.curve import liquidity_quotes, planning
 from almanak.connectors.curve import operations as ops
 from almanak.connectors.curve.authority import admit
-from almanak.connectors.curve.ownership import validate_owned
+from almanak.connectors.curve.ownership import validate_owned, validate_retained
 from almanak.connectors.refusals import below_entry_minimum
 from almanak.dex_intents import (
     ClosePoolLiquidity,
@@ -145,7 +145,9 @@ def validate_operation(backend, state, operation, before):
 def validate_current(backend, plan, current):
     if current.simulated:
         raise ValueError("simulated observations cannot authorize submission")
-    validate_owned(plan.before.owned, current)
+    # LP shares that reach the fund after a signature do not hold the signed bytes back:
+    # they could not be recalled, and their outcome is reconciled with the shares listed.
+    (validate_retained if is_signed(plan) else validate_owned)(plan.before.owned, current)
     if plan.before.allowances != current.allowances:
         raise DataError("precondition_changed", "spending authority changed after preparation")
     validate_current_intent(backend.config, plan, current)

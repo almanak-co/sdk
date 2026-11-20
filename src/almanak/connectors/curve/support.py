@@ -54,6 +54,8 @@ def verified_support():
                 "chain": ChainId(chain),
                 "variants": variants,
                 "modes": (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST),
+                # `almanak ax swap`: one exact-input swap between two named coins of a pool.
+                "direct_actions": (EconomicAction.SWAP,),
                 "restrictions": candidate.restrictions[1:]
                 + (
                     "economic simulation assumes execution access "

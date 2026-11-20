@@ -18,6 +18,7 @@ from almanak.connectors.dex_residual import (
     validate_entry_error,
     validate_quotes,
 )
+from almanak.gateway.ethereum import DataError
 from almanak.models import Account, AssetAmount, Model
 
 
@@ -113,9 +114,30 @@ def ownership(config, name, reference):
     return reference if isinstance(reference, Ownership) else reference.owned
 
 
-def position(reader, target, pool):
+def position(reader, target, pool, *, mined=False):
+    """The fund's stored pool position at the pool's block; None when it holds none.
+
+    Shares and fee claims belong to the whole account. A trading allocation owns none,
+    so it cannot keep the fund's own apart from its inventory, and nothing is planned,
+    signed or sent for a fund that holds any: that observation is refused.
+
+    `mined` observes the block of a step that is already mined. What the fund holds
+    there cannot undo the step, and anyone can send it shares. The trading allocation
+    still owns none, so the observation carries no position, and reconciliation reports
+    the holding as an accounting issue (`reconciliation.unowned_holdings`).
+    """
     value = stored_position(reader, target, pool)
-    return None if value.empty else value
+    if value.empty:
+        return None
+    if target.liquidity_enabled:
+        return value
+    if mined:
+        return None
+    raise DataError(
+        "ownership",
+        f"the fund holds LP shares or fee claims of pool {target.pool.pool}, "
+        "which a trading-only allocation cannot own",
+    )
 
 
 def stored_position(reader, target, pool):
@@ -190,7 +212,7 @@ def exit_amount(owned):
     return counter if owned.position is None and counter.amount else None
 
 
-def snapshot(backend, name, block, reference=None, *, quotes=True, residual=False):
+def snapshot(backend, name, block, reference=None, *, quotes=True, residual=False, mined=False):
     config, reader = backend.config, backend.reader
     target = config.target(name)
     owned = ownership(config, name, reference)
@@ -224,7 +246,7 @@ def snapshot(backend, name, block, reference=None, *, quotes=True, residual=Fals
         allowances=allowances(reader, target, block),
         native_balance=AssetAmount(asset=config.allocation(name).native_asset, amount=native),
         payer=profile.submitter,
-        position=position(reader, target, pool),
+        position=position(reader, target, pool, mined=mined),
         quotes_included=quotes,
         **snapshot_quotes(
             config,

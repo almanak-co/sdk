@@ -49,6 +49,9 @@ PROMOTED_STARTS = {
     ChainId("eip155:42161"): datetime(2026, 9, 7, 9, 40, tzinfo=UTC),
 }
 PROMOTED_MODES = (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST)
+# Every production cell serves `almanak ax swap` as a direct operator action; each has
+# a fork rehearsal of the whole command (tests/fork/test_ax_swap.py).
+DIRECT_ACTIONS = (EconomicAction.SWAP,)
 PRODUCTION_RESTRICTIONS = (
     "configured verified Pancake original router, factory, deployer and pool",
     ONE_ALLOCATION_PER_FUND,
@@ -74,6 +77,7 @@ def verified_support():
                     ),
                 ),
                 "restrictions": PRODUCTION_RESTRICTIONS + op_fee_restrictions(candidate.chain),
+                "direct_actions": DIRECT_ACTIONS,
             }
         )
         for candidate in candidate_support()
