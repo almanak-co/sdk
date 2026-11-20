@@ -3,10 +3,12 @@
 Each rehearsal signs a step with the production adapter on an isolated Anvil fork,
 keeps it from being mined, and mines another transaction of the same wallet at its
 nonce. The record stays while that transaction is not final and is released, with the
-transaction named, once it is. Every declared Curve cell is rehearsed, since a Curve
+transaction named, once it is behind the node's `finalized` block and behind the head
+by the network's own margin. Every declared Curve cell is rehearsed, since a Curve
 call carries no deadline that could retire it; one approval, one lending step and one
-deadline-bound swap show the rule is not Curve's. The fork's `finalized` block is the
-node's own, 64 blocks behind its head. It is rehearsal evidence, not a mainnet run.
+deadline-bound swap show the rule is not Curve's. A cell on a network that states no
+margin keeps its record. The fork's `finalized` block is the node's own, 64 blocks
+behind its head. It is rehearsal evidence, not a mainnet run.
 """
 
 from contextlib import contextmanager
@@ -16,6 +18,8 @@ import pytest
 
 from almanak import ax_actions
 from almanak import state as durable
+from almanak.caip import ChainId
+from almanak.chains import evm_network
 from almanak.gateway.ethereum import EthereumReader
 from almanak.gateway.fork_config import ForkTarget
 from almanak.gateway.fork_fixture import Fork
@@ -27,9 +31,22 @@ from tests.fork import test_ax_swap_curve as curve
 
 pytestmark = pytest.mark.fork
 RECEIPT = "eth_getTransactionReceipt"
-# Blocks mined to put a transaction behind the node's finalized block.
+# Blocks mined to put a transaction behind the node's finalized block, 64 behind its head.
 FINALITY = 70
 CLAIMS = "almanak.state.claims_root"
+
+
+def margin_of(chain) -> int | None:
+    return evm_network(ChainId(str(chain))).finality_margin_seconds
+
+
+def cells(stated: bool):
+    """The declared Curve cells on networks that state a finality margin, or on the rest."""
+    return [cell for cell in curve.declared_cells() if (margin_of(cell[0]) is not None) is stated]
+
+
+def named(cell) -> str:
+    return f"{curve.NETWORKS[cell[0]]}-{cell[1]}"
 
 
 @contextmanager
@@ -44,9 +61,7 @@ def forked(request, chain_id, height, block_hash):
         yield running
 
 
-@pytest.fixture(
-    params=curve.declared_cells(), ids=lambda cell: f"{curve.NETWORKS[cell[0]]}-{cell[1]}"
-)
+@pytest.fixture(params=cells(stated=True), ids=named)
 def cell(request):
     return curve.reference(*request.param)
 
@@ -91,16 +106,20 @@ def take_nonce(fork, owner: str) -> str:
     return sent
 
 
-def finalize(fork):
-    fork.rpc("anvil_mine", [hex(FINALITY)])
+def finalize(fork, seconds: int = FINALITY):
+    """Mine past the node's finalized block, over at least this many seconds."""
+    fork.rpc("anvil_mine", [hex(FINALITY), hex(seconds // FINALITY + 1)])
 
 
-def assert_kept(refused, step):
-    """While the other transaction is not final, the step is neither sent nor dropped."""
+def assert_kept(refused, step, reason):
+    """The step is neither sent nor dropped, and the refusal says why."""
     assert (refused["resolved"], refused["refused"]["kind"]) == (False, "nonce_conflict")
-    assert "not consumed at the finalized block" in refused["refused"]["message"]
+    assert reason in refused["refused"]["message"]
     assert refused["unresolved"]["transaction"] == step.tx_hash
     assert "released_consumed_nonce" not in refused
+
+
+def assert_listed(step):
     (listed,) = ax_actions.kept_records()
     assert listed["unresolved"]["transaction"] == step.tx_hash
 
@@ -108,19 +127,19 @@ def assert_kept(refused, step):
 def assert_released(fork, result, step, consumer):
     """The result names the step, the transaction that took its nonce and its block."""
     mined = fork.rpc(RECEIPT, [consumer])
-    (released,) = result["released_consumed_nonce"]
-    assert released == {
-        "operation": step.operation.kind,
-        "transaction": step.tx_hash,
-        "nonce": step.nonce,
-        "consumed_by": {
-            "transaction": consumer,
-            "block": int(mined["blockNumber"], 16),
-            "block_hash": mined["blockHash"],
-        },
-        "finalized_block": released["finalized_block"],
+    held = {
+        "transaction": consumer,
+        "block": int(mined["blockNumber"], 16),
+        "block_hash": mined["blockHash"],
     }
-    assert released["finalized_block"] >= released["consumed_by"]["block"]
+    assert result["released_consumed_nonce"] == [
+        {
+            "operation": step.operation.kind,
+            "transaction": step.tx_hash,
+            "nonce": step.nonce,
+            "consumed_by": held,
+        }
+    ]
     assert (result["resolved"], result["discarded_request"]) == (True, False)
     assert not {"unresolved", "refused", "record_kept"} & set(result)
     assert ax_actions.kept_records() == []
@@ -138,8 +157,9 @@ def released_once_final(fork, recover, record, owner):
     """Take the step's nonce, ask before and after that is final, and check both answers."""
     step = signed_step(record)
     consumer = take_nonce(fork, owner)
-    assert_kept(recover(record), step)
-    finalize(fork)
+    assert_kept(recover(record), step, "not consumed at the finalized block")
+    assert_listed(step)
+    finalize(fork, margin_of(step.before.block.chain.chain_id))
     result = recover(record)
     assert_released(fork, result, step, consumer)
     assert_dead(fork, step)
@@ -151,8 +171,7 @@ def test_a_sent_curve_swap_whose_nonce_was_taken_is_released_once_that_is_final(
     setting, monkeypatch, capsys
 ):
     start = setting.balances()
-    record, sent = curve.sent_but_never_mined(setting, monkeypatch, capsys)
-    assert signed_step(record).tx_hash == sent
+    record, _ = curve.sent_but_never_mined(setting, monkeypatch, capsys)
 
     result = released_once_final(setting.fork, setting.recover, record, setting.owner)
     # Nothing was sold, and the approval the swap would have spent still stands.
@@ -166,6 +185,32 @@ def test_a_sent_curve_swap_whose_nonce_was_taken_is_released_once_that_is_final(
 
 
 ONE = [("eip155:1", "stableswap_ng")]
+
+
+@pytest.mark.parametrize("cell", ONE, indirect=True, ids=["ethereum-stableswap_ng"])
+def test_a_finalized_tag_alone_releases_nothing_within_the_networks_margin(
+    setting, monkeypatch, capsys
+):
+    """Behind the node's finalized block, and still younger than Ethereum's own margin."""
+    record, _ = curve.sent_but_never_mined(setting, monkeypatch, capsys)
+    step = signed_step(record)
+    consumer = take_nonce(setting.fork, setting.owner)
+    finalize(setting.fork)
+    assert_kept(setting.recover(record), step, "it counts as final 1152s behind it")
+    assert_listed(step)
+
+    finalize(setting.fork, margin_of(setting.cell.chain))
+    assert_released(setting.fork, setting.recover(record), step, consumer)
+
+
+@pytest.mark.parametrize("cell", cells(stated=False), indirect=True, ids=named)
+def test_a_network_that_states_no_margin_keeps_the_record(setting, monkeypatch, capsys):
+    record, _ = curve.sent_but_never_mined(setting, monkeypatch, capsys)
+    step = signed_step(record)
+    take_nonce(setting.fork, setting.owner)
+    finalize(setting.fork, 3600)
+    assert_kept(setting.recover(record), step, "states no finality margin")
+    assert_listed(step)
 
 
 @pytest.mark.parametrize("cell", ONE, indirect=True, ids=["ethereum-stableswap_ng"])
@@ -190,8 +235,7 @@ def test_a_swap_with_a_deadline_whose_nonce_was_taken_is_released_by_that_proof(
     the transaction that took it is."""
     setting = v3_setting
     start = setting.balances()
-    record, sent = v3.stopped_with_the_swap_unmined(setting, monkeypatch, capsys)
-    assert signed_step(record).tx_hash == sent
+    record, _ = v3.stopped_with_the_swap_unmined(setting, monkeypatch, capsys)
 
     result = released_once_final(setting.fork, setting.recover, record, setting.owner)
     assert ("released_expired" in result, setting.balances()) == (False, start)
