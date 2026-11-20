@@ -170,6 +170,42 @@ figures are the vendor's and unverified, so the agent reports them as an
 estimate and takes nothing from them into an action. The vendor sees the address;
 the agent says so once and stops when the user objects.
 
+## Schedules
+
+The user can ask the agent to look at the wallet regularly. The agent then
+creates a schedule with the scheduler of the environment the agent runs in (a
+scheduled task, a routine, a heartbeat), which starts it again later, also after
+its machine was stopped. Where the environment has no scheduler, the agent says
+so and creates nothing; it never stands in for one with a background process.
+
+The user decides what to be told about, each level, how often, and which action
+to have previewed when a watch triggers:
+
+| Watch | Triggers when |
+| --- | --- |
+| `health` | A lending account's health factor is below the user's level |
+| `range` | A liquidity position in a tick range stopped earning or left the wallet |
+| `gas` | A chain's native balance is under the user's level |
+| `change` | A balance or a position differs from the last check, or something new appeared |
+| `value` | The vendor's total moved by more than the user's percentage |
+| `record` | A kept record names the wallet |
+| `report` | Every run |
+
+A run reads the positions and the overview, compares them with the levels and
+with the last check it saved in `~/.almanak/agent/watches.json`, and reports
+what needs attention. For a trigger the user named an action for, it previews
+that action and asks the user to confirm it. A scheduled run never executes and
+never resolves a kept record, and a standing instruction to act is not a
+confirmation. When the user confirms later, the agent previews again and asks
+again if anything differs.
+
+A schedule is a regular look, not protection. A position can be liquidated
+between two checks, a run can fail to happen or to read, and a read that failed
+is reported as not checked. Only Aave V3 and SparkLend reads report a health
+factor; elsewhere the agent compares supplied and owed amounts and treats the
+vendor's health figure as a hint. Each run costs what a conversation with the
+agent costs.
+
 ## Limits
 
 - The wallet is a plain account that holds the funds. Whoever controls the machine
@@ -192,8 +228,9 @@ the agent says so once and stops when the user objects.
   deadline where the call carries one, and the gas price and gas limit are in the
   signed transaction, so the chain enforces them. The health floor, and what the
   gateway checks while it plans and signs, hold before signing only.
-  Nothing protects a position after its step is mined, and the agent does not
-  watch positions.
+  Nothing protects a position after its step is mined. The agent looks at
+  positions only when asked or on a schedule the user set up, and nothing looks
+  between two checks.
 - A public endpoint's operator sees the addresses read and the transactions sent,
   and an action signs what that one endpoint's reads resolve.
 - The overview depends on a vendor's undocumented backend, which throttles callers

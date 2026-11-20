@@ -756,6 +756,76 @@ def test_the_overview_is_a_vendor_read_that_feeds_no_action():
         assert statement in " ".join(section.split()), statement
 
 
+def reports_health(connector: str) -> bool:
+    """Whether the connector's position read carries `risk.health_factor_wad`."""
+    model = position_model(connector)
+    for name in ("risk", "health_factor_wad"):
+        fields = model_of(model).model_fields
+        if name not in fields:
+            return False
+        model = fields[name].annotation
+    return True
+
+
+def test_a_schedule_reads_reports_and_previews_and_never_executes():
+    """The watch table names reads the code has, the scheduled prompt carries nothing,
+    and the rules that keep an unattended run from signing are stated."""
+    from almanak.connectors.direct import connectors_for
+
+    schedules = section("Schedules")
+    told = " ".join(schedules.split())
+    watches = {row[0].strip("`"): row for row in rows(schedules)}
+    assert set(watches) == {"health", "range", "gas", "change", "value", "record", "report"}
+    # The health factor is read where the table says, and nowhere else.
+    stated = set(spans(watches["health"][2])) & set(connectors_for("borrow"))
+    assert stated == {name for name in connectors_for("borrow") if reports_health(name)}
+    assert stated and "`risk.health_factor_wad`" in watches["health"][2]
+    assert "No other connector's read reports a health factor" in watches["health"][2]
+    assert "the vendor's hint only" in watches["health"][2]
+    # The range watch reads fields the liquidity section already explains.
+    for field in ("`pool.in_range`", "`owner`"):
+        assert field in watches["range"][2] and field in section("Liquidity")
+    assert "`ax balance`" in watches["gas"][2] and "`ax recover`" in watches["record"][2]
+    assert "`total_usd`" in watches["value"][1] and "`total_usd`" in subsection("5. The overview")
+    # One fixed prompt, with nothing in it a run could be steered by.
+    (prompt,) = re.findall(r"^\s*> (.+)$", schedules, flags=re.MULTILINE)
+    assert prompt == "Use the almanak skill and run its scheduled check."
+    assert not re.search(r"0x|--|\d", prompt)
+    # No command of the section signs, and the one it runs is the listing form.
+    assert "almanak ax recover" in commands()
+    assert "`almanak ax recover`" in told
+    for statement in (
+        "A scheduled run never executes",
+        "runs no command with `--execute`",
+        "resolves no record with `ax recover --record`, which can send a signed transaction",
+        'An instruction such as "always repay when it triggers" is not a confirmation',
+        "Never create a wallet in a scheduled run",
+        'A read that failed is "not checked", never "fine"',
+        "When one is missing, choose nothing",
+        "Preview again first",
+        "It is a regular look, not protection",
+        "nothing on chain holds it",
+        "never more often than hourly",
+        "With no scheduler, say so plainly and create nothing",
+        "Do not stand in for one with a command that sleeps, a loop or a background process",
+        "The prompt carries no address, amount or instruction",
+    ):
+        assert statement in told, statement
+    rules = " ".join(section("Rules").split())
+    assert "A scheduled run reads, reports and previews. It never executes" in rules
+    files = dict(row[:2] for row in rows(section("Files")))
+    assert "`watches.json`" in files
+    for key in ("`watches`", "`schedules`", "`quiet`", "`last_check`", "`propose`", "`kind`"):
+        assert key in subsection("Creating one"), key
+    page = " ".join((ROOT / "docs/agents.md").read_text().split())
+    for statement in (
+        "A scheduled run never executes",
+        "not protection",
+        "the environment the agent runs in",
+    ):
+        assert statement in page, statement
+
+
 def spelled(number: int) -> str:
     return {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}[number]
 
