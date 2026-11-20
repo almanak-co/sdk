@@ -150,6 +150,17 @@ its changelog is on the `v2` branch.
   included, with `manifest contract identities differ from the supported profile`,
   although its installed grants are the ones revision 12 needs. A plain-account
   deployment retains no manifest and continues across the upgrade.
+- A signed step of `ax swap` on Aerodrome is sent although pool shares reached the
+  wallet after the signature. The step is reconciled from its own receipt with the
+  shares listed under `accounting_issues`, and they are never attributed to the
+  deployment. Such a step was held back before its first send for as long as the
+  wallet held the shares, which kept the record and the wallet's claim: a signed
+  approval carries no deadline to release it by. A strategy's trading-only Aerodrome
+  allocation, composed or not, sends its signed approval, revocation and exit swap
+  the same way. Its signed entry swap is still held back while the fund holds the
+  shares and is never sent past them; past its deadline it can only be released,
+  which follows the removal of the shares. A fund that holds shares is still refused
+  before anything is signed.
 - `ax withdraw` on Aave V4 refuses a reserve that backs the wallet's open debt on the
   Spoke. It was held back only by the Spoke's own limit of a health factor of 1,
   while the documentation said every withdrawal of collateral was refused. A

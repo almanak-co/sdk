@@ -6,6 +6,7 @@ checkpoints of the reference lifecycles show that a strategy checkpoint keeps it
 form. The fork rehearsal of the whole command is tests/fork/test_ax_swap_aerodrome.py.
 """
 
+import contextlib
 import gzip
 import hashlib
 import json
@@ -13,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from eth_abi import encode
 
 from almanak import ax_actions
 from almanak.caip import ChainId
@@ -20,7 +22,7 @@ from almanak.chains import evm_network
 from almanak.cli_arguments import build_parser, parse_validated
 from almanak.connectors import direct
 from almanak.connectors.aerodrome import direct as aerodrome_direct
-from almanak.connectors.aerodrome import observations, reconciliation
+from almanak.connectors.aerodrome import execution, observations, reconciliation, validation
 from almanak.connectors.aerodrome import operations as ops
 from almanak.connectors.aerodrome.domain import PoolObservation
 from almanak.connectors.aerodrome.observations import Snapshot
@@ -28,7 +30,9 @@ from almanak.connectors.aerodrome.positions import Position, Quote
 from almanak.connectors.aerodrome.receipts import Effects
 from almanak.connectors.composition import connector_from_wire
 from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
+from almanak.gateway.accounts import prepare_call
 from almanak.gateway.ethereum import DataError
+from almanak.gateway.execution import EvmGateway
 from almanak.gateway.resolution_evm import ResolutionRead, RetainedResolutionReader
 from almanak.models import AssetAmount, Block
 from almanak.operator_deployment import supports_operator
@@ -434,22 +438,264 @@ def test_a_wallet_holding_pool_shares_or_fee_claims_is_refused_when_observed(var
         Snapshot.model_validate({**seen.model_dump(), "position": position.model_dump()})
 
 
-def test_holdings_at_the_block_of_a_mined_step_are_left_out_of_a_trading_observation(variant):
+def test_holdings_seen_for_signed_bytes_are_left_out_of_a_trading_observation(variant):
     market = resolved(variant)
     config = operator_config(market)
     target = config.target(ALLOCATION)
     seen = observation(config, created(config).owned[0], market)
-    # Nothing the fund holds there can undo the step: the observation carries no
-    # position, and the holding is reported by reconciliation instead.
+    # Nothing the fund holds can recall signed bytes or undo a mined step: the
+    # observation carries no position, and the holding is reported by reconciliation.
     for held in (Holdings(), Holdings(shares=1), Holdings(claimable=1)):
-        assert observations.position(held, target, seen.pool, mined=True) is None
+        assert observations.position(held, target, seen.pool, signed=True) is None
     # An allocation with liquidity authority reads its position at every block.
     liquid = configuration(allocation_document(market, liquidity_enabled=True), market)
-    for mined in (False, True):
+    for signed in (False, True):
         position = observations.position(
-            Holdings(shares=1), liquid.target(ALLOCATION), seen.pool, mined=mined
+            Holdings(shares=1), liquid.target(ALLOCATION), seen.pool, signed=signed
         )
         assert position.shares.amount == 1
+
+
+def trigger(kind):
+    """A decision's trigger, of which these checks read only whose it is."""
+    return SimpleNamespace(trigger=SimpleNamespace(kind=kind))
+
+
+def test_a_plan_is_observed_as_the_rule_for_its_bytes_states(variant, monkeypatch):
+    market, config, steps = trading_steps(variant)
+    asked, checked = [], []
+
+    def snapshot(backend, name, block, reference, **options):
+        asked.append((name, block, reference, options))
+        return reference
+
+    monkeypatch.setattr(execution, "snapshot", snapshot)
+    monkeypatch.setattr(
+        execution, "validate_current", lambda backend, plan, current: checked.append(current)
+    )
+    backend = SimpleNamespace(config=config, reader=None)
+    swap, approved = steps[1]
+    # An operator's signed swap is sent past shares, a strategy's signed entry swap is
+    # not, and nothing unsigned is.
+    cases = ((None, "operator", False), ("0x02", "operator", True), ("0x02", "interval", False))
+    for raw, kind, signed in cases:
+        plan = SimpleNamespace(
+            operation=swap, before=approved, raw_transaction=raw, decision=trigger(kind)
+        )
+        observe = execution.AerodromeExecution.current_observer(plan)
+        assert observe(backend, plan, market.block) is approved
+        execution.AerodromeExecution.current_checks(backend, plan, market.block)
+        # Before the send the gateway reads the plan's own observation again, and the
+        # connector's check its ownership: both as signed bytes, or neither.
+        assert asked[-2:] == [
+            (ALLOCATION, market.block, approved, {"signed": signed}),
+            (ALLOCATION, market.block, approved.owned, {"quotes": False, "signed": signed}),
+        ]
+    assert checked == [approved.owned] * 3
+
+
+def test_a_strategy_sends_past_shares_only_what_no_deadline_releases_or_lowers_exposure(variant):
+    market, config, steps = trading_steps(variant)
+    (approval, _), (entry, _) = steps
+    target = config.target(ALLOCATION)
+    revocation = approval.model_copy(update={"amount": 0})
+    leaving = entry.model_copy(
+        update={
+            "amount": AssetAmount(asset=target.assets[1], amount=QUOTED),
+            "minimum": AssetAmount(asset=target.assets[0], amount=1),
+        }
+    )
+
+    def sent(operation, kind, raw="0x02"):
+        plan = SimpleNamespace(operation=operation, raw_transaction=raw, decision=trigger(kind))
+        return validation.sent_past_shares(config, plan)
+
+    # The operator asked for each step; all of its signed bytes are sent.
+    assert [sent(op, "operator") for op in (approval, entry, leaving, revocation)] == [True] * 4
+    # A strategy's entry swap increases exposure and carries a deadline that releases
+    # it: it is held back. Its approval carries none, and its exit lowers exposure.
+    for kind in ("interval", "teardown"):
+        assert [sent(op, kind) for op in (approval, entry, leaving, revocation)] == [
+            True,
+            False,
+            True,
+            True,
+        ]
+    # A transaction family can have a fee candidate signed next: it is unsigned work.
+    family = SimpleNamespace(
+        operation=approval, raw_transaction="0x02", decision=trigger("operator"), family=object()
+    )
+    assert not validation.sent_past_shares(config, family)
+    # Nothing unsigned is observed as signed bytes, whoever asked for it.
+    for kind in ("operator", "interval"):
+        assert not any(sent(op, kind, raw=None) for op in (approval, entry, leaving))
+    assert validation.carries_deadline(entry) and not validation.carries_deadline(approval)
+    assert validation.expired(entry, SimpleNamespace(timestamp=entry.deadline + 1))
+    assert not validation.expired(approval, SimpleNamespace(timestamp=2**64))
+    assert validation.deadline_reached(entry, SimpleNamespace(timestamp=entry.deadline))
+    assert not validation.deadline_reached(approval, SimpleNamespace(timestamp=2**64))
+
+
+class Head(Holdings):
+    """The chain head as the gateway reads it for one trading fund.
+
+    It answers the token and pool reads of an observation and the simulation of the
+    swap; the pool's own state is the retained one (`at_the_head`).
+    """
+
+    def __init__(self, target, block, *, shares=0, wallet=5000, allowance=AMOUNT, output=QUOTED):
+        super().__init__(shares=shares)
+        self.target, self.block, self.chain = target, block, block.chain
+        self.wallet, self.allowance, self.output = wallet, allowance, output
+
+    def pin_block(self, tag):
+        return self.block
+
+    def retained_pin(self):
+        return contextlib.nullcontext()
+
+    def call(self, to, signature, block, **options):
+        sold = to == self.target.assets[0].reference
+        if signature == "balanceOf(address)" and to != self.target.pool.shares_asset.reference:
+            return (self.wallet if sold else 0,)
+        if signature.startswith("allowance"):
+            return (self.allowance if sold else 0,)
+        return super().call(to, signature, block, **options)
+
+    def _rpc(self, method, params, **options):
+        if method == "eth_getBalance":
+            return hex(10**18)
+        assert method == "eth_call"
+        return "0x" + encode(("uint256[]",), ([AMOUNT, self.output],)).hex()
+
+
+class Gateway(EvmGateway):
+    """The gateway's own signing and current-state checks over a `Head`.
+
+    Left out is what needs a signer, a journal or a fee market: the history audit, the
+    authority read and the fee budget. Every check of the fund's state is the real one.
+    """
+
+    def __init__(self, config, reader):
+        self.config, self.reader = config, reader
+        self.clock = lambda: reader.block.timestamp
+
+    def guard(self):
+        pass
+
+    def audit_history(self, state):
+        pass
+
+    def verify_authority(self, manifest, account):
+        pass
+
+    def validate_plan_budget(self, state, plan):
+        pass
+
+    def validate_fee_budget(self, state, plan, balance):
+        pass
+
+    def retained_fee_exposure(self, plan):
+        return 0
+
+
+def at_the_head(monkeypatch, config, market, owned):
+    """Observe through the connector's own snapshot, with the pool as retained."""
+    seen = observation(config, owned, market)
+    monkeypatch.setattr(observations.reads, "read_pool", lambda *read: seen.pool)
+    for check in ("verify_router", "require_direct_fund", "verify"):
+        monkeypatch.setattr(observations, check, lambda *read: None)
+    monkeypatch.setattr(
+        observations, "measured_quote", lambda reader, target, block, amount: quote(owned, market)
+    )
+
+
+def swap_plan(variant, *, kind="operator"):
+    """The swap step of an admitted request as the gateway holds it before signing."""
+    market, config, state, seen = admitted(variant)
+    intent = direct.binding(CONNECTOR).intent(config, (seen,), request(market))
+    deciding, step = planning(config, state, intent, seen)
+    deciding.decision.trigger = SimpleNamespace(kind=kind)
+    approved = observation(
+        config, state.owned[0], market, allowance=AMOUNT, entry_quote=quote(state.owned[0], market)
+    )
+    operation = step(approved)
+    call = execution.AerodromeExecution.call(config, operation)
+    plan = SimpleNamespace(
+        attempt_id="attempt",
+        operation=operation,
+        before=approved,
+        decision=deciding.decision,
+        call=call,
+        execution=prepare_call(config.accounts, operation.account, call),
+        nonce=0,
+        gas=200_000,
+        gas_price=7,
+        raw_transaction=None,
+    )
+    deciding.plan, deciding.pending, deciding.permissions = plan, None, None
+    return market, config, deciding, plan
+
+
+def signed(plan):
+    return SimpleNamespace(**{**vars(plan), "raw_transaction": "0x02"})
+
+
+def test_the_gateway_signs_nothing_for_a_fund_with_shares_and_sends_what_is_signed(
+    variant, monkeypatch
+):
+    market, config, state, plan = swap_plan(variant)
+    target = config.target(ALLOCATION)
+    at_the_head(monkeypatch, config, market, plan.before.owned)
+
+    clean = Gateway(config, Head(target, market.block))
+    assert clean.authorize_signing(state)[0] == plan.operation
+    held = Gateway(config, Head(target, market.block, shares=1))
+    # Unsigned work is refused for the share by the gateway's own signing check.
+    with pytest.raises(DataError, match="a trading-only allocation cannot own") as refusal:
+        held.authorize_signing(state)
+    assert refusal.value.kind == "ownership"
+    with pytest.raises(DataError, match="a trading-only allocation cannot own"):
+        held.validate_current(plan)
+    # The same bytes once signed pass the gateway's current-state check, and the
+    # observation they pass with carries no position.
+    current = held.validate_current(signed(plan))
+    assert (current.position, current.owned, current.wallet0.amount) == (
+        None,
+        plan.before.owned,
+        5000,
+    )
+
+
+def test_a_signed_swap_sent_past_shares_keeps_every_other_current_state_check(variant, monkeypatch):
+    market, config, state, plan = swap_plan(variant)
+    target = config.target(ALLOCATION)
+    at_the_head(monkeypatch, config, market, plan.before.owned)
+    refusals = {
+        "inventory": Head(target, market.block, shares=1, wallet=AMOUNT - 1),
+        "precondition_changed": Head(target, market.block, shares=1, allowance=AMOUNT - 1),
+        "simulation": Head(
+            target, market.block, shares=1, output=plan.operation.minimum.amount - 1
+        ),
+    }
+    for expected, head in refusals.items():
+        with pytest.raises(DataError) as refusal:
+            Gateway(config, head).validate_current(signed(plan))
+        assert refusal.value.kind == expected
+
+
+def test_a_strategys_signed_entry_swap_is_held_back_by_the_gateway_for_the_share(
+    variant, monkeypatch
+):
+    market, config, state, plan = swap_plan(variant, kind="interval")
+    at_the_head(monkeypatch, config, market, plan.before.owned)
+    held = Gateway(config, Head(config.target(ALLOCATION), market.block, shares=1))
+    with pytest.raises(DataError, match="a trading-only allocation cannot own") as refusal:
+        held.validate_current(signed(plan))
+    assert refusal.value.kind == "ownership"
+    # Without the share the same signed bytes pass.
+    clean = Gateway(config, Head(config.target(ALLOCATION), market.block))
+    assert clean.validate_current(signed(plan)).position is None
 
 
 def trading_steps(variant):
@@ -576,8 +822,8 @@ def test_a_mined_swap_is_reconciled_from_its_own_effects_with_the_shares_reporte
         f"{target.pool.shares_asset}: fund holds LP shares or fee claims that a "
         "trading-only allocation does not own",
     )
-    # The observation after the step is read as the block of a mined step.
-    assert asked == {"quotes": False, "residual": False, "mined": True}
+    # The observation after the step is read as one for signed bytes.
+    assert asked == {"quotes": False, "residual": False, "signed": True}
 
 
 def test_a_mined_swap_with_no_shares_on_the_fund_reports_no_issue(variant, monkeypatch):

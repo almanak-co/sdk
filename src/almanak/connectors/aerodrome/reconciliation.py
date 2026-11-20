@@ -190,7 +190,7 @@ def reconcile(backend, pending, receipt, block):
     # with residual dust; other operations record no quotes.
     exiting = pending.decision.intent.kind == "exit_exchange"
     after = snapshot(
-        backend, op.allocation, block, owned, quotes=False, residual=exiting, mined=True
+        backend, op.allocation, block, owned, quotes=False, residual=exiting, signed=True
     )
     gas_paid, fee_evidence = charged_fees(backend, pending, receipt, block)
     issues = validate_balances(pending, after, effects, gas_paid.amount, success)
