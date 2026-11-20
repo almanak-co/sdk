@@ -122,9 +122,21 @@ class EvmGateway:
             is not None
         ):
             return
-        balances = {o.target: o.native_balance for o in self.observe(state)}
-        balance = balances[state.pending.operation.target]
-        self.validate_fee_budget(state, state.pending, balance)
+        self.validate_fee_budget(state, state.pending, self.payer_balance(state))
+
+    def payer_balance(self, state):
+        """The gas payer's balance that a signed attempt's fee budget is checked against.
+
+        A connector that observes this attempt in its own way (`own_observer`) is
+        read that way here too: this is a check before the attempt's bytes are sent.
+        """
+        pending = state.pending
+        if self.own_observer(pending) is None:
+            balances = {o.target: o.native_balance for o in self.observe(state)}
+            return balances[pending.operation.target]
+        self.guard()
+        block = self.reader.pin_block(int(self.reader._rpc("eth_blockNumber", []), 16))
+        return self.current_snapshot(pending, block).native_balance
 
     def execution_cost(self, pending, receipt):
         from almanak.gateway.evm_fees import charged_fees
@@ -152,6 +164,33 @@ class EvmGateway:
         if self.reader.pin_block(block.number) != block:
             raise DataError("reorganization", "snapshot block is no longer canonical")
         return self.connector.execution.snapshot(self, name, block, reference)
+
+    def current_snapshot(self, plan, block):
+        """The observation at `block` that a plan is validated against.
+
+        It is the plan's allocation read against the observation the plan was made
+        from, unless the connector observes this plan in its own way (`own_observer`).
+        """
+        observe = self.own_observer(plan)
+        if observe is None:
+            return self.snapshot(plan.operation.allocation, block, plan.before)
+        if self.reader.pin_block(block.number) != block:
+            raise DataError("reorganization", "snapshot block is no longer canonical")
+        return observe(self, plan, block)
+
+    def own_observer(self, plan):
+        """The connector's own current observation of this plan, or None for the shared one.
+
+        A connector whose observation depends on whether a plan's bytes are already
+        signed states `current_observer(plan)`, which returns the observation to use or
+        None. A transaction family never takes it: fee replacement validates a new
+        candidate, which is still to be signed, through the same path as recorded bytes,
+        so a family is always observed as unsigned work is.
+        """
+        select = getattr(self.connector.execution, "current_observer", None)
+        if select is None or getattr(plan, "family", None) is not None:
+            return None
+        return select(plan)
 
     def observe(self, state=None):
         self.guard()
@@ -489,7 +528,7 @@ class EvmGateway:
         self.guard()
         block = self.reader.pin_block("latest")
         self.require_fresh(block)
-        current = self.snapshot(plan.operation.allocation, block, plan.before)
+        current = self.current_snapshot(plan, block)
         self.connector.execution.validate_current(self, plan, current)
         exposure = self.retained_fee_exposure(plan) if execution_gas(self.config) is not None else 0
         if current.native_balance.amount < plan.gas * plan.gas_price + exposure:

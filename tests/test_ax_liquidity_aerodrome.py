@@ -1119,7 +1119,7 @@ def test_a_mined_deposit_with_a_share_sent_beside_it_is_reconciled_and_reported(
     assert after.owned.position == after.position == stored
     (issue,) = outcome.accounting_issues
     assert "observed LP shares differ from retained receipt effects" in issue
-    assert asked == {"quotes": False, "residual": False, "mined": True}
+    assert asked == {"quotes": False, "residual": False, "signed": True}
 
 
 def test_captured_receipts_reconcile_with_a_share_that_arrived_beside_each_step(variant):

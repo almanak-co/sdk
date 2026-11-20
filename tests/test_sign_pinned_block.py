@@ -169,6 +169,8 @@ def signing_gateway(node, monkeypatch, profile):
         "validate_operation",
         "verify_authority",
         "validate_current",
+        "own_observer",
+        "current_snapshot",
         "snapshot",
         "simulate_current",
     ):
