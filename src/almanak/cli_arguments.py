@@ -490,6 +490,7 @@ def advanced(products):
     observation_transport(balance)
     discovery(commands)
     hypercore(commands)
+    portfolio(commands)
     from almanak.ax_actions import arguments as operator_actions
 
     operator_actions(commands, lending_source)
@@ -645,6 +646,33 @@ def hypercore(commands):
     )
     for command in (markets, account):
         observation_transport(command)
+
+
+def portfolio(commands):
+    # A vendor overview at read time: no --block, and no transport to choose.
+    command = commands.add_parser(
+        "portfolio",
+        help="an account's tokens and protocol positions on every chain, as a vendor reports them",
+        description=(
+            "Rabby's backend reports the account's wallet tokens and its positions in the"
+            " protocols it indexes, on every chain, with its own prices, as of the moment it"
+            " answers. It needs no key and no endpoint. Every figure is the vendor's and is"
+            " verified by nothing here: read a market on chain before acting on it. The"
+            " vendor sees each address asked about."
+        ),
+    )
+    command.set_defaults(product="ax-portfolio")
+    command.add_argument(
+        "--account",
+        required=True,
+        action="append",
+        help="EVM address of the account; repeat to read up to five",
+    )
+    command.add_argument(
+        "--include-unlisted",
+        action="store_true",
+        help="also list tokens the vendor does not mark as core, such as unsolicited ones",
+    )
 
 
 def bounded(low: int, high: int):
@@ -827,6 +855,8 @@ CONNECTOR_INLINE_OPTIONS: dict[tuple[str, str | None], tuple[str, ...]] = {
 }
 # Optional inline flags: never required, but refused with --config like the rest.
 INLINE_OPTIONS = {"ax-pool-price": ("base", "hooks")}
+# Reads that open no chain endpoint and no gateway: the vendor is asked directly.
+TRANSPORTLESS = frozenset({"ax-portfolio"})
 # The session environment that names the read gateway.
 GATEWAY_ENV = ("ALMANAK_AX_GATEWAY_URL", "ALMANAK_AX_GATEWAY_AUTH_FILE")
 
@@ -835,13 +865,10 @@ def parse_validated(parser, argv=None):
     # argparse cannot tie one option to another; refuse a half pair here so a
     # wrong invocation fails before any transport opens.
     args = parser.parse_args(argv)
-    if (
-        str(getattr(args, "product", "")).startswith("ax-")
-        or getattr(args, "product", None) == "markets"
-    ):
+    product = getattr(args, "product", None)
+    if (str(product).startswith("ax-") and product not in TRANSPORTLESS) or product == "markets":
         session_transport(parser, args)
         require_pair(parser, args, "gateway_url", "gateway_auth_file")
-    product = getattr(args, "product", None)
     if product in INLINE_FLAGS:
         names = inline_flags(parser, args, product)
         own = CONNECTOR_INLINE_OPTIONS.get((product, getattr(args, "connector", None)), ())

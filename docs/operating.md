@@ -935,9 +935,9 @@ is listed under `skipped`. It takes the session's read gateway like `almanak ax`
 ### Protocol observations
 
 `almanak ax` reads one protocol observation at one pinned block. Every
-subcommand takes one transport and its own request arguments after the
-subcommand, and every one but the two HyperCore subcommands takes `--block`
-(default `finalized`):
+subcommand but `portfolio` takes one transport and its own request arguments
+after the subcommand, and every one but `portfolio` and the two HyperCore
+subcommands takes `--block` (default `finalized`):
 
 | Subcommand | `--connector` | Request |
 | --- | --- | --- |
@@ -954,6 +954,7 @@ subcommand, and every one but the two HyperCore subcommands takes `--block`
 | `lending-markets` | `aave_v3`, `sparklend`, `aave_v4`, `compound_v3`, `morpho_blue` | `--chain`; optional `--asset` (required for `morpho_blue`), `--collateral`, `--include-unlisted` (`morpho_blue`), `--limit`, `--offset` |
 | `hypercore-markets` | none | optional `--query` (a coin), `--limit`, `--offset`, `--include-delisted`; no `--block` |
 | `hypercore-account` | none | `--account` (repeatable); no `--block` |
+| `portfolio` | none | `--account` (repeatable, at most five); optional `--include-unlisted`; no `--block` and no transport |
 
 `--config` names a JSON request file whose fields are the connector's request
 model; for the lending subcommands it is the market selection an author writes
@@ -1452,3 +1453,54 @@ count it returned. The ledger charge is the SDK's conservative choice: the API
 documents no per-item weight for ledger entries. These reservation limits are
 separate from reconciliation's truncation thresholds (2000 fills, 500 funding
 payments, 500 ledger entries), which mark a page that may be cut short.
+
+#### Portfolio
+
+`ax portfolio` is an overview of an account across chains, as a wallet vendor
+reports it:
+
+```bash
+almanak ax portfolio --account 0x...
+```
+
+It asks Rabby's backend two questions per account, each answered for every chain
+the vendor indexes: the tokens the address holds, and its positions in the
+protocols the vendor indexes. It needs no key, opens no chain endpoint and takes
+no transport flag, and it is asked from the calling process, not through the read
+gateway. `--account` repeats for up to five accounts.
+
+Every figure is the vendor's. The report says so in `source` (`provider` is
+`rabby`, `verified` is `false`), reads no block, and names the time each answer
+was received in milliseconds under `received_at`. It is an overview for display:
+no row of it is identity, a price input or the basis of an action, and a market
+is read on chain with the subcommands above before anything acts on it.
+
+Each account reports:
+
+- `tokens`: each wallet token with its `amount` as a decimal string, `raw_amount`
+  in base units, the vendor's `price_usd` and their product `value_usd`. `chain`
+  and `asset` are the CAIP references the vendor's chain label and token ID
+  imply, unverified. Both are null on a chain without a verified network
+  definition, and `asset` is null where the vendor's token ID is not a contract
+  address;
+  `vendor_chain` and `vendor_token` keep the vendor's own words. `vendor_flags`
+  carries the vendor's `core`, `verified`, `scam` and `suspicious` marks.
+- `tokens_unlisted`: how many tokens the vendor does not mark as core. They are
+  left out of the rows and the totals unless `--include-unlisted` is given.
+- `positions`: each position with its `protocol`, the vendor's `kind` (such as
+  `Lending` or `Rewards`), `asset_usd`, `debt_usd` and `net_usd`, the vendor's
+  `health_rate` where it states one, and its `legs`: each token list of the
+  vendor's detail under its own name, such as `supply`, `borrow` and `reward`. A
+  leg carries a decimal `amount` and no base units. A position whose detail the
+  vendor shapes otherwise has no legs, only its dollar figures.
+- `totals`: `tokens_usd`, `positions_usd` and `total_usd`. A total is null when a
+  row it sums has no value. The vendor writes a price of zero for a token it
+  cannot price; that is read as no price, never as a value of zero.
+
+This is the vendor's own wallet backend, not a documented public interface. It
+can change or refuse without notice, it sees every address asked about, and it
+throttles a caller's network address: after about 25 requests in ten minutes,
+every request was refused for longer than ten minutes. A throttle is the
+`rate_limit` refusal, any other failed answer is `unavailable`, and an answer
+that is not rows of the expected kind, or a row that states no chain, token or
+amount, is `malformed`. Nothing is substituted for a refused overview.
