@@ -130,47 +130,60 @@ class EvmNetwork:
     # this many blocks behind the tag's block; the context proof still checks that block.
     observation_depth: int = 0
     # Seconds a block must be behind the head before a signed step is released because
-    # a transaction in that block took its nonce (`gateway.consumed_nonce`). It is the
-    # chain's documented time to finality, stated beside each network with its source,
-    # and holds whatever an endpoint serves as `finalized`. None releases nothing.
+    # a transaction in that block took its nonce (`gateway.consumed_nonce`), beside the
+    # endpoint's `finalized` tag. Each figure and what it stands for is stated with its
+    # source below. None releases nothing.
     finality_margin_seconds: int | None = None
 
 
-# Finality margins (`EvmNetwork.finality_margin_seconds`), each from the chain's own
-# documentation as read on 2026-11-20. A figure is the longest the chain documents for
-# its normal case, or a documented lower bound where part of the delay has no documented
-# figure; the endpoint's `finalized` tag must hold as well, so the margin only delays.
+# Finality margins (`EvmNetwork.finality_margin_seconds`). Each figure is from the
+# chain's own documentation, read on 2026-11-21. What a margin is differs by kind of
+# chain, and it never replaces the endpoint's `finalized` tag, which must hold as well.
 #
-# Ethereum: only an epoch's first block is justified and then finalized, so a block is
-# final two to three 32-slot epochs of 12-second slots after it is proposed
-# (ethereum.org proof-of-stake and Gasper pages; consensus-specs phase0). Three epochs.
+# Ethereum: the margin is the chain's finality time. Slots are 12 seconds and epochs 32
+# slots (ethereum.org, proof-of-stake page), and a block is final "roughly two to three
+# epochs (about 13 to 19 minutes) after it is proposed" (docs.optimism.io, transaction
+# finality). Three epochs.
 ETHEREUM_FINALITY_SECONDS = 3 * 32 * 12
-# Arbitrum One and Robinhood Chain are Nitro rollups on Ethereum: a block is final once
-# its batch is posted and that Ethereum block is final (docs.arbitrum.io finality and
-# reorgs reference; docs.robinhood.com/chain transaction finality). Neither documents
-# a batch-posting time, so the margin is Ethereum's alone, a lower bound.
-#
-# OP Mainnet: "typically reaches the finalized state within about 15 to 30 minutes of
-# submission" (docs.optimism.io transaction finality). Thirty minutes.
-OP_MAINNET_FINALITY_SECONDS = 30 * 60
-# Base: batch inclusion on Ethereum in about 2 minutes, then finality of that batch in
-# about 20 minutes (docs.base.org transaction finality). Their sum.
-BASE_FINALITY_SECONDS = 22 * 60
-# BNB Smart Chain: fast finality (BEP-126) finalizes within two blocks. When its votes
-# are insufficient the chain falls back to probabilistic finality, documented as 120
-# blocks for a two-thirds validator majority, about 180 seconds at 1.5-second blocks
-# (docs.bnbchain.org JSON-RPC reference). The fallback, in the documented seconds:
-# blocks have only become shorter, so 180 seconds spans at least those 120 blocks.
-BNB_FINALITY_SECONDS = 180
-# Avalanche C-Chain: a block is final when consensus accepts it, in about a second, and
-# is never reorganized; `finalized` is the last settled block, a constant 5 seconds
-# behind execution (build.avax.network exchange integration and C-Chain RPC pages;
-# ACP-194). The settlement delay.
-AVALANCHE_FINALITY_SECONDS = 5
+# Rollups on Ethereum (OP Mainnet, Base, Arbitrum One, Robinhood Chain): a block is
+# final once its batch is on Ethereum and that Ethereum block is final. Seconds behind
+# the rollup's head do not measure that: the sequencer keeps producing blocks while a
+# batch is late, and can reorganize a block until its data is on Ethereum
+# (docs.optimism.io, transaction finality). So on a rollup the release rests on the
+# endpoint's `finalized` tag, and the margin is only a floor for normal operation.
+# The documented normal case is "about 15 to 30 minutes of submission" on OP Mainnet
+# (same page); about 2 minutes to post a batch and 2 epochs more on Base (docs.base.org,
+# transaction finality); batch posting plus about 13 minutes on Arbitrum One
+# (docs.arbitrum.io, finality and reorgs) and on Robinhood Chain (docs.robinhood.com,
+# transaction finality). Thirty minutes for all four, the longest of them.
+ROLLUP_FINALITY_FLOOR_SECONDS = 30 * 60
+# BNB Smart Chain: fast finality finalizes within two blocks. Without its votes the
+# chain falls back to counting validator turns: BEP-619 (enabled; 0.45-second blocks,
+# TurnLength 16, 21 validators) gives 240 blocks, about 108 seconds, for more than
+# two thirds of them, and one turn of all 21 is 336 blocks, 151.2 seconds. The JSON-RPC
+# reference (docs.bnbchain.org) still states the older 1.5-second blocks and TurnLength
+# 8, where one turn of all 21 is 168 blocks, 252 seconds. The larger of the two.
+BNB_FINALITY_SECONDS = 252
+# Avalanche C-Chain: "A C-Chain transaction is final when consensus accepts its block",
+# "in about 1 second", and "Snowman has no re-orgs"; `finalized` is the last settled
+# block, behind `latest`, and does not mark finality (build.avax.network, exchange
+# integration and C-Chain RPC pages). The documented second. The release there rests on
+# the chain's statement that an accepted block is never reorganized.
+AVALANCHE_FINALITY_SECONDS = 1
 # Polygon PoS and HyperEVM state none, so nothing is released there. Polygon documents
-# milestone finality in 2 to 5 seconds but no bound when milestones stall and no reorg
-# depth without them (docs.polygon.technology finality; PIP-11). Hyperliquid documents
-# no finality time and no meaning for the block tags, and `finalized` is the head.
+# milestone finality "within 2 to 5 seconds" (docs.polygon.technology, finality) but no
+# bound that holds when an endpoint's tag is not the milestone. No Hyperliquid
+# documentation of a finality time or of the block tags was found, and `finalized` is
+# the head there.
+
+
+def finality_margin(chain: ChainId) -> int | None:
+    """The network's finality margin in seconds; None for an unknown network too."""
+    try:
+        return evm_network(chain).finality_margin_seconds
+    except ValueError:
+        return None
+
 
 ETHEREUM = EvmNetwork(
     ChainId("eip155:1"),
@@ -193,7 +206,7 @@ BASE = EvmNetwork(
     "0xf712aa9241cc24369b143cf6dce85f0902a9731e70d66818a3a5845b296c73dd",
     "optimism",
     fixed_block_interval=True,
-    finality_margin_seconds=BASE_FINALITY_SECONDS,
+    finality_margin_seconds=ROLLUP_FINALITY_FLOOR_SECONDS,
 )
 ARBITRUM = EvmNetwork(
     ChainId("eip155:42161"),
@@ -202,7 +215,7 @@ ARBITRUM = EvmNetwork(
     "0x7ee576b35482195fc49205cec9af72ce14f003b9ae69f6ba0faef4514be8b442",
     wrapping_emits_transfer=True,
     legacy_price_is_ceiling=True,
-    finality_margin_seconds=ETHEREUM_FINALITY_SECONDS,
+    finality_margin_seconds=ROLLUP_FINALITY_FLOOR_SECONDS,
 )
 BNB = EvmNetwork(
     ChainId("eip155:56"),
@@ -219,7 +232,7 @@ OPTIMISM = EvmNetwork(
     "0x7ca38a1916c42007829c55e69d3e9a73265554b586a499015373241b8a3fa48b",
     "optimism",
     fixed_block_interval=True,
-    finality_margin_seconds=OP_MAINNET_FINALITY_SECONDS,
+    finality_margin_seconds=ROLLUP_FINALITY_FLOOR_SECONDS,
 )
 
 
@@ -238,7 +251,7 @@ ROBINHOOD = EvmNetwork(
     "0xaad15f3d702aaea00caf3e9bb56395efe9127bc3b31b24921abf1eee3409305c",
     wrapping_emits_transfer=True,
     legacy_price_is_ceiling=True,
-    finality_margin_seconds=ETHEREUM_FINALITY_SECONDS,
+    finality_margin_seconds=ROLLUP_FINALITY_FLOOR_SECONDS,
 )
 
 

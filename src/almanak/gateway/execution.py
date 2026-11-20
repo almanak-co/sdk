@@ -778,20 +778,35 @@ def unsendable_refusal(pending, refusal) -> bool:
 
 
 def unsendable(config, pending, refusal):
-    submitter = config.accounts.binding(pending.operation.account).profile.submitter.address
+    profile = config.accounts.binding(pending.operation.account).profile
     return Unsendable(
         refusal.kind,
-        f"the signed attempt at nonce {pending.nonce} from submitter {submitter} no longer"
-        f" passes current validation ({refusal.kind}: {refusal}). It may already have been"
+        f"the signed attempt at nonce {pending.nonce} from submitter"
+        f" {profile.submitter.address} no longer passes current validation"
+        f" ({refusal.kind}: {refusal}). It may already have been"
         " sent and its calldata enforces no deadline, so no deadline releases it. Restore"
         " what validation requires (for example fund the gas payer, or wait for the market)"
         " and resume. Cancelling the nonce instead retires a strategy deployment: it has no"
         " reconciliation of a foreign transaction at a recorded nonce, so every resume"
-        " then stops at the occupied nonce. A direct action's record is released by"
-        " `ax recover` once the cancelling transaction is final. A cancel must replace"
-        " any copy a provider holds, so it needs a higher fee than the signed attempt's at"
-        f" nonce {pending.nonce}",
+        f" then stops at the occupied nonce. {cancelled_record(profile.fund.chain.chain_id)}"
+        " A cancel must replace any copy a provider holds, so it needs a higher fee than"
+        f" the signed attempt's at nonce {pending.nonce}",
         code=refusal.code,
+    )
+
+
+def cancelled_record(chain) -> str:
+    """What cancelling the nonce does to a direct action's record on this network."""
+    from almanak.chains import finality_margin
+
+    if finality_margin(chain) is None:
+        return (
+            f"On {chain} a used nonce releases no direct action's record either, so"
+            " cancelling there frees nothing and leaves the record unresolvable."
+        )
+    return (
+        "A direct action's record is released by `ax recover` once the cancelling"
+        " transaction is final."
     )
 
 

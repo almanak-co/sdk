@@ -37,7 +37,9 @@ MARGIN = 600
 @pytest.fixture(autouse=True)
 def margin(monkeypatch):
     stated = SimpleNamespace(finality_margin_seconds=MARGIN)
-    monkeypatch.setattr(consumed_nonce, "evm_network", lambda chain: stated)
+    monkeypatch.setattr(
+        consumed_nonce, "stated_margin", lambda chain: stated.finality_margin_seconds
+    )
     return stated
 
 
@@ -173,12 +175,30 @@ def test_a_network_without_a_stated_margin_releases_nothing(margin, monkeypatch)
         consumed_nonce.prove(backend(reader), attempt())
     assert (refusal.value.kind, reader.calls) == ("nonce_conflict", [])
 
-    def unknown(chain):
-        raise ValueError("no verified EVM network definition")
+    # A network the SDK does not define states none either.
+    assert chains.finality_margin(ChainId("eip155:31337")) is None
+    assert chains.finality_margin(ChainId("eip155:1")) == MARGINS["eip155:1"]
 
-    monkeypatch.setattr(consumed_nonce, "evm_network", unknown)
-    with pytest.raises(DataError, match="states no finality margin"):
-        consumed_nonce.prove(backend(reader), attempt())
+
+def test_the_unsendable_refusal_says_what_cancelling_the_nonce_does_on_its_network(
+    production_attempt, monkeypatch
+):
+    from almanak.gateway.execution import unsendable
+
+    state, pending, _ = production_attempt
+    refusal = DataError("price_movement", "the pool pays less than the minimum")
+    released = str(unsendable(state.config, pending, refusal))
+    assert "record is released by `ax recover` once the cancelling transaction is final" in released
+    assert "unresolvable" not in released
+
+    # On a network with no margin, using the nonce frees nothing: the message says so
+    # instead of sending the operator into a record that can never resolve.
+    monkeypatch.setattr(
+        chains, "evm_network", lambda chain: SimpleNamespace(finality_margin_seconds=None)
+    )
+    stuck = str(unsendable(state.config, pending, refusal))
+    assert "cancelling there frees nothing and leaves the record unresolvable" in stuck
+    assert "is released by" not in stuck
 
 
 def test_every_network_states_its_margin_or_none():
@@ -564,12 +584,12 @@ def test_the_admission_refuses_a_proof_the_chain_no_longer_gives(production_atte
 # figure is stated beside the network in `almanak.chains`.
 MARGINS: dict[str, int | None] = {
     "eip155:1": 1152,
-    "eip155:43114": 5,
-    "eip155:8453": 1320,
-    "eip155:42161": 1152,
-    "eip155:56": 180,
+    "eip155:43114": 1,
+    "eip155:8453": 1800,
+    "eip155:42161": 1800,
+    "eip155:56": 252,
     "eip155:10": 1800,
     "eip155:137": None,
-    "eip155:4663": 1152,
+    "eip155:4663": 1800,
     "eip155:999": None,
 }

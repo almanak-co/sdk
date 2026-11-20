@@ -7,12 +7,14 @@ transaction that took the nonce and the block that holds it. A missing receipt a
 proves nothing, because a provider that lags or has pruned its transaction index also
 answers none.
 
-Two facts make the block final here, and both are required. The block is at or below
-the endpoint's `finalized` block, and it is older than the head by the network's own
-`finality_margin_seconds`. The tag alone is only as good as the endpoint: some serve
-their head under it, and a client cannot tell that from real fast finality. The margin
-is the chain's documented time to finality and does not depend on the tag. A network
-with no stated margin releases nothing.
+Two facts are required of the block. It is at or below the endpoint's `finalized`
+block, and it is older than the head by the network's own `finality_margin_seconds`.
+The tag alone is only as good as the endpoint: some serve their head under it, and a
+client cannot tell that from real fast finality. What the margin adds differs by
+chain (`almanak.chains`). On Ethereum and BNB Smart Chain it is the chain's own time
+to finality. On a rollup it is only a floor for normal operation, because time on the
+rollup does not measure the finality of its batch on Ethereum, so the tag is what is
+trusted there. A network with no stated margin releases nothing.
 
 The submitter's transaction count only locates the block. It never falls along one
 chain, so the first block whose state has it above the nonce is found by bisection
@@ -23,7 +25,7 @@ does not serve those states refuses the read, and the attempt stays recorded.
 
 import re
 
-from almanak.chains import evm_network
+from almanak.chains import finality_margin as stated_margin
 from almanak.gateway.ethereum import DataError
 from almanak.models import Block
 from almanak.operator_deployment import ConsumedNonce
@@ -71,11 +73,8 @@ def prove(backend, pending) -> ConsumedNonce:
 
 
 def finality_margin(chain) -> int:
-    """The seconds a block of this network must be behind the head to count as final."""
-    try:
-        margin = evm_network(chain.chain_id).finality_margin_seconds
-    except ValueError:
-        margin = None
+    """The seconds a block of this network must be behind the head to be released on."""
+    margin = stated_margin(chain.chain_id)
     if margin is None:
         raise refused(
             f"{chain.chain_id} states no finality margin, so no signed attempt is released"
