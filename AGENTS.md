@@ -206,13 +206,14 @@ independently.
 - Asynchronous protocol requests keep their accepted request identity, escrow
   and original decision through keeper settlement, cancellation and restart. A
   missing outcome never authorizes recreating the request.
-- Proposed, not accepted: for a trading-only classic Aerodrome allocation, signed
-  bytes are sent past pool shares that reached the fund after signing. The shares
-  are reported as an accounting issue and never attributed. An operator's signed
+- Accepted: for a trading-only classic Aerodrome allocation, signed bytes are
+  sent past pool shares that reached the fund after signing. The shares are
+  reported as an accounting issue and never attributed. An operator's signed
   step is always sent. A strategy's signed step is sent unless it carries a
   calldata deadline and increases exposure. A fund that holds shares is refused
-  before anything is planned or signed. Known consequence: the entry approval of
-  a strategy frozen by such shares stays standing until the shares are removed.
+  before anything is planned or signed. Accepted consequence: the entry approval
+  of a strategy frozen by such shares stays standing until the shares are
+  removed.
 - Unsolicited protocol events, such as a liquidation, are reconciled as
   external financial effects through bounded canonical pages, without inventing
   an SDK intent or submitter transaction.
