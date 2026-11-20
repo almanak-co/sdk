@@ -259,6 +259,14 @@ independently.
 - An omitted CoinGecko coin ID resolves an ERC-20 asset from its CAIP chain and
   contract. No symbol matching, provider fallback or implied historical
   coverage.
+- Accepted: `almanak ax portfolio` reads an account's tokens and protocol
+  positions from Rabby's backend by default, without a key. This is the one
+  default that names a financial data source. Its figures are reported as the
+  vendor's and are display only: never identity, a price input, a health figure
+  a floor is checked against, or the basis of a planned or executed action. A
+  refusal or a throttle is reported as such and nothing is substituted. The
+  backend is the vendor's own, undocumented, and sees every address asked
+  about.
 
 ## Backtesting
 
@@ -348,8 +356,10 @@ independently.
 
 ## `almanak ax`
 
-- A read takes exactly one transport: a local operator `--env-file`, or the
-  read-only observation gateway (`service read-gateway`), which keeps provider
+- `ax portfolio` takes no transport: it asks the vendor from the calling
+  process, and the read gateway does not serve it.
+- Every other read takes exactly one transport: a local operator `--env-file`,
+  or the read-only observation gateway (`service read-gateway`), which keeps provider
   credentials in its own process and serves only whitelisted reads over
   authenticated loopback. The execution gateway's token is never reused for
   reads. Without a transport flag, `ax` uses `ALMANAK_AX_GATEWAY_URL` and

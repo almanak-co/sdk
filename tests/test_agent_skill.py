@@ -672,7 +672,9 @@ def test_every_chain_command_runs_on_either_transport():
     """Nothing needs a provider key: each command takes the public endpoint or the key."""
     recoveries = []
     for line in commands():
-        if "--help" in line or line.startswith(("almanak wallet ", "almanak support ")):
+        if "--help" in line or line.startswith(
+            ("almanak wallet ", "almanak support ", "almanak ax portfolio ")
+        ):
             assert "<transport>" not in line, line
             continue
         whole = line.replace(ENDING, ending())
@@ -699,6 +701,63 @@ def test_support_reads_no_chain():
     assert {"connector", "chain"} <= stated
     assert not stated & {"env_file", "public_rpc", "gateway_url"}
     assert "this reads no chain and needs no transport or key" in flat()
+
+
+def test_the_overview_is_a_vendor_read_that_feeds_no_action():
+    """`ax portfolio` takes no transport, its fields are the ones the report writes, and
+    the skill forbids carrying any of them into an action."""
+    from almanak import ax_portfolio
+
+    stated = {action.dest for action in command_parser(["ax", "portfolio"])._actions}
+    assert {"account", "include_unlisted"} <= stated
+    assert not stated & {"env_file", "public_rpc", "gateway_url", "block"}
+    section = subsection("5. The overview")
+    assert "almanak ax portfolio --account <address>" in commands()
+
+    class Vendor:
+        def fetch(self, listing, account):
+            leg = {"id": "eth", "chain": "eth", "amount": 1, "price": 2, "is_core": True}
+            item = {"detail": {"supply_token_list": [leg], "borrow_token_list": [leg]}}
+            item["detail"]["reward_token_list"] = [leg]
+            protocol = {"id": "p", "chain": "eth", "portfolio_item_list": [item]}
+            return ([leg] if listing == "tokens" else [protocol]), 0
+
+    report = ax_portfolio.portfolio(Vendor(), ["0x" + "11" * 20], False)
+    (account,) = report["accounts"]
+    (held,), (position,) = account["tokens"], account["positions"]
+    fields = dict(rows(section))
+    assert set(fields) == {"`totals`", "`tokens`", "`tokens_unlisted`", "`positions`"}
+    for name, cell in fields.items():
+        row = name.strip("`")
+        assert row in account, row
+        scope = {"totals": account["totals"], "tokens": held, "positions": position}.get(row, {})
+        for field in spans(cell):
+            if field.startswith("--") or field == "null":
+                continue
+            owner = position["legs"] if field in ("supply", "borrow", "reward") else scope
+            path = field.split(".")
+            assert path[0] in owner, (row, field)
+            assert len(path) == 1 or path[1] in owner[path[0]], (row, field)
+    for field in ("vendor_chain", "vendor_token", "vendor_flags"):
+        assert field in held and f"`{field}`" in section
+    assert {"scam", "suspicious"} <= set(held["vendor_flags"])
+    assert f"up to {spelled(ax_portfolio.MAX_ACCOUNTS)} times" in flat()
+    for kind in ("rate_limit", "unavailable", "malformed"):
+        assert f"`{kind}`" in section
+    for statement in (
+        "this reads no chain and takes no transport",
+        "Every figure is the vendor's, read at no block, and nothing here checks it",
+        "Never take an amount, an asset, a market, a price or a health rate from it into an action",
+        "is never the health factor a floor is checked against",
+        "The vendor sees the address",
+        "you still manage only your own wallet",
+        "Do not retry in a loop",
+    ):
+        assert statement in " ".join(section.split()), statement
+
+
+def spelled(number: int) -> str:
+    return {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}[number]
 
 
 def test_the_agent_creates_its_wallet_before_any_command_needs_an_address():

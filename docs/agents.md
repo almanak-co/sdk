@@ -119,6 +119,15 @@ ceilings per chain, the markets it has acted in, the liquidity positions it open
 and the tokens the wallet received. It knows only those positions; a position
 opened elsewhere is read when the user names its market or token ID.
 
+The agent also reads an overview of the wallet with
+[`ax portfolio`](operating.md#portfolio): the tokens and protocol positions a
+wallet vendor, Rabby's backend, reports for the address on every chain, with the
+vendor's prices. It shows what the agent did not open itself, and the user can ask
+for the overview of another address, which the agent reads and never manages. The
+figures are the vendor's and unverified, so the agent reports them as an
+estimate and takes nothing from them into an action. The vendor sees the address;
+the agent says so once and stops when the user objects.
+
 ## Limits
 
 - The wallet is a plain account that holds the funds. Whoever controls the machine
@@ -141,6 +150,8 @@ opened elsewhere is read when the user names its market or token ID.
   watch positions.
 - A public endpoint's operator sees the addresses read and the transactions sent,
   and an action signs what that one endpoint's reads resolve.
+- The overview depends on a vendor's undocumented backend, which throttles callers
+  and can stop answering. Without it the agent knows only the positions it opened.
 - A wallet that holds a pool's LP shares on Aerodrome or Curve is refused a swap in
   that pool, and anyone can send such shares. The agent cannot transfer them; it
   can burn them with `ax close-liquidity` when the user decides so.

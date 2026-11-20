@@ -9,6 +9,11 @@ its changelog is on the `v2` branch.
 ## [Unreleased]
 
 ### Added
+- `almanak ax portfolio --account` reports an account's wallet tokens and protocol
+  positions on every chain, with US dollar values, as Rabby's backend reports them. It
+  needs no key and takes no transport. Every figure is the vendor's and unverified: the
+  report is an overview, never identity, a price input or the basis of an action. The
+  agent skill reads it when it loads.
 - Each connector declares the direct operator actions it serves, and `almanak support`
   lists them per chain as `direct_actions`. `ax supply` and `ax withdraw` take their
   connector choices from these declarations, refuse an undeclared connector, chain or
