@@ -79,9 +79,9 @@ it never picks one silently:
   at. The agent also states the exception: where that tolerance reaches an edge
   of the range, or the range lies beside the price, no price beyond the edge
   reverts the call, which takes there only the one currency the range holds.
-  Uniswap V4 serves an open, a collect and a close, and its open leaves an
-  approval to Permit2 that no command here revokes, which the agent says before
-  the open. On Curve and Aerodrome classic the position is the wallet's balance
+  Uniswap V4 serves an open, a collect, a close and a revocation. Its
+  revocation also sets the token's approval to Permit2 to zero, which other
+  applications share, and the agent says so before it. On Curve and Aerodrome classic the position is the wallet's balance
   of the pool's LP token. A Curve deposit uses exactly the stated amounts, and on
   Curve the user chooses whether a burn pays every coin or one. An Aerodrome
   deposit offers the stated amounts in the proportion of the pool's reserves and
