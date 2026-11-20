@@ -2,8 +2,9 @@
 
 One isolated Anvil fork per chain stands in for mainnet behind the production adapter's
 own planning, signing and reconciliation, at the block each reference's fork fixture
-pins. The market is resolved and the deployment built by the command's own code. It is
-rehearsal evidence, not a mainnet run.
+pins and, for Aave V3, again at a block where the Pool runs revision 12. The market is
+resolved and the deployment built by the command's own code. It is rehearsal evidence,
+not a mainnet run.
 """
 
 import json
@@ -17,6 +18,7 @@ from almanak import ax_actions
 from almanak.caip import AssetType, ChainId
 from almanak.chains import evm_network
 from almanak.configuration.yaml import load
+from almanak.connectors.aave_v3.networks import POOLS
 from almanak.connectors.direct import ActionRequest
 from almanak.connectors.lending_lookup import selection
 from almanak.gateway.credentials import write_private
@@ -27,6 +29,7 @@ from almanak.gateway.fork_fixture import Fork
 from almanak.gateway.fork_funding import fund_erc20
 from almanak.gateway.read_endpoints import read_endpoint
 from almanak.models import Chain
+from tests.fork.aave_v3_revision12 import ANCHORS, COLLATERAL, pool_revision
 from tests.fork.production_gateway_driver import RehearsalGateway
 
 pytestmark = pytest.mark.fork
@@ -35,27 +38,42 @@ AMOUNT = 10**16
 PASSWORD = "public-test-password"
 # Above the fee market of every pinned block; Polygon's quotes about 580 gwei.
 LIMITS = ax_actions.FeeLimits(max_gas_price_wei=5000 * 10**9, max_transaction_fee=10**19)
-# Each declared cell, by the reference whose fork fixture pins its block and assets.
+# Each declared cell, by the reference whose fork fixture pins its block and assets, and
+# the Pool revision an Aave V3 cell runs there. The fixtures pin revision 11; every Aave V3
+# cell runs again at a block after its Pool moved to revision 12.
 CELLS = (
-    ("aave_v3", "aave_v3_ethereum_lending"),
-    ("aave_v3", "aave_v3_base_lending"),
-    ("aave_v3", "aave_v3_arbitrum_lending"),
-    ("aave_v3", "aave_v3_optimism_lending"),
-    ("aave_v3", "aave_v3_bnb_lending"),
-    ("aave_v3", "aave_v3_polygon_lending"),
-    ("aave_v3", "aave_v3_avalanche_lending"),
-    ("sparklend", "sparklend_ethereum_lending"),
+    *(("aave_v3", reference, 11) for reference in ANCHORS),
+    *(("aave_v3", reference, 12) for reference in ANCHORS),
+    ("sparklend", "sparklend_ethereum_lending", None),
 )
 
 
-def fixture_of(reference):
+def cell_id(cell):
+    connector, reference, revision = cell
+    return reference if revision in (None, 11) else f"{reference}-revision{revision}"
+
+
+def fixture_of(reference, revision):
     """The pinned block and the second funded asset of a reference's fork fixture."""
     fork = load(ROOT / f"examples/operators/{reference}.fork.yaml").value["fork"]
     (anchor,) = fork["anchors"]
     chain = ChainId(anchor["chain"])
     wrapped = evm_network(chain).wrapped_native
     others = [AssetType(a["asset"]) for a in fork["funds"][0]["assets"]]
+    if revision == 12:
+        anchor = ANCHORS[reference]
     return chain, anchor, next(asset for asset in others if asset != wrapped)
+
+
+def collateral_of(reference, revision):
+    """The asset a cell supplies where it cannot supply the wrapped native coin."""
+    return COLLATERAL.get(reference) if revision == 12 else None
+
+
+def assert_revision(fork, connector, chain, revision):
+    """The fork's Pool reports the revision the cell names, so no cell passes on the other."""
+    if connector == "aave_v3":
+        assert pool_revision(fork.rpc, POOLS[chain]) == revision
 
 
 def origin_block(env, chain, anchor):
@@ -67,8 +85,8 @@ def origin_block(env, chain, anchor):
     return block
 
 
-def funded_wallet(fork, token, directory):
-    signer = fork.funded_signer(to_checksum_address(token), 100 * AMOUNT, 100 * 10**18)
+def funded_wallet(fork, token, directory, wrapped=100 * AMOUNT):
+    signer = fork.funded_signer(to_checksum_address(token), wrapped, 100 * 10**18)
     directory.mkdir(mode=0o700)
     stores = {"treasury": Signer.encrypt(signer.key, PASSWORD, kdf="pbkdf2", iterations=1000)}
     write_private(directory / "keystores.json", json.dumps(stores))
@@ -94,10 +112,20 @@ def as_mainnet(fork, chain):
 class Desk:
     """One wallet on one fork; every action is its own deployment, as each command's is."""
 
-    def __init__(self, fork, connector, chain, second, tmp_path):
+    def __init__(self, fork, connector, chain, second, tmp_path, collateral=None):
         self.fork, self.connector, self.chain = fork, connector, chain
-        self.wrapped, self.second = evm_network(chain).wrapped_native, second
-        self.wallet = funded_wallet(fork, erc20_address(self.wrapped, chain), tmp_path / "wallet")
+        native = evm_network(chain).wrapped_native
+        # `wrapped` is the asset an action names by default: the wrapped native coin,
+        # or the collateral a cell states where the Pool admits no supply of that coin.
+        self.wrapped, self.second = collateral or native, second
+        self.wallet = funded_wallet(
+            fork,
+            erc20_address(native, chain),
+            tmp_path / "wallet",
+            0 if collateral else 100 * AMOUNT,
+        )
+        if collateral:
+            fund_erc20(fork, self.wallet["address"], collateral, 100 * AMOUNT)
         self.identity = as_mainnet(fork, chain)
 
     def backend(self, config):
@@ -136,18 +164,19 @@ class Desk:
         fund_erc20(self.fork, self.wallet["address"], self.second, amount)
 
 
-@pytest.fixture(params=CELLS, ids=lambda cell: cell[1])
+@pytest.fixture(params=CELLS, ids=cell_id)
 def desk(request, tmp_path, monkeypatch):
     # Records and claims stay out of the operator's own state: the first action sweeps
     # every record it finds there.
     monkeypatch.setattr("almanak.state.claims_root", lambda: tmp_path / "state/claims")
-    connector, reference = request.param
-    chain, anchor, second = fixture_of(reference)
+    connector, reference, revision = request.param
+    chain, anchor, second = fixture_of(reference, revision)
     env = request.config.getoption("--fork-env").resolve()
     origin = origin_block(env, chain, anchor)
     target = ForkTarget(chain=origin.chain, provider=ax_actions.alchemy(chain), block=origin)
     with Fork(env, origin, target=target) as fork:
-        yield Desk(fork, connector, chain, second, tmp_path)
+        assert_revision(fork, connector, chain, revision)
+        yield Desk(fork, connector, chain, second, tmp_path, collateral_of(reference, revision))
 
 
 def operations(result):
