@@ -710,3 +710,30 @@ def test_a_payer_that_fails_the_fee_check_does_not_hide_a_consumed_nonce(product
     # A strategy deployment keeps its fee check first.
     with pytest.raises(DataError, match="no longer covers the fee"):
         taken.authorize_submission(state)
+
+
+def test_a_released_attempt_that_took_the_nonce_itself_is_reconciled_not_settled(
+    production_attempt,
+):
+    """The transaction the proof names is that of an attempt released earlier at the
+    nonce: it was mined after all, so the drop that would settle it is refused."""
+    state, pending, _ = production_attempt
+    mined = "0x" + "a1" * 32
+    earlier = pending.model_copy(update={"tx_hash": mined})
+    before = operated(releasable(state)).model_copy(update={"released": (earlier,)})
+    evidence = evidence_for(pending, mined)
+    service = gateway_service(before, proving([], evidence))
+    with pytest.raises(DataError, match="was mined at the recorded nonce") as refusal:
+        service.dispatch_pending("superseded", before)
+    assert (refusal.value.kind, mined in str(refusal.value)) == ("nonce_conflict", True)
+    with pytest.raises(DataError, match="was mined at the recorded nonce"):
+        service.validate_pending_resolution(before, drop_superseded(before, evidence))
+
+    # A foreign transaction at the nonce still releases the step and settles the earlier one.
+    foreign = evidence_for(pending)
+    service = gateway_service(before, proving([], foreign))
+    assert service.dispatch_pending("superseded", before) == foreign
+    after = drop_superseded(before, foreign)
+    service.validate_pending_resolution(before, after)
+    service.validate_released_record(before, after)
+    assert (after.released, after.superseded) == ((), (foreign,))

@@ -642,8 +642,12 @@ def test_the_result_fields_are_the_ones_the_action_module_writes():
     assert "It did not happen and the wallet is free" in table["released_expired"]
     assert "`ax recover` exits 1 for it although `resolved` is true" in table["released_expired"]
     taken = table["released_consumed_nonce"]
-    assert "It did not happen and the wallet is free" in taken
+    assert "The step was released and the wallet is free" in taken
     assert "`ax recover` exits 1 for it although `resolved` is true" in taken
+    # The release is one endpoint's word, and the agent says so before a repeat.
+    assert "The release rests on the report of the endpoint used" in taken
+    assert "the released step could still execute" in taken
+    assert "Report both hashes and tell the user this before they repeat the action" in taken
     assert {"nonce", "consumed_by", "block"} <= set(spans(taken)) & keys
     assert "failed on chain" in table["outcomes"]
 

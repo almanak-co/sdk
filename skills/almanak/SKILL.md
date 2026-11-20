@@ -492,7 +492,7 @@ position again and report both:
 | `outcomes` | Each step that was mined, with its `transaction` hash. `success` false is a step that failed on chain and still cost its fee; no `refused` goes with it. `accounting_issues` lists wallet movements the step does not explain: report them. |
 | `refused` | The kind and message of the refusal that stopped a later step. |
 | `released_expired` | A signed step whose deadline passed before it was mined. It did not happen and the wallet is free; `ax recover` exits 1 for it although `resolved` is true. |
-| `released_consumed_nonce` | A signed step that was never mined and whose `nonce` another transaction of the wallet used, named under `consumed_by` with its `block`. It did not happen and the wallet is free; `ax recover` exits 1 for it although `resolved` is true. Report both hashes. |
+| `released_consumed_nonce` | A signed step that was never mined and whose `nonce` another transaction of the wallet used, named under `consumed_by` with its `block`. The step was released and the wallet is free; `ax recover` exits 1 for it although `resolved` is true. The release rests on the report of the endpoint used: were that report false, the released step could still execute, and repeating the action could then execute it twice. Report both hashes and tell the user this before they repeat the action. |
 | `unresolved` | A step that was signed and may have been sent but has no result yet: neither done nor failed. |
 | `record_kept` | The wallet is now blocked; follow "A blocked wallet". |
 

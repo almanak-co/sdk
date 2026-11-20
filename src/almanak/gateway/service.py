@@ -543,7 +543,7 @@ class GatewayService:
         if method == "superseded":
             if not is_operator(state):
                 raise ValueError("only an operator deployment drops a superseded signed step")
-            return self.adapter.superseded(state.pending)
+            return self.proven_superseded(state)
 
         raise ValueError("unsupported gateway operation")
 
@@ -754,9 +754,26 @@ class GatewayService:
             raise ValueError("only an operator deployment drops a superseded signed step")
         if after != drop_superseded(before, recorded):
             raise ValueError("a superseded step is dropped only with its proof and its decision")
-        if recorded != self.adapter.superseded(before.pending):
+        if recorded != self.proven_superseded(before):
             raise ValueError("recorded proof differs from the gateway's own")
         return True
+
+    def proven_superseded(self, state):
+        """The adapter's proof for the signed step, unless a released attempt took the nonce.
+
+        The transaction the proof names must be foreign to the deployment. When it is
+        the transaction of an attempt released earlier at that nonce, that attempt was
+        mined after all: its execution has to be reconciled from its own receipt, so
+        the drop, which would settle it without an outcome, is refused.
+        """
+        proof = self.adapter.superseded(state.pending)
+        if any(item.tx_hash == proof.consumed_by for item in getattr(state, "released", ())):
+            raise DataError(
+                "nonce_conflict",
+                f"the released attempt {proof.consumed_by} was mined at the recorded nonce;"
+                " reconcile it before continuing",
+            )
+        return proof
 
     def validate_released_record(self, before, after):
         """Released attempts change only by a release or by reconciling their nonce.
