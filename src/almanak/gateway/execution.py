@@ -652,6 +652,16 @@ class EvmGateway:
                 "only a transaction never sent or past its protocol deadline can be released"
             )
 
+    def superseded(self, pending):
+        """Evidence that a final transaction took the attempt's nonce, or a refusal.
+
+        Unlike `require_releasable` this needs no deadline and no unused nonce: the
+        attempt can never be mined at all. See `almanak.gateway.consumed_nonce`.
+        """
+        from almanak.gateway.consumed_nonce import prove
+
+        return prove(self, pending)
+
     def broadcast(self, pending, permissions=None, *, state=None):
         if pending.family is not None:
             from almanak.gateway.replacement import broadcast
@@ -773,13 +783,14 @@ def unsendable(config, pending, refusal):
         refusal.kind,
         f"the signed attempt at nonce {pending.nonce} from submitter {submitter} no longer"
         f" passes current validation ({refusal.kind}: {refusal}). It may already have been"
-        " sent and its calldata enforces no deadline, so it is never released. Restore what"
-        " validation requires (for example fund the gas payer, or wait for the market) and"
-        " resume. Cancelling the nonce instead retires the deployment: no"
-        " reconciliation of a foreign transaction at a recorded nonce exists yet, so every"
-        " resume then stops at the occupied nonce. A cancel must replace any copy a"
-        f" provider holds, so it needs a higher fee than the signed attempt's at nonce"
-        f" {pending.nonce}",
+        " sent and its calldata enforces no deadline, so no deadline releases it. Restore"
+        " what validation requires (for example fund the gas payer, or wait for the market)"
+        " and resume. Cancelling the nonce instead retires a strategy deployment: it has no"
+        " reconciliation of a foreign transaction at a recorded nonce, so every resume"
+        " then stops at the occupied nonce. A direct action's record is released by"
+        " `ax recover` once the cancelling transaction is final. A cancel must replace"
+        " any copy a provider holds, so it needs a higher fee than the signed attempt's at"
+        f" nonce {pending.nonce}",
         code=refusal.code,
     )
 

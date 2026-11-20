@@ -41,6 +41,18 @@ def release_pending(state):
     )
 
 
+def drop_superseded(state):
+    """Drop a signed attempt that a final transaction superseded; nothing is retained.
+
+    The gateway proved the attempt can never be mined, so no copy of it can land and its
+    identity is not needed to reconcile its nonce. The request it belonged to ends, as
+    after any release.
+    """
+    return state.model_copy(
+        update={"pending": None, "decision": state.decision if unresolved(state) else None}
+    )
+
+
 def settle_released(state, pending):
     """Drop released attempts at a reconciled attempt's nonce; they can no longer land."""
     if not getattr(state, "released", ()):

@@ -80,6 +80,7 @@ FIELDS = {
     "request-cancel-plan": {"coordinator", "deployment_id", "attempt_id"},
     "external-reconcile": {"coordinator", "deployment_id"},
     "family": {"coordinator", "deployment_id", "family_id", "candidate_index", "action"},
+    "superseded": {"coordinator", "deployment_id"},
 }
 
 
@@ -539,6 +540,10 @@ class GatewayService:
             if receipt is None:
                 raise DataError("unavailable", "the recorded transaction has no receipt")
             return self.adapter.reconcile(state.pending, receipt)
+        if method == "superseded":
+            if not is_operator(state):
+                raise ValueError("only an operator deployment drops a superseded signed step")
+            return self.adapter.superseded(state.pending)
 
         raise ValueError("unsupported gateway operation")
 
@@ -725,9 +730,32 @@ class GatewayService:
     def validate_released_attempt(self, before, after):
         from almanak.request_runtime import release_pending
 
+        if self.superseded_drop(before, after):
+            return
         if after != release_pending(before):
             raise ValueError("a transaction is released only with its decision")
         self.adapter.require_releasable(before.pending)
+
+    def superseded_drop(self, before, after) -> bool:
+        """Whether an operator deployment drops a signed step a final transaction superseded.
+
+        The drop retains nothing, so for a never-sent step it is the same update as a
+        release. That one stays a release while its nonce is unused, and needs this
+        proof once the nonce is taken.
+        """
+        from almanak.request_runtime import drop_superseded
+
+        if not is_operator(before) or after != drop_superseded(before):
+            return False
+        if is_unsent(before.pending):
+            try:
+                self.adapter.require_releasable(before.pending)
+                return True
+            except DataError as exc:
+                if exc.kind != "nonce_conflict":
+                    raise
+        self.adapter.superseded(before.pending)
+        return True
 
     def validate_released_record(self, before, after):
         """Released attempts change only by a release or by reconciling their nonce.
@@ -741,8 +769,10 @@ class GatewayService:
         retained, changed = getattr(before, "released", ()), getattr(after, "released", ())
         if before.pending is not None and after.pending is None:
             if after.outcomes == before.outcomes:
-                # Exactness: validate_released_attempt. A never-sent attempt is not retained.
-                expected = retained if is_unsent(before.pending) else (*retained, before.pending)
+                # Exactness: validate_released_attempt. A never-sent attempt is not retained,
+                # nor is an operator deployment's step that a final transaction superseded.
+                dropped = is_unsent(before.pending) or self.drops_superseded(before, after)
+                expected = retained if dropped else (*retained, before.pending)
             else:
                 expected = settle_released(before, before.pending).get("released", retained)
             if changed == expected:
@@ -750,6 +780,12 @@ class GatewayService:
         elif retained == changed:
             return
         raise ValueError("released attempts are retained until an attempt at their nonce settles")
+
+    @staticmethod
+    def drops_superseded(before, after) -> bool:
+        from almanak.request_runtime import drop_superseded
+
+        return is_operator(before) and after == drop_superseded(before)
 
     def validate_resolved_outcome(self, before, after):
         if after.pending is not None or len(after.outcomes) != len(before.outcomes) + 1:
