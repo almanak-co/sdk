@@ -532,7 +532,11 @@ valid until it is mined or its nonce is used.
 
 A completed swap leaves no allowance from a wallet that had none. On Uniswap V4 an
 allowance that already stood, to Permit2 or through it, is used and what the swap
-does not spend remains; tell the user what remains approved. Report what
+does not spend remains; tell the user what remains approved, and that
+`ax revoke-exchange` clears it. A Uniswap V4 result can also list
+`position_after.permit2_unexpired`: a spent Permit2 allowance that grants nothing
+and lapses at the swap's deadline. Mention it only when the user asks to clear
+everything; `ax revoke-exchange` expires it. Report what
 `position_after.inventory` lists as bought.
 
 ## Liquidity
@@ -554,7 +558,8 @@ position adds below. For every kind:
   to zero. Offer it when `position_after.allowances` lists any. On Uniswap V4 it
   also sets each pool token's approval to Permit2 to zero, which is not Uniswap's
   alone: tell the user, before they confirm, that every other application that
-  spends that token through Permit2 needs it approved again afterwards.
+  spends that token through Permit2 needs it approved again afterwards. The
+  preview's `note` names the tokens this applies to; read it to the user.
 
 ```bash
 almanak ax revoke-exchange --connector <connector> --chain <chain> <market> <wallet and ceilings>
@@ -608,6 +613,7 @@ earns nothing.
   takes there only the one currency the range holds, at most what it offered.
 - Only what a mint offers is approved, and what it does not take of that stays
   approved: to the position manager, or on Uniswap V4 to Permit2, with no expiry.
+  Tell the user before a Uniswap V4 open that it leaves an approval to Permit2.
   `ax revoke-exchange` clears it. A Uniswap V4 open can repeat an approval before
   its mint.
 - For a position you have no record of, ask the user for the token ID; the wallet

@@ -60,7 +60,9 @@ its changelog is on the `v2` branch.
   ERC-20 approval to Permit2 to zero, then the Permit2 allowances to the router and
   the position manager. The approval to Permit2 is shared with every other
   application that spends the token through Permit2, which needs it approved again
-  afterwards.
+  afterwards; the result says so in `note` before anything is signed. A Uniswap V4
+  result lists a Permit2 allowance that holds no amount and has not expired under
+  `permit2_unexpired`, and the revocation expires it.
 - `--public-rpc` serves `almanak ax` reads on Base, Arbitrum, BNB, Optimism, Polygon and
   Robinhood beside Ethereum and Avalanche. `drpc` adds Base, Optimism, Polygon and
   Robinhood, and four chain operators' own endpoints are named `base`, `arbitrum`,

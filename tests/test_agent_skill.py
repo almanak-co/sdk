@@ -653,9 +653,21 @@ def pool_position() -> dict:
     return v3_pool_direct.position(SimpleNamespace(owned=[owned], outcomes=[], baseline=[]))
 
 
+def permit2_standing() -> dict:
+    """What a Uniswap V4 action adds to its position for a spent, unexpired Permit2
+    allowance, from a stand-in observation."""
+    from almanak.connectors.uniswap_v4 import direct as uniswap_v4
+
+    spent = SimpleNamespace(
+        asset="a", spender="s", amount=0, expiration=9, needs_cleanup=lambda now: True
+    )
+    seen = SimpleNamespace(block=SimpleNamespace(timestamp=1), allowances=(spent,))
+    return uniswap_v4.standing(seen)
+
+
 def test_the_position_paths_of_a_pool_result_exist():
     """Each `position_after` path the skill names is in a pool action's position."""
-    reported = pool_position()
+    reported = {**permit2_standing(), **pool_position()}
     paths = {name for name in spans(text()) if name.startswith("position_after.")}
     assert "position_after.position.token_id" in paths and len(paths) >= 3
     for path in paths:
@@ -855,6 +867,7 @@ def test_the_skill_says_what_the_chain_enforces_and_what_it_does_not():
     for statement, passage in (
         ("tell the user it can use less than stated and that the rest stays in the wallet", ranged),
         ("Only what a mint offers is approved", ranged),
+        ("Tell the user before a Uniswap V4 open that it leaves an approval to Permit2", ranged),
         ("`ax revoke-exchange` clears it", ranged),
         ("except on Uniswap V4, it is refused when nothing is owed", ranged),
         ("Only that offer is approved, and the rest stays in the wallet", shares),
@@ -870,6 +883,9 @@ def test_the_skill_says_what_the_chain_enforces_and_what_it_does_not():
         "On Uniswap V4 it also sets each pool token's approval to Permit2 to zero",
         "tell the user, before they confirm, that every other application that spends "
         "that token through Permit2 needs it approved again afterwards",
+        "The preview's `note` names the tokens this applies to; read it to the user",
+        "tell the user what remains approved, and that `ax revoke-exchange` clears it",
+        "`position_after.permit2_unexpired`: a spent Permit2 allowance that grants nothing",
     ):
         assert statement in flat(), statement
     # The refused empty collect and the staked flag are the code's own words.
