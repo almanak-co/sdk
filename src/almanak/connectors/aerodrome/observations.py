@@ -130,8 +130,9 @@ def position(reader, target, pool, *, signed=False):
     so it cannot keep the fund's own apart from its inventory, and nothing is planned
     or signed for a fund that holds any: that observation is refused.
 
-    `signed` observes for a step whose bytes are already signed: the head it is sent
-    at, or the block it was mined in. Anyone can send the fund shares, and what it
+    `signed` observes for a step whose bytes are already signed: the block it was
+    mined in, or the head it is sent at when it is sent whatever the fund holds
+    (`validation.sent_past_shares`). Anyone can send the fund shares, and what it
     holds there cannot recall the bytes or undo the step. Refusing would hold an
     approval, which carries no deadline, back for good. The trading allocation still
     owns none, so the observation carries no position, the step is sent, and its

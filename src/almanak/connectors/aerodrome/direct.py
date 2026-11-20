@@ -26,7 +26,8 @@ cannot be recalled, and an approval carries no deadline to release it by. The st
 sent, by the command or by `almanak ax recover`, and reconciled from its own effects,
 and its outcome lists the shares as an accounting issue. They are never attributed to
 the deployment. A swap whose approval was signed before the shares arrived ends with
-that approval mined and the swap itself refused, unsigned. The wallet's next command
+that approval sent and the swap itself refused, unsigned. A strategy's allocation
+follows a narrower rule (`validation.sent_past_shares`). The wallet's next command
 is refused until the shares are gone. Shares that sit in the pool's own balance do not
 matter to a swap.
 

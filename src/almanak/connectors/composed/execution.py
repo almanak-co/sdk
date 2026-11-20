@@ -246,6 +246,23 @@ class ComposedExecution:
         )
 
     @staticmethod
+    def current_observer(plan):
+        """The plan's component's own head observation, read through its view, or None.
+
+        It is the observation the component's `current_checks` reads, so the gateway's
+        check and the component's agree on what a signed step is held to.
+        """
+        select = getattr(
+            connector_for_target(plan.operation.target).execution, "current_observer", None
+        )
+        own = None if select is None else select(plan)
+        if own is None:
+            return None
+        return lambda backend, plan, block: own(
+            backend_view(backend, plan.operation.target), plan, block
+        )
+
+    @staticmethod
     def reconcile(backend, pending, receipt, block):
         return connector_for_target(pending.operation.target).execution.reconcile(
             backend_view(backend, pending.operation.target), pending, receipt, block
