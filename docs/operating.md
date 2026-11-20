@@ -684,8 +684,11 @@ narrower rule, since a fund that holds shares can no longer be observed, so the
 strategy can neither decide nor tear down. Its signed approval or revocation, which
 carries no deadline, and its signed exit swap, which lowers exposure, are sent as
 above. Its signed entry swap is not: it is held back while the fund holds the
-shares and released once its deadline has passed, so the strategy takes no new
-exposure it could not leave.
+shares and is never sent past them, so the strategy takes no new exposure it could
+not leave. Once its deadline has passed the swap can only be released, and a
+production run releases it after the shares are removed: until then each attempt
+to send it is refused for the shares first. The approval that preceded it stays
+standing for as long.
 
 #### Liquidity
 

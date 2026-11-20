@@ -217,16 +217,19 @@ def retained(config, plan):
 def sent_past_shares(config, plan) -> bool:
     """Whether a plan's bytes are sent whatever pool shares reached a trading fund.
 
-    Never before they are signed. Once signed, an operator's step always is: the
+    Never before they are signed, and never for a transaction family, whose next fee
+    candidate is still to be signed. Once signed, an operator's step always is: the
     operator asked for exactly that step, and its record keeps the wallet's claim until
     the step resolves. A strategy's step is, unless it both increases exposure and
     carries a protocol deadline, which is its entry swap. A strategy whose fund holds
     shares can no longer observe, decide or tear down, so it takes no new exposure
-    then: the entry swap is held back and released once its deadline has passed. Its
-    approval or revocation carries no deadline to release it by, and its exit swap
-    lowers exposure, so those are sent.
+    then: the entry swap is held back while the fund holds the shares and is never
+    sent past them. Past its deadline it can only be released. Under a gas policy the
+    gateway reads the fund before it checks the deadline, so that release follows the
+    removal of the shares. Its approval or revocation carries no deadline to release
+    it by, and its exit swap lowers exposure, so those are sent.
     """
-    if not is_signed(plan):
+    if not is_signed(plan) or getattr(plan, "family", None) is not None:
         return False
     if plan.decision.trigger.kind == "operator":
         return True

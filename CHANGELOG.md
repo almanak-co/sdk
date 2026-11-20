@@ -126,9 +126,10 @@ its changelog is on the `v2` branch.
   wallet held the shares, which kept the record and the wallet's claim: a signed
   approval carries no deadline to release it by. A strategy's trading-only Aerodrome
   allocation, composed or not, sends its signed approval, revocation and exit swap
-  the same way. Its signed entry swap is still held back and released once its
-  deadline has passed. A fund that holds shares is still refused before anything is
-  signed.
+  the same way. Its signed entry swap is still held back while the fund holds the
+  shares and is never sent past them; past its deadline it can only be released,
+  which follows the removal of the shares. A fund that holds shares is still refused
+  before anything is signed.
 - `ax withdraw` on Aave V4 refuses a reserve that backs the wallet's open debt on the
   Spoke. It was held back only by the Spoke's own limit of a health factor of 1,
   while the documentation said every withdrawal of collateral was refused. A

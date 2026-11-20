@@ -521,6 +521,11 @@ def test_a_strategy_sends_past_shares_only_what_no_deadline_releases_or_lowers_e
             True,
             True,
         ]
+    # A transaction family can have a fee candidate signed next: it is unsigned work.
+    family = SimpleNamespace(
+        operation=approval, raw_transaction="0x02", decision=trigger("operator"), family=object()
+    )
+    assert not validation.sent_past_shares(config, family)
     # Nothing unsigned is observed as signed bytes, whoever asked for it.
     for kind in ("operator", "interval"):
         assert not any(sent(op, kind, raw=None) for op in (approval, entry, leaving))
