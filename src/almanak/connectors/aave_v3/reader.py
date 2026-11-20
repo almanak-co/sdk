@@ -1,6 +1,6 @@
 """Pinned V3 observations without signing or deployment-address defaults."""
 
-from almanak.caip import AssetType
+from almanak.caip import AssetType, ChainId
 from almanak.connectors.aave_v3.domain import (
     OracleQuote,
     PositionObservation,
@@ -22,72 +22,86 @@ from almanak.models import Account, Block
 # Arbitrum USDC and BNB reserve proxy metadata differ from compiled references.
 # Admission still requires each complete observed proxy and implementation hash.
 #
-# Each verified Pool, as (proxy code hash, implementation code hash), with the
-# POOL_REVISION that implementation reports. Revision 12 adds a transient reentrancy guard
-# to the Pool's entry points. It keeps every function signature and the storage layout,
-# and links the SupplyLogic, BorrowLogic, LiquidationLogic and PoolLogic deployments that
-# revision 11 links, so one accounting model serves both. The reserve tokens are the same
-# implementations under either Pool revision.
+# Each chain's verified Pool, as (proxy code hash, implementation code hash), with the
+# POOL_REVISION that implementation reports. A pin admits a Pool only on its own chain.
+# Revision 12 adds a transient reentrancy guard to the Pool's entry points. It keeps every
+# function signature and the storage layout, and links the SupplyLogic, BorrowLogic,
+# LiquidationLogic and PoolLogic deployments that revision 11 links, so one accounting
+# model serves both. The reserve tokens are the same implementations under either Pool
+# revision; their pins are not scoped by chain.
 POOL_REVISIONS = {
-    (
-        "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
-        "0x92b4bfbdb85278f47d05c6daa11efc7665f5827bd5cfc2363105469efc067153",
-    ): 11,
-    (
-        "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
-        "0x79a6f319f85da0a4ab13195e76d5c96ac48aa7b2c1f741a129844095458cb6e3",
-    ): 11,
-    (
-        "0xa2aac688c1cbeae86c0b468a926632c775c7a40f1b5dec59948f9f1562c53e9e",
-        "0x7266d9c5bf4d60b3c0dbccb254e6e9c06880db859bc3a5cd82b38e42212dd2cb",
-    ): 11,
-    (
-        "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
-        "0x34b10035786e78f682a30e11cd04de5228ee452bde734354b335bacdd918da77",
-    ): 11,
-    (
-        "0x96107dc4006b4c7fecd1827cfb275ffeef31e6194cd50466f85f8eb24ccf2679",
-        "0x530cdbba5eb9487cd5d041bb74b7a1936ad3230bf9e361893ecd025373c7fbe5",
-    ): 11,
-    (
-        "0xffcb26fbebbe09d9b0d8baef76a1fa218989be6c279b7acf9865d8fb6e0718ce",
-        "0x46a99baf41f90e39818ded14f4d45885fe6293496e72c1cea2014e814701a994",
-    ): 11,
-    (
-        "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
-        "0x9018e99643e0c9b7506f6c8233da851241f5bfddb06158e978fda41861fdea50",
-    ): 11,
-    (
-        "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
-        "0x39d977584f7dddf2887834de21197d89e0033900776973c2d5212b62d8df6f7b",
-    ): 12,
-    (
-        "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
-        "0x9d993b3df52c0cd3ae308a701605adefb43a79fe12e766c01637f7bf92dd7f33",
-    ): 12,
-    (
-        "0xa2aac688c1cbeae86c0b468a926632c775c7a40f1b5dec59948f9f1562c53e9e",
-        "0x3bdf20b81c093002d1f7a544e55dcb85f63032750cd94ba8b27e75a509384189",
-    ): 12,
-    (
-        "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
-        "0x9875343964bc428629b4c2829163a267050f38ff34a141a1a350c610ad9f4d42",
-    ): 12,
-    (
-        "0x96107dc4006b4c7fecd1827cfb275ffeef31e6194cd50466f85f8eb24ccf2679",
-        "0xe334f592d8ff872871487568216f48dfbe98822bbf8c9c2ec55242db3a07028e",
-    ): 12,
-    (
-        "0xffcb26fbebbe09d9b0d8baef76a1fa218989be6c279b7acf9865d8fb6e0718ce",
-        "0xa4d2855cd851dc69a5bef2dfc99504ab6b101f29c5353a4b043eece444780771",
-    ): 12,
-    (
-        "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
-        "0x1f369913d01c3141dff9de25fe35d096c468b1d43d7996b3a1ba7fa0d759a0ec",
-    ): 12,
+    ChainId("eip155:1"): {
+        (
+            "0x96107dc4006b4c7fecd1827cfb275ffeef31e6194cd50466f85f8eb24ccf2679",
+            "0x530cdbba5eb9487cd5d041bb74b7a1936ad3230bf9e361893ecd025373c7fbe5",
+        ): 11,
+        (
+            "0x96107dc4006b4c7fecd1827cfb275ffeef31e6194cd50466f85f8eb24ccf2679",
+            "0xe334f592d8ff872871487568216f48dfbe98822bbf8c9c2ec55242db3a07028e",
+        ): 12,
+    },
+    ChainId("eip155:10"): {
+        (
+            "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
+            "0x34b10035786e78f682a30e11cd04de5228ee452bde734354b335bacdd918da77",
+        ): 11,
+        (
+            "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
+            "0x9875343964bc428629b4c2829163a267050f38ff34a141a1a350c610ad9f4d42",
+        ): 12,
+    },
+    ChainId("eip155:56"): {
+        (
+            "0xa2aac688c1cbeae86c0b468a926632c775c7a40f1b5dec59948f9f1562c53e9e",
+            "0x7266d9c5bf4d60b3c0dbccb254e6e9c06880db859bc3a5cd82b38e42212dd2cb",
+        ): 11,
+        (
+            "0xa2aac688c1cbeae86c0b468a926632c775c7a40f1b5dec59948f9f1562c53e9e",
+            "0x3bdf20b81c093002d1f7a544e55dcb85f63032750cd94ba8b27e75a509384189",
+        ): 12,
+    },
+    ChainId("eip155:137"): {
+        (
+            "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
+            "0x79a6f319f85da0a4ab13195e76d5c96ac48aa7b2c1f741a129844095458cb6e3",
+        ): 11,
+        (
+            "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
+            "0x9d993b3df52c0cd3ae308a701605adefb43a79fe12e766c01637f7bf92dd7f33",
+        ): 12,
+    },
+    ChainId("eip155:8453"): {
+        (
+            "0xffcb26fbebbe09d9b0d8baef76a1fa218989be6c279b7acf9865d8fb6e0718ce",
+            "0x46a99baf41f90e39818ded14f4d45885fe6293496e72c1cea2014e814701a994",
+        ): 11,
+        (
+            "0xffcb26fbebbe09d9b0d8baef76a1fa218989be6c279b7acf9865d8fb6e0718ce",
+            "0xa4d2855cd851dc69a5bef2dfc99504ab6b101f29c5353a4b043eece444780771",
+        ): 12,
+    },
+    ChainId("eip155:42161"): {
+        (
+            "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
+            "0x9018e99643e0c9b7506f6c8233da851241f5bfddb06158e978fda41861fdea50",
+        ): 11,
+        (
+            "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
+            "0x1f369913d01c3141dff9de25fe35d096c468b1d43d7996b3a1ba7fa0d759a0ec",
+        ): 12,
+    },
+    ChainId("eip155:43114"): {
+        (
+            "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
+            "0x92b4bfbdb85278f47d05c6daa11efc7665f5827bd5cfc2363105469efc067153",
+        ): 11,
+        (
+            "0xf168c2e9e4d04292c7d5d526a9a917175a44369ab63a2f9997537acf0ffaaf2e",
+            "0x39d977584f7dddf2887834de21197d89e0033900776973c2d5212b62d8df6f7b",
+        ): 12,
+    },
 }
 REVISION_HASHES = {
-    "pool": tuple(POOL_REVISIONS),
     "a_token": (
         (
             "0x3ebcd59bd9d51bd49cafbb0419423ba025e8e477f34cefa1a71ea3c29b78fa1f",
@@ -175,17 +189,29 @@ REVISION_HASHES = {
 }
 
 
+def pinned(role, chain):
+    """The verified code of a role: a Pool's on its own chain, a reserve token's anywhere."""
+    return POOL_REVISIONS.get(chain, {}) if role == "pool" else REVISION_HASHES[role]
+
+
 def verify_revision(reader, address, block, role):
     observed = AuthorityReader(reader, block).identity(address)
-    if (observed.code_hash, observed.implementation_hash) not in REVISION_HASHES[role]:
+    pins = pinned(role, block.chain.chain_id)
+    if (observed.code_hash, observed.implementation_hash) not in pins:
         raise DataError("deployment_changed", f"Aave V3 {role} has an unverified revision")
     return observed
 
 
 def verify_pool(reader, pool, block):
-    """The Pool's pinned code, reporting the revision that code was verified as."""
+    """The Pool's pinned code, reporting the revision that code was verified as.
+
+    `verify_revision` admits the code; this adds the revision the code must report. A
+    resolution reads the Pool's identity through `verify_revision` and reaches this
+    check through `pool_provider`.
+    """
     observed = verify_revision(reader, pool, block, "pool")
-    revision = POOL_REVISIONS[(observed.code_hash, observed.implementation_hash)]
+    pins = POOL_REVISIONS[block.chain.chain_id]
+    revision = pins[(observed.code_hash, observed.implementation_hash)]
     if reader.call(pool, "POOL_REVISION()", block)[0] != revision:
         raise DataError("deployment_changed", "Aave V3 Pool revision differs from its model")
     return observed

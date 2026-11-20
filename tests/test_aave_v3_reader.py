@@ -93,7 +93,20 @@ def test_each_pinned_pool_reports_the_revision_it_was_verified_as(network, revis
         if r["method"] == "eth_call" and r["params"][0]["data"] == POOL_REVISION
     ]
     assert set(reported) == {revision}
-    assert POOL_REVISIONS[pool_identity(raw)] == revision
+    chain = ChainId(raw["block"]["chain"]["chain_id"])
+    assert POOL_REVISIONS[chain][pool_identity(raw)] == revision
+
+
+def test_a_pool_pin_admits_its_code_on_its_own_chain_only(monkeypatch):
+    raw = captured("base", 12)
+    base, arbitrum = ChainId("eip155:8453"), ChainId("eip155:42161")
+    moved = {**POOL_REVISIONS, arbitrum: POOL_REVISIONS[base], base: POOL_REVISIONS[arbitrum]}
+    monkeypatch.setattr("almanak.connectors.aave_v3.reader.POOL_REVISIONS", moved)
+    expected = PositionObservation.model_validate_json(json.dumps(raw["positions"][0]))
+    with replay(raw) as reader:
+        block = reader.pin_block(expected.reserve.block.number)
+        with pytest.raises(DataError, match="unverified revision"):
+            read_position(reader, expected.reserve.source, expected.fund, block)
 
 
 def test_the_revisions_of_one_network_share_a_pool_proxy_and_reserve_tokens():
