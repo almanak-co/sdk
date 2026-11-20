@@ -233,9 +233,17 @@ independently.
 - Accepted: a named public endpoint (`--public-rpc`) serves `almanak ax` reads
   and direct actions, previewed, executed or recovered, without a provider key.
   The caller names it; it is never a default and never a fallback. The reviewed
-  list is in code, covers Ethereum and Avalanche, and excludes HyperEVM. Each
-  reader verifies the chain number, the pinned genesis block and a recent head.
-  Strategy runs, forks, checks and backtests refuse it.
+  list is in code and excludes HyperEVM. Each reader verifies the chain number,
+  the pinned genesis block and a recent head. Strategy runs, forks, checks and
+  backtests refuse it.
+- Accepted: the Base and BNB Chain operators' own endpoints, listed under the
+  operator's name as `base` and `bnbchain`. Proposed, not accepted: the
+  `arbitrum` and `optimism` entries, listed under the same rule.
+- A (name, chain) pair is listed only after it passed every check of
+  `scripts/qualify_public_rpc.py` in repeated full live runs. A pass is a
+  point-in-time result, and a transient refusal fails a run as it would fail a
+  command. The tool samples the reads an observation and a direct action make
+  and sends nothing. Never relax the genesis or head proof to admit an endpoint.
 - Accepted risk: a direct action executed through a public endpoint signs what
   that one endpoint's reads resolve, including the market's contract, and the
   endpoint's operator sees each transaction before it is mined. A false report
@@ -359,9 +367,13 @@ independently.
   record and the wallet's claim, which refuses later actions for that wallet.
   `ax recover` resolves the signed step from its receipt or by sending the
   signed bytes again, drops what the request had not signed, and releases the
-  claim; it plans and signs nothing. Records live in durable local state; one
-  with no signed step is removed, with its claim, by the next direct command.
-  An unreadable record is kept.
+  claim; it plans and signs nothing. It uses the endpoint the record's action
+  ran on, or the one transport the caller names with `--env-file` or
+  `--public-rpc` instead, on the record's chain. A record whose public endpoint
+  is no longer listed needs a named transport, so removing a listed pair never
+  strands a claim. Records live in durable local state; one with no signed step
+  is removed, with its claim, by the next direct command. An unreadable record
+  is kept.
 - A connector package that serves direct actions declares them in its
   `direct.py`, and each chain's support lists them as `direct_actions`. Every
   other installed connector is named with its reason. Accepted: GMX V2 and

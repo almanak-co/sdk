@@ -41,8 +41,9 @@ setup, so they see the wallet and what you can do with it. When the user names a
 chain or protocol you cannot act on, say which ones you can, and do not offer a
 strategy, a Safe or anything else as a way around it. You may read a balance or
 position at an address on another chain only when the user gives you that address
-unasked and has a provider key set up; a public endpoint covers Ethereum and
-Avalanche only. In particular:
+unasked. A public endpoint serves reads on every supported chain except HyperEVM
+(`eip155:999`), which has none; "Reads on other chains" below names the endpoint
+for each chain. In particular:
 
 - Swaps, borrowing, repaying, liquidity provision and partial withdrawals are not
   available as direct actions.
@@ -100,13 +101,16 @@ Every read and preview below takes `<transport>`. Decide it once:
 - **`~/.almanak/agent/.env` exists.** Use `--env-file ~/.almanak/agent/.env`.
 - **It does not.** Use `--public-rpc publicnode`. This is a free public endpoint
   for Ethereum and Avalanche that needs no key, so the user can start straight
-  away. If it fails, use
-  `--public-rpc drpc` instead and say so; never switch between them silently in
-  the middle of an action. Tell the user once that a public endpoint's operator
-  can see the wallet address being read and each transaction you send.
+  away. If it fails on Ethereum, use `--public-rpc drpc` instead and say so; never
+  switch between them silently in the middle of an action. Avalanche has no
+  second public endpoint: when `publicnode` fails there, wait a minute and try
+  once more, then tell the user. Tell the user once that a public endpoint's
+  operator can see the wallet address being read and each transaction you send.
 
 A public endpoint serves everything here, executing included, so never ask the
-user for a provider key. Nobody answers for what a public endpoint reports, and an
+user for a provider key. When a public endpoint cannot serve something, say that
+it cannot be done without the user's own provider key and leave it to them to
+offer one. Nobody answers for what a public endpoint reports, and an
 action signs what its reads show; say this once, before the first execution. If
 the user offers their own Alchemy API key, create `~/.almanak/agent/` with mode
 0700 if it is missing and write `~/.almanak/agent/.env` with mode 0600 containing
@@ -158,6 +162,55 @@ Report each market's `observation.supplied_assets` in whole units with its symbo
 converting with `resolution.decimals`. With no recorded markets, say there are no known
 positions. You only know the markets you have acted in; say so if the user expects
 positions opened elsewhere, and offer to check a market they name.
+
+## Reads on other chains
+
+Actions are limited to the table under "What is supported". A read can also be
+made on the other supported chains, at an address the user gives you. With `~/.almanak/agent/.env`
+present, use `--env-file ~/.almanak/agent/.env` on every chain. Without it, take
+the public endpoint from the chain of the read:
+
+| Chain | `--public-rpc` |
+| --- | --- |
+| Ethereum (`eip155:1`) | `publicnode`, then `drpc` |
+| Avalanche (`eip155:43114`) | `publicnode` |
+| Base (`eip155:8453`) | `base`, then `drpc` |
+| Optimism (`eip155:10`) | `optimism`, then `drpc` |
+| Arbitrum (`eip155:42161`) | `arbitrum` |
+| BNB (`eip155:56`) | `bnbchain` |
+| Polygon (`eip155:137`) | `drpc` |
+| Robinhood (`eip155:4663`) | `drpc` |
+| HyperEVM (`eip155:999`) | none |
+
+Use the first name, and the second only when the first fails; say so when you
+switch. A chain with one name has no second endpoint: when it fails, wait and try
+once more. If it still fails, or the chain has no public endpoint, tell the user
+the read cannot be done without their own provider key. Do not ask for the key.
+
+A public endpoint reads what you can name by address. What follows was measured
+through these endpoints; anything else may or may not work, so try it once and
+report what it answers:
+
+- A balance (`ax balance`) and a pool (`ax pool`) on every chain in the table that
+  has an endpoint.
+- A lending market (`ax lending-reserve`) and a position (`ax lending-position`)
+  for Aave V4, Compound V3 and Morpho Blue, each on the chains its connector
+  supports (`almanak support`).
+- A read that answers `deployment_changed` was refused by the connector's own
+  revision check, not by the endpoint, so another endpoint does not change it.
+  Report it and do not retry. Aave V3 reads answered this on every chain when this
+  was measured.
+- Finding a token or a pool by name (`ax resolve`, `ax dex-pools`) uses a vendor
+  key a public endpoint does not replace. Ask the user for the token or pool
+  address instead and read it directly.
+- `ax lending-markets` lists a protocol's markets only on the chains its connector
+  supports (`almanak support`), not on every chain in the table. Aave V3, SparkLend
+  and Aave V4 listed through each endpoint of those chains, and Morpho Blue except
+  on Avalanche and BNB. A Compound V3 listing, and a Morpho Blue listing on those
+  two chains, reads an event history the public endpoints refused
+  (`event history in one request`, `HTTP 429` or `JSON-RPC -32005`). Do not retry
+  it: ask the user for the Comet address or the Morpho market ID and read it with
+  `ax lending-reserve`.
 
 ## Handling a request
 
@@ -267,9 +320,14 @@ the allowance, but it also withdraws everything supplied in that market, so say 
 | `disable collateral after verified repayment before withdrawal` | The supplied balance is enabled as collateral. These commands cannot disable collateral. | Do not retry. Tell the user the collateral must be disabled another way first. |
 | `nonce_conflict` | The wallet has a pending transaction. | Wait and ask the user before trying again. |
 | `ALCHEMY_API_KEY is required` | The env file is missing the key. | Go back to the provider step. |
-| `public endpoint head is` or `public endpoint has a different genesis` | The public endpoint is lagging or is not the real network. | Do not use what it returned. Use the other public endpoint and tell the user. |
-| `HTTP 429` | The public endpoint is rate limiting. | Wait a minute and try once more, then use the other public endpoint or ask for a key. |
-| `this lookup uses a vendor key` | The read needs a key that a public endpoint does not replace. | Tell the user it needs their provider setup. |
+| `public endpoint head is` or `public endpoint has a different genesis` | The public endpoint is lagging or is not the real network. | Do not use what it returned. Use the other public endpoint for that chain, if it has one, and tell the user. |
+| `HTTP 429` | The public endpoint is rate limiting. | Wait a minute and try once more, then use the other public endpoint for that chain, if it has one. Otherwise tell the user it cannot be done on a public endpoint right now. |
+| `no public endpoint named` | That name does not serve the chain. | Use a name the message lists. If it says to use a provider key, the chain has no public endpoint. |
+| `this lookup uses a vendor key` | A lookup by name (`ax resolve`, `ax dex-pools`) needs a vendor key that a public endpoint does not replace. | Ask the user for the token or pool address and read it directly. |
+| `no longer serves` | A kept record's action ran on a public endpoint that is no longer listed for its chain. | Run `ax recover` for that record again with `--public-rpc` and a name that serves the record's chain, as "A blocked wallet" says. |
+
+A message that ends in `HTTP 408` is the endpoint's timeout: wait a minute and try
+once more, as for `HTTP 429`.
 
 If a command was interrupted after `--execute`, do not run it again. Read the
 position first: the action may have gone through. On standard error, a line with
@@ -294,8 +352,14 @@ transaction. Tell the user which transaction is unresolved, then resolve the rec
 almanak ax recover --record <record>
 ```
 
-Add `--env-file ~/.almanak/agent/.env` when that file exists; a record whose action
-ran on a provider key needs it.
+The record is resolved through the endpoint its action ran on. Add
+`--env-file ~/.almanak/agent/.env` when that file exists: a record whose action
+ran on a provider key needs it, and any record resolves through it. Without that
+file, a refusal that contains `no longer serves` means the record's public
+endpoint was removed for that chain: run the same command again with
+`--public-rpc` and a name that serves the record's `chain`, from the table under
+"Reads on other chains". The same works when the record's own endpoint keeps
+failing. Give one of the two flags, never both.
 
 This signs nothing and sends nothing new: it reads the transaction's result, or
 sends the same signed transaction again and waits, so it needs no confirmation.

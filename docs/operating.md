@@ -518,14 +518,24 @@ the same way.
 ```bash
 almanak ax recover
 almanak ax recover --record ~/.local/state/almanak-v3/actions/<record> --env-file /private/providers.env
+almanak ax recover --record ~/.local/state/almanak-v3/actions/<record> --public-rpc publicnode
 ```
 
 Without `--record` it lists the kept records: each one's `path`, `chain`, `account`
 and `unresolved` step. With `--record` it resolves that record's signed step: from
 its receipt when the transaction was mined, otherwise by sending the same signed
-bytes again and waiting. It plans and signs nothing, and needs no wallet. It uses
-the provider the record's action ran on: `--env-file` is needed only when that was
-a provider key. Once the
+bytes again and waiting. It plans and signs nothing, and needs no wallet. Without a
+transport flag it uses the endpoint the record's action ran on, which needs
+`--env-file` when that was a provider key. `--env-file` or `--public-rpc <name>`,
+one of them, names another transport, and the record is resolved through that
+endpoint of the record's chain instead. The bytes sent are the ones that were
+signed, the adapter proves the chain number and the pinned genesis on whichever
+endpoint it is given and reads the outcome from the canonical receipt, and a named
+public endpoint must also show a head no older than 120 seconds. A record whose
+public endpoint has left the [list](#public-endpoints) for its chain is refused
+with `the public endpoint <name> this record's action ran on no longer serves
+<chain>; name a transport with --public-rpc or --env-file`, and resolves once one
+is named. Once the
 step has its outcome, whatever the request had not yet signed is dropped
 (`discarded_request`), the record is removed and the claim released; state the
 action again against the position as it now is. A step that cannot be resolved
@@ -606,21 +616,9 @@ by `ALMANAK_AX_GATEWAY_URL` and `ALMANAK_AX_GATEWAY_AUTH_FILE`; a flag always wi
 with neither the command is refused. A public endpoint is never chosen for the
 caller.
 
-`--public-rpc <name>` reads through one named public endpoint; `--help` lists the
-names and the chains each serves. It is for `ax` reads and for `ax supply` and
-`ax withdraw`, previewed or executed. Before any read the endpoint must report the chain's
-number and its pinned genesis block and a head no older than 120 seconds; otherwise
-the command is refused with `chain_mismatch` or `stale`. One endpoint serves a
-command, and a failure fails the read: nothing falls back to another endpoint.
-Nobody answers for a public endpoint. It gives no promise of availability, archive
-state or wide log ranges, it rate limits without notice, and its operator sees the
-addresses a command reads and the transactions it sends before they are mined. An
-action executed through one signs what that endpoint's reads resolve, including
-the market's contract, so an endpoint that reports falsely can direct an approval
-or a supply elsewhere, up to the amount of the action. Naming a public endpoint
-accepts that. `ax recover` uses the endpoint its record's action ran on. Strategy
-runs, forks, checks and backtests do not accept a public endpoint and need a
-provider key or an operator RPC URL. A lookup that uses a vendor key is refused when it is made. The
+`--public-rpc <name>` reads through one named public endpoint;
+[Public endpoints](#public-endpoints) lists the names, the chains each serves and
+what they do not serve. The
 inline `pool-price` key names a pool on the reviewed deployment for the chain,
 hookless unless `--hooks` names a reviewed hook (whose dynamic-fee profiles take
 `--fee 8388608`). Use each command's `--help` for the complete argument list.
@@ -780,6 +778,88 @@ and a first deposit would set its price. `ax dex-pools` reports such a pool as
 it is unfunded, and `check --online` for fork or production refuses it in its
 `pool_liquidity` stage with code `unfunded_pool`, read through the operator's
 provider at the latest block.
+
+#### Public endpoints
+
+`--public-rpc <name>` reads through one named public endpoint that needs no key.
+It is for `ax` reads, for `ax supply` and `ax withdraw`, previewed or executed, and
+for `ax recover`. The reviewed list is in code, and each command's `--help` prints
+it:
+
+| Name | Operator | Chains |
+| --- | --- | --- |
+| `publicnode` | Allnodes PublicNode | `eip155:1`, `eip155:43114` |
+| `drpc` | dRPC | `eip155:1`, `eip155:8453`, `eip155:10`, `eip155:137`, `eip155:4663` |
+| `base` | Base, the chain's own endpoint | `eip155:8453` |
+| `arbitrum` | Arbitrum, the chain's own endpoint | `eip155:42161` |
+| `bnbchain` | BNB Chain, the chain's own endpoint | `eip155:56` |
+| `optimism` | Optimism, the chain's own endpoint | `eip155:10` |
+
+Ethereum, Base and Optimism have two endpoints. Avalanche (`eip155:43114`),
+Arbitrum (`eip155:42161`), BNB (`eip155:56`), Polygon (`eip155:137`) and Robinhood
+(`eip155:4663`) have one, so there is no second endpoint to name when it fails.
+HyperEVM (`eip155:999`) has none and needs a provider key. A name that does not
+serve the command's chain is refused with the names that do.
+
+An endpoint for a chain does not make an action available there. `ax supply` and
+`ax withdraw` run only for a connector and chain that declare the action, which
+`almanak support` lists as `direct_actions` and [Operator actions](#operator-actions)
+describes; they run through any endpoint listed for that chain. On a chain with a
+public endpoint and no declared action, the endpoint serves reads only.
+
+Before any read the endpoint must report the chain's number and its pinned genesis
+block and a head no older than 120 seconds; otherwise the command is refused with
+`chain_mismatch` or `stale`. One endpoint serves a command, and a failure fails the
+read: nothing falls back to another endpoint. Nobody answers for a public endpoint.
+It gives no promise of availability, archive state or wide log ranges, it rate
+limits and times out without notice, and its operator sees the addresses a command
+reads and the transactions it sends before they are mined. An action executed
+through one signs what that endpoint's reads resolve, including the market's
+contract, so an endpoint that reports falsely can direct an approval or a supply
+elsewhere, up to the amount of the action. Naming a public endpoint accepts that.
+`ax recover` uses the endpoint its record's action ran on, or the transport it is
+given instead. Strategy runs, forks, checks and backtests do not accept a public
+endpoint and need a provider key or an operator RPC URL.
+
+A pair is listed only after it passed every check of the
+[qualification tool](qa.md#public-endpoint-qualification) in repeated full runs.
+The tool samples the reads an observation and a direct action make: the identity
+proof, pinned state, the fee quote and the receipt reads. It sends nothing, so it
+proves neither every method a connector calls nor that an endpoint accepts a
+transaction. A pass is a point-in-time result. A transient refusal fails a run as
+it fails a command, and a listed endpoint can refuse a read it served a minute
+earlier. A shared provider is absent from a chain where its keyless tier refused
+one of those reads in those runs.
+
+What a public endpoint serves beyond that sample was measured on 2026-11-19 with
+the commands below, each through the listed pairs named. Nothing else is claimed:
+
+| Command | Measured |
+| --- | --- |
+| `ax balance` of the native asset, at `latest` and at `finalized` | Served on every listed pair. |
+| `ax pool` on a Uniswap V3 pool, `ax pool-price` on a Uniswap V4 pool | Served on every listed pair. |
+| `ax lending-reserve` and `ax lending-position` for Aave V4, Compound V3 and Morpho Blue | Served on every listed pair for at least one of the three, each on chains its connector supports. |
+| `ax lending-reserve --connector aave_v3` | Refused on all seven chains of the connector, through every endpoint, with `deployment_changed: Aave V3 pool has an unverified revision`. The connector's own revision pin refuses the pool; a provider key was not measured against it. |
+| `ax perp-markets --connector gmx_v2`, by market address | Served on Arbitrum through `arbitrum` and on Avalanche through `publicnode`. |
+| `ax perp-position`, and `ax lending-reserve` for SparkLend | Not measured. |
+| `ax lending-markets` for `aave_v3`, `sparklend` and `aave_v4` | The record is read with calls at the pinned block and listed on each chain the connector supports. Three rows of each listing were read: the SparkLend and Aave V4 rows were `verified`, and every Aave V3 row was `refused` with the same `deployment_changed`. On Avalanche the Aave V4 listing named 8 Spokes in `source.unreadable`, each with `rpc: eth_call: RPC rejected the requested read (JSON-RPC -32000)`, and listed the others. A Spoke counts as holding no reserves only when its revert is reported as JSON-RPC 3, so these may be Spokes without reserves; that was not verified. |
+| `ax lending-markets --connector morpho_blue` | Listed on Ethereum, Base, Optimism, Polygon, Robinhood and Arbitrum, where Morpho's API names the markets. Refused on Avalanche and BNB, where it reads the core's event history. |
+| `ax lending-markets --connector compound_v3` | Refused on Ethereum, Base, Arbitrum and Optimism, through every endpoint listed there: it reads the Configurator's event history. |
+| `ax resolve`, `ax dex-pools` | Refused with `this lookup uses a vendor key; give --env-file or the read gateway`, measured on Base and Arbitrum; the refusal does not depend on the chain. |
+
+An event history is asked for from block zero in one request. Every endpoint such
+a listing was run through refused it: `publicnode` on Ethereum and Avalanche, `drpc`
+on Ethereum, Base and Optimism, and `base`, `arbitrum`, `optimism` and `bnbchain`. No
+listing sends that request on Polygon or Robinhood, so nothing is known there. The
+refusal is `eth_getLogs: the provider refused <contract>'s event history in one
+request`, or `eth_getLogs: HTTP 429` or `eth_getLogs: RPC rejected the requested
+read (JSON-RPC -32005)` where the endpoint answers with its rate-limit code and the
+retries run out. A refused listing or lookup does not stop a direct read. Name the
+market or the token yourself: the Comet address or the Morpho market ID for
+`ax lending-reserve`, the pool address for `ax pool`, the token's CAIP-19 asset for
+`ax balance`. A provider key serves an event-history listing where the provider
+serves the range, and the lookups by name need `COINGECKO_API_KEY` as
+[Discovery](#discovery) describes.
 
 #### Discovery
 

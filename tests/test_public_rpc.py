@@ -4,6 +4,7 @@ Offline: no test here opens a connection. The endpoints themselves are exercised
 running the commands against them, which is not part of this suite.
 """
 
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,6 +66,43 @@ def test_every_listed_endpoint_is_https_on_a_chain_with_a_pinned_genesis():
 
 def test_no_public_endpoint_is_listed_for_hyperevm():
     assert all(ChainId("eip155:999") not in chains for chains in providers.PUBLIC_RPC.values())
+
+
+def test_each_name_is_the_registered_domain_of_its_endpoints():
+    hosts = []
+    for name, chains in providers.PUBLIC_RPC.items():
+        for url in chains.values():
+            host = url.split("/")[2]
+            hosts.append(host)
+            # ethereum-rpc.publicnode.com is `publicnode`; mainnet.base.org is `base`.
+            assert host.split(".")[-2] == name
+    assert len(set(hosts)) == len(hosts)
+
+
+def test_the_option_help_names_each_endpoint_and_both_uses(capsys):
+    for command in (["ax", "balance"], ["ax", "supply"], ["ax", "recover"]):
+        with pytest.raises(SystemExit):
+            parse(*command, "--help")
+        text = " ".join(capsys.readouterr().out.split())
+        assert "a public endpoint that needs no key, for reads and direct actions" in text
+        for name in providers.PUBLIC_RPC:
+            assert f"{name}: eip155:" in text
+
+
+def test_the_operating_guide_lists_the_endpoints_the_code_lists():
+    guide = (Path(__file__).parents[1] / "docs/operating.md").read_text()
+    section = guide.split("#### Public endpoints")[1].split("\n#### ")[0]
+    rows = re.findall(r"^\| `([a-z0-9-]+)` \| [^|]+ \| (.+) \|$", section, flags=re.MULTILINE)
+    documented = {name: re.findall(r"`(eip155:\d+)`", chains) for name, chains in rows}
+    assert documented == {
+        name: [str(chain) for chain in chains] for name, chains in providers.PUBLIC_RPC.items()
+    }
+    # The chains with one endpoint are named as such, and HyperEVM as having none.
+    serving = [chain for chains in providers.PUBLIC_RPC.values() for chain in chains]
+    single = {str(chain) for chain in serving if serving.count(chain) == 1}
+    stated = section.split("have two endpoints.")[1].split("have one")[0]
+    assert set(re.findall(r"`(eip155:\d+)`", stated)) == single
+    assert "HyperEVM (`eip155:999`) has none" in section
 
 
 def test_a_name_resolves_only_on_a_chain_it_serves(monkeypatch):
@@ -233,16 +271,152 @@ def test_a_preview_configuration_records_the_public_provider_it_used(recorded):
     assert ax_actions.record_endpoint(config, None) == providers.PUBLIC_RPC["publicnode"][ETHEREUM]
 
 
-def test_recovering_a_keyed_record_needs_the_env_file(tmp_path):
-    network = SimpleNamespace(
-        provider=ax_actions.alchemy(ETHEREUM), chain=SimpleNamespace(chain_id=ETHEREUM)
-    )
-    config = SimpleNamespace(production=SimpleNamespace(networks=[network]))
+AVALANCHE = ChainId("eip155:43114")
+
+
+def record(provider, chain=AVALANCHE):
+    """The part of a kept record's configuration that names its provider."""
+    from almanak.models import Chain
+
+    network = SimpleNamespace(provider=provider, chain=Chain(chain_id=chain, environment="mainnet"))
+    return SimpleNamespace(production=SimpleNamespace(networks=[network]))
+
+
+def public(name):
+    return PublicProvider(kind="public_rpc", name=name)
+
+
+@pytest.fixture
+def proofs(monkeypatch):
+    """The public proofs a recovery runs: each endpoint opened, proved and closed."""
+    steps = []
+
+    class Opened:
+        def __init__(self, chain, endpoint):
+            steps.append(("open", str(chain.chain_id), endpoint))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *arguments):
+            steps.append("closed")
+
+        def verify_chain(self):
+            steps.append("chain")
+
+    monkeypatch.setattr("almanak.gateway.ethereum.EthereumReader", Opened)
+    monkeypatch.setattr(read_endpoints, "verify_public", lambda reader: steps.append("public"))
+    return steps
+
+
+@pytest.fixture
+def env(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("ALCHEMY_API_KEY=k\n")
+    return path
+
+
+def test_recovering_a_keyed_record_needs_the_env_file(env, proofs):
+    config = record(ax_actions.alchemy(ETHEREUM), ETHEREUM)
     with pytest.raises(ValueError, match="--env-file is required"):
         ax_actions.record_endpoint(config, None)
-    env = tmp_path / ".env"
-    env.write_text("ALCHEMY_API_KEY=k\n")
-    assert ax_actions.record_endpoint(config, env).endswith("/v2/k")
+    assert ax_actions.record_endpoint(config, env) == "https://eth-mainnet.g.alchemy.com/v2/k"
+    # A named public endpoint of the record's chain resolves it without the key.
+    listed = providers.PUBLIC_RPC["publicnode"][ETHEREUM]
+    assert ax_actions.record_endpoint(config, None, "publicnode") == listed
+    assert proofs == [("open", "eip155:1", listed), "chain", "public", "closed"]
+
+
+def test_a_record_on_a_listed_pair_resolves_through_its_own_endpoint(proofs):
+    config = record(public("publicnode"))
+    own = providers.PUBLIC_RPC["publicnode"][AVALANCHE]
+    assert ax_actions.record_endpoint(config, None) == own
+    # The adapter proves the chain and genesis there, as before a transport could be named.
+    assert proofs == []
+
+
+def test_a_named_transport_replaces_the_records_own_endpoint(monkeypatch, env, proofs):
+    listed = {
+        "one": {AVALANCHE: "https://one.example"},
+        "two": {AVALANCHE: "https://two.example", ETHEREUM: "https://two.eth.example"},
+    }
+    monkeypatch.setattr(providers, "PUBLIC_RPC", listed)
+    config = record(public("one"))
+    assert ax_actions.record_endpoint(config, None, "two") == "https://two.example"
+    assert proofs == [("open", "eip155:43114", "https://two.example"), "chain", "public", "closed"]
+    # The env file names the keyed provider of the record's chain.
+    keyed = ax_actions.record_endpoint(config, env)
+    assert keyed == "https://avax-mainnet.g.alchemy.com/v2/k"
+    # A name is looked up on the record's chain, never on another one it serves.
+    with pytest.raises(ValueError, match="named three serves eip155:43114; choose from one, two"):
+        ax_actions.record_endpoint(config, None, "three")
+
+
+def test_a_record_on_a_delisted_pair_needs_a_named_transport(env, proofs):
+    """`drpc` served Avalanche when its records were made and is no longer listed there."""
+    assert AVALANCHE not in providers.PUBLIC_RPC["drpc"]
+    config = record(public("drpc"))
+    with pytest.raises(ValueError) as stranded:
+        ax_actions.record_endpoint(config, None)
+    assert str(stranded.value) == (
+        "the public endpoint drpc this record's action ran on no longer serves "
+        "eip155:43114; name a transport with --public-rpc or --env-file"
+    )
+    assert proofs == []
+    listed = providers.PUBLIC_RPC["publicnode"][AVALANCHE]
+    assert ax_actions.record_endpoint(config, None, "publicnode") == listed
+    assert proofs == [("open", "eip155:43114", listed), "chain", "public", "closed"]
+    assert ax_actions.record_endpoint(config, env).endswith("avax-mainnet.g.alchemy.com/v2/k")
+    # A name that was never listed is stranded the same way.
+    with pytest.raises(ValueError, match="gone this record's action ran on no longer serves"):
+        ax_actions.record_endpoint(record(public("gone")), None)
+
+
+def test_a_named_public_endpoint_that_fails_its_proof_resolves_nothing(monkeypatch, proofs):
+    def stale(reader):
+        raise DataError("stale", "public endpoint head is 500 seconds old")
+
+    monkeypatch.setattr(read_endpoints, "verify_public", stale)
+    with pytest.raises(DataError, match="500 seconds old"):
+        ax_actions.record_endpoint(record(public("drpc")), None, "publicnode")
+    assert proofs[-1] == "closed"
+
+
+def test_recover_takes_one_transport_and_resolves_the_record_through_it(monkeypatch, capsys):
+    named = parse("ax", "recover", "--record", "kept", "--public-rpc", "publicnode")
+    assert (named.public_rpc, named.env_file) == ("publicnode", None)
+    keyed = parse("ax", "recover", "--record", "kept", "--env-file", ".env")
+    assert (keyed.public_rpc, keyed.env_file) == (None, Path(".env"))
+    own = parse("ax", "recover", "--record", "kept")
+    assert (own.public_rpc, own.env_file) == (None, None)
+    for arguments in (
+        ["--public-rpc", "publicnode", "--env-file", ".env"],
+        ["--public-rpc", "unlisted"],
+    ):
+        with pytest.raises(SystemExit):
+            parse("ax", "recover", "--record", "kept", *arguments)
+    capsys.readouterr()
+    seen = {}
+
+    def endpoint(config, env_file, public_rpc):
+        seen.update(config=config, env_file=env_file, public_rpc=public_rpc)
+        return "https://named.example"
+
+    def recover(record, backend_for):
+        seen["backend"] = backend_for("stored")
+        return {"resolved": True}
+
+    monkeypatch.setattr(ax_actions, "record_endpoint", endpoint)
+    monkeypatch.setattr(ax_actions, "production_backend", lambda *arguments: arguments)
+    monkeypatch.setattr(ax_actions, "recover", recover)
+    assert ax_actions.recover_command(named) == 0
+    assert seen == {
+        "config": "stored",
+        "env_file": None,
+        "public_rpc": "publicnode",
+        "backend": ("stored", "https://named.example", None),
+    }
+    capsys.readouterr()
 
 
 def test_head_age_counts_the_time_the_read_itself_took():

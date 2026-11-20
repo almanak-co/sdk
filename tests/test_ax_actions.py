@@ -912,6 +912,60 @@ def test_recover_runs_the_records_own_configuration_and_closes_its_backend(
     assert closed == [True] and not record.exists() and not claimed.exists()
 
 
+def test_a_record_on_a_delisted_endpoint_stays_kept_until_a_transport_is_named(
+    monkeypatch, stored, state_home, capsys
+):
+    """Removing a pair from the reviewed list must not strand the wallet's claim."""
+    from almanak.caip import ChainId
+    from almanak.gateway import providers, read_endpoints
+    from almanak.models import Chain
+
+    avalanche = ChainId("eip155:43114")
+    assert avalanche not in providers.PUBLIC_RPC["drpc"]
+    network = SimpleNamespace(
+        provider=providers.PublicProvider(kind="public_rpc", name="drpc"),
+        chain=Chain(chain_id=avalanche, environment="mainnet"),
+    )
+    config = SimpleNamespace(production=SimpleNamespace(networks=[network]))
+    monkeypatch.setattr(stored, "load", lambda self: SimpleNamespace(config=config, pending=None))
+    record, claimed = abandoned(state_home, "kept")
+    args = SimpleNamespace(record=record, env_file=None, public_rpc=None)
+    with pytest.raises(ValueError, match="no longer serves eip155:43114; name a transport"):
+        ax_actions.recover_command(args)
+    # Refused before anything ran: the record, its claim and its lock are as they were.
+    assert record.exists() and claimed.exists()
+
+    proved, opened = [], []
+
+    class Reader:
+        def __init__(self, chain, endpoint):
+            proved.append(endpoint)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *arguments):
+            pass
+
+        def verify_chain(self):
+            proved.append("chain")
+
+    def backend(config, endpoint, wallet):
+        opened.append((endpoint, wallet))
+        return SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setattr("almanak.gateway.ethereum.EthereumReader", Reader)
+    monkeypatch.setattr(read_endpoints, "verify_public", lambda reader: proved.append("public"))
+    monkeypatch.setattr(ax_actions, "production_backend", backend)
+    monkeypatch.setattr(ax_actions, "resolve", lambda service, interrupt: {"resolved": True})
+    args.public_rpc = "publicnode"
+    assert ax_actions.recover_command(args) == 0
+    named = providers.PUBLIC_RPC["publicnode"][avalanche]
+    assert proved == [named, "chain", "public"] and opened == [(named, None)]
+    assert json.loads(capsys.readouterr().out) == {"resolved": True}
+    assert not record.exists() and not claimed.exists()
+
+
 def test_recover_lists_kept_records_and_needs_credentials_only_to_resolve(
     monkeypatch, stored, state_home, capsys
 ):
@@ -922,7 +976,8 @@ def test_recover_lists_kept_records_and_needs_credentials_only_to_resolve(
     pending = SimpleNamespace(operation=SimpleNamespace(kind="approve"), tx_hash="0x1")
     state = SimpleNamespace(config=config, pending=pending)
     monkeypatch.setattr(stored, "load", lambda self: state)
-    assert ax_actions.recover_command(SimpleNamespace(record=None, env_file=None)) == 0
+    listing = SimpleNamespace(record=None, env_file=None, public_rpc=None)
+    assert ax_actions.recover_command(listing) == 0
     assert json.loads(capsys.readouterr().out) == {
         "records": [
             {
@@ -935,7 +990,7 @@ def test_recover_lists_kept_records_and_needs_credentials_only_to_resolve(
         ]
     }
     monkeypatch.setattr(ax_actions, "recover", lambda record, backend_for: {"resolved": False})
-    args = SimpleNamespace(record=record, env_file=Path(".env"))
+    args = SimpleNamespace(record=record, env_file=Path(".env"), public_rpc=None)
     assert ax_actions.recover_command(args) == 1
 
 
