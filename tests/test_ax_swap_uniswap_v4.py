@@ -481,7 +481,15 @@ def test_the_position_is_the_attributed_inventory_and_the_allowances_last_observ
     # A spent Permit2 allowance keeps its expiration with no amount; it is not listed.
     spent = observation(config, owned, market, permit=(0, 1234))
     done = SimpleNamespace(owned=state.owned, baseline=(), outcomes=(SimpleNamespace(after=spent),))
-    assert report(done)["allowances"] == []
+    assert report(done)["allowances"] == [] and "permit2_unexpired" not in report(done)
+    # Until it expires it is listed apart: it grants nothing and can be revoked.
+    deadline = market.block.timestamp + 300
+    fresh = observation(config, owned, market, permit=(0, deadline))
+    done = SimpleNamespace(owned=state.owned, baseline=(), outcomes=(SimpleNamespace(after=fresh),))
+    assert (report(done)["allowances"], report(done)["permit2_unexpired"]) == (
+        [],
+        [{"asset": USDC, "spender": contracts.router, "expiration": deadline}],
+    )
 
 
 COMMON = {

@@ -75,7 +75,7 @@ def test_preview_plans_the_first_step_and_signs_nothing(desk):
     amount = desk.intent("supply").amount.amount
     result = ax_actions.perform(desk.service, ActionRequest("supply", amount), execute=False)
     assert result["executed"] is False and "outcomes" not in result
-    assert result["first_step"]["operation"]["kind"] == "approve"
+    assert result["first_step"]["operation"]["kind"] == "approve" and "note" not in result
     assert result["position_before"] == {"supplied_shares": "0", "debt_shares": "0"}
     assert desk.gateway.broadcasts == [] and desk.store.load().pending is None
 
@@ -92,6 +92,27 @@ def test_execute_runs_the_action_and_reports_the_position(desk):
     withdrawn = ax_actions.perform(desk.service, ActionRequest("withdraw"), execute=True)
     assert withdrawn["position_before"]["supplied_shares"] == str(shares)
     assert withdrawn["position_after"]["supplied_shares"] == "0"
+
+
+def test_a_connectors_note_on_the_admitted_request_is_in_the_result(desk, monkeypatch):
+    from dataclasses import replace
+
+    from almanak.connectors import direct
+
+    seen = []
+
+    def note(config, observed, request):
+        seen.append((config, len(observed), request.action))
+        return "a stated effect"
+
+    declared = direct.binding_for(desk.store.load().config)
+    monkeypatch.setattr(direct, "binding_for", lambda config: replace(declared, note=note))
+    amount = desk.intent("supply").amount.amount
+    result = ax_actions.perform(desk.service, ActionRequest("supply", amount), execute=False)
+    assert (result["note"], result["executed"]) == ("a stated effect", False)
+    # It is built from the configuration and observations the request is admitted with.
+    assert seen == [(desk.store.load().config, 1, "supply")]
+    assert ax_actions.stated_note(declared, None, (), ActionRequest("supply", amount)) == {}
 
 
 def test_an_action_states_its_amount_exactly_once(recorded, monkeypatch):

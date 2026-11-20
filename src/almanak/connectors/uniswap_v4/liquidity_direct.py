@@ -54,12 +54,16 @@ both. A collection and a close approve nothing.
 allocation states no range, no inventory and no NFT, and its steps are the connector's
 own allowance cleanup, one transaction each: for each held token, the ERC-20 approval
 to Permit2 is set to zero, then the Permit2 allowance to the router and the one to the
-PositionManager are set to zero and expired. It is refused when no allowance holds an
-amount. Beside one that does, a Permit2 allowance with no amount left that has not
-expired is expired as well. The ERC-20 approval to Permit2 is not this venue's alone:
-every application that spends the token through Permit2 relies on it, and needs it
-approved again afterwards. Permit2 allowances to any other spender are neither read
-nor changed.
+PositionManager are set to zero and expired. What it clears is what the connector's
+own cleanup counts (`Allowance.needs_cleanup`): an allowance that holds an amount, and
+a Permit2 allowance that holds none and has not expired, which a completed swap leaves
+until its deadline and on which a strategy's start in the wallet is refused. With
+neither, the command is refused. The ERC-20 approval to Permit2 is not this venue's
+alone: every application that spends the token through Permit2 relies on it, and needs
+it approved again afterwards; the result's `note` says so before anything is signed.
+Permit2 allowances to any other spender are neither read nor changed. The cleanup
+takes the allowances in order, so a token whose approval of zero reverts stops it
+there.
 
 The heavy imports stay inside the functions: the command line imports each connector's
 `direct` module to build its choices.
@@ -78,8 +82,9 @@ REQUIRED = {
     "revoke-exchange": (),
 }
 # Seconds after the observed block within which a collection is still planned and
-# signed, and mined: its call carries that deadline. A revocation is planned and signed
-# within them too; its calls carry no deadline.
+# signed, and mined: its call carries that deadline. A revocation's allocation states
+# them only because the field is required: its calls carry no deadline, and nothing
+# holds its steps to this bound.
 ADMISSION_SECONDS = 300
 
 
@@ -267,16 +272,32 @@ def close_liquidity(allocation, seen):
 
 
 def revoke_exchange(allocation, seen):
-    """The connector's allowance cleanup, refused when no allowance holds an amount."""
+    """The connector's allowance cleanup, refused when it would have nothing to clear."""
     from almanak.connectors.uniswap_v4.models import Target
     from almanak.dex_intents import RevokeExchange
 
-    if not any(item.amount for item in seen.allowances):
+    if not seen.needs_cleanup:
         raise ValueError(
-            "the wallet has given Permit2 no allowance in either pool token, and through "
-            "Permit2 none to the pool's router or position manager"
+            "nothing to revoke: no approval of a pool token to Permit2 holds an amount, "
+            "and no Permit2 allowance to the pool's router or position manager holds an "
+            "amount or has yet to expire"
         )
     return RevokeExchange[Target](target=seen.target)
+
+
+def note(config, observed, request: ActionRequest) -> str | None:
+    """What a revocation does beyond this venue: the approvals to Permit2 it zeroes."""
+    if request.action != "revoke-exchange":
+        return None
+    (seen,) = observed
+    shared = [str(a.asset) for a in seen.allowances if a.expiration is None and a.amount]
+    if not shared:
+        return None
+    return (
+        f"revoke-exchange sets the wallet's ERC-20 approval to Permit2 to zero for "
+        f"{' and '.join(shared)}. Permit2 is shared: every other application that spends "
+        "these tokens from this wallet through Permit2 needs them approved again afterwards"
+    )
 
 
 BUILDERS = {

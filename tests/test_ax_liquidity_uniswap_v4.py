@@ -763,17 +763,65 @@ def test_a_revocation_zeroes_the_approvals_to_permit2_and_both_permit2_allowance
         validating(config, state, closed, after)[1](after)
 
 
-def test_a_revocation_is_refused_when_no_allowance_holds_an_amount():
+def test_a_revocation_is_refused_only_when_the_cleanup_has_nothing_to_clear():
     market = swaps.resolved()
-    soon = market.block.timestamp + 100
-    refusal = "the wallet has given Permit2 no allowance in either pool token"
-    for granted in ({}, {"permits": ((0, soon), (0, 0)), "routed": ((0, 0), (0, soon))}):
+    now = market.block.timestamp
+    # Nothing at all, and Permit2 allowances that hold no amount and have expired.
+    for granted in ({}, {"permits": ((0, now), (0, 0)), "routed": ((0, 0), (0, now - 1))}):
         _, config, _, bare = revoking(**granted)
-        with pytest.raises(ValueError, match=refusal):
+        assert not bare.needs_cleanup
+        with pytest.raises(ValueError, match="nothing to revoke: no approval of a pool token"):
             liquidity_direct.intent(config, (bare,), stated("revoke-exchange"))
     # A single base unit left to Permit2 is revoked.
     _, config, state, seen = revoking(tokens=(0, 1))
     assert [s.kind for s in revoked(config, state, seen)[0]] == ["revoke_erc20"]
+
+
+def test_a_spent_permit2_allowance_that_has_not_expired_is_revoked_and_reported():
+    """What a completed swap leaves until its deadline: no amount, and an expiration
+    still ahead. A strategy's start is refused on it, so the revocation clears it."""
+    market = swaps.resolved()
+    soon = market.block.timestamp + 100
+    _, config, state, seen = revoking(routed=((0, soon), (0, 0)))
+    found = connector_from_wire({"connector": CONNECTOR})
+    with pytest.raises(ValueError, match="cannot adopt pre-existing spending authority"):
+        found.lifecycle.validate_initial(state, (seen,))
+    steps, after = revoked(config, state, seen)
+    contracts = config.target(ALLOCATION).contracts
+    assert [(s.kind, str(s.asset), s.spender, s.amount, s.expiration) for s in steps] == [
+        ("revoke_permit2", USDC, contracts.router, 0, 0)
+    ]
+    found.lifecycle.validate_initial(state, (after,))
+    # The result lists it apart from the allowances that hold an amount, until it is
+    # expired; an expired one is not listed.
+    report = direct.binding(CONNECTOR).position
+    standing = report(state.model_copy(update={"initialized": True, "baseline": (seen,)}))
+    assert (standing["allowances"], standing["permit2_unexpired"]) == (
+        [],
+        [{"asset": USDC, "spender": contracts.router, "expiration": soon}],
+    )
+    cleared = report(state.model_copy(update={"initialized": True, "baseline": (after,)}))
+    assert cleared == {"inventory": standing["inventory"], "allowances": []}
+
+
+def test_the_note_names_the_shared_approvals_to_permit2_a_revocation_zeroes():
+    note = direct.binding(CONNECTOR).note
+    market = swaps.resolved()
+    soon = market.block.timestamp + 100
+    _, config, _, seen = revoking(tokens=(7, 0), permits=((7, soon), (0, 0)))
+    text = note(config, (seen,), stated("revoke-exchange"))
+    assert f"sets the wallet's ERC-20 approval to Permit2 to zero for {USDC}." in text
+    assert WETH not in text
+    assert "every other application that spends these tokens from this wallet" in text
+    _, config, _, both = revoking(tokens=(7, UNLIMITED_TOKEN))
+    assert f"for {USDC} and {WETH}." in note(config, (both,), stated("revoke-exchange"))
+    # Only Permit2's own allowances stand: nothing shared is touched, so nothing is noted.
+    _, config, _, own = revoking(permits=((7, soon), (0, 0)))
+    assert note(config, (own,), stated("revoke-exchange")) is None
+    # No other command zeroes the approval.
+    _, opening_config, _, minting = opening()
+    assert note(opening_config, (minting,), stated("open-liquidity")) is None
+    assert note(None, (), ActionRequest("swap", 5)) is None
 
 
 def test_a_revocation_deployment_admits_no_mint_and_no_position_command():
