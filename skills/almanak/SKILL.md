@@ -1,6 +1,6 @@
 ---
 name: almanak
-description: Manage DeFi positions for the user from plain requests with the Almanak SDK CLI, through a wallet you create and operate yourself. Use when the user asks to supply, lend, withdraw, borrow, repay, swap tokens, provide or remove liquidity, collect fees, check balances, gas or DeFi positions, or to set up an Almanak agent wallet. Start with its setup steps before asking the user anything. Covers installing the SDK, creating the agent wallet, finding what each chain serves, and the preview-then-execute workflow for lending, borrowing, swaps and liquidity.
+description: Manage DeFi positions for the user from plain requests with the Almanak SDK CLI, through a wallet you create and operate yourself. Use when the user asks to supply, lend, withdraw, borrow, repay, swap tokens, provide or remove liquidity, collect fees, check balances, gas, rates or DeFi positions, or to set up an Almanak agent wallet. Start with its setup steps before asking the user anything. Covers installing the SDK, creating the agent wallet, finding what each chain serves, and the preview-then-execute workflow for lending, borrowing, swaps and liquidity.
 ---
 
 # Almanak
@@ -39,12 +39,19 @@ chain and needs no transport or key:
 
 ```bash
 almanak support --connector <connector> --chain <chain> --json
+almanak support --chain <chain> --json
 ```
 
-Each entry's `direct_actions` lists the kinds that chain serves for your wallet;
-`actions` is what a strategy may do, so ignore it. An empty answer, or an entry
-without `direct_actions`, serves nothing. Without `--connector` the answer covers
-every protocol on the chain.
+Always filter. With both flags the answer is a few kilobytes. With `--chain` alone
+it covers every protocol on the chain: keep only each entry's `direct_actions`.
+With neither it is over 100 kilobytes; do not run it. In an entry:
+
+- `direct_actions` lists the kinds that chain serves for your wallet. When the key
+  is missing or null, or the answer is empty, nothing is served there.
+- `actions` is what a strategy may do, not what `ax` serves. GMX V2, Hyperliquid
+  and Morpho Blue on HyperEVM list `actions` and have no `direct_actions`.
+- `restrictions` says which pools or markets the connector takes. Read it before
+  you name one; the rest of the entry is for strategies.
 
 | Commands, each with its kind in `direct_actions` | Connectors |
 | --- | --- |
@@ -56,18 +63,21 @@ every protocol on the chain.
 | `ax collect-liquidity-fees` (`collect_liquidity_fees`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome` |
 
 Tell the user plainly when a request is outside what is served, and still finish
-the setup, so they see the wallet and what you can do with it. When the user names
-a chain or protocol you cannot act on, say which ones you can, and do not offer a
-strategy, a Safe or anything else as a way around it. You may read a balance or a
-position of an address other than your wallet only when the user gives you that
-address unasked. A public endpoint serves reads and direct actions on every
-supported chain except HyperEVM (`eip155:999`), which has none. The limits:
+the setup, so they see what you can do. When the user names a chain or protocol
+you cannot act on, say which ones you can, and do not offer a strategy, a Safe or
+anything else as a way around it. You may read a balance or a position of an
+address other than your wallet only when the user gives you that address unasked.
+A public endpoint serves reads and direct actions on every supported chain except
+HyperEVM (`eip155:999`), which has none. The limits:
 
 - The wallet is a plain account (EOA) that holds the funds itself. A Safe with
   delegated permissions is not available for these actions. If the user asks for a
   Safe, say so and offer the EOA wallet.
 - GMX V2 and Hyperliquid serve no direct action, and no direct action is served on
   HyperEVM: a provider key there serves reads only.
+- `curve` takes only a pool that a reviewed StableSwap NG, TwoCrypto NG or
+  TriCrypto NG factory registers, and no metapool. Every Curve command refuses an
+  older pool, the 3pool for one, with `unsupported_pool`.
 - An action takes the token itself. A chain's native coin must already be wrapped
   to be supplied, sold or provided; there is no wrap command.
 - An action has no amount ceiling. The wallet's balance and the fee ceilings bound
@@ -80,7 +90,7 @@ Everything lives in `~/.almanak/agent/`, outside any project:
 
 | Path | Holds |
 | --- | --- |
-| `wallet/` | The wallet directory `almanak wallet create` writes. Never print or read `keystores.json` or `keystore-password`. |
+| `wallet/` | The wallet directory `almanak wallet create` writes. Never print or read `keystores.json`, `keystore-password` or `gateway-auth.token`. `wallet.json` names their paths: take only `address` from it. |
 | `.env` | `ALCHEMY_API_KEY=...`, the user's provider key, only if they choose to give one. Never print it. |
 | `settings.json` | Your own notes, in this shape; create it when missing. |
 
@@ -95,13 +105,16 @@ Everything lives in `~/.almanak/agent/`, outside any project:
   ],
   "liquidity": [
     {"connector": "uniswap_v3", "chain": "eip155:8453", "pool": "0xd0b53d9277642d899df5c87a3966a349a798f224", "token_id": "5947663"},
-    {"connector": "curve", "chain": "eip155:1", "pool": "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7"}
+    {"connector": "curve", "chain": "eip155:1", "pool": "0x02950460e2b9529d0e00284a5fa2d7bdf3fa4d72"}
   ],
   "assets": [
     {"asset": "eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", "symbol": "USDC"}
   ]
 }
 ```
+
+The addresses in this example show the shape only. Never put one in a command
+unless the user gave it or an `ax` read returned it in this conversation.
 
 An entry of `markets` or `liquidity` is the connector, the chain and the
 connector's own selector fields, named as the flags under "Name the market or
@@ -115,8 +128,8 @@ one `assets` entry per token the wallet receives.
 
 Do these steps in order every time the skill loads, then report to the user in a
 few lines: the wallet's address, which chains have gas, and the positions you
-know of. Stop only at a step that says to ask the user; none of them asks for an
-address.
+know of, or that no wallet exists yet. Stop only at a step that says to ask the
+user; none of them asks for an address.
 
 ### 1. Install
 
@@ -156,8 +169,11 @@ Check for `~/.almanak/agent/wallet/wallet.json`.
 
 - **It exists.** Read `address` from it. This is a direct EOA wallet: the address
   holds the funds and signs for itself, and it is the same address on every chain.
-- **It does not exist.** Tell the user you are creating a direct EOA wallet that
-  will hold the funds they send it, and that a Safe is not available. Then run:
+- **It does not exist.** A read of a market, a pool, a rate or an address the user
+  gave takes no wallet: answer such a request without creating one, and skip step
+  4. Create the wallet when the user asks for an action, for your address, or to
+  set up. Tell them you are creating a direct EOA wallet that will hold the funds
+  they send it, and that a Safe is not available. Then run:
 
 ```bash
 almanak wallet create --account wallet --output ~/.almanak/agent/wallet --generate-password
@@ -199,6 +215,9 @@ is not always the entry's own asset:
 | `compound_v3` | `supplied_base` of the base asset; `collaterals.balance` in the row of each collateral asset | `borrowed_base` of the base asset | base asset: `market.base_asset.decimals`; a collateral: `market.collaterals.asset.decimals` in its row |
 | `morpho_blue` | `position.collateral`; `position.supply_shares` times `market.accounting.supply_assets` over `market.accounting.supply_shares` | `position.borrow_shares` times `market.accounting.borrow_assets` over `market.accounting.borrow_shares` | collateral: `market.collateral_asset.decimals`; loan asset: `market.loan_asset.decimals` |
 
+An account with no debt reports `risk.health_factor_wad` as 2^256 - 1, the
+largest value the field holds: say "no debt", never quote it as a number. The
+account that was read is `observation.fund`, or `observation.account` on Aave V4.
 The Morpho products are estimates from the market's totals; say so, and that a
 debt grows with interest. You only know what you have acted in: with nothing
 recorded, say so, and offer to check a market, a pool or a token ID the user
@@ -218,24 +237,21 @@ names.
 | Robinhood (`eip155:4663`) | `drpc` | `eip155:4663/slip44:60` |
 | HyperEVM (`eip155:999`) | none | `eip155:999/slip44:2457` |
 
-Use the first name. When it fails, for example with a message that ends in
-`HTTP 429` or `HTTP 408`, do not use what it returned: wait a minute, try once
-more, then use the second name and say so. A switch of transport voids a preview:
-preview on the new one and ask the user again before executing. Where there is no
-second name, or the chain has no public endpoint, tell the user it cannot be done
-without their own provider key, and leave it to them to offer one. Do not ask for
-the key.
+Use the first name. One failure is never retried and never cured by another
+endpoint: an `ax lending-markets` refusal whose message starts with `eth_getLogs:`,
+which "Name the market or pool" covers. When the endpoint fails otherwise, for
+example with a message that ends in `HTTP 429` or `HTTP 408`, do not use what it
+returned: wait a minute, try once more, then use the second name and say so. A
+switch of transport voids a preview: preview on the new one and ask the user
+again before executing. Where there is no second name, or the chain has no public
+endpoint, tell the user it cannot be done without their own provider key, and
+leave it to them to offer one. Do not ask for the key.
 
-What a public endpoint does not serve:
-
-- Finding a token or a pool by name (`ax resolve`, `ax dex-pools`) uses a vendor
-  key that a public endpoint does not replace. Ask the user for the token or pool
-  address instead and read it directly.
-- A Compound V3 listing, and a Morpho Blue listing on Avalanche and BNB, from
-  `ax lending-markets` reads an event history the public endpoints refuse
-  (`event history in one request`, `HTTP 429` or `JSON-RPC -32005`). Do not retry
-  it: ask the user for the Comet address or the Morpho market ID and read it with
-  `ax lending-reserve`.
+A command through a public endpoint is slow. A read takes seconds, and an action,
+preview or not, reads the wallet's whole position in the venue first: previews
+were measured at 20 seconds to 2 minutes, the longest on SparkLend and Compound
+V3, and a Comet with many collateral assets can take longer. Give every action
+command the time limit "Execute" states and wait for it to exit.
 
 ## Handling a request
 
@@ -245,9 +261,11 @@ One action is one command. Work through these steps for one action at a time.
 
 Pick the command from the table under "What is supported" and run
 `almanak support` for the connector and chain. Go on only when `direct_actions`
-lists the command's kind. When the user names no protocol, list the connectors
-that serve the kind on their chain and let them choose; never choose a protocol,
-a market or a pool for them.
+lists the command's kind. When the user names no protocol, or a name that fits
+several connectors, list the connectors that serve the kind on their chain and
+let them choose; never choose a protocol, a market or a pool for them. "Aave" on
+Ethereum, for one, is `aave_v3` or `aave_v4`, and `sparklend` is a separate
+protocol of the same design: name all three.
 
 ### 2. Name the market or pool
 
@@ -267,7 +285,12 @@ below:
 An asset is a CAIP-19 identity, `<chain>/erc20:<token address>`, never a symbol.
 Take every token, market and pool address from the user or from an `ax` read, never
 from your own memory: a remembered address is how funds reach the wrong contract.
-List lending markets, and check a market or a pool the user names, with:
+
+Expect to ask the user for the address. Nothing here finds a token or a pool by
+name: `ax resolve` and `ax dex-pools` use a vendor key that a public endpoint
+does not replace. So ask for the token address, the pool address or key, the
+Comet address or the Morpho market ID, and verify it with a read before you use
+it. Only lending markets can be listed:
 
 ```bash
 almanak ax lending-markets --connector <connector> --chain <chain> <transport>
@@ -281,6 +304,19 @@ almanak ax pool-price --connector <connector> --chain <chain> <market> --block l
   with `"status": "verified"`, whose `config.market` holds the selector fields. On
   the Aave connectors leave out a reserve that is `frozen` or `paused`, or whose
   `reserve` is null.
+- A Compound V3 listing, and a Morpho Blue listing on Avalanche and BNB, reads an
+  event history the public endpoints refuse. The refusal starts with
+  `eth_getLogs:` and usually says `event history in one request`, with whatever
+  code the endpoint gave (`HTTP 429`, `JSON-RPC -32005`, `JSON-RPC -32602`). Do
+  not retry it and do not switch endpoint: ask the user for the Comet address or
+  the Morpho market ID and read it with `ax lending-reserve`.
+- `ax lending-reserve` answers what a market pays and charges: `rates.supply_apy`
+  and `rates.borrow_apy`, each a ratio per year (0.05 is 5%), for the asset
+  `rates.asset` names, the protocol's rate at the block read and not a forecast.
+  `rates.selected_asset` is what the asset you selected earns, zero for
+  collateral. A verified listing row carries the same `rates`. On Aave V4 `rates`
+  is null on both, with the reason in `rates_unavailable`: say the CLI reads no
+  rate there, and do not estimate one.
 - `ax pool` verifies a pool through its connector: `resolution` names its
   `currencies` (`coins` on Curve) and their `decimals`, and `price` its `base` and
   `quote`. `ax pool-price` verifies a Uniswap V4 pool key, with `base` and `quote`
@@ -288,14 +324,21 @@ almanak ax pool-price --connector <connector> --chain <chain> <market> --block l
   `observation.currency1`. A `price` is whole units of the quote per whole unit of
   the base, as `numerator` over `denominator`, fees excluded; a Curve pool reports
   `prices`, each later coin in its first coin.
+- A `numerator` and a `denominator` are integers of up to a hundred digits.
+  Compute every price, amount and estimate with a tool that does exact integer
+  arithmetic, never by reading the digits.
+- A Uniswap V4 key is the pool. Copy all of it exactly from the user or a read:
+  the same pair with the chain's native coin (`slip44`) as a currency and with
+  its wrapped token are two different pools, and so are two fees or spacings.
 
 ### 3. Convert the amounts
 
 Every amount is an exact integer in base units: the user's amount times 10 to the
 power of the asset's `decimals`, which `ax balance` of that asset reports with what
-the wallet holds of it. Check that the wallet holds what the action spends. A
-withdrawal or a repayment without `--amount` takes the whole supplied balance or
-the whole debt; read the position and tell the user what that is.
+the wallet holds of it. Check that the wallet holds what the action spends: when
+it does not, do not preview, as step 5 explains. A withdrawal or a repayment
+without `--amount` takes the whole supplied balance or the whole debt; read the
+position and tell the user what that is.
 
 ### 4. Ask for what the user decides
 
@@ -333,6 +376,13 @@ almanak ax swap --connector <connector> --chain <chain> <market> --sell <asset> 
 chain serves `withdraw_amount` or `repay_amount`. `ax collateral` takes `--enable`
 or `--disable`. "Borrowing and the health floor" says which commands also take
 `--min-health-factor`.
+
+A preview needs the funds in the wallet. An action that spends more than the
+wallet holds is refused at its first check, before any step is planned, with a
+kind that differs by connector: `inventory`, `funding_unavailable`,
+`supply_unavailable`, or on Aave V4 `unavailable` with
+`funds are unavailable for supply`. So tell the user what to send, and that the
+first step and its gas can be shown only once the funds are in the wallet.
 
 Nothing is signed. The result has `position_before` and `first_step`, the first
 transaction the action would send, often an approval. The preview plans only that
@@ -376,9 +426,10 @@ Run one action at a time for the wallet, previews included, and wait for each to
 exit before starting the next. Two at once refuse each other.
 
 An executing command waits for each transaction to be mined, with no time limit
-of its own. Run it with the longest limit your tool allows, ten minutes or more
-where it can, and never kill it; a limit that ends it is a kill. To stop it, send
-an interrupt once and wait: it stops between steps and reports what it sent.
+of its own. Run an action command, preview or not, with the longest limit your
+tool allows, ten minutes or more where it can, and never kill it; a limit that
+ends it is a kill. To stop it, send an interrupt once and wait: it stops between
+steps and reports what it sent.
 
 Read the result, of an action or of `ax recover`, by these fields, then read the
 position again and report both:
@@ -407,9 +458,6 @@ pool's. After an open in a tick range, add the token ID from
   and revokes what is left, so the wallet must hold the whole debt with its
   interest; a shortfall is refused with the amount missing. If it stops before the
   revocation, `ax repay` again revokes it.
-- An action reads the wallet's whole position in the venue first. On a Compound
-  V3 Comet with many collateral assets that can take minutes through a public
-  endpoint.
 - **Aave V3 and SparkLend.** The Pool enables a first supply as collateral when the
   reserve has a loan-to-value. `ax collateral` turns that on or off.
 - **Aave V4.** A withdrawal and a repayment are whole. One reserve can be
@@ -540,6 +588,12 @@ earns nothing.
   mined price, so tell the user it can use less than stated and that the rest
   stays in the wallet; amounts near that ratio leave the least unused. Below the
   range only currency0 is taken, above it only currency1.
+- No read reports that ratio, so do not work out the second amount with a
+  formula of your own. When the user states one amount ("500 USDC, plus or minus
+  5%"), ask for the most of the other currency the open may use, at most what the
+  wallet holds. The scarcer of the two limits the mint: tell them that a low
+  limit on the other currency means less than their stated amount goes in, and
+  report from the result's `moved` what was taken.
 - `--slippage-bps` is in the signed mint or increase: it reverts when mined at a
   price further than that, in either direction, from the price the command first
   read. On Uniswap V4 that is the price the mint step is planned at. Tell the
@@ -592,12 +646,13 @@ almanak ax close-liquidity --connector <connector> --chain <chain> <market> --re
 ```
 
 - `--amount <coin>=<base units>` is given once per coin deposited, and the
-  deposit uses exactly the stated amounts. In other proportions than the pool's
-  it trades against the pool and pays its fee. `--slippage-bps` is in the signed
-  call, as the least LP shares it may mint.
+  deposit uses exactly the stated amounts. The coin is its CAIP-19 asset, as
+  `ax pool` lists it under `coins`; a symbol or an index is a usage error. In
+  other proportions than the pool's it trades against the pool and pays its fee.
+  `--slippage-bps` is in the signed call, as the least LP shares it may mint.
 - A burn states `--receive`, which is the user's decision: `balanced` pays every
-  coin in the pool's current proportions, and a coin of the pool pays that coin
-  alone, which trades against the pool and pays its fee.
+  coin in the pool's current proportions, and a coin of the pool, as its CAIP-19
+  asset, pays that coin alone, which trades against the pool and pays its fee.
 
 Connectors: `aerodrome`.
 
@@ -635,9 +690,11 @@ tell the user what it says, and preview what it names if they want it.
 | `gas_price`, `gas_fee_quote` or `gas_limit` | A step's fee quote or gas is above a ceiling. The quoted price is twice the base fee plus a tip, 1.25 times on Arbitrum and Robinhood. | Tell the user the quote and ask whether to wait or raise the ceiling. Never raise it yourself. Say which steps in `outcomes` were already sent. |
 | `health_factor`, `risk_limit` or `violates the configured fund/market health floor` | The step would leave the account below the floor, so it was not signed. On Aave V4, collateral steps before it may be mined. | Tell the user. A smaller amount, more collateral or a lower floor is their choice. |
 | `deployment_changed` or `has an unverified revision` | The connector refused the protocol's contracts as unreviewed. The endpoint is not the cause. | Do not retry or switch endpoint. Say the installed SDK cannot use that protocol on that chain. |
+| `unsupported_pool` or `unsupported_revision` | The connector does not take this pool: on Curve, one that no reviewed factory registers or whose code matches no reviewed revision; on Uniswap V4, a key or hook outside review. The endpoint is not the cause. | Do not retry or switch endpoint. Say the installed SDK cannot use that pool; another pool is the user's choice. |
+| `event history in one request` | The endpoint refused the event read of an `ax lending-markets` listing. | Do not retry or switch endpoint. Ask the user for the Comet address or the Morpho market ID, as "Name the market or pool" says. |
 | `ownership_mismatch` or `risk_unavailable` | The wallet's position in the venue is not what the command read or expected. | On a preview, or with nothing sent yet: preview again, which reads it anew, and stop if it repeats. With `unresolved`, `record_kept` or on `ax recover`: a step is already signed, so report the message and stop. |
 | `allowance_mismatch` or `allowance differs from the requested amount` | The wallet already approved another amount to this market. | Tell the user. Stating exactly the approved amount works, and so does the command the message names, which ends by revoking. |
-| `funds are unavailable for supply` or `inventory` | The wallet holds less than the action states, or the market cannot take it. | Check the balances and tell the user. |
+| `inventory`, `funding_unavailable`, `supply_unavailable` or `funds are unavailable for supply` | The wallet holds less than the action states, or the market cannot take it. An unfunded wallet gets this on every preview. | Check the balances and tell the user what is missing. The first step and its gas can be shown only once the wallet holds the funds. |
 | `retained deadline expired` | A step was not signed within `--deadline-seconds`, for example after a slow approval. Nothing more was sent. | Report the steps that ran and any allowance left, then preview again. |
 | `price moved beyond` | The pool price moved more than `--slippage-bps` since the action read it. | Preview again; a wider bound is the user's choice. |
 | `signed_attempt_unsendable` | On `ax recover`: a signed step with no deadline, such as a Curve swap, may have been sent and would now fail its own minimum, so it is neither sent again nor dropped. It can still execute at that old minimum, through `ax recover` or anyone who holds the signed transaction, once the pool pays it again. The wallet stays blocked on that chain. | Tell the user all of that. Running `ax recover` again will send it if the pool then allows, so ask before every further attempt. Never send another transaction from the wallet to get past it. |
