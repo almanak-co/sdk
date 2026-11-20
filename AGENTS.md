@@ -200,7 +200,7 @@ independently.
   is released on a current-state refusal. A maybe-sent attempt with no calldata
   deadline that current validation refuses stops with
   `signed_attempt_unsendable`.
-- Proposed, not accepted: an operator deployment's signed step whose submitter
+- Accepted: an operator deployment's signed step whose submitter
   nonce was consumed is dropped, with or without a calldata deadline, sent or
   not. The gateway proves, when asked and again when the drop is recorded, that
   the step has no canonical receipt and that exactly one other transaction of
@@ -223,7 +223,7 @@ independently.
   never-sent step is dropped only by this proof, so a connector that cannot
   release gains no release. A strategy deployment still stops at an occupied
   recorded nonce. Never describe this proof as on-chain enforcement.
-- Proposed, not accepted, as the risk of the rule above: the proof rests on one
+- Accepted risk of the rule above: the proof rests on one
   endpoint's report of its head, its finalized block and a block's
   transactions. An endpoint that lies can cause the release of a step that is
   still valid. For a sent step with no calldata deadline, such as a Curve swap,
@@ -425,7 +425,7 @@ independently.
   strands a claim. Records live in durable local state; one with no signed step
   is removed, with its claim, by the next direct command. An unreadable record
   is kept.
-- Proposed, not accepted: `ax recover` also releases a signed step whose nonce
+- Accepted: `ax recover` also releases a signed step whose nonce
   another finalized transaction of the wallet consumed, under the proof stated
   in "Execution and recovery". The result lists it under
   `released_consumed_nonce` with the consuming transaction and its block, and
