@@ -702,8 +702,8 @@ def test_support_reads_no_chain():
 
 
 def test_the_agent_creates_its_wallet_before_any_command_needs_an_address():
-    """The address every read takes is the created wallet's, never one asked of the
-    user, and the user hears what funding it means before they fund it."""
+    """The address a read of the agent's own funds takes is the created wallet's, never
+    one asked of the user, and the user hears what funding it means before they fund it."""
     from almanak.gateway import credentials
 
     lines = commands()
@@ -1101,5 +1101,259 @@ def test_the_agents_page_names_what_the_skill_covers():
         "not an enforced control",
         "nobody answers for what the endpoint reports",
         "`direct_actions`",
+        "defers creating the wallet",
+        "`gateway-auth.token`",
+        "StableSwap NG, TwoCrypto NG or TriCrypto NG",
+        "`rates`",
+        "can be shown only once the wallet holds the funds",
     ):
         assert statement in page, statement
+
+
+def support_answer(capsys, *filters: str) -> str:
+    """What `almanak support --json` prints with these filters."""
+    from almanak import cli
+
+    capsys.readouterr()
+    assert cli.dispatch(build_parser().parse_args(["support", *filters, "--json"])) == 0
+    return capsys.readouterr().out
+
+
+def test_support_is_read_filtered_and_by_its_direct_actions(capsys):
+    """The sizes the skill states, and the key it reads: a connector that serves no
+    direct action lists `actions` and has no `direct_actions` at all."""
+    from almanak.connectors.direct import NOT_DIRECT, direct_actions
+
+    stated = " ".join(section("What is supported").split())
+    assert "Always filter" in stated and "do not run it" in stated
+    assert "With neither it is over 100 kilobytes" in stated
+    assert len(support_answer(capsys)) > 100_000
+    assert "With both flags the answer is a few kilobytes" in stated
+    for name in direct_actions():
+        for cell in json.loads(support_answer(capsys, "--connector", name))[name]:
+            narrow = support_answer(capsys, "--connector", name, "--chain", cell["chain"])
+            assert len(narrow) < 5_000, (name, cell["chain"])
+    assert "When the key is missing or null, or the answer is empty, nothing is served" in stated
+    assert "`actions` is what a strategy may do, not what `ax` serves" in stated
+    unserved = [(name, None) for name in NOT_DIRECT] + [("morpho_blue", "eip155:999")]
+    for name, chain in unserved:
+        filters = ["--connector", name] + (["--chain", chain] if chain else [])
+        cells = json.loads(support_answer(capsys, *filters))[name]
+        assert cells and all(cell["actions"] and "direct_actions" not in cell for cell in cells)
+        assert name.replace("_", " ") in stated.lower()
+    assert "`restrictions` says which pools or markets the connector takes" in stated
+
+
+def test_the_curve_limit_and_the_example_pool_are_the_connectors_own():
+    """Curve takes the three reviewed factory families and no metapool, as its support
+    states, and the example's Curve pool is one a reference strategy runs on its chain."""
+    from almanak.connectors.composition import connector_from_wire
+    from almanak.connectors.curve.networks import COIN_VIEWS
+
+    limits = " ".join(section("What is supported").split())
+    assert (
+        "a pool that a reviewed StableSwap NG, TwoCrypto NG or TriCrypto NG factory registers"
+        in limits
+    )
+    assert "no metapool" in limits and "with `unsupported_pool`" in limits
+    assert set(COIN_VIEWS) == {"stableswap_ng", "twocrypto_ng", "tricrypto_ng"}
+    for cell in connector_from_wire({"connector": "curve"}).chain_support:
+        restrictions = " ".join(cell.restrictions)
+        assert "StableSwap NG, TwoCrypto NG or TriCrypto NG" in restrictions
+        assert "no metapool routing" in restrictions
+    (block,) = re.findall(r"```json\n(.*?)```", text(), flags=re.DOTALL)
+    (entry,) = [e for e in json.loads(block)["liquidity"] if e["connector"] == "curve"]
+    references = [
+        config.read_text()
+        for config in (ROOT / "strategies").glob("curve_*/config.yaml")
+        if entry["chain"] in config.read_text()
+    ]
+    assert any(entry["pool"] in reference for reference in references)
+    assert "The addresses in this example show the shape only" in flat()
+    assert "unless the user gave it or an `ax` read returned it" in flat()
+    cells = [row[0] for row in rows(section("When something is refused"))]
+    assert "`unsupported_pool` or `unsupported_revision`" in cells
+
+
+def test_a_curve_coin_is_its_asset_and_a_listing_refusal_is_known_by_its_words():
+    from almanak import ax_lending_markets
+    from almanak.ax_liquidity import coin_amount, payout
+    from almanak.gateway.ethereum import DataError
+
+    assert coin_amount(f"{USDC}=1000") == (USDC, 1000)
+    for stated in ("USDC=1000", "0=1000"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            coin_amount(stated)
+    assert payout("balanced") == "balanced" and payout(USDC) == USDC
+    with pytest.raises(argparse.ArgumentTypeError):
+        payout("USDC")
+    shares = " ".join(subsection("A position held as LP tokens").split())
+    assert "The coin is its CAIP-19 asset" in shares
+    assert "a symbol or an index is a usage error" in shares
+    # The listing's refusal carries whatever code the endpoint gave; a throttle keeps
+    # its own message. Both start with the read's name, which is what the skill keys on.
+    refused = DataError("rpc", "eth_getLogs: RPC rejected the read (JSON-RPC -32602)", code=-32602)
+    throttled = DataError("http", "eth_getLogs: HTTP 429", code=429)
+    block = SimpleNamespace(number=1)
+    messages = []
+    for answer in (refused, throttled):
+
+        def rpc(method, params, answer=answer):
+            raise answer
+
+        with pytest.raises(DataError) as raised:
+            ax_lending_markets.created(SimpleNamespace(_rpc=rpc), block, "0xc", "0xt", 2)
+        messages.append(str(raised.value))
+    assert "event history in one request" in messages[0] and "-32602" in messages[0]
+    assert "event history in one request" not in messages[1]
+    assert all(message.startswith("eth_getLogs:") for message in messages)
+    naming = " ".join(subsection("2. Name the market or pool").split())
+    assert "The refusal starts with `eth_getLogs:`" in naming
+    assert "Do not retry it and do not switch endpoint" in naming
+    assert "Expect to ask the user for the address" in naming
+    # The general retry rule states its exception before it states itself.
+    endpoints = " ".join(section("Public endpoints").split())
+    assert endpoints.index("whose message starts with `eth_getLogs:`") < endpoints.index(
+        "wait a minute, try once more"
+    )
+
+
+def test_the_wallet_files_the_skill_forbids_are_the_ones_creation_writes(tmp_path):
+    from almanak.gateway import credentials
+
+    written = []
+    record = credentials.write_wallet(
+        tmp_path, "wallet", "0x" + "11" * 20, {}, "password", write=lambda n, _: written.append(n)
+    )
+    (row,) = [cells[1] for cells in rows(section("Files")) if cells[0] == "`wallet/`"]
+    secret = set(written) - {"wallet.json"}
+    assert secret == {"keystores.json", "keystore-password", "gateway-auth.token"}
+    assert secret <= set(spans(row.split("`wallet.json`")[0]))
+    # The record names the path of every secret, so only its address is taken.
+    assert {"account", "address"} < set(record)
+    named = {Path(record[name]).name for name in set(record) - {"account", "address"}}
+    assert named == secret
+    assert "`wallet.json` names their paths: take only `address` from it" in row
+
+
+def test_the_rates_the_skill_names_are_the_ones_a_reserve_read_reports():
+    from almanak.connectors import lending_rates
+    from almanak.connectors.direct import connectors_for
+
+    naming = " ".join(subsection("2. Name the market or pool").split())
+    assert set(lending_rates.RATES) | set(lending_rates.UNOBSERVED) == set(connectors_for("supply"))
+    assert set(lending_rates.UNOBSERVED) == {"aave_v4"}
+    assert "On Aave V4 `rates` is null on both, with the reason in `rates_unavailable`" in naming
+    unread = lending_rates.rates_entry("aave_v4", None, None)
+    assert unread["rates"] is None and unread["rates_unavailable"]
+    asset = SimpleNamespace(identifier="asset")
+    reported = lending_rates.per_second(asset, lending_rates.ray_apr(0), lending_rates.ray_apr(0))
+    selected = lending_rates.selected_yield(reported, "another")
+    named = {name for name in spans(naming) if name.startswith("rates.")}
+    assert named == {"rates.supply_apy", "rates.borrow_apy", "rates.asset", "rates.selected_asset"}
+    assert {name.split(".")[1] for name in named} <= {*reported, "selected_asset"}
+    assert float(selected["supply_apy"]) == 0 and selected["role"] == "collateral"
+    assert "each a ratio per year (0.05 is 5%)" in naming
+    assert lending_rates.UNIT == "ratio per year, 0.05 is 5%"
+    assert "do not estimate one" in naming
+
+
+def test_a_position_read_names_its_account_and_says_no_debt():
+    from almanak.connectors.direct import connectors_for
+    from almanak.connectors.pool_lending_domain import AccountRisk
+
+    positions = " ".join(subsection("4. Gas and positions").split())
+    assert (
+        "The account that was read is `observation.fund`, or `observation.account` on Aave V4"
+        in positions
+    )
+    for connector in connectors_for("borrow"):
+        field = "account" if connector == "aave_v4" else "fund"
+        assert field in position_model(connector).model_fields, connector
+    assert "reports `risk.health_factor_wad` as 2^256 - 1" in positions
+    assert 'say "no debt", never quote it as a number' in positions
+    highest = 2**256 - 1
+    values = dict.fromkeys(AccountRisk.model_fields, 0) | {"health_factor_wad": highest}
+    assert AccountRisk(**values).health_factor_wad == highest
+    with pytest.raises(ValueError):
+        AccountRisk(**values | {"health_factor_wad": highest + 1})
+
+
+def test_a_range_open_is_sized_by_two_limits_and_a_pool_key_is_copied_whole():
+    from almanak.caip import AssetType, ChainId
+    from almanak.connectors.concentrated_math import liquidity_for
+    from almanak.connectors.uniswap_v4.pool import key_id
+
+    ranged = " ".join(subsection("A position in a tick range").split())
+    for statement in (
+        "No read reports that ratio",
+        "do not work out the second amount with a formula of your own",
+        "ask for the most of the other currency the open may use",
+        "The scarcer of the two limits the mint",
+    ):
+        assert statement in ranged, statement
+    # Inside the range the mint is bounded by the scarcer amount; beside it by one only.
+    q96 = 2**96
+    lower, price, upper = q96, 2 * q96, 4 * q96
+    ample = liquidity_for(10**9, 10**12, price, lower, upper)
+    scarce = liquidity_for(10**9, 10**3, price, lower, upper)
+    assert 0 < scarce < ample == liquidity_for(10**9, 10**15, price, lower, upper)
+    assert liquidity_for(10**9, 0, price, lower, upper) == 0
+    assert liquidity_for(10**9, 0, lower, lower, upper) > 0
+    # A native currency and its wrapped token make two pool IDs from one pair.
+    chain = ChainId(PLACEHOLDERS["<chain>"])
+    ids = {
+        key_id(chain, (AssetType(currency), AssetType(USDC), 500, 10, "0x" + "00" * 20))
+        for currency in (PLACEHOLDERS["<native asset>"], WETH)
+    }
+    assert len(ids) == 2
+    naming = " ".join(subsection("2. Name the market or pool").split())
+    assert "A Uniswap V4 key is the pool. Copy all of it exactly from the user or a read" in naming
+    assert "are two different pools" in naming
+    assert "Compute every price, amount and estimate with a tool" in naming
+    assert "never by reading the digits" in naming
+
+
+def test_a_name_that_fits_several_connectors_is_the_users_choice():
+    from almanak.connectors.composition import connector_from_wire
+
+    served = subsection("1. Check that it is served")
+    assert "or a name that fits several connectors" in " ".join(served.split())
+    named = [name for name in spans(served) if name in selectors()]
+    assert named == ["aave_v3", "aave_v4", "sparklend"]
+    for name in named:
+        cells = connector_from_wire({"connector": name}).chain_support
+        (cell,) = [cell for cell in cells if str(cell.chain) == PLACEHOLDERS["<chain>"]]
+        assert "supply" in cell.direct_actions, name
+
+
+def test_a_read_needs_no_wallet_and_a_preview_needs_the_funds():
+    """The reads that answer a question about a market or a pool take no account, so
+    the wallet is created only for a request that needs the agent's own address. An
+    action from a wallet without the funds is refused with one of the kinds named."""
+    wallet = " ".join(subsection("3. Wallet").split())
+    assert "takes no wallet: answer such a request without creating one" in wallet
+    assert (
+        "Create the wallet when the user asks for an action, for your address, or to set up"
+        in wallet
+    )
+    for command in ("pool", "pool-price", "lending-reserve", "lending-markets"):
+        taken = {action.dest for action in ax_parsers()[command]._actions}
+        assert not taken & {"account", "wallet"}, command
+    preview = " ".join(subsection("5. Preview").split())
+    assert "A preview needs the funds in the wallet" in preview
+    assert (
+        "the first step and its gas can be shown only once the funds are in the wallet" in preview
+    )
+    kinds, parts = raised_refusals()
+    row = next(r for r in rows(section("When something is refused")) if "`inventory`" in r[0])
+    for stated in spans(row[0]):
+        assert f"`{stated}`" in preview, stated
+        assert stated in kinds or any(stated in part for part in parts), stated
+    assert "`unavailable`" in preview and "unavailable" in kinds
+    assert "An unfunded wallet gets this on every preview" in row[1]
+    # Every action command is given the long limit, a preview too.
+    endpoints = " ".join(section("Public endpoints").split())
+    assert 'Give every action command the time limit "Execute" states' in endpoints
+    execute = " ".join(subsection("7. Execute").split())
+    assert "Run an action command, preview or not, with the longest limit" in execute
