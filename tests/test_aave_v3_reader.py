@@ -18,15 +18,22 @@ from almanak.connectors.aave_v3.math import (
     normalized_indices,
     supplied_assets,
 )
-from almanak.connectors.aave_v3.reader import read_position
+from almanak.connectors.aave_v3.reader import POOL_REVISIONS, read_position
 from almanak.gateway.ethereum import DataError, EthereumReader
 from almanak.models import Account, Block, Chain
 
 FIXTURE = Path(__file__).parent / "fixtures/aave-v3-ethereum-revision11-reads.json.gz"
+POOL_REVISION = "0x" + keccak(text="POOL_REVISION()")[:4].hex()
 
 
-def captured(network="ethereum"):
-    path = FIXTURE.with_name(f"aave-v3-{network}-revision11-reads.json.gz")
+NETWORKS = ["ethereum", "base", "arbitrum", "optimism", "bnb", "polygon", "avalanche"]
+# The Pool revisions with captured reads on every network. The revision-12 blocks follow
+# each Pool's upgrade; their comparison values are the contracts' own answers there.
+REVISIONS = [11, 12]
+
+
+def captured(network="ethereum", revision=11):
+    path = FIXTURE.with_name(f"aave-v3-{network}-revision{revision}-reads.json.gz")
     return json.loads(gzip.decompress(path.read_bytes()))
 
 
@@ -48,11 +55,10 @@ def replay(raw):
 
 
 @pytest.mark.parametrize("index", [0, 1])
-@pytest.mark.parametrize(
-    "network", ["ethereum", "base", "arbitrum", "optimism", "bnb", "polygon", "avalanche"]
-)
-def test_revision_11_reader_and_integer_indices_match_archival_contracts(index, network):
-    raw = captured(network)
+@pytest.mark.parametrize("network", NETWORKS)
+@pytest.mark.parametrize("revision", REVISIONS)
+def test_reader_and_integer_indices_match_archival_contracts(index, network, revision):
+    raw = captured(network, revision)
     expected = PositionObservation.model_validate_json(json.dumps(raw["positions"][index]))
     comparison = raw["comparisons"][index]
     with replay(raw) as reader:
@@ -68,11 +74,56 @@ def test_revision_11_reader_and_integer_indices_match_archival_contracts(index, 
         ) == tuple(comparison["total_balances"])
 
 
-@pytest.mark.parametrize(
-    "network", ["ethereum", "base", "arbitrum", "optimism", "bnb", "polygon", "avalanche"]
-)
-def test_changed_pool_implementation_cannot_claim_a_supported_revision(network):
-    raw = captured(network)
+def pool_identity(raw):
+    """The Pool's proxy and implementation code hashes, from the recorded code itself."""
+    proxy, implementation = [r for r in raw["reads"] if r["method"] == "eth_getCode"][:2]
+    assert proxy["params"][0] == raw["positions"][0]["reserve"]["source"]["pool"]
+    return tuple(
+        "0x" + keccak(bytes.fromhex(row["result"][2:])).hex() for row in (proxy, implementation)
+    )
+
+
+@pytest.mark.parametrize("network", NETWORKS)
+@pytest.mark.parametrize("revision", REVISIONS)
+def test_each_pinned_pool_reports_the_revision_it_was_verified_as(network, revision):
+    raw = captured(network, revision)
+    reported = [
+        int(r["result"], 16)
+        for r in raw["reads"]
+        if r["method"] == "eth_call" and r["params"][0]["data"] == POOL_REVISION
+    ]
+    assert set(reported) == {revision}
+    assert POOL_REVISIONS[pool_identity(raw)] == revision
+
+
+def test_the_revisions_of_one_network_share_a_pool_proxy_and_reserve_tokens():
+    for network in NETWORKS:
+        old, new = captured(network, 11), captured(network, 12)
+        assert pool_identity(old)[0] == pool_identity(new)[0]
+        assert pool_identity(old)[1] != pool_identity(new)[1]
+        for before, after in zip(old["positions"], new["positions"], strict=True):
+            for token in ("a_token", "variable_debt_token"):
+                assert before["reserve"][token] == after["reserve"][token]
+
+
+@pytest.mark.parametrize("revision", REVISIONS)
+def test_pinned_pool_code_reporting_another_revision_is_refused(revision):
+    raw = captured("base", revision)
+    other = REVISIONS[1 - REVISIONS.index(revision)]
+    for row in raw["reads"]:
+        if row["method"] == "eth_call" and row["params"][0]["data"] == POOL_REVISION:
+            row["result"] = "0x" + other.to_bytes(32, "big").hex()
+    expected = PositionObservation.model_validate_json(json.dumps(raw["positions"][0]))
+    with replay(raw) as reader:
+        block = reader.pin_block(expected.reserve.block.number)
+        with pytest.raises(DataError, match="revision differs from its model"):
+            read_position(reader, expected.reserve.source, expected.fund, block)
+
+
+@pytest.mark.parametrize("network", NETWORKS)
+@pytest.mark.parametrize("revision", REVISIONS)
+def test_changed_pool_implementation_cannot_claim_a_supported_revision(network, revision):
+    raw = captured(network, revision)
     code_reads = [r for r in raw["reads"] if r["method"] == "eth_getCode"]
     implementation = code_reads[1]["params"][0]
     for row in code_reads:
@@ -85,8 +136,9 @@ def test_changed_pool_implementation_cannot_claim_a_supported_revision(network):
             read_position(reader, expected.reserve.source, expected.fund, block)
 
 
-def test_historical_discovery_pins_the_selected_header_before_authority_reads():
-    raw = captured()
+@pytest.mark.parametrize("revision", REVISIONS)
+def test_historical_discovery_pins_the_selected_header_before_authority_reads(revision):
+    raw = captured(revision=revision)
     expected = PositionObservation.model_validate_json(json.dumps(raw["positions"][0]))
     block = expected.reserve.block
     with replay(raw) as reader:
