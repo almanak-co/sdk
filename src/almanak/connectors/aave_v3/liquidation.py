@@ -1,4 +1,7 @@
-"""Revision-11 liquidation amounts and scaled consumption, without keeper execution."""
+"""Liquidation amounts and scaled consumption of Pool revision 11, without keeper execution.
+
+Pool revision 12 runs the same liquidation logic unchanged.
+"""
 
 from almanak.connectors.aave_v3.domain import OracleQuote, PositionObservation, Uint256
 from almanak.connectors.aave_v3.math import (

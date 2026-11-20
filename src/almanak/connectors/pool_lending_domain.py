@@ -59,8 +59,8 @@ class ReserveConfiguration(Model):
     def first_supply_enables_collateral(self) -> bool:
         """Whether the Pool enables a supply into an empty position as collateral.
 
-        Exact only for the ordinary-mode reserves the SDK admits: on Aave V3 revision 11 the
-        Pool tests the user's effective LTV (eMode can change it), and on SparkLend a reserve
+        Exact only for the ordinary-mode reserves the SDK admits: on Aave V3 revisions 11 and
+        12 the Pool tests the user's effective LTV (eMode can change it), and on SparkLend a reserve
         with a nonzero debt ceiling (isolated collateral) also needs the
         ISOLATED_COLLATERAL_SUPPLIER role. eMode for new exposure and isolated or siloed
         SparkLend reserves are refused elsewhere, which leaves reserve LTV > 0.

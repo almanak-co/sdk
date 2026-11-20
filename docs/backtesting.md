@@ -80,6 +80,11 @@ that run. Do not replace datasets or silently change sampling on resume.
 - `economic` uses prepared Aave lending samples, including borrowing, collateral,
   repayment and liquidation, or bounded integer Uniswap pool state with price
   impact and tick crossings. LP fees use explicit fixed historical fee growth.
+  The Aave V3 model and its datasets carry `revision11` in their identifiers
+  (`aave-v3-revision11-economic-indices-v1`, `immediate_underlying_v3_revision11`).
+  The name is the accounting model's: Pool revision 12 runs the same supply,
+  borrow and liquidation logic, so the model serves history under either revision
+  and a window may span a Pool's upgrade from one to the other.
 
 Hypothetical trades and liquidity do not change later external market history.
 LP fees exclude hypothetical dilution and fees from the strategy's own trades.
