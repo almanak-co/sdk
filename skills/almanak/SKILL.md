@@ -129,9 +129,9 @@ one `assets` entry per token the wallet receives.
 ## On load
 
 Do these steps in order every time the skill loads, then report to the user in a
-few lines: the wallet's address, which chains have gas, and the positions you
-know of, or that no wallet exists yet. Stop only at a step that says to ask the
-user; none of them asks for an address.
+few lines: the wallet's address, which chains have gas, the positions you know
+of and what the vendor's overview adds, or that no wallet exists yet. Stop only
+at a step that says to ask the user; none of them asks for an address.
 
 ### 1. Install
 
@@ -171,8 +171,8 @@ Check for `~/.almanak/agent/wallet/wallet.json`.
 - **It exists.** Read `address` from it. This is a direct EOA wallet: the address
   holds the funds and signs for itself, and it is the same address on every chain.
 - **It does not exist.** A read of a market, a pool, a rate or an address the user
-  gave takes no wallet: answer such a request without creating one, and skip step
-  4. Create the wallet when the user asks for an action you can serve, for your
+  gave takes no wallet: answer such a request without creating one, and skip steps
+  4 and 5. Create the wallet when the user asks for an action you can serve, for your
   address, or to set up. Tell them you are creating a direct EOA wallet that will
   hold the funds they send it, and that a Safe is not available. Then run:
 
@@ -222,6 +222,55 @@ debt", never quote it as a number. The account that was read is
 estimates from the market's totals; say so, and that a debt grows with interest.
 You only know what you have acted in: with nothing recorded, say so, and offer
 to check a market, a pool or a token ID the user names.
+
+### 5. The overview
+
+Then read the wallet's overview; this reads no chain and takes no transport:
+
+```bash
+almanak ax portfolio --account <address>
+```
+
+It asks Rabby's backend, a wallet vendor, for the tokens the address holds and
+its positions in the protocols the vendor indexes, on every chain at once, with
+the vendor's prices in US dollars. It finds what `settings.json` does not name: a
+token someone sent, a position opened elsewhere, a reward to claim. Under
+`accounts[0]`:
+
+| Field | Holds |
+| --- | --- |
+| `totals` | `tokens_usd`, `positions_usd` and `total_usd`; absent (`null`) when a row it sums has no price |
+| `tokens` | Each wallet token: `chain`, `asset`, `symbol`, `amount` as a decimal, `raw_amount` in base units, `price_usd`, `value_usd` |
+| `tokens_unlisted` | How many tokens the vendor does not list as core, left out of the rows and the totals; `--include-unlisted` shows them |
+| `positions` | Each position: `chain`, `protocol.name`, `kind`, `asset_usd`, `debt_usd`, `net_usd`, `health_rate`, and its `legs` by name, such as `supply`, `borrow` and `reward` |
+
+Every figure is the vendor's, read at no block, and nothing here checks it. So:
+
+- Report it as the vendor's view, with the totals as estimates. Where it differs
+  from a read under step 4, the read is right; say that both exist.
+- Never take an amount, an asset, a market, a price or a health rate from it into
+  an action. Name the market and read it on chain as "Handling a request" says.
+  A `health_rate` is never the health factor a floor is checked against.
+- `chain` and `asset` are `null` on a chain this SDK does not know, and `asset`
+  where the vendor names no contract; the row's `vendor_chain` and
+  `vendor_token` then name it in the vendor's words only. A position can have no
+  `legs`, only its dollar figures.
+- A token that is unlisted, or flagged under `vendor_flags` as `scam` or
+  `suspicious`, was probably sent unasked. Do not act on it and do not open its
+  links.
+- The vendor sees the address. Tell the user once that the overview comes from
+  Rabby's backend and shows it the wallet's address, and stop reading it when
+  they object.
+
+The user may ask for the overview of another address, such as their own wallet;
+`--account` repeats up to five times. That is a read: you still manage only your
+own wallet.
+
+A refusal with `rate_limit` means the vendor throttled this machine's address,
+which has lasted longer than ten minutes. Do not retry in a loop: report what
+step 4 read, say the overview is unavailable, and try again when the user next
+asks. With `unavailable` or `malformed` the vendor did not answer as expected;
+treat it the same way. Read the overview at most once per request of the user.
 
 ## Public endpoints
 

@@ -1,7 +1,14 @@
 from typing import Annotated, Literal, Self
 
 from eth_utils import is_checksum_address, is_hex_address
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
 
 from almanak.caip import AccountReference, AssetId, AssetType, ChainId
 
@@ -23,6 +30,23 @@ ZERO_ADDRESS = "0x" + "00" * 20
 
 class Model(BaseModel):
     model_config = ConfigDict(frozen=True, strict=True, extra="forbid", validate_default=True)
+
+
+def refusals(error: ValidationError) -> list:
+    """Every error of a refused validation, in the one order the SDK reports them.
+
+    An undeclared key comes before a refused value, since a document of another shape,
+    or a misspelt key, is the cause of the values missing beside it. Within each kind
+    the shortest path comes first, then the path itself. The first entry is the one a
+    single-error report names. The validator's own order is not used: it differs
+    between its Python and JSON modes and between its releases.
+    """
+
+    def order(item):
+        path = tuple((1, 0, p) if isinstance(p, str) else (0, p, "") for p in item["loc"])
+        return item["type"] != "extra_forbidden", len(path), path
+
+    return sorted(error.errors(include_input=False, include_url=False), key=order)
 
 
 class AssetMetadata(Model):
