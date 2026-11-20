@@ -288,6 +288,18 @@ refuses an empty selection and a declared cell that no reference exercises.
 Keeper-settled GMX references are selected like any other and replay their
 signed reports from the pinned copies. At most 24 references run at once.
 
+Each reference runs at the block its fork operator file pins. The Aave V3
+references pin blocks where every Pool runs revision 11, so this workflow does not
+exercise Pool revision 12, which every listed Pool has run since 2026-11-11.
+Revision 12 is rehearsed locally with `--fork-env`, at blocks after the upgrade:
+`tests/fork/test_ax_pool_lending.py` runs every direct action on all seven chains,
+and `test_aave_v3_lifecycle_at_pool_revision_12` in
+`tests/strategy_fork/test_strategies.py` runs the Safe/Roles reference lifecycle
+from a copy of the operator file with only the anchor moved, on every chain but
+Avalanche. There the reference supplies WAVAX, which the Pool holds above its
+supply cap, so the entry is refused with `supply_cap` and the direct actions
+supply WETH.e instead. Neither rehearsal is hosted Fork Qualification.
+
 The `select` job summary lists each cell with its references. When a scheduled
 run fails, the `report` job opens the issue "Weekly Fork Qualification failed on
 main", or comments on it if it is open, naming the jobs that did not pass; the

@@ -104,6 +104,25 @@ its changelog is on the `v2` branch.
   Avalanche resolves with `ax recover --record <record> --public-rpc publicnode`.
 
 ### Fixed
+- Aave V3 is served again on all seven chains. On 2026-11-11 every Aave V3 Pool the
+  connector lists moved to Pool revision 12 (Aave v3.8), whose code the connector had
+  not verified, so each read, check, run, fork at a later block and direct action
+  stopped with `deployment_changed: Aave V3 pool has an unverified revision`. The
+  connector admits each chain's revision 12 Pool implementation by code hash beside
+  the revision 11 one, and refuses a Pool that reports another revision than the one
+  its code was verified as. Revision 12 adds a reentrancy guard to the Pool's entry
+  points. Its function signatures, events and storage layout are those of revision
+  11, it links the same supply, borrow, liquidation and pool logic libraries, and the
+  reserve tokens are unchanged, so calldata, receipt accounting, the health
+  projection and the generated Safe/Roles grants are the same under either revision.
+  A permission manifest generated before the upgrade names the earlier Pool
+  implementation and no longer verifies; generating it again yields the same grants,
+  which need no owner transaction where they are already installed.
+- The Aave V3 backtest model keeps its identifiers (`aave-v3-revision11-economic-indices-v1`,
+  `aave-v3-revision11-prepared-reserves-v1` and the liquidation model
+  `immediate_underlying_v3_revision11`): they name the accounting model, which
+  revision 12 runs unchanged. A dataset prepared earlier stays valid, and a window
+  may span a Pool's upgrade.
 - `ax withdraw` on Aave V4 refuses a reserve that backs the wallet's open debt on the
   Spoke. It was held back only by the Spoke's own limit of a health factor of 1,
   while the documentation said every withdrawal of collateral was refused. A
