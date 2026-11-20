@@ -11,6 +11,7 @@ import time
 from uuid import uuid4
 
 from almanak import request_runtime
+from almanak.gateway.client import GatewayClient
 from almanak.gateway.ethereum import DataError
 from almanak.operator_deployment import accounting_blocked, accounting_refusal, request_executed
 from almanak.runtime import Runtime, validate_closure, validate_observed_ownership
@@ -20,10 +21,15 @@ from almanak.work import validate_dependencies
 
 class OperatorRuntime(Runtime):
     operator = True
+    # An operator deployment runs on one chain, so its client is never chain-scoped.
+    gateway: GatewayClient
     # Seconds between checks for an unmined signed step.
     poll = 1.0
     # The latest refusal that dropped the active request's plan; nobody re-decides it.
     refused: DataError | None = None
+    # Each signed step this coordinator dropped because a final transaction took its
+    # nonce, with the gateway's evidence for it.
+    superseded: tuple = ()
 
     def count_replan(self, exc, *arguments, **options):
         self.refused = exc
@@ -62,6 +68,33 @@ class OperatorRuntime(Runtime):
         )
         if saved.delivered == state.delivered + 1:
             self.fault("transition", outcome)
+        return False
+
+    def resolve_pending(self, pending):
+        try:
+            return super().resolve_pending(pending)
+        except DataError as exc:
+            if exc.kind != "nonce_conflict":
+                raise
+            return self.drop_superseded(pending)
+
+    def drop_superseded(self, pending):
+        """Drop a signed step whose nonce another, final transaction took.
+
+        Such a step can never be mined, so sending it again or waiting resolves nothing.
+        The gateway names the transaction that took the nonce, and refuses with
+        `nonce_conflict` while that is not proven. Nothing is planned in its place: the
+        request ends and the operator states it again.
+        """
+        evidence = self.gateway.superseded(pending)
+        saved = self.journal.update(
+            lambda current: (
+                request_runtime.drop_superseded(current) if current.pending == pending else current
+            )
+        )
+        if saved.pending is None:
+            self.superseded = (*self.superseded, (pending, evidence))
+            self.fault("released", pending)
         return False
 
     def recover(self, interrupt=lambda: None):

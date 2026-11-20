@@ -941,6 +941,66 @@ def test_recovery_that_cannot_resolve_reports_the_step_and_keeps_it(desk, monkey
     assert desk.store.load().pending is not None
 
 
+def test_recovery_drops_a_step_whose_nonce_was_taken_and_reports_the_evidence(
+    desk, monkeypatch, capsys
+):
+    from almanak.gateway.ethereum import DataError
+    from tests.test_operator_runtime import superseded_evidence
+
+    pending = signed_and_stopped(desk)
+    proof = superseded_evidence(pending)
+
+    def occupied(pending):
+        raise DataError("nonce_conflict", "unknown execution occupies the recorded nonce")
+
+    desk.gateway.receipt = lambda pending: None
+    desk.gateway.broadcast, desk.gateway.superseded = occupied, superseded_evidence
+    result = ax_actions.resolve(desk.service, lambda: None)
+    released = {
+        "operation": "approve",
+        "transaction": pending.tx_hash,
+        "nonce": pending.nonce,
+        "consumed_by": {
+            "transaction": proof.consumed_by,
+            "block": proof.block.number,
+            "block_hash": proof.block.hash,
+        },
+        "finalized_block": proof.finalized.number,
+    }
+    assert result["released_consumed_nonce"] == [released]
+    # The record is free and nothing is left of the request, yet no step happened.
+    assert (result["resolved"], result["discarded_request"]) == (True, False)
+    assert result["outcomes"] == [] and not {"unresolved", "refused"} & set(result)
+    state = desk.store.load()
+    assert (state.pending, state.decision, state.outcomes) == (None, None, ())
+
+    # A command that met the same drop while it ran did execute, and did not complete.
+    ran = ax_actions.executed_result(state, (), None, ((pending, proof),))
+    assert (ran["executed"], ran["completed"]) == (True, False)
+    assert ran["released_consumed_nonce"] == [released]
+    assert "released_consumed_nonce" not in ax_actions.executed_result(state, (), None)
+
+    # `ax recover` frees the wallet and still exits 1: the step did not happen.
+    args = SimpleNamespace(record=Path("record"), env_file=None, public_rpc=None)
+    monkeypatch.setattr(ax_actions, "recover", lambda record, backend_for: result)
+    assert ax_actions.recover_command(args) == 1
+    assert json.loads(capsys.readouterr().out)["released_consumed_nonce"] == [released]
+
+
+def test_the_proof_reaches_the_coordinator_in_its_wire_form(tmp_path, recorded):
+    from tests.test_operator_runtime import superseded_evidence
+
+    desk = Desk(tmp_path, recorded)
+    pending = signed_and_stopped(desk)
+    desk.gateway.superseded = superseded_evidence
+    gateway = ax_actions.LocalGateway(desk.service)
+    gateway.acquire()
+    try:
+        assert gateway.superseded(pending) == superseded_evidence(pending)
+    finally:
+        gateway.close()
+
+
 def test_recover_refuses_what_is_not_a_free_action_record(stored, state_home, tmp_path):
     import fcntl
 
