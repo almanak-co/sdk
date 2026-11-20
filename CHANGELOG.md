@@ -81,6 +81,20 @@ its changelog is on the `v2` branch.
 - A direct action bids as an author's gas policy defaults on its chain: the observed
   block's base fee on Avalanche, 1.25 times the base fee on Arbitrum and Robinhood
   Chain, and a gas limit of at most 1,200,000 unless `--max-gas-limit` states another.
+- The agent skill (`skills/almanak/SKILL.md`) covers every direct action: lending with
+  borrowing, repayment and collateral, swaps, and liquidity in a tick range or as
+  Curve or Aerodrome LP tokens. It holds no list of chains: the agent reads `direct_actions` from
+  `almanak support` before each action. It asks the user for the health floor, the
+  slippage, the tick range and the payout of a Curve burn, and explains what each one
+  does not protect against. Its public endpoint table names
+  each chain's native asset, and its `settings.json` notes the markets, the liquidity
+  positions and the tokens the wallet holds. It resolves with `ax recover` only a
+  record of its own wallet, and asks before a signed transaction that is not from an
+  action the user has just confirmed is sent again. `tests/test_agent_skill.py` holds
+  the skill's command lines, the flags it names, and its command, selector, public
+  endpoint, position field, health floor and result field tables to the parser, the
+  declarations and the models. A refusal the skill names is a kind the SDK raises or
+  part of a message it raises. The rules an agent must keep are checked only as text.
 
 ### Removed
 - `--public-rpc drpc` no longer serves Avalanche. Its keyless tier intermittently
