@@ -8,6 +8,8 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-11-20
+
 ### Added
 - `almanak ax portfolio --account` reports an account's wallet tokens and protocol
   positions on every chain, with US dollar values, as Rabby's backend reports them. It
