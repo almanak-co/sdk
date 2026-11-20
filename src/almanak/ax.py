@@ -9,7 +9,7 @@ name the time each answer was received.
 
 import json
 
-from almanak import ax_discovery, ax_hypercore, ax_lending_markets
+from almanak import ax_discovery, ax_hypercore, ax_lending_markets, ax_portfolio
 from almanak.balances import parse_balance_request, read_balance
 from almanak.caip import AssetType, ChainId
 from almanak.cli_arguments import (
@@ -53,6 +53,7 @@ from almanak.gateway.evm import native_asset
 from almanak.gateway.hypercore_info import GatewayInfo, HyperCoreInfo
 from almanak.gateway.observation_gateway import gateway_reader
 from almanak.gateway.onchain_lookup import GatewayLookups, VendorLookups
+from almanak.gateway.rabby_portfolio import RabbyPortfolio
 from almanak.gateway.read_endpoints import public_reader, verified_reader
 from almanak.models import ZERO_ADDRESS, Account, Chain, Model
 
@@ -90,6 +91,7 @@ def command(args) -> int:
         "ax-lending-markets": lending_markets,
         "ax-hypercore-markets": hypercore_markets,
         "ax-hypercore-account": hypercore_account,
+        "ax-portfolio": portfolio,
     }
     print(json.dumps(handlers[args.product](args), indent=2))
     return 0
@@ -262,6 +264,16 @@ def hypercore_markets(args):
 def hypercore_account(args):
     with info_source(args) as info:
         return ax_hypercore.accounts(info, args.account)
+
+
+def portfolio(args):
+    with portfolio_source() as source:
+        return ax_portfolio.portfolio(source, args.account, args.include_unlisted)
+
+
+def portfolio_source() -> RabbyPortfolio:
+    # The vendor needs no key and no chain endpoint, so this read takes no transport.
+    return RabbyPortfolio()
 
 
 def asset_on(chain: ChainId, value: str, flag: str) -> AssetType:
