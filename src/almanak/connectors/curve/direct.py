@@ -35,7 +35,8 @@ holds a copy and the swap still simulates at or above its minimum output, sends 
 same bytes again. When the pool would pay less than the minimum, a swap that may have
 been sent is neither sent again nor released: recovery reports
 `signed_attempt_unsendable`, and the record keeps the wallet's claim until the swap
-passes again. A swap the gateway retains as never sent is released instead. The one
+passes again, or until another transaction of the wallet that used its nonce is final,
+which releases it. A swap the gateway retains as never sent is released instead. The one
 bound a mined swap always meets is that minimum output, which the pool enforces.
 
 The heavy imports stay inside the functions: the command line imports each connector's

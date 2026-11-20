@@ -579,6 +579,9 @@ def test_the_refusal_table_covers_what_an_action_can_leave_behind():
     assert "It can still execute at that old minimum" in stuck
     assert "ask before every further attempt" in stuck
     assert "No funds are at risk" not in flat()
+    occupied = " ".join(table["nonce_conflict"])
+    assert "released only once that transaction is final" in occupied
+    assert "Never send another transaction from the wallet to get past it" in stuck
     moved = " ".join(table["ownership_mismatch"])
     assert "a step is already signed, so report the message and stop" in moved
     # No row opens an instruction with raising a ceiling or running something again.
@@ -611,6 +614,7 @@ def test_the_result_fields_are_the_ones_the_action_module_writes():
         "outcomes",
         "refused",
         "released_expired",
+        "released_consumed_nonce",
         "unresolved",
         "record_kept",
     }
@@ -637,6 +641,10 @@ def test_the_result_fields_are_the_ones_the_action_module_writes():
     assert "A recover result has `resolved` instead and no `completed`" in table["completed"]
     assert "It did not happen and the wallet is free" in table["released_expired"]
     assert "`ax recover` exits 1 for it although `resolved` is true" in table["released_expired"]
+    taken = table["released_consumed_nonce"]
+    assert "It did not happen and the wallet is free" in taken
+    assert "`ax recover` exits 1 for it although `resolved` is true" in taken
+    assert {"nonce", "consumed_by", "block"} <= set(spans(taken)) & keys
     assert "failed on chain" in table["outcomes"]
 
 

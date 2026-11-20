@@ -475,7 +475,9 @@ A step that was signed and has no reconciled outcome yet is reported apart from
 not have been sent, and `executed` is true for it. A signed step whose deadline
 passed without it being mined is released, since it can no longer take effect, and
 is listed under `released_expired` with its operation and transaction hash;
-`executed` is true for it and `completed` false. A first step refused at planning
+`executed` is true for it and `completed` false. A signed step whose nonce another
+transaction of the wallet used is released once that transaction is final, and is
+listed under `released_consumed_nonce`. A first step refused at planning
 fails the command with that refusal and signs nothing.
 
 Standard output carries one JSON document, the result. Events and the error are
@@ -662,11 +664,12 @@ it, sets the allowances to zero.
 `ax recover` resolves an interrupted swap as it does any action. A signed Curve swap
 that may have been sent, and that the pool would now pay below its minimum, is
 neither sent nor released: `ax recover` reports `signed_attempt_unsendable` and
-exits 1, and the record and the wallet's claim on that chain stay. The only way out
-is the pool paying the minimum again, after which `ax recover` sends the same bytes.
-Using the nonce with another transaction does not release the record: every later
-`ax recover` then reports `nonce_conflict`. No funds are at risk in that state, since
-the signed bytes can no longer be mined, but no command drops the record.
+exits 1, and the record and the wallet's claim on that chain stay. Until then the
+signed bytes can still be mined at their old minimum, by `ax recover` once the pool
+pays it again or by anyone who holds them. The other way out is the operator's own:
+use the swap's nonce with another transaction of the wallet. Once that transaction is
+final, `ax recover` releases the record as a
+[step whose nonce was used](#a-step-whose-nonce-was-used).
 
 A swap deployment trades one pool and holds no liquidity position. On Aerodrome and
 Curve a wallet that holds the pool's LP shares, however few, is refused before
@@ -894,8 +897,9 @@ action again against the position as it now is. A step that cannot be resolved
 leaves `resolved` false with the reason under `refused`, keeps the record and exits
 1. A signed step whose deadline passed unmined is released instead: it is listed
 under `released_expired`, `resolved` is true and the wallet is free, and the command
-exits 1 because the step did not happen. A record a running command still uses is
-refused.
+exits 1 because the step did not happen. So is a
+[step whose nonce was used](#a-step-whose-nonce-was-used) by another transaction of
+the wallet. A record a running command still uses is refused.
 
 A record with no signed step holds nothing worth keeping. When a command is killed
 before it signs, the next operator action removes that record and releases its
@@ -907,6 +911,60 @@ without a time limit, and stops between steps on SIGINT, SIGTERM or SIGHUP.
 
 An action has no amount ceiling: it is bounded by the wallet's balance and the two
 fee ceilings.
+
+#### A step whose nonce was used
+
+A signed step that was never mined, and whose nonce another transaction of the same
+wallet has used since, can never be mined: sending it again is refused by every node,
+and waiting changes nothing. This holds for every step of every direct action,
+whether it carries a deadline or not, and whether it was sent or not. `ax recover`
+releases such a step once the transaction that used the nonce is in a block at or
+below the chain's `finalized` block. Its result, without the position:
+
+```json
+{
+  "resolved": true,
+  "discarded_request": false,
+  "outcomes": [],
+  "released_consumed_nonce": [
+    {
+      "operation": "swap",
+      "transaction": "0x1afe...",
+      "nonce": 7,
+      "consumed_by": {
+        "transaction": "0x9c02...",
+        "block": 25927622,
+        "block_hash": "0x5b1d..."
+      },
+      "finalized_block": 25927690
+    }
+  ]
+}
+```
+
+`transaction` is the step that was released and `consumed_by` the transaction that
+took its nonce, with the block that holds it. The step did not happen, so the command
+exits 1 although `resolved` is true; the record is removed and the wallet is free.
+Nothing is planned or signed in its place: state the action again.
+
+The gateway does not take a missing receipt as proof, since a lagging provider also
+answers none. It finds the block in which the wallet's transaction count passed the
+step's nonce, reads that block and requires exactly one transaction of the wallet
+with that nonce in it, other than the recorded one. Otherwise the record stays and
+`resolved` is false:
+
+- with `nonce_conflict` while the other transaction is pending or in a block that is
+  not final yet, because a reorganization could drop it and leave the signed step
+  valid again. Ask again later; on Ethereum a block is final about 13 minutes after
+  it is mined.
+- with `nonce_conflict` when the count rose without such a transaction, as it does
+  when another account's transaction carries an authorization the wallet signed.
+- with the provider's own refusal when it does not serve the wallet's transaction
+  count at the blocks since the step was planned, as a provider without archive
+  state may not for an old record. Name one that does with `--env-file`.
+
+This check runs in the gateway process and is not enforced on chain. It rests on the
+endpoint's report of the finalized block and of that block's transactions.
 
 ### Market resolution
 

@@ -200,6 +200,17 @@ independently.
   is released on a current-state refusal. A maybe-sent attempt with no calldata
   deadline that current validation refuses stops with
   `signed_attempt_unsendable`.
+- Proposed, not accepted: an operator deployment's signed step whose submitter
+  nonce was consumed is dropped, with or without a calldata deadline, sent or
+  not. The gateway proves, when asked and again when the drop is recorded, that
+  the step has no canonical receipt and that exactly one other transaction of
+  the submitter with the recorded nonce is in a block at or below the chain's
+  `finalized` block, and names that transaction and block as evidence. A nonce
+  that is only occupied keeps the step with `nonce_conflict`: a transaction a
+  provider holds, a block that is not final, or a count that rose with no such
+  transaction. The drop plans nothing and retains nothing in `released`, since
+  the step can never be mined. A strategy deployment still stops at an occupied
+  recorded nonce. Never describe this proof as on-chain enforcement.
 - Fee-only replacement of legacy transactions is opt-in under explicit payer
   bounds. All same-nonce candidates are retained and their maximum exposure is
   reserved.
@@ -375,6 +386,11 @@ independently.
   strands a claim. Records live in durable local state; one with no signed step
   is removed, with its claim, by the next direct command. An unreadable record
   is kept.
+- Proposed, not accepted: `ax recover` also releases a signed step whose nonce
+  another finalized transaction of the wallet consumed, under the proof stated
+  in "Execution and recovery". The result lists it under
+  `released_consumed_nonce` with the consuming transaction, its block and the
+  finalized block, and the command exits 1 because the step did not happen.
 - A connector package that serves direct actions declares them in its
   `direct.py`, and each chain's support lists them as `direct_actions`. Every
   other installed connector is named with its reason. Accepted: GMX V2 and

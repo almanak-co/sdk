@@ -110,6 +110,13 @@ its changelog is on the `v2` branch.
   withdrawal of collateral with no debt open works, and the documentation says so.
 - The `--public-rpc` help no longer says the endpoint is for reads and previews only:
   direct actions execute through it.
+- `ax recover` releases a signed step that was never mined and whose nonce another
+  transaction of the wallet used, once that transaction is in a finalized block. Such
+  a record answered `nonce_conflict` on every `ax recover` and kept the wallet's claim
+  for good, for every direct action and step. The result lists the step under
+  `released_consumed_nonce` with the transaction that used the nonce and its block,
+  and the command exits 1 because the step did not happen. While that transaction is
+  not final the answer is still `nonce_conflict`. Strategy deployments are unchanged.
 
 ## [3.2.1] - 2026-11-19
 
