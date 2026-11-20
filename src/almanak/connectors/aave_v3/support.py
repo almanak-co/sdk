@@ -30,7 +30,7 @@ def verified_support():
             account_profiles=("eoa", "safe_roles"),
             direct_actions=actions,
             restrictions=(
-                "verified Pool and reserve-token revision 11 implementations",
+                "verified Pool revision 11 and 12 and reserve-token implementations",
                 "ordinary collateral mode and variable-rate debt",
                 "configured Pool, reserve assets and oracle feeds; no default markets",
             ),
@@ -50,7 +50,7 @@ def verified_support():
             account_profiles=("eoa", "safe_roles"),
             direct_actions=actions,
             restrictions=(
-                "verified Pool and reserve-token revision 11 implementations",
+                "verified Pool revision 11 and 12 and reserve-token implementations",
                 "ordinary collateral mode and variable-rate debt",
                 "pinned Jovian L1 and operator fee accounting",
             ),
@@ -70,7 +70,7 @@ def verified_support():
             account_profiles=("eoa", "safe_roles"),
             direct_actions=actions,
             restrictions=(
-                "verified revision-11 L2Pool, aToken and variable-debt semantics",
+                "verified revision 11 and 12 L2Pool, aToken and variable-debt semantics",
                 "full runtime fingerprints retain documented proxy metadata differences",
                 "ordinary collateral mode and explicit configured oracle sources",
             ),
@@ -90,7 +90,7 @@ def verified_support():
             account_profiles=("eoa", "safe_roles"),
             direct_actions=actions,
             restrictions=(
-                "verified revision-11 L2Pool and reserve-token implementations",
+                "verified revision 11 and 12 L2Pool and reserve-token implementations",
                 "complete proxy fingerprints and explicitly configured oracle sources",
             ),
             historical=(
@@ -109,7 +109,7 @@ def verified_support():
             account_profiles=("eoa", "safe_roles"),
             direct_actions=actions,
             restrictions=(
-                "verified revision-11 PoolInstance and reserve-token implementations",
+                "verified revision 11 and 12 PoolInstance and reserve-token implementations",
                 "complete proxy fingerprints; reserve proxy metadata difference retained",
             ),
             historical=(
@@ -128,7 +128,7 @@ def verified_support():
             account_profiles=("eoa", "safe_roles"),
             direct_actions=actions,
             restrictions=(
-                "verified revision-11 PoolInstance and reserve-token implementations",
+                "verified revision 11 and 12 PoolInstance and reserve-token implementations",
                 "complete proxy fingerprints and explicitly configured oracle sources",
             ),
             historical=(
@@ -147,7 +147,7 @@ def verified_support():
             account_profiles=("eoa", "safe_roles"),
             direct_actions=actions,
             restrictions=(
-                "verified revision-11 PoolInstance and reserve-token implementations",
+                "verified revision 11 and 12 PoolInstance and reserve-token implementations",
                 "complete proxy fingerprints and explicitly configured oracle sources",
             ),
             historical=(

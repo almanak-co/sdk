@@ -1,5 +1,6 @@
 """Approval-only interruption leaves no position and must revoke before closure."""
 
+import json
 import signal
 import sys
 from contextlib import ExitStack
@@ -9,7 +10,14 @@ from uuid import uuid4
 import pytest
 
 from almanak.strategy import StrategyDefinition
-from tests.fork.support import processes, request_teardown, resume, wait_state
+from tests.fork.aave_v3_revision12 import upgrade_pool
+from tests.fork.support import (
+    interrupt_after_commit,
+    processes,
+    request_teardown,
+    resume,
+    wait_state,
+)
 from tests.fork.test_aave_v3_base_eoa import eoa_configuration
 from tests.strategy_fork.harness import (
     bind_workspace,
@@ -139,3 +147,86 @@ def assert_cleanup_balances(closed):
         assert_zero_obligations(final)
         assert final.wallet_balance == initial.wallet_balance
         assert_payer_effects(closed, initial, final)
+
+
+REFUSAL = "manifest contract identities differ from the supported profile"
+
+
+def base_case(request, tmp_path, profile):
+    name = "aave_v3_base_lending"
+    case = next(
+        value
+        for value in discover(ROOT / "strategies", ROOT / "tests/strategy_fork/scenarios")
+        if value.name == name
+    )
+    env = request.config.getoption("--fork-env").resolve()
+    config = case_fork_config(case, env, tmp_path / "resolution")
+    if profile == "eoa":
+        config = eoa_configuration(config)
+    return case, resolve_config(config, env, {}), env
+
+
+def held_approval_before_the_upgrade(case, config, env, temporary, stack, profile):
+    """A deployment with one approval committed while the Pool runs revision 11."""
+    nodes, node = bind_workspace(config, env, stack, {})
+    launch = stack.enter_context(processes(temporary))
+    directory = temporary / "deployment"
+    deployment = nodes.prepare(config, directory)
+    journal, arguments = start_gateway(node, directory, launch, lease_seconds=30)
+    if profile == "safe_roles":
+        install_permissions(case, nodes, directory, deployment, arguments)
+    accepted = interrupt_after_commit(case, launch, arguments, "approve", journal)
+    assert_approval_committed(accepted)
+    return node, launch, journal, arguments, accepted
+
+
+def torn_down_after_the_upgrade(request, tmp_path, profile):
+    """Create the deployment at revision 11, move the Pool to revision 12, then ask the
+    resumed coordinator to tear down. Returns its exit code and both checkpoints."""
+    case, config, env = base_case(request, tmp_path, profile)
+    temporary = tmp_path / "run"
+    temporary.mkdir()
+    with ExitStack() as stack:
+        node, launch, journal, arguments, accepted = held_approval_before_the_upgrade(
+            case, config, env, temporary, stack, profile
+        )
+        upgrade_pool(env, case.name, node.rpc)
+        restart_gateway(node, launch)
+        request_teardown(arguments)
+        running = resume(launch, journal, arguments)
+        code = running.wait(timeout=180)
+        return code, accepted, journal.load(), temporary
+
+
+def gateway_refusals(temporary):
+    """The gateway requests refused with the manifest identity comparison, by operation."""
+    lines = [
+        json.loads(line)
+        for log in sorted(temporary.glob("process-*.log"))
+        for line in log.read_text().splitlines()
+        if REFUSAL in line
+    ]
+    return [(line["operation"], line["status"]) for line in lines]
+
+
+def test_safe_deployment_created_before_the_pool_upgrade_plans_nothing_after_it(request, tmp_path):
+    """The retained manifest names the revision 11 Pool implementation. Once the Pool runs
+    revision 12 the gateway refuses the deployment's teardown plan: the approval stays
+    and the deployment stays in teardown. This records current behaviour.
+    """
+    code, accepted, stopped, temporary = torn_down_after_the_upgrade(
+        request, tmp_path, "safe_roles"
+    )
+    assert code == 1
+    assert (stopped.mode, stopped.outcomes) == ("teardown", accepted.outcomes)
+    assert gateway_refusals(temporary) == [("plan", 400)]
+
+
+def test_plain_account_deployment_created_before_the_pool_upgrade_tears_down_after_it(
+    request, tmp_path
+):
+    """A plain account retains no manifest, so the same deployment revokes and closes."""
+    code, accepted, closed, temporary = torn_down_after_the_upgrade(request, tmp_path, "eoa")
+    assert code == 0
+    assert_cleanup(accepted, closed)
+    assert gateway_refusals(temporary) == []

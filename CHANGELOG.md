@@ -90,6 +90,12 @@ its changelog is on the `v2` branch.
   the list strands no wallet claim.
 
 ### Changed
+- The Aave V3 backtest model serves history under Pool revision 11 and 12 and keeps
+  its identifiers (`aave-v3-revision11-economic-indices-v1`,
+  `aave-v3-revision11-prepared-reserves-v1` and the liquidation model
+  `immediate_underlying_v3_revision11`): they name the accounting model, which
+  revision 12 runs unchanged. A dataset prepared earlier stays valid, and a window
+  may span a Pool's upgrade.
 - A direct action bids as an author's gas policy defaults on its chain: the observed
   block's base fee on Avalanche, 1.25 times the base fee on Arbitrum and Robinhood
   Chain, and a gas limit of at most 1,200,000 unless `--max-gas-limit` states another.
@@ -131,6 +137,26 @@ its changelog is on the `v2` branch.
   Avalanche resolves with `ax recover --record <record> --public-rpc publicnode`.
 
 ### Fixed
+- Aave V3 Pool revision 12 is admitted on all seven chains. On 2026-11-11 every Aave V3
+  Pool the connector lists moved to Pool revision 12 (Aave v3.8), whose code the
+  connector had not verified, so each read, check, run, fork at a later block and
+  direct action stopped with `deployment_changed: Aave V3 pool has an unverified
+  revision`. The connector admits each chain's revision 12 Pool implementation by code
+  hash beside the revision 11 one, each on its own chain only, and refuses a Pool that
+  reports another revision than the one its code was verified as. Reads, backtests,
+  direct actions, plain-account deployments and Safe/Roles deployments created while
+  the Pool runs revision 12 are served. Revision 12 adds a reentrancy guard to the
+  Pool's entry points. Its function signatures, events and storage layout are those of
+  revision 11, it links the same supply, borrow, liquidation and pool logic
+  libraries, and the reserve tokens are unchanged, so calldata, receipt accounting,
+  the health projection and the generated Safe/Roles grants are the same under either
+  revision.
+  A Safe/Roles deployment keeps the permission manifest of its creation,
+  which records the code of each contract it covers. One created while the Pool ran
+  revision 11 is refused on every plan, its repayments, withdrawals and teardown
+  included, with `manifest contract identities differ from the supported profile`,
+  although its installed grants are the ones revision 12 needs. A plain-account
+  deployment retains no manifest and continues across the upgrade.
 - A signed step of `ax swap` on Aerodrome is sent although pool shares reached the
   wallet after the signature. The step is reconciled from its own receipt with the
   shares listed under `accounting_issues`, and they are never attributed to the

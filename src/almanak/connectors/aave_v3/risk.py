@@ -1,4 +1,7 @@
-"""Revision-11 pool-wide risk in the configured oracle's base currency."""
+"""Pool-wide risk of Pool revision 11 in the configured oracle's base currency.
+
+Pool revision 12 runs the same risk logic unchanged.
+"""
 
 from typing import Annotated
 
