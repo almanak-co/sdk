@@ -12,7 +12,7 @@ from almanak.configuration.metadata import verify
 from almanak.connectors.aave_v3.domain import Reserve
 from almanak.connectors.aave_v3.economic_data import RateRecord, RiskRecord, RiskSample, key
 from almanak.connectors.aave_v3.economic_parameters import allocations
-from almanak.connectors.aave_v3.reader import LEGACY_RESERVE, read_reserve, verify_revision
+from almanak.connectors.aave_v3.reader import LEGACY_RESERVE, read_reserve, verify_pool
 from almanak.models import ZERO_ADDRESS, Address, Block, Chain, Model
 
 
@@ -63,9 +63,7 @@ def contracts(config, discoveries=()):
 def discover(history, source, at):
     block = history.pin(history.floor(UnixTime(at)))
     reader = history.reader
-    verify_revision(reader, source.pool, block, "pool")
-    if reader.call(source.pool, "POOL_REVISION()", block)[0] != 11:
-        raise ValueError("V3 historical discovery requires the verified Pool revision")
+    verify_pool(reader, source.pool, block)
     provider = reader.call(source.pool, "ADDRESSES_PROVIDER()", block, outputs=("address",))[0]
     data = reader.call(
         source.pool,

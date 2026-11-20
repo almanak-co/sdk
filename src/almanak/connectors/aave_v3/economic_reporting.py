@@ -128,7 +128,8 @@ def report(state, model):
             "sampled historical rates integrate hypothetical scaled balances "
             "without changing future history",
             "configured Pool oracle and reserve risk changes become visible at end of block",
-            "liquidation uses revision 11 underlying settlement "
+            "liquidation uses Pool revision 11 underlying settlement, "
+            "which revision 12 runs unchanged, "
             "on the integer-second simulation clock",
             "liquidation fees and deficits remain explicit; "
             "third-party liquidator costs are excluded",

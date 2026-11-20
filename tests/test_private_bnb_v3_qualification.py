@@ -61,7 +61,7 @@ def test_private_branch_stages_final_bnb_production_declarations():
     assert uniswap_bnb.account_profiles == ("eoa", "safe_roles")
 
     assert aave_bnb.restrictions == (
-        "verified revision-11 PoolInstance and reserve-token implementations",
+        "verified revision 11 and 12 PoolInstance and reserve-token implementations",
         "complete proxy fingerprints; reserve proxy metadata difference retained",
     )
     assert uniswap_bnb.restrictions == RESTRICTIONS[1:]

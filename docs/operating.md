@@ -405,6 +405,16 @@ and no default role. Grants beyond the strategy's own, other members of its role
 and other roles of the operator are not detected; Safes are dedicated to one
 strategy. The authority check before every plan, signature and broadcast replays
 the previous check's block-pinned reads in batches at its own observation block.
+The manifest a deployment was created with is retained and records the code of
+each contract it covers: for Aave V3, the Pool, its implementation, the reserve
+tokens and the price sources. That check compares them with the chain, so when a
+protocol upgrade replaces one of them, every plan of that deployment is refused
+with `manifest contract identities differ from the supported profile`, an exit
+or a teardown as much as an entry, whether or not the installed grants still
+fit. Every Aave V3 Pool moved from revision 11 to revision 12 on 2026-11-11: a
+Safe/Roles deployment created before that is refused this way, and one created
+since is served. A plain-account deployment retains no manifest and
+continues across such an upgrade.
 Production advances on canonical mined receipts and audits recorded canonicality
 before further work. Invalidated history halts with pending evidence retained.
 
@@ -1121,7 +1131,12 @@ reserve `observation`. For Aave V3 and SparkLend, `config.allocation` holds the
 reserve, and `config.collateral_price_source` is the entry for that reserve in
 a debt's `collateral_price_sources`. Compound V3 and Morpho Blue resolve their
 feeds and oracle themselves, so their `config.market` adds them only as
-optional assertions. A deployment the connector has not reviewed is refused. A
+optional assertions. A deployment the connector has not reviewed is refused. An
+Aave V3 Pool is admitted by the code it runs: the Pool implementation of revision
+11 or revision 12 on its chain, by code hash, reporting that same revision, with
+the reserve's aToken and variable debt token implementations by code hash. A Pool
+pin admits its code on its own chain only. A Pool
+or token running other code is refused with `deployment_changed`. A
 reserve state read the protocol refuses at that block leaves `observation`
 null with `observation_error`, and the price sources are still reported.
 
@@ -1317,10 +1332,10 @@ the commands below, each through the listed pairs named. Nothing else is claimed
 | `ax balance` of the native asset, at `latest` and at `finalized` | Served on every listed pair. |
 | `ax pool` on a Uniswap V3 pool, `ax pool-price` on a Uniswap V4 pool | Served on every listed pair. |
 | `ax lending-reserve` and `ax lending-position` for Aave V4, Compound V3 and Morpho Blue | Served on every listed pair for at least one of the three, each on chains its connector supports. |
-| `ax lending-reserve --connector aave_v3` | Refused on all seven chains of the connector, through every endpoint, with `deployment_changed: Aave V3 pool has an unverified revision`. The connector's own revision pin refuses the pool; a provider key was not measured against it. |
+| `ax lending-reserve --connector aave_v3`, for the chain's wrapped native coin | Measured on 2026-11-20, with every Pool at revision 12: served on every listed pair of the connector's seven chains. |
 | `ax perp-markets --connector gmx_v2`, by market address | Served on Arbitrum through `arbitrum` and on Avalanche through `publicnode`. |
 | `ax perp-position`, and `ax lending-reserve` for SparkLend | Not measured. |
-| `ax lending-markets` for `aave_v3`, `sparklend` and `aave_v4` | The record is read with calls at the pinned block and listed on each chain the connector supports. Three rows of each listing were read: the SparkLend and Aave V4 rows were `verified`, and every Aave V3 row was `refused` with the same `deployment_changed`. On Avalanche the Aave V4 listing named 8 Spokes in `source.unreadable`, each with `rpc: eth_call: RPC rejected the requested read (JSON-RPC -32000)`, and listed the others. A Spoke counts as holding no reserves only when its revert is reported as JSON-RPC 3, so these may be Spokes without reserves; that was not verified. |
+| `ax lending-markets` for `aave_v3`, `sparklend` and `aave_v4` | The record is read with calls at the pinned block and listed on each chain the connector supports. Three rows of each listing were read: the SparkLend and Aave V4 rows were `verified`. The Aave V3 rows were read again on 2026-11-20, with every Pool at revision 12: `verified` on every listed pair except `drpc` on Base and Optimism, where each row was `refused` with `http: eth_getCode: HTTP 429` or `http: eth_getStorageAt: HTTP 429`. On Avalanche the Aave V4 listing named 8 Spokes in `source.unreadable`, each with `rpc: eth_call: RPC rejected the requested read (JSON-RPC -32000)`, and listed the others. A Spoke counts as holding no reserves only when its revert is reported as JSON-RPC 3, so these may be Spokes without reserves; that was not verified. |
 | `ax lending-markets --connector morpho_blue` | Listed on Ethereum, Base, Optimism, Polygon, Robinhood and Arbitrum, where Morpho's API names the markets. Refused on Avalanche and BNB, where it reads the core's event history. |
 | `ax lending-markets --connector compound_v3` | Refused on Ethereum, Base, Arbitrum and Optimism, through every endpoint listed there: it reads the Configurator's event history. |
 | `ax resolve`, `ax dex-pools` | Refused with `this lookup uses a vendor key; give --env-file or the read gateway`, measured on Base and Arbitrum; the refusal does not depend on the chain. |
