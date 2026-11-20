@@ -747,28 +747,32 @@ def resolve(service, interrupt) -> dict:
 
     runtime = OperatorRuntime(gateway=LocalGateway(service), create=None)
     try:
-        refusal = None
-        try:
-            runtime.recover(interrupt)
-        except DataError as exc:
-            refusal = exc
-        except BaseException:
-            # A stop or a failure must not lose what the record already resolved or
-            # dropped: the record is removed once it holds no signed step.
-            report_sent(runtime, 0)
-            raise
-        state = runtime.journal.load()
-        result = {"resolved": state.pending is None, "discarded_request": False}
-        if state.pending is None and state.decision is not None:
-            # What was left of the request was never signed; the operator states it
-            # again against the position as it is now.
-            runtime.discard()
-            result["discarded_request"] = True
-        result.update(executed_result(state, state.outcomes, refusal))
-        del result["executed"], result["completed"]
-        return result
+        return resolved(runtime, interrupt)
+    except BaseException:
+        # A stop or a failure anywhere must not lose what the record already resolved
+        # or dropped: the record is removed once it holds no signed step.
+        report_sent(runtime, 0)
+        raise
     finally:
         runtime.close()
+
+
+def resolved(runtime, interrupt) -> dict:
+    refusal = None
+    try:
+        runtime.recover(interrupt)
+    except DataError as exc:
+        refusal = exc
+    state = runtime.journal.load()
+    result = {"resolved": state.pending is None, "discarded_request": False}
+    if state.pending is None and state.decision is not None:
+        # What was left of the request was never signed; the operator states it
+        # again against the position as it is now.
+        runtime.discard()
+        result["discarded_request"] = True
+    result.update(executed_result(state, state.outcomes, refusal))
+    del result["executed"], result["completed"]
+    return result
 
 
 def recover_command(args) -> int:

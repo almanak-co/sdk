@@ -1031,6 +1031,17 @@ def test_a_recovery_that_fails_after_the_drop_reports_it_on_standard_error(
     (event,) = [json.loads(line) for line in capsys.readouterr().err.splitlines()]
     assert (event["event"], event["released_consumed_nonce"]) == ("steps_sent", [released])
 
+    # So does a failure anywhere after the recovery itself, such as reading the position.
+    monkeypatch.setattr(desk, "runtime", build)
+
+    def unreadable(state):
+        raise RuntimeError("position unreadable")
+
+    monkeypatch.setattr(ax_actions, "position", unreadable)
+    with pytest.raises(RuntimeError, match="position unreadable"):
+        ax_actions.resolve(desk.service, lambda: None)
+    assert json.loads(capsys.readouterr().err)["released_consumed_nonce"] == [released]
+
     # A live command reports it the same way, and says nothing when nothing happened.
     ax_actions.report_sent(desk.runtime(), 0)
     assert json.loads(capsys.readouterr().err)["released_consumed_nonce"] == [released]
