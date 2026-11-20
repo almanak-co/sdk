@@ -484,6 +484,15 @@ allowance that already stood, to Permit2 or through it, is used and what the swa
 does not spend remains; tell the user what remains approved. Report what
 `position_after.inventory` lists as bought.
 
+Anyone can send the wallet LP shares of an Aerodrome or Curve pool while a swap
+there runs. A completed swap then lists them under `accounting_issues` in its
+outcome. On Aerodrome a swap can also end after its approval, with `executed`
+true, `completed` false and `refused.kind` `ownership`: nothing was sold, and
+`position_after.allowances` lists the allowance that stands. Either way, report
+the shares and any allowance, and say that the wallet's next swap in that pool is
+refused while it holds them. `ax close-liquidity` burns the shares, if the user
+decides so; then offer `ax revoke-exchange` for the allowance.
+
 ## Liquidity
 
 A liquidity position holds a pool's currencies and earns its trading fees. What

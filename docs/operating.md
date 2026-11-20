@@ -675,9 +675,17 @@ to a wallet. Shares that arrive once a step is signed do not block it, whether i
 was sent yet or not: the step is sent, by the command or by `ax recover`, and
 reconciled from its own receipt, and its outcome lists the shares under
 `accounting_issues`. On Aerodrome a swap takes an approval and then the swap itself.
-When the shares arrive after the approval is signed, the approval is mined, the swap
+When the shares arrive after the approval is signed, the approval is sent, the swap
 is refused before it is signed, no record is kept, and the result lists the
 allowance that remains.
+
+A strategy with a trading-only Aerodrome allocation, composed or not, follows a
+narrower rule, since a fund that holds shares can no longer be observed, so the
+strategy can neither decide nor tear down. Its signed approval or revocation, which
+carries no deadline, and its signed exit swap, which lowers exposure, are sent as
+above. Its signed entry swap is not: it is held back while the fund holds the
+shares and released once its deadline has passed, so the strategy takes no new
+exposure it could not leave.
 
 #### Liquidity
 
