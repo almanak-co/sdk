@@ -18,6 +18,10 @@ from almanak.models import Chain
 
 ROOT = Path(__file__).parents[2]
 POOL_REVISION = "0x" + keccak(text="POOL_REVISION()")[:4].hex()
+IMPLEMENTATION_SLOT = hex(int.from_bytes(keccak(text="eip1967.proxy.implementation"), "big") - 1)
+# The one library revision 12 links that revision 11 does not: the same source, compiled
+# for Cancun, deployed at this address on every chain.
+FLASH_LOAN_LOGIC = "0xc27a4d7ac0623b129919786d88714ef16132beae"
 ANCHORS = {
     "aave_v3_ethereum_lending": {
         "chain": "eip155:1",
@@ -91,3 +95,27 @@ def anchored_revision(env: Path, reference: str) -> int:
         block = reader.pin_block(anchor["height"])
         assert block.hash == anchor["reference"]
         return reader.call(POOLS[chain], "POOL_REVISION()", block)[0]
+
+
+def upgrade_pool(env: Path, reference: str, rpc) -> None:
+    """Move a fork's Pool to revision 12, as the governance payload's `setPoolImpl` did.
+
+    The implementation the origin chain runs at the reference's revision 12 anchor, and
+    the library only it links, are copied onto the fork and the proxy is pointed at it.
+    """
+    anchor = ANCHORS[reference]
+    chain = ChainId(anchor["chain"])
+    pool = POOLS[chain]
+    origin = Chain(chain_id=chain, environment="mainnet")
+    with EthereumReader(origin, read_endpoint(chain, env)) as reader:
+        at = hex(anchor["height"])
+        word = reader._rpc("eth_getStorageAt", [pool, IMPLEMENTATION_SLOT, at])
+        codes = {
+            address: reader._rpc("eth_getCode", [address, at])
+            for address in ("0x" + word[-40:], FLASH_LOAN_LOGIC)
+        }
+    for address, code in codes.items():
+        rpc("anvil_setCode", [address, code])
+    rpc("anvil_setStorageAt", [pool, IMPLEMENTATION_SLOT, word])
+    rpc("evm_mine")
+    assert pool_revision(rpc, pool) == 12
