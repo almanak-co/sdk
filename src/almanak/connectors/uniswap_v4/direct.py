@@ -1,7 +1,7 @@
 """Uniswap V4 direct operator actions in one pool named by its key.
 
 This module holds the exact-input swap and the report every command shares. The
-liquidity commands are `liquidity_direct`.
+liquidity commands and `revoke-exchange` are `liquidity_direct`.
 
 The deployment holds one trading allocation whose capital is the amount sold, in the
 asset sold, offered whole as one entry. The gateway then sizes its entry quote at
@@ -25,7 +25,7 @@ written.
 A swap that is refused or reverts after its approvals were mined leaves them standing:
 the Permit2 allowance lapses at its expiration, the ERC-20 approval to Permit2 does not.
 A signed swap whose deadline passes unmined is released, and leaves them the same way.
-Nothing here revokes either; the result lists both.
+No swap revokes either; the result lists both, and `revoke-exchange` sets them to zero.
 
 The heavy imports stay inside the functions: the command line imports each connector's
 `direct` module to build its choices.
@@ -124,7 +124,11 @@ def position(state) -> dict:
     last block the deployment observed, so a signed step still unresolved is not in
     them. Only nonzero amounts are listed. A Permit2 allowance carries its expiration
     in Unix seconds, after which it grants nothing; an ERC-20 approval to Permit2 has
-    none. A liquidity deployment also reports the NFT it owns and what its steps moved.
+    none. `permit2_unexpired`, present only when there is one, lists each Permit2
+    allowance that holds no amount and had not expired at that block: it grants
+    nothing, `revoke-exchange` expires it, and a strategy's start in the wallet is
+    refused while it stands. A liquidity deployment also reports the NFT it owns and
+    what its steps moved.
     """
     owned = state.owned[0]
     seen = last_observed(state)
@@ -139,10 +143,22 @@ def position(state) -> dict:
             {"asset": str(value.asset), "amount": str(value.amount)}
             for value in (owned.inventory0, owned.inventory1)
         ],
-        "allowances": [
-            allowance(item) for item in (() if seen is None else seen.allowances) if item.amount
-        ],
+        **standing(seen),
     }
+
+
+def standing(seen) -> dict:
+    """The allowances of one observation as a result lists them."""
+    if seen is None:
+        return {"allowances": []}
+    now = seen.block.timestamp
+    empty = [
+        {"asset": str(item.asset), "spender": item.spender, "expiration": item.expiration}
+        for item in seen.allowances
+        if not item.amount and item.needs_cleanup(now)
+    ]
+    listed = {"allowances": [allowance(item) for item in seen.allowances if item.amount]}
+    return {**listed, "permit2_unexpired": empty} if empty else listed
 
 
 def allowance(item) -> dict:
@@ -150,6 +166,12 @@ def allowance(item) -> dict:
     if item.expiration is not None:
         stated["expiration"] = item.expiration
     return stated
+
+
+def note(config, observed, request: ActionRequest) -> str | None:
+    from almanak.connectors.uniswap_v4 import liquidity_direct as liquidity
+
+    return liquidity.note(config, observed, request)
 
 
 def last_observed(state):
@@ -160,8 +182,15 @@ def last_observed(state):
 
 
 DIRECT = DirectActions(
-    actions=("swap", "open-liquidity", "collect-liquidity-fees", "close-liquidity"),
+    actions=(
+        "swap",
+        "open-liquidity",
+        "collect-liquidity-fees",
+        "close-liquidity",
+        "revoke-exchange",
+    ),
     positions=positions,
     intent=intent,
     position=position,
+    note=note,
 )

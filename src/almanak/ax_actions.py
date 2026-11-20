@@ -56,7 +56,10 @@ ACTIONS = {
     " shares, and for aerodrome claim their fees",
     "revoke-exchange": "set every allowance the wallet gave the pool's router and"
     " position manager, or for curve the pool itself, in the pool currencies to zero; for"
-    " aerodrome also the router's allowance in the pool's LP token",
+    " aerodrome also the router's allowance in the pool's LP token; for uniswap_v4 the"
+    " Permit2 allowances of the router and position manager and the ERC-20 approval of"
+    " each pool token to Permit2, which every other application that spends the token"
+    " through Permit2 shares",
 }
 # Actions whose market is one pool; the others name a lending market, with the flags
 # `ax lending-reserve` takes.
@@ -629,14 +632,22 @@ def perform(
     try:
         before = runtime.recover()
         interrupt()
-        build = binding_for(before.config).intent
-        # The intent is built against the observations it is admitted with.
-        runtime.submit(lambda state, observed: build(state.config, observed, request))
+        binding = binding_for(before.config)
+        noted: dict = {}
+
+        def admit(state, observed):
+            # The intent and the note are built against the observations the request
+            # is admitted with.
+            noted.update(stated_note(binding, state.config, observed, request))
+            return binding.intent(state.config, observed, request)
+
+        runtime.submit(admit)
         result = {
             "action": request.action,
             "executed": False,
             "position_before": position(before),
             "first_step": step(runtime.preview()),
+            **noted,
         }
         interrupt()
         if execute:
@@ -644,6 +655,12 @@ def perform(
         return result
     finally:
         runtime.close()
+
+
+def stated_note(binding, config, observed, request) -> dict:
+    """The connector's note on an admitted request, as the result carries it."""
+    text = None if binding.note is None else binding.note(config, observed, request)
+    return {} if text is None else {"note": text}
 
 
 def executed(runtime, start: int, interrupt) -> dict:

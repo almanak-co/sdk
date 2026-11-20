@@ -654,7 +654,7 @@ it bought, and the nonzero `allowances` left to the venue:
 | Connector | Steps | Allowance after a completed swap |
 | --- | --- | --- |
 | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome` | `approve` to the router for exactly the amount, after a reset to zero when another allowance stands, then `swap` | none |
-| `uniswap_v4` | `approve_erc20` to Permit2, `approve_permit2` to the router until the deadline, then `swap` | none from a wallet with none; see below for a wallet with standing allowances |
+| `uniswap_v4` | `approve_erc20` to Permit2, `approve_permit2` to the router until the deadline, then `swap` | none from a wallet with none, and under `permit2_unexpired` the spent Permit2 allowance until its deadline; see below for a wallet with standing allowances |
 | `curve` | `approve` to the pool for exactly the amount, then the exchange | none |
 
 On Uniswap V4 a standing ERC-20 approval to Permit2 that covers the amount is used
@@ -666,8 +666,8 @@ it by the amount sold, depending on the token.
 
 A swap refused or reverted after its approval was mined leaves that approval: the
 result lists it, and a later swap of the same amount uses it, on Uniswap V4 after
-granting the Permit2 allowance again. `ax revoke-exchange`, where a connector serves
-it, sets the allowances to zero.
+granting the Permit2 allowance again. `ax revoke-exchange` sets the allowances to
+zero; what it clears on Uniswap V4 is stated under [Liquidity](#liquidity).
 
 `ax recover` resolves an interrupted swap as it does any action. A signed Curve swap
 that may have been sent, and that the pool would now pay below its minimum, is
@@ -836,10 +836,11 @@ wallet. The read is `ax liquidity-position --connector aerodrome` with `--accoun
 A wallet that holds a pool's LP shares on Curve or Aerodrome is refused an `ax swap`
 in that pool, which owns no liquidity: swap first, or in another pool.
 
-Uniswap V4 serves `open-liquidity`, `collect-liquidity-fees` and `close-liquidity`,
-with the pool named by its key as for a swap (`--currency0`, `--currency1`, `--fee`,
-`--tick-spacing` and, for a reviewed hooked pool, `--hooks`) and a position by
-`--token-id`. Its connector has no intent that adds to or removes part of a
+Uniswap V4 serves `open-liquidity`, `collect-liquidity-fees`, `close-liquidity` and
+`revoke-exchange`, with the pool named by its key as for a swap (`--currency0`,
+`--currency1`, `--fee`, `--tick-spacing` and, for a reviewed hooked pool, `--hooks`).
+A collection and a close name the position by `--token-id`; a revocation names no
+position. Its connector has no intent that adds to or removes part of a
 position, so `increase-liquidity` and `decrease-liquidity` refuse it. A key may name
 the chain's native coin: the wallet provides and receives the wrapped token, and
 `--amount0` and `--amount1` follow the key's order.
@@ -865,9 +866,40 @@ that most of each token, and for the position manager a Permit2 allowance that
 expires at the mint's deadline. An approval mined at an earlier price for less than
 the mint now needs is made again before the mint. What the mint does not take stays
 approved: the Permit2 allowance until it expires, the ERC-20 approval to Permit2
-without limit of time. `revoke-exchange` does not serve Uniswap V4, so the approval
-to Permit2 is revoked with another tool. A collection and a close approve nothing.
+without limit of time. A collection and a close approve nothing.
 `ax liquidity-position --connector uniswap_v4` takes the key flags and `--token-id`.
+
+On Uniswap V4 `revoke-exchange` takes the key flags and clears what a swap or a mint
+left, one transaction per allowance. For each of the two tokens the wallet holds for
+the pool it sets the ERC-20 approval to Permit2 to zero, then sets the Permit2
+allowance to the router and the one to the position manager to zero and expires
+them. It clears an allowance that holds an amount, and a Permit2 allowance that
+holds none and has not expired. A completed swap leaves one of those until its
+deadline: it grants nothing, the result lists it under `permit2_unexpired` apart from
+`allowances`, and a strategy's start in the same wallet is refused while it stands.
+With nothing of either kind the command is refused.
+
+The ERC-20 approval to Permit2 is not Uniswap's alone: every application that spends
+that token through Permit2 relies on it, so after the command each of them needs the
+token approved to Permit2 again. When the command will set one to zero, its result
+says so in `note`, in the preview as in the execution, naming the tokens. Permit2
+allowances the wallet gave any other spender are neither read nor changed. The
+command moves no tokens and touches no position: an NFT the wallet holds stays, and
+collecting from it or closing it needs no approval.
+
+The steps run in the order above and each must be mined before the next is planned.
+A token whose `approve` of zero reverts therefore stops the command at that step,
+and the allowances after it are not reached: they are cleared with another tool.
+The same holds for `revoke-exchange` on the other pool connectors.
+
+```bash
+almanak ax revoke-exchange --connector uniswap_v4 --chain eip155:8453 \
+  --currency0 eip155:8453/erc20:0x4200000000000000000000000000000000000006 \
+  --currency1 eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913 \
+  --fee 3000 --tick-spacing 60 \
+  --wallet treasury --env-file .env \
+  --max-gas-price-wei 100000000 --max-transaction-fee 100000000000000
+```
 
 The action runs through the same planning, simulation, signing and receipt
 reconciliation as a strategy's, as an operator deployment that exists only for the

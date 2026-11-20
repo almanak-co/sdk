@@ -60,7 +60,8 @@ With neither it is over 100 kilobytes; do not run it. In an entry:
 | `ax collateral` (`collateral`) | `aave_v3`, `sparklend` |
 | `ax swap` (`swap_exact_input`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
 | `ax open-liquidity` (`open_liquidity`), `ax close-liquidity` (`close_liquidity`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
-| `ax increase-liquidity` (`increase_liquidity`), `ax decrease-liquidity` (`decrease_liquidity`), `ax revoke-exchange` (`revoke_exchange`) | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
+| `ax increase-liquidity` (`increase_liquidity`), `ax decrease-liquidity` (`decrease_liquidity`) | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
+| `ax revoke-exchange` (`revoke_exchange`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
 | `ax collect-liquidity-fees` (`collect_liquidity_fees`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome` |
 
 Tell the user plainly when a request is outside what is served, and still finish
@@ -580,7 +581,13 @@ valid until it is mined or its nonce is used.
 
 A completed swap leaves no allowance from a wallet that had none. On Uniswap V4 an
 allowance that already stood, to Permit2 or through it, is used and what the swap
-does not spend remains; tell the user what remains approved. Report what
+does not spend remains; tell the user what remains approved, and that
+`ax revoke-exchange` clears it. A Uniswap V4 result can also list
+`position_after.permit2_unexpired`: a spent Permit2 allowance that grants nothing
+and lapses at the swap's deadline. Mention it only when the user asks to clear
+everything, or is about to start a Uniswap V4 strategy in that wallet: the start
+is refused until the row lapses or is revoked. `ax revoke-exchange` expires it.
+Report what
 `position_after.inventory` lists as bought.
 
 Anyone can send the wallet LP shares of an Aerodrome or Curve pool while a swap
@@ -608,8 +615,11 @@ position adds below. For every kind:
   report them, they are not a failure. A tick-range close mined that way
   reverts; preview it again.
 - `ax revoke-exchange` sets every allowance the wallet gave the pool's contracts
-  to zero, except on Uniswap V4, which it does not serve. Offer it when
-  `position_after.allowances` lists any:
+  to zero. Offer it when `position_after.allowances` lists any. On Uniswap V4 it
+  also sets each pool token's approval to Permit2 to zero, which is not Uniswap's
+  alone: tell the user, before they confirm, that every other application that
+  spends that token through Permit2 needs it approved again afterwards. The
+  preview's `note` names the tokens this applies to; read it to the user.
 
 ```bash
 almanak ax revoke-exchange --connector <connector> --chain <chain> <market> <wallet and ceilings>
@@ -663,9 +673,9 @@ earns nothing.
   takes there only the one currency the range holds, at most what it offered.
 - Only what a mint offers is approved, and what it does not take of that stays
   approved: to the position manager, or on Uniswap V4 to Permit2, with no expiry.
-  Nothing here revokes the approval to Permit2: tell the user that before an
-  open there, and that you cannot clear it. A Uniswap V4 open can repeat an
-  approval before its mint.
+  Tell the user before a Uniswap V4 open that it leaves an approval to Permit2.
+  `ax revoke-exchange` clears it. A Uniswap V4 open can repeat an approval before
+  its mint.
 - For a position you have no record of, ask the user for the token ID; the wallet
   must own the NFT, whoever opened it.
 - `ax decrease-liquidity` removes `--liquidity`, in the position's own units and

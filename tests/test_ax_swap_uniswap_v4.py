@@ -481,7 +481,15 @@ def test_the_position_is_the_attributed_inventory_and_the_allowances_last_observ
     # A spent Permit2 allowance keeps its expiration with no amount; it is not listed.
     spent = observation(config, owned, market, permit=(0, 1234))
     done = SimpleNamespace(owned=state.owned, baseline=(), outcomes=(SimpleNamespace(after=spent),))
-    assert report(done)["allowances"] == []
+    assert report(done)["allowances"] == [] and "permit2_unexpired" not in report(done)
+    # Until it expires it is listed apart: it grants nothing and can be revoked.
+    deadline = market.block.timestamp + 300
+    fresh = observation(config, owned, market, permit=(0, deadline))
+    done = SimpleNamespace(owned=state.owned, baseline=(), outcomes=(SimpleNamespace(after=fresh),))
+    assert (report(done)["allowances"], report(done)["permit2_unexpired"]) == (
+        [],
+        [{"asset": USDC, "spender": contracts.router, "expiration": deadline}],
+    )
 
 
 COMMON = {
@@ -746,15 +754,18 @@ def test_the_gateway_admits_the_swap_request_and_no_other_action(tmp_path):
     assert admitted_state.owned[0].inventory0.amount == AMOUNT
 
 
-@pytest.mark.parametrize("refused", [RevokeExchange, ExitExchange])
-def test_the_gateway_refuses_an_operator_request_that_is_not_the_swap(tmp_path, refused):
+def test_the_gateway_refuses_an_operator_request_that_is_not_declared_direct(tmp_path):
+    """An exit is no direct action on these cells; a revocation is, and only zeroes
+    allowances."""
     market, config, _, _ = admitted()
     desk = family.SwapDesk(
         tmp_path,
         config,
         lambda owned: observation(config, owned, market, entry_quote=quote(market)),
     )
-    other = refused[Target](target=config.target(ALLOCATION))
+    target = config.target(ALLOCATION)
     with pytest.raises(ValueError, match="unsupported as a direct action"):
-        desk.runtime().submit(other)
+        desk.runtime().submit(ExitExchange[Target](target=target))
     assert desk.store.load().decision is None
+    revoke = desk.runtime().submit(RevokeExchange[Target](target=target))
+    assert revoke.intent.kind == "revoke_exchange"

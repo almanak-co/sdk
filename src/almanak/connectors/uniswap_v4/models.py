@@ -191,13 +191,19 @@ class Allocation(Model):
 
 
 def validate_adoption(allocation, adopt):
-    """An adopting allocation is one fixed range that trades nothing.
+    """An adopting allocation trades nothing, and holds a position only in a fixed range.
 
     Its entry share must be stated as zero, since the default offers the whole capital
-    as an entry swap, and it has no band, whose rebalancing is a swap as well.
+    as an entry swap, and it has no band, whose rebalancing is a swap as well. Without
+    a range it can neither mint nor take over an NFT: it is the allocation of a
+    revocation, which brings no inventory either.
     """
-    if allocation.entry_swap_bps or allocation.band is not None or allocation.range is None:
-        raise ValueError("an adopting allocation states a fixed range, no entry swap and no band")
+    if allocation.entry_swap_bps or allocation.band is not None:
+        raise ValueError("an adopting allocation states no entry swap and no band")
+    if allocation.range is None:
+        if adopt.nft is not None or adopt.counter or allocation.capital.amount:
+            raise ValueError("an adopting allocation without a fixed range holds nothing")
+        return
     if adopt.nft is None:
         return
     chain = allocation.pool.chain.chain_id
