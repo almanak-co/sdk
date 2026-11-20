@@ -222,7 +222,8 @@ independently.
   identifies its venue, pool, oracle or explicitly chosen vendor, its chain and
   its base and quote units. Never substitute another source for a requested
   venue price, invent a peg, or hide missing data behind a fallback. Defaults
-  never choose a financial data source.
+  never choose a financial data source, except the `ax portfolio` overview
+  below.
 - Strategy price series for technical analysis come directly from on-chain pool
   data through the operator's RPC provider, in backtests, forks and live runs
   alike. No vendor candle substitutes for one.

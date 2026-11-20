@@ -10,7 +10,7 @@ A value the vendor omits stays absent. A total is stated only when every row it
 sums has a value, so a missing price never counts as zero.
 """
 
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation
 
 from almanak.caip import AssetType
 from almanak.gateway.ethereum import DataError
@@ -22,11 +22,17 @@ from almanak.models import address
 # the vendor throttles an address of ours after a few dozen.
 MAX_ACCOUNTS = 5
 CENT = Decimal("0.01")
+# A vendor number further from one than this many decimal places is not a balance, a
+# price or a time; it is read as absent. Arithmetic keeps every digit of what is left.
+MAX_EXPONENT = 60
+MAX_RAW_DIGITS = 78
+EXACT = Context(prec=4 * MAX_EXPONENT)
 TOKEN_LIST = "_token_list"
 
 
 def portfolio(source, accounts: list[str], include_unlisted: bool) -> dict:
-    if len(accounts) > MAX_ACCOUNTS:
+    unique = list(dict.fromkeys(address(account) for account in accounts))
+    if len(unique) > MAX_ACCOUNTS:
         raise ValueError(f"ax portfolio reads at most {MAX_ACCOUNTS} accounts in one command")
     return {
         "product": "portfolio",
@@ -38,10 +44,7 @@ def portfolio(source, accounts: list[str], include_unlisted: bool) -> dict:
                 " before acting on it."
             ),
         },
-        "accounts": [
-            account_report(source, address(account), include_unlisted)
-            for account in dict.fromkeys(accounts)
-        ],
+        "accounts": [account_report(source, account, include_unlisted) for account in unique],
     }
 
 
@@ -75,7 +78,7 @@ def account_report(source, account: str, include_unlisted: bool) -> dict:
 def token_report(row: dict) -> dict:
     """One wallet balance or one leg of a position, as the vendor states it."""
     amount = token_amount(row)
-    price = decimal(row.get("price"))
+    price = positive(decimal(row.get("price")))
     return {
         **identity(row),
         "symbol": text(row.get("optimized_symbol")) or text(row.get("symbol")),
@@ -85,7 +88,7 @@ def token_report(row: dict) -> dict:
         # Base units, where the vendor states them; a position leg carries none.
         "raw_amount": text(row.get("raw_amount_str")),
         "price_usd": plain(price),
-        "value_usd": None if price is None else cents(amount * price),
+        "value_usd": None if price is None else cents(EXACT.multiply(amount, price)),
         "vendor_flags": {
             "core": row.get("is_core") is True,
             "verified": row.get("is_verified") is True,
@@ -124,13 +127,27 @@ def asset(chain, label: str, token: str) -> AssetType | None:
 
 
 def token_amount(row: dict) -> Decimal:
+    """The balance from its base units where the vendor states them, exactly."""
     raw, decimals = row.get("raw_amount_str"), row.get("decimals")
-    if isinstance(raw, str) and raw.isdecimal() and type(decimals) is int and 0 <= decimals <= 77:
-        return Decimal(raw).scaleb(-decimals)
     amount = decimal(row.get("amount"))
-    if amount is None:
+    if (
+        isinstance(raw, str)
+        and raw.isascii()
+        and raw.isdecimal()
+        and len(raw) <= MAX_RAW_DIGITS
+        and isinstance(decimals, int)
+        and not isinstance(decimals, bool)
+        and 0 <= decimals <= MAX_EXPONENT
+    ):
+        amount = Decimal(raw).scaleb(-decimals, EXACT)
+    if amount is None or amount < 0:
         raise DataError("malformed", f"{SOURCE}: a token row states no amount")
     return amount
+
+
+def positive(price: Decimal | None) -> Decimal | None:
+    # The vendor writes zero for a token it has no price for; that is not a price.
+    return price if price is not None and price > 0 else None
 
 
 def items(protocol: dict) -> list[dict]:
@@ -186,7 +203,10 @@ def mapping(value: object) -> dict:
 def total(values: list[str | None]) -> str | None:
     if any(value is None for value in values):
         return None
-    return cents(sum((Decimal(value) for value in values if value is not None), Decimal(0)))
+    summed = Decimal(0)
+    for value in values:
+        summed = EXACT.add(summed, Decimal(value or 0))
+    return cents(summed)
 
 
 def rank(value: str | None) -> Decimal:
@@ -194,22 +214,28 @@ def rank(value: str | None) -> Decimal:
 
 
 def decimal(value: object) -> Decimal | None:
-    """A vendor number as a decimal; absent or not a finite number stays absent."""
+    """A vendor number as a decimal; absent, not finite or out of bounds stays absent."""
     if isinstance(value, bool) or not isinstance(value, int | Decimal | str):
         return None
     try:
         number = Decimal(value)
     except InvalidOperation:
         return None
-    return number if number.is_finite() else None
+    if not number.is_finite():
+        return None
+    return number if number == 0 or abs(number.adjusted()) <= MAX_EXPONENT else None
 
 
 def cents(value: Decimal | None) -> str | None:
-    return None if value is None else str(value.quantize(CENT))
+    return None if value is None else str(value.quantize(CENT, context=EXACT))
 
 
 def plain(value: Decimal | None) -> str | None:
-    return None if value is None else format(value.normalize() if value else Decimal(0), "f")
+    """Every digit of the value in positional notation, without trailing zeros."""
+    if value is None:
+        return None
+    digits = format(value, "f")
+    return (digits.rstrip("0").rstrip(".") if "." in digits else digits) or "0"
 
 
 def seconds(value: object) -> int | None:

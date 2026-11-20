@@ -1,9 +1,9 @@
 """An account's tokens and protocol positions from Rabby's backend.
 
-Rabby's backend is the accepted default source (20 November 2026) for the
-`almanak ax portfolio` overview only. It needs no key. It is the wallet's own
-backend, not a documented public API: it can change, throttle or refuse without
-notice, and it sees every address asked about. Its figures are a vendor's and are
+Rabby's backend is the accepted default source for the `almanak ax portfolio`
+overview only. It needs no key. It is the wallet's own backend, not a documented
+public API: it can change, throttle or refuse without notice, and it sees every
+address asked about. Its figures are a vendor's and are
 reported as such; nothing read here becomes identity, a price input or the basis
 of an action.
 

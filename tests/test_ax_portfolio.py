@@ -192,9 +192,42 @@ def test_positions_and_tokens_are_ordered_by_value_with_unvalued_rows_last():
     assert account["totals"]["positions_usd"] is None
 
 
+def test_a_large_balance_keeps_every_digit_and_an_absurd_number_is_absent():
+    raw = "1234567890123456789012345678901234567"
+    big = token(id=USDC, raw_amount_str=raw, price=Decimal("0.5"))
+    (row,) = one(Answers([big]))["tokens"]
+    assert row["amount"] == "1234567890123456789.012345678901234567"
+    assert row["value_usd"] == "617283945061728394.51"
+    widest = token(raw_amount_str="9" * 78, decimals=0, price=Decimal("1e60"))
+    assert one(Answers([widest]))["tokens"][0]["value_usd"] == "9" * 78 + "0" * 60 + ".00"
+    absurd = lending()
+    absurd["portfolio_item_list"][0]["stats"]["net_usd_value"] = Decimal("1e400")
+    absurd["portfolio_item_list"][0]["update_at"] = Decimal("1e999999")
+    account = one(Answers([token(price=Decimal("1e400"))], [absurd]))
+    assert account["tokens"][0]["price_usd"] is None
+    assert account["positions"][0]["net_usd"] is None
+    assert account["positions"][0]["updated_at"] is None
+    assert (
+        one(Answers([token(amount=Decimal("1e-7"), raw_amount_str=None)]))["tokens"][0]["amount"]
+        == "0.0000001"
+    )
+
+
+@pytest.mark.parametrize("price", [0, Decimal("0.0"), -5, None, "free"])
+def test_a_price_that_is_zero_or_negative_is_no_price(price):
+    account = one(Answers([token(price=price)]))
+    assert account["tokens"][0]["price_usd"] is None
+    assert account["tokens"][0]["value_usd"] is None
+    assert account["totals"]["tokens_usd"] is None
+
+
 @pytest.mark.parametrize(
     ("tokens", "positions"),
     [
+        ([token(amount=Decimal("-5"), raw_amount_str=None)], []),
+        ([token(amount=Decimal("1e999999"), raw_amount_str=None)], []),
+        ([token(amount=None, raw_amount_str="9" * 79)], []),
+        ([token(amount=None, raw_amount_str="-5")], []),
         ([token(chain=None)], []),
         ([token(id="")], []),
         ([token(amount=None, raw_amount_str=None)], []),
@@ -212,8 +245,10 @@ def test_a_row_that_states_no_identity_or_amount_refuses_the_report(tokens, posi
 
 def test_accounts_are_validated_deduplicated_and_bounded():
     source = Answers()
-    report = ax_portfolio.portfolio(source, [ACCOUNT, OTHER, ACCOUNT], False)
+    shouted = "0x" + ACCOUNT[2:].upper()
+    report = ax_portfolio.portfolio(source, [ACCOUNT, OTHER, shouted] + [ACCOUNT] * 4, False)
     assert [row["account"] for row in report["accounts"]] == [ACCOUNT, OTHER]
+    assert len(source.asked) == 4
     with pytest.raises(ValueError, match="20-byte EVM address"):
         ax_portfolio.portfolio(source, ["0x1234"], False)
     many = [f"0x{n:040x}" for n in range(1, 7)]

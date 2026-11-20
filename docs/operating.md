@@ -1467,7 +1467,9 @@ Each account reports:
 - `tokens`: each wallet token with its `amount` as a decimal string, `raw_amount`
   in base units, the vendor's `price_usd` and their product `value_usd`. `chain`
   and `asset` are the CAIP references the vendor's chain label and token ID
-  imply, unverified, and null on a chain without a verified network definition;
+  imply, unverified. Both are null on a chain without a verified network
+  definition, and `asset` is null where the vendor's token ID is not a contract
+  address;
   `vendor_chain` and `vendor_token` keep the vendor's own words. `vendor_flags`
   carries the vendor's `core`, `verified`, `scam` and `suspicious` marks.
 - `tokens_unlisted`: how many tokens the vendor does not mark as core. They are
@@ -1476,9 +1478,11 @@ Each account reports:
   `Lending` or `Rewards`), `asset_usd`, `debt_usd` and `net_usd`, the vendor's
   `health_rate` where it states one, and its `legs`: each token list of the
   vendor's detail under its own name, such as `supply`, `borrow` and `reward`. A
-  leg carries a decimal `amount` and no base units.
+  leg carries a decimal `amount` and no base units. A position whose detail the
+  vendor shapes otherwise has no legs, only its dollar figures.
 - `totals`: `tokens_usd`, `positions_usd` and `total_usd`. A total is null when a
-  row it sums has no value; a missing price is never counted as zero.
+  row it sums has no value. The vendor writes a price of zero for a token it
+  cannot price; that is read as no price, never as a value of zero.
 
 This is the vendor's own wallet backend, not a documented public interface. It
 can change or refuse without notice, it sees every address asked about, and it

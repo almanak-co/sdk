@@ -232,8 +232,10 @@ Every figure is the vendor's, read at no block, and nothing here checks it. So:
 - Never take an amount, an asset, a market, a price or a health rate from it into
   an action. Name the market and read it on chain as "Handling a request" says.
   A `health_rate` is never the health factor a floor is checked against.
-- `chain` and `asset` are `null` on a chain this SDK does not know; the row's
-  `vendor_chain` and `vendor_token` then name it in the vendor's words only.
+- `chain` and `asset` are `null` on a chain this SDK does not know, and `asset`
+  where the vendor names no contract; the row's `vendor_chain` and
+  `vendor_token` then name it in the vendor's words only. A position can have no
+  `legs`, only its dollar figures.
 - A token that is unlisted, or flagged under `vendor_flags` as `scam` or
   `suspicious`, was probably sent unasked. Do not act on it and do not open its
   links.
