@@ -129,19 +129,62 @@ class EvmNetwork:
     # Observation readers (`almanak ax`, `almanak markets`) pin `finalized` and `latest`
     # this many blocks behind the tag's block; the context proof still checks that block.
     observation_depth: int = 0
+    # Seconds a block must be behind the head before a signed step is released because
+    # a transaction in that block took its nonce (`gateway.consumed_nonce`). It is the
+    # chain's documented time to finality, stated beside each network with its source,
+    # and holds whatever an endpoint serves as `finalized`. None releases nothing.
+    finality_margin_seconds: int | None = None
 
+
+# Finality margins (`EvmNetwork.finality_margin_seconds`), each from the chain's own
+# documentation as read on 2026-11-20. A figure is the longest the chain documents for
+# its normal case, or a documented lower bound where part of the delay has no documented
+# figure; the endpoint's `finalized` tag must hold as well, so the margin only delays.
+#
+# Ethereum: only an epoch's first block is justified and then finalized, so a block is
+# final two to three 32-slot epochs of 12-second slots after it is proposed
+# (ethereum.org proof-of-stake and Gasper pages; consensus-specs phase0). Three epochs.
+ETHEREUM_FINALITY_SECONDS = 3 * 32 * 12
+# Arbitrum One and Robinhood Chain are Nitro rollups on Ethereum: a block is final once
+# its batch is posted and that Ethereum block is final (docs.arbitrum.io finality and
+# reorgs reference; docs.robinhood.com/chain transaction finality). Neither documents
+# a batch-posting time, so the margin is Ethereum's alone, a lower bound.
+#
+# OP Mainnet: "typically reaches the finalized state within about 15 to 30 minutes of
+# submission" (docs.optimism.io transaction finality). Thirty minutes.
+OP_MAINNET_FINALITY_SECONDS = 30 * 60
+# Base: batch inclusion on Ethereum in about 2 minutes, then finality of that batch in
+# about 20 minutes (docs.base.org transaction finality). Their sum.
+BASE_FINALITY_SECONDS = 22 * 60
+# BNB Smart Chain: fast finality (BEP-126) finalizes within two blocks. When its votes
+# are insufficient the chain falls back to probabilistic finality, documented as 120
+# blocks for a two-thirds validator majority, about 180 seconds at 1.5-second blocks
+# (docs.bnbchain.org JSON-RPC reference). The fallback, in the documented seconds:
+# blocks have only become shorter, so 180 seconds spans at least those 120 blocks.
+BNB_FINALITY_SECONDS = 180
+# Avalanche C-Chain: a block is final when consensus accepts it, in about a second, and
+# is never reorganized; `finalized` is the last settled block, a constant 5 seconds
+# behind execution (build.avax.network exchange integration and C-Chain RPC pages;
+# ACP-194). The settlement delay.
+AVALANCHE_FINALITY_SECONDS = 5
+# Polygon PoS and HyperEVM state none, so nothing is released there. Polygon documents
+# milestone finality in 2 to 5 seconds but no bound when milestones stall and no reorg
+# depth without them (docs.polygon.technology finality; PIP-11). Hyperliquid documents
+# no finality time and no meaning for the block tags, and `finalized` is the head.
 
 ETHEREUM = EvmNetwork(
     ChainId("eip155:1"),
     AssetType("eip155:1/slip44:60"),
     AssetType("eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
     "0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3",
+    finality_margin_seconds=ETHEREUM_FINALITY_SECONDS,
 )
 AVALANCHE = EvmNetwork(
     ChainId("eip155:43114"),
     AssetType("eip155:43114/slip44:9005"),
     AssetType("eip155:43114/erc20:0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7"),
     "0x31ced5b9beb7f8782b014660da0cb18cc409f121f408186886e1ca3e8eeca96b",
+    finality_margin_seconds=AVALANCHE_FINALITY_SECONDS,
 )
 BASE = EvmNetwork(
     ChainId("eip155:8453"),
@@ -150,6 +193,7 @@ BASE = EvmNetwork(
     "0xf712aa9241cc24369b143cf6dce85f0902a9731e70d66818a3a5845b296c73dd",
     "optimism",
     fixed_block_interval=True,
+    finality_margin_seconds=BASE_FINALITY_SECONDS,
 )
 ARBITRUM = EvmNetwork(
     ChainId("eip155:42161"),
@@ -158,6 +202,7 @@ ARBITRUM = EvmNetwork(
     "0x7ee576b35482195fc49205cec9af72ce14f003b9ae69f6ba0faef4514be8b442",
     wrapping_emits_transfer=True,
     legacy_price_is_ceiling=True,
+    finality_margin_seconds=ETHEREUM_FINALITY_SECONDS,
 )
 BNB = EvmNetwork(
     ChainId("eip155:56"),
@@ -165,6 +210,7 @@ BNB = EvmNetwork(
     AssetType("eip155:56/erc20:0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"),
     "0x0d21840abff46b96c84b2ac9e10e4f5cdaeb5693cb665db62a2f3b02d2d57b5b",
     fee_history_reports_tips=False,
+    finality_margin_seconds=BNB_FINALITY_SECONDS,
 )
 OPTIMISM = EvmNetwork(
     ChainId("eip155:10"),
@@ -173,6 +219,7 @@ OPTIMISM = EvmNetwork(
     "0x7ca38a1916c42007829c55e69d3e9a73265554b586a499015373241b8a3fa48b",
     "optimism",
     fixed_block_interval=True,
+    finality_margin_seconds=OP_MAINNET_FINALITY_SECONDS,
 )
 
 
@@ -191,6 +238,7 @@ ROBINHOOD = EvmNetwork(
     "0xaad15f3d702aaea00caf3e9bb56395efe9127bc3b31b24921abf1eee3409305c",
     wrapping_emits_transfer=True,
     legacy_price_is_ceiling=True,
+    finality_margin_seconds=ETHEREUM_FINALITY_SECONDS,
 )
 
 
