@@ -739,7 +739,9 @@ def test_the_overview_is_a_vendor_read_that_feeds_no_action():
     assert "almanak ax portfolio --account <address>" in commands()
 
     class Vendor:
-        def fetch(self, listing, account):
+        def fetch(self, listing, account, chain=None):
+            if listing == "chains":
+                return [{"id": "eth", "usd_value": 1}], 0
             leg = {"id": "eth", "chain": "eth", "amount": 1, "price": 2, "is_core": True}
             item = {"detail": {"supply_token_list": [leg], "borrow_token_list": [leg]}}
             item["detail"]["reward_token_list"] = [leg]
@@ -750,11 +752,23 @@ def test_the_overview_is_a_vendor_read_that_feeds_no_action():
     (account,) = report["accounts"]
     (held,), (position,) = account["tokens"], account["positions"]
     fields = dict(rows(section))
-    assert set(fields) == {"`totals`", "`tokens`", "`tokens_unlisted`", "`positions`"}
+    assert set(fields) == {
+        "`totals`",
+        "`tokens`",
+        "`tokens_unlisted`",
+        "`chains_unread`",
+        "`positions`",
+    }
+    unread = ax_portfolio.unread_chain("eth", ax_portfolio.CENT)
     for name, cell in fields.items():
         row = name.strip("`")
         assert row in account, row
-        scope = {"totals": account["totals"], "tokens": held, "positions": position}.get(row, {})
+        scope = {
+            "totals": account["totals"],
+            "tokens": held,
+            "positions": position,
+            "chains_unread": unread,
+        }.get(row, {})
         for field in spans(cell):
             if field.startswith("--") or field == "null":
                 continue

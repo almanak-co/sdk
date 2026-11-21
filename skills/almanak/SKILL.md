@@ -242,6 +242,7 @@ token someone sent, a position opened elsewhere, a reward to claim. Under
 | `totals` | `tokens_usd`, `positions_usd` and `total_usd`; absent (`null`) when a row it sums has no price |
 | `tokens` | Each wallet token: `chain`, `asset`, `symbol`, `amount` as a decimal, `raw_amount` in base units, `price_usd`, `value_usd` |
 | `tokens_unlisted` | How many tokens the vendor does not list as core, left out of the rows and the totals; `--include-unlisted` shows them |
+| `chains_unread` | Chains the vendor values whose tokens were not read, each with `vendor_chain` and the vendor's `value_usd`; normally empty, and the token totals are `null` when it is not |
 | `positions` | Each position: `chain`, `protocol.name`, `kind`, `asset_usd`, `debt_usd`, `net_usd`, `health_rate`, and its `legs` by name, such as `supply`, `borrow` and `reward` |
 
 Every figure is the vendor's, read at no block, and nothing here checks it. So:

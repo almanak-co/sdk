@@ -1618,9 +1618,11 @@ reports it:
 almanak ax portfolio --account 0x...
 ```
 
-It asks Rabby's backend two questions per account, each answered for every chain
-the vendor indexes: the tokens the address holds, and its positions in the
-protocols the vendor indexes. It needs no key, opens no chain endpoint and takes
+It asks Rabby's backend, per account, which chains the address has value on, the
+tokens it holds on each of those chains, and its positions in the protocols the
+vendor indexes on every chain. That is two requests and one more per chain. The
+tokens are the vendor's current listing of each chain; its stored all-chain list,
+which can predate the account's latest transactions, is not read. It needs no key, opens no chain endpoint and takes
 no transport flag, and it is asked from the calling process, not through the read
 gateway. `--account` repeats for up to five accounts.
 
@@ -1641,7 +1643,12 @@ Each account reports:
   `vendor_chain` and `vendor_token` keep the vendor's own words. `vendor_flags`
   carries the vendor's `core`, `verified`, `scam` and `suspicious` marks.
 - `tokens_unlisted`: how many tokens the vendor does not mark as core. They are
-  left out of the rows and the totals unless `--include-unlisted` is given.
+  left out of the rows and the totals unless `--include-unlisted` is given. Only
+  the chains read are counted, and a chain the vendor gives no value is not read.
+- `chains_read`: the vendor's labels of the chains whose tokens were read, largest
+  value first. At most eight are read per account. `chains_unread` names each
+  valued chain past that bound with the vendor's `value_usd` for the whole chain,
+  and `tokens_usd` and `total_usd` are then null.
 - `positions`: each position with its `protocol`, the vendor's `kind` (such as
   `Lending` or `Rewards`), `asset_usd`, `debt_usd` and `net_usd`, the vendor's
   `health_rate` where it states one, and its `legs`: each token list of the

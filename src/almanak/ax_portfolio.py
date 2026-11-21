@@ -6,6 +6,9 @@ here. The overview is for display. Before an action, the market is named and rea
 on chain by the observation commands, and no row of this report stands in for
 that read.
 
+Wallet tokens are read chain by chain, for the chains the vendor's summary gives
+the account a value on. A chain past the bound is named as unread, never dropped.
+
 A value the vendor omits stays absent. A total is stated only when every row it
 sums has a value, so a missing price never counts as zero.
 """
@@ -18,14 +21,17 @@ from almanak.gateway.evm import native_asset
 from almanak.gateway.rabby_portfolio import CHAINS, SOURCE
 from almanak.models import address
 
-# One command reads at most this many accounts: each costs two vendor requests, and
+# One command reads at most this many accounts, and for each the tokens of at most
+# this many chains: an account costs two vendor requests and one more per chain, and
 # the vendor throttles an address of ours after a few dozen.
 MAX_ACCOUNTS = 5
+MAX_CHAINS = 8
+MAX_HEX_DIGITS = 64
 CENT = Decimal("0.01")
 # A vendor number further from one than this many decimal places is not a balance, a
 # price or a time; it is read as absent. Arithmetic keeps every digit of what is left.
 MAX_EXPONENT = 60
-MAX_RAW_DIGITS = 78
+HEX = "0123456789abcdefABCDEF"
 EXACT = Context(prec=4 * MAX_EXPONENT)
 TOKEN_LIST = "_token_list"
 
@@ -49,18 +55,27 @@ def portfolio(source, accounts: list[str], include_unlisted: bool) -> dict:
 
 
 def account_report(source, account: str, include_unlisted: bool) -> dict:
-    token_rows, tokens_at = source.fetch("tokens", account)
+    chain_rows, chains_at = source.fetch("chains", account)
+    valued = funded(chain_rows)
+    token_rows, tokens_at = [], None
+    for label, _ in valued[:MAX_CHAINS]:
+        found, received = source.fetch("tokens", account, label)
+        token_rows += found
+        # The oldest answer among the chains read.
+        tokens_at = received if tokens_at is None else min(tokens_at, received)
+    unread = [unread_chain(label, value) for label, value in valued[MAX_CHAINS:]]
     position_rows, positions_at = source.fetch("positions", account)
     held = [token_report(row) for row in token_rows]
     listed = [token for token in held if include_unlisted or token["vendor_flags"]["core"]]
     positions = [
         position_report(protocol, item) for protocol in position_rows for item in items(protocol)
     ]
-    tokens_usd = total([token["value_usd"] for token in listed])
+    # Tokens on a chain that was not read are not measured, so there is no total.
+    tokens_usd = None if unread else total([token["value_usd"] for token in listed])
     positions_usd = total([position["net_usd"] for position in positions])
     return {
         "account": account,
-        "received_at": {"tokens": tokens_at, "positions": positions_at},
+        "received_at": {"chains": chains_at, "tokens": tokens_at, "positions": positions_at},
         "totals": {
             "tokens_usd": tokens_usd,
             "positions_usd": positions_usd,
@@ -68,11 +83,31 @@ def account_report(source, account: str, include_unlisted: bool) -> dict:
         },
         "tokens": sorted(listed, key=lambda token: rank(token["value_usd"]), reverse=True),
         # Tokens the vendor does not list as core, left out of the rows and the totals.
+        # Counted on the chains read; a chain the vendor gives no value is not read.
         "tokens_unlisted": len(held) - len(listed),
+        "chains_read": [label for label, _ in valued[:MAX_CHAINS]],
+        "chains_unread": unread,
         "positions": sorted(
             positions, key=lambda position: rank(position["net_usd"]), reverse=True
         ),
     }
+
+
+def funded(chain_rows: list[dict]) -> list[tuple[str, Decimal]]:
+    """The chains the vendor's summary gives the account a value on, largest first."""
+    valued = []
+    for row in chain_rows:
+        label, value = text(row.get("id")), decimal(row.get("usd_value"))
+        if label is None:
+            raise DataError("malformed", f"{SOURCE}: a chain row names no chain")
+        if value is not None and value > 0:
+            valued.append((label, value))
+    return sorted(valued, key=lambda chain: chain[1], reverse=True)
+
+
+def unread_chain(label: str, value: Decimal) -> dict:
+    # The vendor's value for the whole chain, tokens and positions together.
+    return {"chain": caip(CHAINS.get(label)), "vendor_chain": label, "value_usd": cents(value)}
 
 
 def token_report(row: dict) -> dict:
@@ -86,7 +121,7 @@ def token_report(row: dict) -> dict:
         "decimals": row.get("decimals") if type(row.get("decimals")) is int else None,
         "amount": plain(amount),
         # Base units, where the vendor states them; a position leg carries none.
-        "raw_amount": text(row.get("raw_amount_str")),
+        "raw_amount": base_units(row),
         "price_usd": plain(price),
         "value_usd": None if price is None else cents(EXACT.multiply(amount, price)),
         "vendor_flags": {
@@ -128,21 +163,24 @@ def asset(chain, label: str, token: str) -> AssetType | None:
 
 def token_amount(row: dict) -> Decimal:
     """The balance from its base units where the vendor states them, exactly."""
-    raw, decimals = row.get("raw_amount_str"), row.get("decimals")
+    raw, decimals = base_units(row), row.get("decimals")
     amount = decimal(row.get("amount"))
-    if (
-        isinstance(raw, str)
-        and raw.isascii()
-        and raw.isdecimal()
-        and len(raw) <= MAX_RAW_DIGITS
-        and isinstance(decimals, int)
-        and not isinstance(decimals, bool)
-        and 0 <= decimals <= MAX_EXPONENT
-    ):
+    if raw is not None and type(decimals) is int and 0 <= decimals <= MAX_EXPONENT:
         amount = Decimal(raw).scaleb(-decimals, EXACT)
     if amount is None or amount < 0:
         raise DataError("malformed", f"{SOURCE}: a token row states no amount")
     return amount
+
+
+def base_units(row: dict) -> str | None:
+    """The balance in base units, from the vendor's hexadecimal statement of it."""
+    stated = row.get("raw_amount_hex_str")
+    if not isinstance(stated, str) or not stated.isascii() or not stated.startswith("0x"):
+        return None
+    digits = stated[2:]
+    if not digits or len(digits) > MAX_HEX_DIGITS or set(digits) - set(HEX):
+        return None
+    return str(int(digits, 16))
 
 
 def positive(price: Decimal | None) -> Decimal | None:
