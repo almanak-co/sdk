@@ -232,14 +232,14 @@ almanak ax portfolio --account <address>
 ```
 
 It asks Rabby's backend, a wallet vendor, for the tokens the address holds and
-its positions in the protocols the vendor indexes, on every chain at once, with
+its positions in the protocols the vendor indexes, across chains, with
 the vendor's prices in US dollars. It finds what `settings.json` does not name: a
 token someone sent, a position opened elsewhere, a reward to claim. Under
 `accounts[0]`:
 
 | Field | Holds |
 | --- | --- |
-| `totals` | `tokens_usd`, `positions_usd` and `total_usd`; absent (`null`) when a row it sums has no price |
+| `totals` | `tokens_usd`, `positions_usd` and `total_usd`; absent (`null`) when a row it sums has no price or a chain is unread |
 | `tokens` | Each wallet token: `chain`, `asset`, `symbol`, `amount` as a decimal, `raw_amount` in base units, `price_usd`, `value_usd` |
 | `tokens_unlisted` | How many tokens the vendor does not list as core, left out of the rows and the totals; `--include-unlisted` shows them |
 | `chains_unread` | Chains the vendor values whose tokens were not read, each with `vendor_chain` and the vendor's `value_usd`; normally empty, and the token totals are `null` when it is not |
@@ -264,7 +264,7 @@ Every figure is the vendor's, read at no block, and nothing here checks it. So:
   they object.
 
 The user may ask for the overview of another address, such as their own wallet;
-`--account` repeats up to five times. That is a read: you still manage only your
+`--account` repeats up to two times. That is a read: you still manage only your
 own wallet.
 
 A refusal with `rate_limit` means the vendor throttled this machine's address,

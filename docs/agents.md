@@ -164,7 +164,7 @@ opened elsewhere is read when the user names its market or token ID.
 
 The agent also reads an overview of the wallet with
 [`ax portfolio`](operating.md#portfolio): the tokens and protocol positions a
-wallet vendor, Rabby's backend, reports for the address on every chain, with the
+wallet vendor, Rabby's backend, reports for the address across chains, with the
 vendor's prices. It shows what the agent did not open itself, and the user can ask
 for the overview of another address, which the agent reads and never manages. The
 figures are the vendor's and unverified, so the agent reports them as an

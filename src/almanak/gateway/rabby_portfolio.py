@@ -82,7 +82,7 @@ def answer(listing: Listing, response: httpx.Response) -> object:
     try:
         # Amounts and prices stay the decimals the vendor sent, never binary floats.
         return json.loads(response.text, parse_float=Decimal)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise DataError("malformed", f"{SOURCE}: {listing}: response is not JSON") from None
 
 

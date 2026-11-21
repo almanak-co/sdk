@@ -68,29 +68,25 @@ class Answers:
     """A vendor that answers each listing from fixed rows and records what it was asked."""
 
     def __init__(self, tokens=(), positions=(), chains=None):
-        # Unless the chains are stated, the tokens are all held on one valued chain.
-        valued = {"eth": 1} if chains is None and tokens else chains or {}
+        self.tokens = {}
+        for row in tokens:
+            # A row that names no chain is answered on Ethereum, where the report refuses it.
+            label = row.get("chain") if isinstance(row.get("chain"), str) else "eth"
+            self.tokens.setdefault(label, []).append(row)
+        # Unless the chains are stated, each chain a token is on has a value.
+        valued = dict.fromkeys(self.tokens, 1) if chains is None else chains
         self.rows = {
             "chains": [{"id": label, "usd_value": value} for label, value in valued.items()],
             "positions": list(positions),
         }
-        self.tokens = list(tokens)
         self.asked = []
 
     def fetch(self, listing, account, chain=None):
         self.asked.append((listing, account) if chain is None else (listing, account, chain))
         received = 1795000000000 + len(self.asked)
         if listing == "tokens":
-            if set(self.rows_by_chain()) == {None} or len(self.rows["chains"]) == 1:
-                return self.tokens, received
-            return self.rows_by_chain().get(chain, []), received
+            return self.tokens.get(chain, []), received
         return self.rows[listing], received
-
-    def rows_by_chain(self):
-        found = {}
-        for row in self.tokens:
-            found.setdefault(row.get("chain"), []).append(row)
-        return found
 
 
 def parse(argv):
@@ -124,16 +120,20 @@ def test_the_report_names_the_vendor_and_claims_no_verification():
 
 
 def test_tokens_are_read_live_on_each_chain_the_vendor_values_largest_first():
-    chains = {"base": Decimal("2.5"), "sophon": 0, "eth": 7, "op": None, "arb": "junk"}
+    # A chain whose value the vendor does not state is not known to be empty: it is
+    # read too, after the valued ones. Only a stated zero is left unread.
+    chains = {"op": None, "base": Decimal("2.5"), "sophon": 0, "eth": 7, "arb": -1}
     source = Answers([token(), token(id="base", chain="base")], [], chains)
     account = one(source)
     assert source.asked == [
         ("chains", ACCOUNT),
         ("tokens", ACCOUNT, "eth"),
         ("tokens", ACCOUNT, "base"),
+        ("tokens", ACCOUNT, "arb"),
+        ("tokens", ACCOUNT, "op"),
         ("positions", ACCOUNT),
     ]
-    assert account["chains_read"] == ["eth", "base"]
+    assert account["chains_read"] == ["eth", "base", "arb", "op"]
     assert [row["vendor_chain"] for row in account["tokens"]] == ["eth", "base"]
     # The oldest of the token answers.
     assert account["received_at"]["tokens"] == 1795000000002
@@ -143,16 +143,33 @@ def test_tokens_are_read_live_on_each_chain_the_vendor_values_largest_first():
         one(Answers(chains={"": 1}))
 
 
+def test_a_repeated_chain_or_a_row_on_another_chain_refuses_the_report():
+    twice = Answers([token()])
+    twice.rows["chains"] *= 2
+    with pytest.raises(DataError, match="repeats one"):
+        one(twice)
+    # A vendor that ignores the chain asked would have its rows counted once per chain.
+    stray = Answers([token()], chains={"eth": 1, "base": 1})
+    stray.tokens["base"] = stray.tokens["eth"]
+    with pytest.raises(DataError, match="a row is on another chain") as refused:
+        one(stray)
+    assert refused.value.kind == "malformed"
+
+
 def test_a_chain_past_the_bound_is_named_as_unread_and_leaves_no_token_total():
-    chains = {f"chain{n}": n for n in range(1, 10)} | {"base": Decimal("0.004")}
-    source = Answers([], [lending()], chains)
+    chains = {f"chain{n}": n for n in range(1, 10)} | {"base": Decimal("0.004"), "op": "junk"}
+    held = [token(chain="chain9"), token(chain="chain9", id=USDC, is_core=False)]
+    source = Answers(held, [lending()], chains)
     account = one(source)
     assert account["chains_read"] == [f"chain{n}" for n in range(9, 1, -1)]
     assert account["chains_unread"] == [
         {"chain": None, "vendor_chain": "chain1", "value_usd": "1.00"},
         {"chain": "eip155:8453", "vendor_chain": "base", "value_usd": "0.00"},
+        {"chain": "eip155:10", "vendor_chain": "op", "value_usd": None},
     ]
     assert len([asked for asked in source.asked if asked[0] == "tokens"]) == 8
+    # What was read is still listed beside the absent total.
+    assert len(account["tokens"]) == 1 and account["tokens_unlisted"] == 1
     assert account["totals"] == {"tokens_usd": None, "positions_usd": "12.03", "total_usd": None}
 
 
@@ -316,8 +333,8 @@ def test_accounts_are_validated_deduplicated_and_bounded():
     assert len(source.asked) == 4  # No chain has value, so no token read.
     with pytest.raises(ValueError, match="20-byte EVM address"):
         ax_portfolio.portfolio(source, ["0x1234"], False)
-    many = [f"0x{n:040x}" for n in range(1, 7)]
-    with pytest.raises(ValueError, match="at most 5 accounts"):
+    many = [f"0x{n:040x}" for n in range(1, 4)]
+    with pytest.raises(ValueError, match="at most 2 accounts"):
         ax_portfolio.portfolio(source, many, False)
 
 

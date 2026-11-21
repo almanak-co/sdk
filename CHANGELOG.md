@@ -13,7 +13,8 @@ its changelog is on the `v2` branch.
   account has value on. It read the vendor's stored all-chain list, which kept
   balances from before an account's latest transactions. The report names the chains
   read as `chains_read` and any past the bound of eight as `chains_unread`, and
-  `raw_amount` now comes from the vendor's hexadecimal base units.
+  `raw_amount` now comes from the vendor's hexadecimal base units. One command reads at
+  most two accounts, where it read five, since each account now costs more requests.
 
 ## [3.3.0] - 2026-11-20
 

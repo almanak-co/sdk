@@ -6,11 +6,14 @@ here. The overview is for display. Before an action, the market is named and rea
 on chain by the observation commands, and no row of this report stands in for
 that read.
 
-Wallet tokens are read chain by chain, for the chains the vendor's summary gives
-the account a value on. A chain past the bound is named as unread, never dropped.
+Wallet tokens are read chain by chain, for the chains the vendor's summary does
+not value at zero. A chain past the bound is named as unread, never dropped. A
+chain the vendor values at zero is not read, so a token the vendor cannot price
+there is not seen.
 
 A value the vendor omits stays absent. A total is stated only when every row it
-sums has a value, so a missing price never counts as zero.
+sums has a value and every chain to read was read, so a missing price on a chain
+read never counts as zero.
 """
 
 from decimal import Context, Decimal, InvalidOperation
@@ -24,7 +27,7 @@ from almanak.models import address
 # One command reads at most this many accounts, and for each the tokens of at most
 # this many chains: an account costs two vendor requests and one more per chain, and
 # the vendor throttles an address of ours after a few dozen.
-MAX_ACCOUNTS = 5
+MAX_ACCOUNTS = 2
 MAX_CHAINS = 8
 MAX_HEX_DIGITS = 64
 CENT = Decimal("0.01")
@@ -60,6 +63,8 @@ def account_report(source, account: str, include_unlisted: bool) -> dict:
     token_rows, tokens_at = [], None
     for label, _ in valued[:MAX_CHAINS]:
         found, received = source.fetch("tokens", account, label)
+        if any(row.get("chain") != label for row in found):
+            raise DataError("malformed", f"{SOURCE}: tokens: a row is on another chain")
         token_rows += found
         # The oldest answer among the chains read.
         tokens_at = received if tokens_at is None else min(tokens_at, received)
@@ -83,7 +88,7 @@ def account_report(source, account: str, include_unlisted: bool) -> dict:
         },
         "tokens": sorted(listed, key=lambda token: rank(token["value_usd"]), reverse=True),
         # Tokens the vendor does not list as core, left out of the rows and the totals.
-        # Counted on the chains read; a chain the vendor gives no value is not read.
+        # Counted on the chains read; a chain the vendor values at zero is not read.
         "tokens_unlisted": len(held) - len(listed),
         "chains_read": [label for label, _ in valued[:MAX_CHAINS]],
         "chains_unread": unread,
@@ -93,19 +98,21 @@ def account_report(source, account: str, include_unlisted: bool) -> dict:
     }
 
 
-def funded(chain_rows: list[dict]) -> list[tuple[str, Decimal]]:
-    """The chains the vendor's summary gives the account a value on, largest first."""
-    valued = []
+def funded(chain_rows: list[dict]) -> list[tuple[str, Decimal | None]]:
+    """The chains to read, largest value first: every one the vendor's summary does
+    not value at zero. A chain whose value cannot be read is not known to be empty,
+    so it is kept, after the valued ones."""
+    valued: dict[str, Decimal | None] = {}
     for row in chain_rows:
         label, value = text(row.get("id")), decimal(row.get("usd_value"))
-        if label is None:
-            raise DataError("malformed", f"{SOURCE}: a chain row names no chain")
-        if value is not None and value > 0:
-            valued.append((label, value))
-    return sorted(valued, key=lambda chain: chain[1], reverse=True)
+        if label is None or label in valued:
+            raise DataError("malformed", f"{SOURCE}: a chain row names no chain or repeats one")
+        valued[label] = value
+    kept = [(label, value) for label, value in valued.items() if value != 0]
+    return sorted(kept, key=lambda chain: rank(chain[1]), reverse=True)
 
 
-def unread_chain(label: str, value: Decimal) -> dict:
+def unread_chain(label: str, value: Decimal | None) -> dict:
     # The vendor's value for the whole chain, tokens and positions together.
     return {"chain": caip(CHAINS.get(label)), "vendor_chain": label, "value_usd": cents(value)}
 
@@ -247,7 +254,7 @@ def total(values: list[str | None]) -> str | None:
     return cents(summed)
 
 
-def rank(value: str | None) -> Decimal:
+def rank(value: Decimal | str | None) -> Decimal:
     return Decimal("-Infinity") if value is None else Decimal(value)
 
 
