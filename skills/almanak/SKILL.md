@@ -252,6 +252,10 @@ Every figure is the vendor's, read at no block, and nothing here checks it. So:
 - Never take an amount, an asset, a market, a price or a health rate from it into
   an action. Name the market and read it on chain as "Handling a request" says.
   A `health_rate` is never the health factor a floor is checked against.
+- It is not every token. Tokens are read on the chains the vendor does not value
+  at zero, at most eight, so a token the vendor cannot price on an otherwise
+  empty chain is not listed and is not under `chains_unread`. Never say the
+  wallet holds nothing else.
 - `chain` and `asset` are `null` on a chain this SDK does not know, and `asset`
   where the vendor names no contract; the row's `vendor_chain` and
   `vendor_token` then name it in the vendor's words only. A position can have no
