@@ -1104,7 +1104,7 @@ subcommands takes `--block` (default `finalized`):
 | `lending-markets` | `aave_v3`, `sparklend`, `aave_v4`, `compound_v3`, `morpho_blue` | `--chain`; optional `--asset` (required for `morpho_blue`), `--collateral`, `--include-unlisted` (`morpho_blue`), `--limit`, `--offset` |
 | `hypercore-markets` | none | optional `--query` (a coin), `--limit`, `--offset`, `--include-delisted`; no `--block` |
 | `hypercore-account` | none | `--account` (repeatable); no `--block` |
-| `portfolio` | none | `--account` (repeatable, at most five); optional `--include-unlisted`; no `--block` and no transport |
+| `portfolio` | none | `--account` (repeatable, at most two); optional `--include-unlisted`; no `--block` and no transport |
 
 `--config` names a JSON request file whose fields are the connector's request
 model; for the lending subcommands it is the market selection an author writes
@@ -1618,15 +1618,19 @@ reports it:
 almanak ax portfolio --account 0x...
 ```
 
-It asks Rabby's backend two questions per account, each answered for every chain
-the vendor indexes: the tokens the address holds, and its positions in the
-protocols the vendor indexes. It needs no key, opens no chain endpoint and takes
+It asks Rabby's backend, per account, which chains the address has value on, the
+tokens it holds on each of those chains, and its positions in the protocols the
+vendor indexes on every chain. That is two requests and one more per chain. The
+tokens are the vendor's current listing of each chain; its stored all-chain list,
+which can predate the account's latest transactions, is not read. It needs no key, opens no chain endpoint and takes
 no transport flag, and it is asked from the calling process, not through the read
-gateway. `--account` repeats for up to five accounts.
+gateway. `--account` repeats for up to two accounts, which keeps one command under the
+vendor's throttle.
 
 Every figure is the vendor's. The report says so in `source` (`provider` is
 `rabby`, `verified` is `false`), reads no block, and names the time each answer
-was received in milliseconds under `received_at`. It is an overview for display:
+was received in milliseconds under `received_at`: `chains`, `positions`, and
+`tokens` as the oldest of the token answers, or null when no chain was read. It is an overview for display:
 no row of it is identity, a price input or the basis of an action, and a market
 is read on chain with the subcommands above before anything acts on it.
 
@@ -1641,7 +1645,15 @@ Each account reports:
   `vendor_chain` and `vendor_token` keep the vendor's own words. `vendor_flags`
   carries the vendor's `core`, `verified`, `scam` and `suspicious` marks.
 - `tokens_unlisted`: how many tokens the vendor does not mark as core. They are
-  left out of the rows and the totals unless `--include-unlisted` is given.
+  left out of the rows and the totals unless `--include-unlisted` is given. Only
+  the chains read are counted.
+- `chains_read`: the vendor's labels of the chains whose tokens were read, largest
+  value first: every chain the vendor's summary does not value at zero, including
+  one whose value it does not state, up to eight per account. `chains_unread`
+  names each such chain past that bound with the vendor's `value_usd` for the
+  whole chain, or null, and `tokens_usd` and `total_usd` are then null. A chain
+  the vendor values at zero is not read, so a token the vendor cannot price there
+  is not listed and does not make a total null.
 - `positions`: each position with its `protocol`, the vendor's `kind` (such as
   `Lending` or `Rewards`), `asset_usd`, `debt_usd` and `net_usd`, the vendor's
   `health_rate` where it states one, and its `legs`: each token list of the
@@ -1649,7 +1661,7 @@ Each account reports:
   leg carries a decimal `amount` and no base units. A position whose detail the
   vendor shapes otherwise has no legs, only its dollar figures.
 - `totals`: `tokens_usd`, `positions_usd` and `total_usd`. A total is null when a
-  row it sums has no value. The vendor writes a price of zero for a token it
+  row it sums has no value or a chain is unread. The vendor writes a price of zero for a token it
   cannot price; that is read as no price, never as a value of zero.
 
 This is the vendor's own wallet backend, not a documented public interface. It
@@ -1657,5 +1669,6 @@ can change or refuse without notice, it sees every address asked about, and it
 throttles a caller's network address: after about 25 requests in ten minutes,
 every request was refused for longer than ten minutes. A throttle is the
 `rate_limit` refusal, any other failed answer is `unavailable`, and an answer
-that is not rows of the expected kind, or a row that states no chain, token or
-amount, is `malformed`. Nothing is substituted for a refused overview.
+that is not rows of the expected kind, a row that states no chain, token or
+amount, a chain listed twice, or a token row on a chain other than the one asked,
+is `malformed`. Nothing is substituted for a refused overview.

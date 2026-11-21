@@ -652,10 +652,10 @@ def portfolio(commands):
     # A vendor overview at read time: no --block, and no transport to choose.
     command = commands.add_parser(
         "portfolio",
-        help="an account's tokens and protocol positions on every chain, as a vendor reports them",
+        help="an account's tokens and protocol positions across chains, as a vendor reports them",
         description=(
             "Rabby's backend reports the account's wallet tokens and its positions in the"
-            " protocols it indexes, on every chain, with its own prices, as of the moment it"
+            " protocols it indexes, across chains, with its own prices, as of the moment it"
             " answers. It needs no key and no endpoint. Every figure is the vendor's and is"
             " verified by nothing here: read a market on chain before acting on it. The"
             " vendor sees each address asked about."
@@ -666,7 +666,7 @@ def portfolio(commands):
         "--account",
         required=True,
         action="append",
-        help="EVM address of the account; repeat to read up to five",
+        help="EVM address of the account; repeat to read up to two",
     )
     command.add_argument(
         "--include-unlisted",

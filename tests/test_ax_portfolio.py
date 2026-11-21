@@ -31,14 +31,14 @@ def token(**fields) -> dict:
         "is_scam": False,
         "is_suspicious": False,
         "amount": Decimal("0.5"),
-        "raw_amount_str": "500000000000000001",
+        "raw_amount_hex_str": hex(500000000000000001),
     } | fields
 
 
 def leg(**fields) -> dict:
     # A position leg carries the vendor's decimal amount and no base units.
     row = token(id=USDC, name="USD Coin", symbol="USDC", optimized_symbol="USDC", decimals=6)
-    del row["raw_amount_str"]
+    del row["raw_amount_hex_str"]
     return row | {"price": Decimal("1.0009"), "amount": Decimal("12.019914")} | fields
 
 
@@ -67,13 +67,26 @@ def lending(**detail) -> dict:
 class Answers:
     """A vendor that answers each listing from fixed rows and records what it was asked."""
 
-    def __init__(self, tokens=(), positions=()):
-        self.rows = {"tokens": list(tokens), "positions": list(positions)}
+    def __init__(self, tokens=(), positions=(), chains=None):
+        self.tokens = {}
+        for row in tokens:
+            # A row that names no chain is answered on Ethereum, where the report refuses it.
+            label = row.get("chain") if isinstance(row.get("chain"), str) else "eth"
+            self.tokens.setdefault(label, []).append(row)
+        # Unless the chains are stated, each chain a token is on has a value.
+        valued = dict.fromkeys(self.tokens, 1) if chains is None else chains
+        self.rows = {
+            "chains": [{"id": label, "usd_value": value} for label, value in valued.items()],
+            "positions": list(positions),
+        }
         self.asked = []
 
-    def fetch(self, listing, account):
-        self.asked.append((listing, account))
-        return self.rows[listing], 1795000000000 + len(self.asked)
+    def fetch(self, listing, account, chain=None):
+        self.asked.append((listing, account) if chain is None else (listing, account, chain))
+        received = 1795000000000 + len(self.asked)
+        if listing == "tokens":
+            return self.tokens.get(chain, []), received
+        return self.rows[listing], received
 
 
 def parse(argv):
@@ -90,11 +103,74 @@ def test_the_report_names_the_vendor_and_claims_no_verification():
     report = ax_portfolio.portfolio(source, [ACCOUNT], False)
     assert report["product"] == "portfolio"
     assert report["source"]["provider"] == "rabby" and report["source"]["verified"] is False
-    assert source.asked == [("tokens", ACCOUNT), ("positions", ACCOUNT)]
+    assert source.asked == [
+        ("chains", ACCOUNT),
+        ("tokens", ACCOUNT, "eth"),
+        ("positions", ACCOUNT),
+    ]
     account = report["accounts"][0]
     assert account["account"] == ACCOUNT
-    assert account["received_at"] == {"tokens": 1795000000001, "positions": 1795000000002}
+    assert account["received_at"] == {
+        "chains": 1795000000001,
+        "tokens": 1795000000002,
+        "positions": 1795000000003,
+    }
+    assert (account["chains_read"], account["chains_unread"]) == (["eth"], [])
     assert json.loads(json.dumps(report)) == report
+
+
+def test_tokens_are_read_live_on_each_chain_the_vendor_values_largest_first():
+    # A chain whose value the vendor does not state is not known to be empty: it is
+    # read too, after the valued ones. Only a stated zero is left unread.
+    chains = {"op": None, "base": Decimal("2.5"), "sophon": 0, "eth": 7, "arb": -1}
+    source = Answers([token(), token(id="base", chain="base")], [], chains)
+    account = one(source)
+    assert source.asked == [
+        ("chains", ACCOUNT),
+        ("tokens", ACCOUNT, "eth"),
+        ("tokens", ACCOUNT, "base"),
+        ("tokens", ACCOUNT, "arb"),
+        ("tokens", ACCOUNT, "op"),
+        ("positions", ACCOUNT),
+    ]
+    assert account["chains_read"] == ["eth", "base", "arb", "op"]
+    assert [row["vendor_chain"] for row in account["tokens"]] == ["eth", "base"]
+    # The oldest of the token answers.
+    assert account["received_at"]["tokens"] == 1795000000002
+    empty = one(Answers(chains={"sophon": 0}))
+    assert empty["received_at"]["tokens"] is None and empty["chains_read"] == []
+    with pytest.raises(DataError, match="names no chain"):
+        one(Answers(chains={"": 1}))
+
+
+def test_a_repeated_chain_or_a_row_on_another_chain_refuses_the_report():
+    twice = Answers([token()])
+    twice.rows["chains"] *= 2
+    with pytest.raises(DataError, match="repeats one"):
+        one(twice)
+    # A vendor that ignores the chain asked would have its rows counted once per chain.
+    stray = Answers([token()], chains={"eth": 1, "base": 1})
+    stray.tokens["base"] = stray.tokens["eth"]
+    with pytest.raises(DataError, match="a row is on another chain") as refused:
+        one(stray)
+    assert refused.value.kind == "malformed"
+
+
+def test_a_chain_past_the_bound_is_named_as_unread_and_leaves_no_token_total():
+    chains = {f"chain{n}": n for n in range(1, 10)} | {"base": Decimal("0.004"), "op": "junk"}
+    held = [token(chain="chain9"), token(chain="chain9", id=USDC, is_core=False)]
+    source = Answers(held, [lending()], chains)
+    account = one(source)
+    assert account["chains_read"] == [f"chain{n}" for n in range(9, 1, -1)]
+    assert account["chains_unread"] == [
+        {"chain": None, "vendor_chain": "chain1", "value_usd": "1.00"},
+        {"chain": "eip155:8453", "vendor_chain": "base", "value_usd": "0.00"},
+        {"chain": "eip155:10", "vendor_chain": "op", "value_usd": None},
+    ]
+    assert len([asked for asked in source.asked if asked[0] == "tokens"]) == 8
+    # What was read is still listed beside the absent total.
+    assert len(account["tokens"]) == 1 and account["tokens_unlisted"] == 1
+    assert account["totals"] == {"tokens_usd": None, "positions_usd": "12.03", "total_usd": None}
 
 
 def test_a_wallet_token_keeps_its_base_units_and_its_caip_references():
@@ -183,7 +259,7 @@ def test_positions_and_tokens_are_ordered_by_value_with_unvalued_rows_last():
     del unvalued["portfolio_item_list"][0]["stats"]
     account = one(
         Answers(
-            [token(price=None), token(amount=None, raw_amount_str="1"), token()],
+            [token(price=None), token(amount=None, raw_amount_hex_str="0x1"), token()],
             [unvalued, small, lending()],
         )
     )
@@ -194,12 +270,13 @@ def test_positions_and_tokens_are_ordered_by_value_with_unvalued_rows_last():
 
 def test_a_large_balance_keeps_every_digit_and_an_absurd_number_is_absent():
     raw = "1234567890123456789012345678901234567"
-    big = token(id=USDC, raw_amount_str=raw, price=Decimal("0.5"))
+    big = token(id=USDC, raw_amount_hex_str=hex(int(raw)), price=Decimal("0.5"))
     (row,) = one(Answers([big]))["tokens"]
     assert row["amount"] == "1234567890123456789.012345678901234567"
     assert row["value_usd"] == "617283945061728394.51"
-    widest = token(raw_amount_str="9" * 78, decimals=0, price=Decimal("1e60"))
-    assert one(Answers([widest]))["tokens"][0]["value_usd"] == "9" * 78 + "0" * 60 + ".00"
+    widest = token(raw_amount_hex_str="0x" + "f" * 64, decimals=0, price=Decimal("1e60"))
+    value = one(Answers([widest]))["tokens"][0]["value_usd"]
+    assert value == str(2**256 - 1) + "0" * 60 + ".00"
     absurd = lending()
     absurd["portfolio_item_list"][0]["stats"]["net_usd_value"] = Decimal("1e400")
     absurd["portfolio_item_list"][0]["update_at"] = Decimal("1e999999")
@@ -208,7 +285,9 @@ def test_a_large_balance_keeps_every_digit_and_an_absurd_number_is_absent():
     assert account["positions"][0]["net_usd"] is None
     assert account["positions"][0]["updated_at"] is None
     assert (
-        one(Answers([token(amount=Decimal("1e-7"), raw_amount_str=None)]))["tokens"][0]["amount"]
+        one(Answers([token(amount=Decimal("1e-7"), raw_amount_hex_str=None)]))["tokens"][0][
+            "amount"
+        ]
         == "0.0000001"
     )
 
@@ -224,14 +303,17 @@ def test_a_price_that_is_zero_or_negative_is_no_price(price):
 @pytest.mark.parametrize(
     ("tokens", "positions"),
     [
-        ([token(amount=Decimal("-5"), raw_amount_str=None)], []),
-        ([token(amount=Decimal("1e999999"), raw_amount_str=None)], []),
-        ([token(amount=None, raw_amount_str="9" * 79)], []),
-        ([token(amount=None, raw_amount_str="-5")], []),
+        ([token(amount=Decimal("-5"), raw_amount_hex_str=None)], []),
+        ([token(amount=Decimal("1e999999"), raw_amount_hex_str=None)], []),
+        ([token(amount=None, raw_amount_hex_str="0x" + "f" * 65)], []),
+        ([token(amount=None, raw_amount_hex_str="-0x5")], []),
+        ([token(amount=None, raw_amount_hex_str="0x")], []),
+        ([token(amount=None, raw_amount_hex_str="0xzz")], []),
+        ([token(amount=None, raw_amount_hex_str=5)], []),
         ([token(chain=None)], []),
         ([token(id="")], []),
-        ([token(amount=None, raw_amount_str=None)], []),
-        ([token(amount=float("nan"), raw_amount_str=None)], []),
+        ([token(amount=None, raw_amount_hex_str=None)], []),
+        ([token(amount=float("nan"), raw_amount_hex_str=None)], []),
         ([], [{"id": "aave4", "chain": "eth"}]),
         ([], [lending() | {"chain": None}]),
         ([], [lending(supply_token_list=["USDC"])]),
@@ -248,11 +330,11 @@ def test_accounts_are_validated_deduplicated_and_bounded():
     shouted = "0x" + ACCOUNT[2:].upper()
     report = ax_portfolio.portfolio(source, [ACCOUNT, OTHER, shouted] + [ACCOUNT] * 4, False)
     assert [row["account"] for row in report["accounts"]] == [ACCOUNT, OTHER]
-    assert len(source.asked) == 4
+    assert len(source.asked) == 4  # No chain has value, so no token read.
     with pytest.raises(ValueError, match="20-byte EVM address"):
         ax_portfolio.portfolio(source, ["0x1234"], False)
-    many = [f"0x{n:040x}" for n in range(1, 7)]
-    with pytest.raises(ValueError, match="at most 5 accounts"):
+    many = [f"0x{n:040x}" for n in range(1, 4)]
+    with pytest.raises(ValueError, match="at most 2 accounts"):
         ax_portfolio.portfolio(source, many, False)
 
 
@@ -265,14 +347,24 @@ def test_the_client_asks_one_fixed_path_per_listing_and_keeps_decimals():
 
     def answer(request: httpx.Request) -> httpx.Response:
         seen.append((request.url.host, request.url.path, dict(request.url.params)))
+        if request.url.path == PATHS["chains"]:
+            return httpx.Response(200, text='{"chain_list": [{"id": "eth", "usd_value": 14.6}]}')
         return httpx.Response(200, text='[{"amount": 0.1, "price": 1750.77}]')
 
     with vendor(answer) as source:
-        rows, received = source.fetch("tokens", ACCOUNT.upper().replace("0X", "0x"))
+        chains, _ = source.fetch("chains", ACCOUNT)
+        rows, received = source.fetch("tokens", ACCOUNT.upper().replace("0X", "0x"), "eth")
         source.fetch("positions", ACCOUNT)
+        for listing, chain in (("tokens", None), ("positions", "eth"), ("chains", "eth")):
+            with pytest.raises(ValueError, match="only it, is asked for one chain"):
+                source.fetch(listing, ACCOUNT, chain)
+    assert chains == [{"id": "eth", "usd_value": Decimal("14.6")}]
     assert rows == [{"amount": Decimal("0.1"), "price": Decimal("1750.77")}] and received == 7
+    # The live listing of one chain; the vendor's stored all-chain list is never asked.
+    assert PATHS["tokens"] == "/v1/user/token_list"
     assert seen == [
-        ("api.rabby.io", PATHS["tokens"], {"id": ACCOUNT}),
+        ("api.rabby.io", PATHS["chains"], {"id": ACCOUNT}),
+        ("api.rabby.io", PATHS["tokens"], {"id": ACCOUNT, "chain_id": "eth", "is_all": "true"}),
         ("api.rabby.io", PATHS["positions"], {"id": ACCOUNT}),
     ]
 
@@ -289,8 +381,16 @@ def test_the_client_asks_one_fixed_path_per_listing_and_keeps_decimals():
 )
 def test_the_client_names_each_refusal_and_substitutes_nothing(response, kind):
     with vendor(lambda request: response) as source, pytest.raises(DataError) as refused:
-        source.fetch("tokens", ACCOUNT)
+        source.fetch("tokens", ACCOUNT, "eth")
     assert refused.value.kind == kind and "rabby: tokens" in str(refused.value)
+
+
+@pytest.mark.parametrize("body", [[], {"total_usd_value": 1}, {"chain_list": ["eth"]}])
+def test_a_chain_summary_of_another_shape_is_malformed(body):
+    response = httpx.Response(200, json=body)
+    with vendor(lambda request: response) as source, pytest.raises(DataError) as refused:
+        source.fetch("chains", ACCOUNT)
+    assert refused.value.kind == "malformed" and "rabby: chains" in str(refused.value)
 
 
 def test_a_failed_request_is_unavailable_and_a_bad_account_is_never_sent():
