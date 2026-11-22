@@ -49,6 +49,10 @@ class FeeQuote(Model):
         return self.observed_base_fee
 
 
+# How long a journal connection waits for the write lock before it reports BUSY.
+BUSY_TIMEOUT_MS = 5000
+
+
 def _configure_connection(connection: sqlite3.Connection) -> None:
     # WAL recovery can return BUSY without invoking SQLite's busy handler.
     # Retry only setup, before any caller transaction or external action exists.
@@ -62,7 +66,7 @@ def _configure_connection(connection: sqlite3.Connection) -> None:
             if error.sqlite_errorcode & 0xFF != sqlite3.SQLITE_BUSY or remaining <= 0:
                 raise
             time.sleep(min(0.01, remaining))
-    connection.execute("PRAGMA busy_timeout=5000")
+    connection.execute(f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_MS)}")
 
 
 def strategy_authority(config, strategy, permissions, preparation):
@@ -256,6 +260,12 @@ class Journal:
         keep provider and signer calls outside it, re-reading the checkpoint body here to
         detect changes since their `read_fenced`. A gateway killed after broadcast leaves
         the preexisting pending bytes intact.
+
+        The lease runs for `duration` from the release of the lock, whether the request
+        committed or raised. A submission sends under this lock and no renewal can be
+        written meanwhile, so time under the lock must not count against the lease: the
+        holder proved a current lease when it took the lock, and nothing can supersede it
+        before the lock is released. A request that raises still loses its own writes.
         """
         connection = sqlite3.connect(f"file:{quote(str(self.path))}?mode=rw", uri=True, timeout=0)
         try:
@@ -264,10 +274,22 @@ class Journal:
                 connection.execute("BEGIN IMMEDIATE")
             with timed("lock_held"), connection:
                 require_lease(connection, identity)
-                yield connection, checkpoint_body(connection)
-                connection.execute(
-                    "UPDATE coordinator SET expires=? WHERE id=1", (time.time() + duration,)
-                )
+                connection.execute("SAVEPOINT request")
+                try:
+                    yield connection, checkpoint_body(connection)
+                except Exception:
+                    try:
+                        # Undo only the request's writes; the write lock stays held, so
+                        # the lease row is still the one `require_lease` accepted.
+                        connection.execute("ROLLBACK TO request")
+                        extend_lease(connection, duration)
+                        connection.commit()
+                    except sqlite3.Error:
+                        # Storage that cannot keep the lease must not hide the failure
+                        # of the request; the lease then runs out by itself.
+                        pass
+                    raise
+                extend_lease(connection, duration)
         finally:
             connection.close()
 
@@ -288,6 +310,10 @@ def require_lease(connection, identity: str) -> None:
     row = connection.execute("SELECT identity, expires FROM coordinator WHERE id=1").fetchone()
     if row is None or row[0] != identity or row[1] <= time.time():
         raise RuntimeError("coordinator lease is absent, expired or superseded")
+
+
+def extend_lease(connection, duration: float) -> None:
+    connection.execute("UPDATE coordinator SET expires=? WHERE id=1", (time.time() + duration,))
 
 
 def checkpoint_body(connection) -> str:

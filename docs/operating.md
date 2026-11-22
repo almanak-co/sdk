@@ -100,6 +100,13 @@ reads and remote signing run against the checkpoint read under the current lease
 the commit re-checks the lease and refuses a recording whose checkpoint changed
 meanwhile, and a broadcast re-checks its envelope, hash and nonce and sends only
 under the lock. Renewals therefore never wait behind a slow plan or signature.
+They do wait behind a send, which can take longer than the lease on a slow
+endpoint. That time does not count against the lease: a request that held the
+lock under a current lease leaves the lease running for its full duration from
+the moment the lock is released, whether the request committed or failed, and the
+coordinator's renewal waits for its own request instead of giving up. No other
+coordinator can be admitted while the lock is held. A lease that is lost is
+reported with the renewal failure that lost it.
 Replacement families keep the lock for their whole request. Each
 `gateway_request` log line reports provider calls by method (`rpc_calls`,
 `rpc`), HTTP exchanges with the provider (`rpc_round_trips`, a batch counting

@@ -266,6 +266,17 @@ its changelog is on the `v2` branch.
   `RPC rejected the requested read (JSON-RPC -32000)`. The usual cause is a pinned
   block whose state the endpoint has pruned. The read is not sent again. Other
   clients' wordings for the same condition are not recognised (#42).
+- A direct `almanak ax --execute` action, or a strategy run, no longer ends with
+  `gateway coordinator heartbeat failed` because its own send was slow. A broadcast
+  sends while the gateway holds the journal's write lock, and no lease renewal can be
+  written until it returns; a send slower than the lease (30 s for a direct action) cost
+  the coordinator its lease, although the transaction had often been mined. Time under
+  that lock no longer counts against the lease: it runs for its full duration from the
+  release of the lock, whether the request committed or failed, and the renewal waits
+  for the coordinator's own request. The send still runs under the lock, so a signed
+  step is recorded and sent exactly as before (#46).
+- A lost coordinator lease is reported with the renewal failure that lost it, and a
+  direct action names `almanak ax recover` where it said `resume to recover`.
 
 ## [3.3.1] - 2026-11-21
 

@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from almanak import state as durable
-from almanak.gateway.client import GatewayClient
+from almanak.gateway.client import Fenced, GatewayClient
 from almanak.gateway.ethereum import DataError
 from almanak.models import Model
 
@@ -122,8 +122,11 @@ class LocalGateway(GatewayClient):
     loopback server reports them, because the inherited lease renewal retries only that.
     """
 
+    lease_recovery = "run `almanak ax recover` on a kept record"
+
     def __init__(self, service):
         self.service = service
+        self.fenced = Fenced()
         self.coordinator = None
         self.deployment_id = None
         self.stopped = threading.Event()
