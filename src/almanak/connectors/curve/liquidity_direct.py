@@ -40,6 +40,10 @@ any of its coins to zero, one step per coin, and does nothing else.
 
 Time. No Curve call carries a deadline. `deadline_seconds` bounds only when a step may
 be signed; a signed step stays valid until it is mined or the wallet's nonce is used.
+Every approval is held to that many seconds after the observed block. The deposit that
+follows the request's last mined approval may be signed for that many seconds after the
+block that mined it, never later than twice that many after the observed block, with
+the minimum LP shares unchanged.
 
 The heavy imports stay inside the functions: the command line imports each connector's
 `direct` module to build its choices.

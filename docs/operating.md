@@ -835,8 +835,17 @@ reverts on chain below it. The quote is the pool's own price at that block. Noth
 compares it with another venue, so a pool whose price was already moved quotes that
 price. `--deadline-seconds`, 300 unless stated, is how long after the observed block
 the swap may still be mined. Curve calls carry no deadline: there it bounds only how
-long after the observed block the swap may be signed, and a signed swap stays valid
-until it is mined or its nonce is used, protected by its minimum output alone.
+long after the observed block a step may be signed, and a signed swap stays valid
+until it is mined or its nonce is used, protected by its minimum output alone. A Curve
+swap whose approval the same command had mined is not charged the time the approval
+took: it may be signed for `--deadline-seconds` after the block that mined the
+approval, and never later than twice that after the observed block. Its minimum
+output is still the one of the first quote. Once the first window has passed, the pool
+must also still quote at least that minimum, or nothing more is signed. A swap refused
+for time or for that quote reports `stale_plan` with the block and the window that
+ended, and says that the approval stands; the same command run again spends that
+approval and needs one step. The gateway applies this window when it plans and signs.
+It is not enforced on chain.
 
 The wallet must hold the amount. `position_before` and `position_after` list the
 `inventory` of the pool currencies the action owns, the amount sold and then what
@@ -1354,9 +1363,11 @@ tick range and no token ID:
 proportions, and a coin of the pool pays that coin alone, which trades against the
 pool and pays its fee. The deployment owns the wallet's whole LP balance in the
 pool, whoever deposited it. `--deadline-seconds` bounds only how late a step may be
-signed, since Curve calls carry no deadline. A deposit approves the pool for
-exactly each stated amount, so a completed one leaves no allowance on the coins it
-deposited. A deposit in other proportions than the pool's, like a one-coin burn,
+signed, since Curve calls carry no deadline. Each approval is held to that window
+from the observed block, and the deposit that follows the last mined approval has the
+same number of seconds from the block that mined it, as a Curve swap has. A deposit
+approves the pool for exactly each stated amount, so a completed one leaves no
+allowance on the coins it deposited. A deposit in other proportions than the pool's, like a one-coin burn,
 trades against the pool and pays its fee; `--slippage-bps` bounds how far the LP
 shares minted may fall below what the amounts were worth at the observed block. The read takes
 the account instead of a token ID and reports its LP shares, the total supply and

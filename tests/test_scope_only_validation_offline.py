@@ -110,11 +110,12 @@ class Venue:
             extra: dict[str, Any] = {"exit_quote": None}
         else:
             owned = SimpleNamespace(inventory=SimpleNamespace(root=values), position=None)
-            extra = {"exit_quotes": ()}
+            # A Curve refusal for time names the block and the allowances that stand.
+            extra = {"exit_quotes": (), "allowances": ()}
         return SimpleNamespace(
             simulated=False,
             target=self.target,
-            block=SimpleNamespace(timestamp=NOW),
+            block=SimpleNamespace(timestamp=NOW, number=1),
             owned=owned,
             pool=SimpleNamespace(paused=False),
             native_balance=amount(NATIVE, native),

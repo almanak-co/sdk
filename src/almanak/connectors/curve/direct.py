@@ -26,9 +26,17 @@ after its approval was mined leaves that approval standing. Nothing here revokes
 the result lists it, and a later swap of the same amount spends it. Allowances of the
 pool's other coins are never touched, and the result lists the nonzero ones.
 
-Time. No Curve call carries a deadline. `deadline_seconds` bounds only when the swap
-may be signed: the gateway refuses to plan or sign it later than that many seconds
-after the block the request was observed at. Once signed, the bytes stay valid until
+Time. No Curve call carries a deadline. `deadline_seconds` bounds only when a step may
+be signed. The gateway refuses to plan or sign the approval later than that many
+seconds after the block the request was observed at, and the same holds for a swap
+that needs no approval. A swap whose approval this request had mined is not charged
+the time that took: it may be planned and signed for that many seconds after the block
+that mined the approval, and never later than twice that many after the observed
+block. Its minimum output stays the one of the request's quote. Planned or signed
+after the request's own window, it also needs the pool to quote at least that minimum
+for the stated amount at that block; otherwise nothing is signed. A refusal for time
+or for that quote names the block and the bound, and says that the approval stands.
+Once signed, the bytes stay valid until
 they are mined or the wallet's nonce is used by another transaction. However long ago
 they were signed, `almanak ax recover` reconciles their receipt or, when no provider
 holds a copy and the swap still simulates at or above its minimum output, sends the
@@ -132,7 +140,8 @@ def swap_intent(config, observed, request: ActionRequest):
     minimum output is the quoted output less the stated slippage. A quote of any other
     size or pair than the stated one is refused. The intent's deadline is the observed
     block time plus the stated seconds; it bounds planning and signing only, because no
-    Curve call carries it.
+    Curve call carries it, and the swap that follows this request's mined approval is
+    given its own (`planning.step_deadline`).
     """
     from almanak.connectors.curve import authoring
 

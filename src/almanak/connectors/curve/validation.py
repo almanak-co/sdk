@@ -18,15 +18,93 @@ from almanak.gateway.ethereum import DataError
 from almanak.transaction_family import is_signed
 
 
-def deadline(intent, before, allocation):
+def deadline(intent, before, allocation, limit=None):
+    """Refuse a step observed at or after its deadline, or one whose deadline is too far.
+
+    `limit` is the step's own deadline (`planning.step_deadline`) where it has one;
+    otherwise the intent's applies. The refusal names the bound that fired.
+    """
     if isinstance(intent, (RevokeExchange, ExitExchange)):
         return
-    if (
-        not before.block.timestamp
-        < intent.deadline
-        <= before.block.timestamp + allocation.deadline_seconds
+    limit = intent.deadline if limit is None else limit
+    block, window = before.block, allocation.deadline_seconds
+    if not block.timestamp < limit <= block.timestamp + window:
+        raise DataError(
+            "stale_plan",
+            "retained deadline expired or exceeds configured policy: block"
+            f" {block.number} at time {block.timestamp} is outside the {window}s"
+            f" `deadline_seconds` window that ends at {limit}" + standing(before),
+        )
+
+
+def standing(before) -> str:
+    """What a refusal says of the allowances the pool holds at the refused block."""
+    held = [value for value in before.allowances if value.amount]
+    if not held:
+        return ""
+    listed = ", ".join(f"{value.amount} of {value.asset}" for value in held)
+    return (
+        f"; the pool's allowance of {listed} stands, and the same request stated again"
+        " spends it without another approval"
+    )
+
+
+def fresh_quote(intent, seen, allocation):
+    """Past the intent's deadline, a swap needs a fresh quote at or above its minimum.
+
+    A swap planned in the window its mined approval restarted keeps the minimum output
+    of the request's original quote. The pool enforces that minimum when the swap is
+    mined; this refuses before a signature when the pool, at the block the step is
+    planned or signed at, no longer quotes it for the stated amount.
+    """
+    if seen.block.timestamp < intent.deadline or not seen.quotes_included:
+        return
+    quotes = [
+        q
+        for q in (seen.entry_quote, *seen.exit_quotes)
+        if q is not None
+        and q.amount_in == intent.amount
+        and q.amount_out.asset == intent.minimum_output.asset
+    ]
+    quoted = min((q.amount_out.amount for q in quotes), default=None)
+    if quoted is not None and quoted >= intent.minimum_output.amount:
+        return
+    block, minimum = seen.block, intent.minimum_output
+    found = "quotes nothing" if quoted is None else f"quotes {quoted} of {minimum.asset}"
+    raise DataError(
+        "stale_plan",
+        f"the request's {allocation.deadline_seconds}s `deadline_seconds` window ended at"
+        f" {intent.deadline}, and at block {block.number} (time {block.timestamp}) the pool"
+        f" {found} for the stated amount, below the request's minimum output"
+        f" {minimum.amount}" + standing(seen),
+    )
+
+
+def step_limit(intent, operation):
+    """The deadline a pool call carries, which may follow a mined approval; else None.
+
+    `admitted_operation` binds that deadline to the recorded approval.
+    """
+    if isinstance(intent, (RevokeExchange, ExitExchange)):
+        return None
+    return operation.deadline if isinstance(operation, (ops.Swap, ops.Addition)) else None
+
+
+def admitted_operation(state, intent, operation, before):
+    """Refuse an operation that is not the one the retained intent plans at `before`.
+
+    A pool call is also admitted with the intent's own deadline in place of the later
+    one a mined approval gives it (`planning.step_deadline`): that bound is the
+    tighter of the two, and `deadline` has checked the observation against it.
+    """
+    planned = planning.operation(state.config, state, intent, before)
+    if operation == planned:
+        return
+    if step_limit(intent, planned) is not None and operation == planned.model_copy(
+        update={"deadline": intent.deadline}
     ):
-        raise DataError("stale_plan", "retained deadline expired or exceeds configured policy")
+        return
+    raise ValueError("operation differs from its retained economic intent or owned shares")
 
 
 def swap_limits(intent, decision, allocation):
@@ -131,11 +209,12 @@ def validate_operation(backend, state, operation, before):
     decision = planning.decision_basis(state.decision, operation.target)
     if decision.simulated:
         raise ValueError("simulated decisions cannot authorize execution")
-    deadline(intent, before, allocation)
+    deadline(intent, before, allocation, step_limit(intent, operation))
     validate_inventory(intent, before)
     intent_limits(intent, decision, before, allocation)
-    if operation != planning.operation(state.config, state, intent, before):
-        raise ValueError("operation differs from its retained economic intent or owned shares")
+    if isinstance(intent, SwapExactInput) and isinstance(operation, ops.Swap):
+        fresh_quote(intent, before, allocation)
+    admitted_operation(state, intent, operation, before)
     if isinstance(intent, (OpenPoolLiquidity, IncreasePoolLiquidity)) or increases_exposure(
         state.config, operation
     ):
@@ -170,9 +249,14 @@ def validate_current_intent(config, plan, current):
     # The intent's admission window and the prepared deadline bound planning and signing.
     # No Curve call enforces a deadline on chain, so recorded signed bytes stay
     # rebroadcastable after both instead of being refused forever.
+    # A pool call planned after its request's approval was mined carries its own
+    # deadline, which preparation bound to the recorded approval.
     if not is_signed(plan):
-        deadline(plan.decision.intent, current, allocation)
-        if deadline_reached(plan.operation, current.block):
+        intent, operation = plan.decision.intent, plan.operation
+        deadline(intent, current, allocation, step_limit(intent, operation))
+        if deadline_reached(operation, current.block):
             raise DataError("stale_plan", "prepared protocol deadline expired")
+        if isinstance(intent, SwapExactInput) and isinstance(operation, ops.Swap):
+            fresh_quote(intent, current, allocation)
     basis = planning.decision_basis(plan.decision, plan.operation.target)
     intent_limits(plan.decision.intent, basis, current, allocation)

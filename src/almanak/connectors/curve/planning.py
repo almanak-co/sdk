@@ -50,11 +50,54 @@ def operation(config, state, intent, before):
             target=intent.target,
             amount=intent.amount,
             minimum=intent.minimum_output,
-            deadline=intent.deadline,
+            deadline=step_deadline(config, state, intent),
         )
     if isinstance(intent, (OpenPoolLiquidity, IncreasePoolLiquidity)):
-        return addition(config, intent, before, decision_basis(state.decision, intent.target))
+        return addition(
+            config,
+            intent,
+            before,
+            decision_basis(state.decision, intent.target),
+            step_deadline(config, state, intent),
+        )
     return removal(intent, before)
+
+
+def preceding_approval(state):
+    """The mined approval of the retained request that its next step follows, or None.
+
+    Only the latest outcome counts, and only when it is a successful approval recorded
+    under the decision still retained: a step of another request, a reverted approval
+    or any other operation gives the next step nothing.
+    """
+    outcomes = getattr(state, "outcomes", ())
+    last = outcomes[-1] if outcomes else None
+    if (
+        last is None
+        or not isinstance(getattr(last, "operation", None), ops.Approval)
+        or not last.success
+        or last.decision != state.decision
+    ):
+        return None
+    return last
+
+
+def step_deadline(config, state, intent):
+    """When the pool call of a swap or an addition may last be planned and signed.
+
+    It is the intent's own deadline until an approval of the same request is mined. The
+    pool call that follows one is given `deadline_seconds` from the block that mined
+    it, so the time the approval took to be mined is not charged to the pool call, and
+    never more than `deadline_seconds` past the intent's deadline, so a request is
+    never signed later than two windows after it was observed. An approval is always
+    held to the intent's deadline. The minimum output or minimum shares the pool call
+    carries are unchanged, and no Curve call carries the deadline itself.
+    """
+    mined = preceding_approval(state)
+    if mined is None:
+        return intent.deadline
+    window = config.allocation(intent.target.allocation).deadline_seconds
+    return max(intent.deadline, min(mined.after.block.timestamp, intent.deadline) + window)
 
 
 def decision_basis(decision, target):
@@ -68,7 +111,7 @@ def decision_basis(decision, target):
     return observations[0]
 
 
-def addition(config, intent, before, basis):
+def addition(config, intent, before, basis, deadline):
     position = before.owned.position
     if isinstance(intent, OpenPoolLiquidity) == (position is not None):
         raise ValueError("Curve liquidity addition must preserve retained share ownership")
@@ -88,7 +131,7 @@ def addition(config, intent, before, basis):
             asset=intent.target.pool.shares_asset,
             amount=max(1, shares * (10000 - slippage) // 10000),
         ),
-        deadline=intent.deadline,
+        deadline=deadline,
     )
 
 

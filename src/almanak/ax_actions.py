@@ -1228,7 +1228,9 @@ def swap_arguments(action) -> None:
         help="the swap is not signed later than this after the observed block, and it"
         " reverts when mined later than that; a curve call carries no deadline, so a"
         " signed curve swap stays valid until it is mined or its nonce is used, bound"
-        f" only by its minimum output (default: {DEFAULT_DEADLINE_SECONDS})",
+        " only by its minimum output, and a curve swap whose approval was mined first"
+        " may be signed this long after the block that mined the approval, at the"
+        f" same minimum output (default: {DEFAULT_DEADLINE_SECONDS})",
     )
 
 
