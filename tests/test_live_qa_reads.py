@@ -137,6 +137,23 @@ def test_a_balance_read_without_observations_compares_nothing_and_fails():
         assert verdict.status == "fail" and "no observations" in verdict.detail
 
 
+def test_a_command_that_exits_0_without_its_observation_is_not_a_pass_or_a_wrong_fail():
+    """A reserve read keeps its resolution and reports the failed observation beside it."""
+    limited = {"resolution": {}, "observation": None, "observation_error": "http: HTTP 429"}
+    run, calls = scripted(succeeded(limited))
+    blocked = reads.run_case(CASE, "drpc", run, FakeRpc(), Path("."), sleep=lambda seconds: None)
+    assert (blocked.status, blocked.attempts, len(calls)) == ("blocked", 3, 3)
+    assert "exited 0 but reported: http: HTTP 429" in blocked.detail
+    # Anything but an endpoint's refusal is the SDK's answer, and fails.
+    changed = {"observation": None, "observation_error": "deployment_changed: unverified"}
+    verdict = reads.judge(CASE, succeeded(changed), FakeRpc())
+    assert verdict.status == "fail" and verdict.findings == ("deployment_changed: unverified",)
+    # A case without a check does not pass on such output either.
+    bare = reads.ReadCase("bare", "eip155:1", ("lending-reserve",))
+    assert reads.judge(bare, succeeded(limited), FakeRpc()).status == "transient"
+    assert reads.judge(bare, succeeded({"observation": {}, "observation_error": None}), FakeRpc())
+
+
 def test_output_the_check_cannot_read_fails():
     verdict = reads.judge(CASE, succeeded({"product": "ax-balance"}), FakeRpc())
     assert verdict.status == "fail" and "not shaped" in verdict.detail

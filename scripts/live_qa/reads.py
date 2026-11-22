@@ -136,9 +136,28 @@ def judge_refusal(case: ReadCase, refusal: dict[str, Any]) -> Verdict:
     return Verdict("fail", text)
 
 
+def partial_errors(output: dict[str, Any]) -> list[str]:
+    """Parts a command could not read although it exited 0, as `kind: message`.
+
+    A reserve read reports its resolution and puts a failed observation under
+    `observation_error`, with `observation` null.
+    """
+    return [str(value) for key, value in output.items() if key.endswith("_error") and value]
+
+
+def judge_partial(errors: list[str]) -> Verdict:
+    text = "the command exited 0 but reported: " + "; ".join(errors)
+    if all(error.partition(":")[0] in TRANSIENT_ERRORS for error in errors):
+        return Verdict("transient", text)
+    return Verdict("fail", text, tuple(errors))
+
+
 def judge_output(case: ReadCase, output: dict[str, Any], rpc: Rpc) -> Verdict:
     if not case.succeeds:
         return Verdict("fail", "the case states a refusal, but the command succeeded")
+    errors = partial_errors(output)
+    if errors:
+        return judge_partial(errors)
     if case.check is None:
         return Verdict("pass", "read succeeded")
     try:

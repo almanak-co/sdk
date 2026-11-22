@@ -471,7 +471,8 @@ Outcomes. Each case on each endpoint ends as one of:
 - `pass`: the command behaved as the case states and every direct read agreed.
 - `fail`: it did not. A failure is not retried.
 - `blocked`: the endpoint did not answer: a rate limit, a rejected read, a
-  timeout or an unanswered direct read. Such a case is tried three times, 5 and
+  timeout, an unanswered direct read, or a command that exited 0 but reported an
+  endpoint refusal for part of its output (`observation_error`). Such a case is tried three times, 5 and
   then 15 seconds apart, with 90 seconds per command (`--attempts`,
   `--backoff-seconds`, `--timeout-seconds`). After three consecutive blocked cases
   on one chain, the endpoint's remaining cases on that chain are reported blocked
