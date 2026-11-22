@@ -431,7 +431,8 @@ def test_the_command_resolves_the_named_pool_through_the_connectors_resolver(fam
             return super().call(to, signature, at, **options)
 
     monkeypatch.setattr(
-        "almanak.gateway.ethereum.EthereumReader", lambda chain, endpoint: Head(chain, rows)
+        "almanak.gateway.ethereum.EthereumReader",
+        lambda chain, endpoint, retry_budget=None: Head(chain, rows),
     )
     resolution = ax_actions.resolution("curve")
     selection = resolution.MarketSelection(

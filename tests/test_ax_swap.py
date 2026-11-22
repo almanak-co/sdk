@@ -310,7 +310,8 @@ def test_the_command_resolves_the_named_pool_through_the_connectors_resolver(
             return block if selector == "latest" else super().pin_block(selector)
 
     monkeypatch.setattr(
-        "almanak.gateway.ethereum.EthereumReader", lambda chain, endpoint: Head(chain, rows)
+        "almanak.gateway.ethereum.EthereumReader",
+        lambda chain, endpoint, retry_budget=None: Head(chain, rows),
     )
     market = resolved(connector)
     wallet = {"account": WALLET.account, "address": WALLET.address}

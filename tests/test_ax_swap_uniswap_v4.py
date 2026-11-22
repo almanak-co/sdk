@@ -309,7 +309,8 @@ class Head(RetainedResolutionReader):
 
 def deployment(monkeypatch, market, rows):
     monkeypatch.setattr(
-        "almanak.gateway.ethereum.EthereumReader", lambda chain, endpoint: Head(chain, rows)
+        "almanak.gateway.ethereum.EthereumReader",
+        lambda chain, endpoint, retry_budget=None: Head(chain, rows),
     )
     wallet = {"account": WALLET.account, "address": WALLET.address}
     provider = ax_actions.alchemy(ChainId("eip155:1"))

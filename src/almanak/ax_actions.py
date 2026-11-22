@@ -339,12 +339,15 @@ def action_config(args, request, action, wallet, provider, endpoint):
 def deployment(connector, request, action, wallet, provider, endpoint, limits, *, public=False):
     """The operator deployment of one account in one resolved market, with explicit fees."""
     from almanak.connectors.direct import Wallet, binding
-    from almanak.gateway.ethereum import EthereumReader
+    from almanak.gateway.ethereum import EXECUTION_RETRY_BUDGET, EthereumReader
     from almanak.models import Chain
 
     chain = Chain(chain_id=request.chain, environment="mainnet")
     account = Wallet(account=wallet["account"], address=wallet["address"].lower())
-    with EthereumReader(chain, endpoint) as reader:
+    # The market and the wallet's position are read at the head, which a load-balanced
+    # endpoint can serve a moment late. These reads precede planning and signing, and
+    # re-send a transient failure within the budget execution reads have.
+    with EthereumReader(chain, endpoint, retry_budget=EXECUTION_RETRY_BUDGET) as reader:
         if public:
             prove_public(reader)
         block = reader.pin_block("latest")
