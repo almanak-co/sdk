@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from almanak.caip import ChainId
+from almanak.gateway.providers import PUBLIC_RPC
+from almanak.models import address
 from scripts.live_qa.cli import Invocation, Run
 
 SPEND_ENV = "ALMANAK_QA_SPEND_REAL_FUNDS"
@@ -40,6 +42,7 @@ class WriteMarket:
     """A reviewed Aave V4 market the write check may use, with its size limit."""
 
     chain: ChainId
+    # The Spoke's EVM address, as `almanak ax` takes it with `--spoke`.
     spoke: str
     reserve_id: int
     symbol: str
@@ -60,20 +63,15 @@ class FeeLimit:
 ETHEREUM = ChainId("eip155:1")
 AVALANCHE = ChainId("eip155:43114")
 GWEI = 10**9
+# Validated when this module loads; the commands are also parsed by the real CLI in tests.
+ETHEREUM_SPOKE = address("0x94e7a5dcbe816e498b89ab752661904e2f56c485")
+AVALANCHE_SPOKE = address("0x435272ceff93a1e657e8abfdf0a13e95900a3a56")
 
 MARKETS: dict[str, WriteMarket] = {
-    "ethereum-usdc": WriteMarket(
-        ETHEREUM, "0x94e7a5dcbe816e498b89ab752661904e2f56c485", 7, "USDC", 6, 100_000, 1_000_000
-    ),
-    "ethereum-weth": WriteMarket(
-        ETHEREUM, "0x94e7a5dcbe816e498b89ab752661904e2f56c485", 0, "WETH", 18, 10**14, 10**15
-    ),
-    "avalanche-usdc": WriteMarket(
-        AVALANCHE, "0x435272ceff93a1e657e8abfdf0a13e95900a3a56", 2, "USDC", 6, 100_000, 1_000_000
-    ),
-    "avalanche-wavax": WriteMarket(
-        AVALANCHE, "0x435272ceff93a1e657e8abfdf0a13e95900a3a56", 0, "WAVAX", 18, 10**16, 10**17
-    ),
+    "ethereum-usdc": WriteMarket(ETHEREUM, ETHEREUM_SPOKE, 7, "USDC", 6, 100_000, 1_000_000),
+    "ethereum-weth": WriteMarket(ETHEREUM, ETHEREUM_SPOKE, 0, "WETH", 18, 10**14, 10**15),
+    "avalanche-usdc": WriteMarket(AVALANCHE, AVALANCHE_SPOKE, 2, "USDC", 6, 100_000, 1_000_000),
+    "avalanche-wavax": WriteMarket(AVALANCHE, AVALANCHE_SPOKE, 0, "WAVAX", 18, 10**16, 10**17),
 }
 
 # A ceiling above these is refused: a QA round trip is never worth more gas than this.
@@ -149,6 +147,15 @@ def output_gates(output: Path | None) -> list[str]:
 def transport_gates(request: WriteRequest) -> list[str]:
     if (request.public_rpc is None) == (request.env_file is None):
         return ["exactly one of --public-rpc and --env-file is required"]
+    market = MARKETS.get(request.market or "")
+    if request.public_rpc is None or market is None:
+        return []
+    if market.chain not in PUBLIC_RPC.get(request.public_rpc, {}):
+        serving = sorted(name for name, chains in PUBLIC_RPC.items() if market.chain in chains)
+        return [
+            f"--public-rpc {request.public_rpc} does not serve {market.chain};"
+            f" choose from {', '.join(serving) or 'none: use --env-file'}"
+        ]
     return []
 
 

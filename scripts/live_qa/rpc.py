@@ -5,6 +5,7 @@ plain `eth_call`, so a disagreement is the SDK's decoding or resolution, not a
 second provider's view of the chain.
 """
 
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -49,6 +50,19 @@ def asset_address(asset: str) -> str:
     if namespace != "erc20":
         raise ValueError(f"not an ERC-20 asset: {asset}")
     return reference
+
+
+def direct_clients() -> Callable[[str, str], "Rpc"]:
+    """One direct client per endpoint and chain for a run, instead of one per case."""
+    clients: dict[tuple[str, str], Rpc] = {}
+
+    def client(endpoint: str, chain: str) -> Rpc:
+        key = (endpoint, chain)
+        if key not in clients:
+            clients[key] = Rpc(endpoint_url(endpoint, chain))
+        return clients[key]
+
+    return client
 
 
 class Rpc:

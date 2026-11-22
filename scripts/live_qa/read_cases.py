@@ -9,8 +9,8 @@ until the defect is fixed.
 Not covered, and why:
 
 - `ax lending-markets --connector compound_v3`: the listing reads the
-  Configurator's whole event history in one `eth_getLogs`, which both public
-  endpoints refuse. Public endpoints promise no wide log ranges.
+  Configurator's whole event history in one `eth_getLogs`, which the public
+  endpoints tried refuse. Public endpoints promise no wide log ranges.
 - `ax resolve` and `ax dex-pools` succeed only with a vendor key; the cases below
   hold their refusal on a public endpoint instead.
 - `ax perp-position` takes a request file holding a fully resolved GMX market with
@@ -20,6 +20,10 @@ Not covered, and why:
   `ax hypercore-markets`.
 """
 
+from almanak.caip import ChainId
+from almanak.chains import evm_network
+from almanak.connectors.aave_v3.networks import POOLS as AAVE_V3_POOLS
+from almanak.gateway.providers import PUBLIC_RPC
 from scripts.live_qa import checks
 from scripts.live_qa.reads import KnownIssue, ReadCase, Refusal
 
@@ -45,17 +49,14 @@ MORPHO_CBBTC_USDC = "0x64d65c9a2d91c36d56fbc42d69e979335320169b3df63bf92789e2c88
 
 MORPHO_CORE = "0xbbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb"
 
+HYPEREVM_WHYPE = "eip155:999/erc20:0x5555555555555555555555555555555555555555"
+
 GMX_BTC_USDC = "0xfb02132333a79c8b5bd0b64e3abcca5f7faf2937"
 GMX_WAVAX_USDC = "0x913c1f46b48b3ed35e7dc3cf754d4ae8499f31cf"
 
-AAVE_V3_REVISION = KnownIssue(
-    "Aave V3 reads refuse with deployment_changed after the on-chain Pool upgrade;"
-    " the SDK pins the earlier revision's code hashes",
-    "deployment_changed",
-)
 AAVE_V4_EMPTY_SPOKES = KnownIssue(
-    "the Aave V4 listing reports Avalanche Spokes without reserves as unreadable: both"
-    " public endpoints answer their getReserveCount() revert with JSON-RPC -32000, and"
+    "the Aave V4 listing reports Avalanche Spokes without reserves as unreadable: the"
+    " public endpoint answers their getReserveCount() revert with JSON-RPC -32000, and"
     " the listing recognizes a revert only by code 3",
     "revert getReserveCount()",
 )
@@ -132,14 +133,12 @@ ETHEREUM_CASES = (
         ETHEREUM,
         reserve("aave_v3", ETHEREUM, "--asset", WETH),
         checks.pooled_reserve,
-        known_issue=AAVE_V3_REVISION,
     ),
     ReadCase(
         "lending-markets/aave_v3/ethereum",
         ETHEREUM,
         markets("aave_v3", ETHEREUM),
         checks.pool_reserve_listing,
-        known_issue=AAVE_V3_REVISION,
     ),
     ReadCase(
         "lending-reserve/sparklend/ethereum-weth",
@@ -240,7 +239,6 @@ AVALANCHE_CASES = (
         AVALANCHE,
         reserve("aave_v3", AVALANCHE, "--asset", AVALANCHE_USDC),
         checks.pooled_reserve,
-        known_issue=AAVE_V3_REVISION,
     ),
     ReadCase(
         "pool/uniswap_v3/avalanche-wavax-usdc",
@@ -316,14 +314,69 @@ VENUE_AND_REFUSAL_CASES = (
         refusals=(Refusal("unavailable", "this lookup uses a vendor key"),),
         endpoints=("publicnode",),
     ),
+    # No public endpoint is listed for HyperEVM, whichever name is given.
     ReadCase(
-        "refusal/base-has-no-public-endpoint",
-        "eip155:8453",
-        balance("eip155:8453/slip44:60", DEPOSIT_CONTRACT),
+        "refusal/hyperevm-has-no-public-endpoint",
+        "eip155:999",
+        balance(HYPEREVM_WHYPE, DEPOSIT_CONTRACT),
         succeeds=False,
         refusals=(Refusal("invalid_input", "use a provider key instead"),),
         endpoints=("publicnode", "drpc"),
     ),
+    # A name that serves other chains is refused with the names that serve this one.
+    ReadCase(
+        "refusal/publicnode-does-not-serve-base",
+        "eip155:8453",
+        balance("eip155:8453/slip44:60", DEPOSIT_CONTRACT),
+        succeeds=False,
+        refusals=(Refusal("invalid_input", "no public endpoint named publicnode serves"),),
+        endpoints=("publicnode",),
+    ),
 )
 
-CASES: tuple[ReadCase, ...] = (*ETHEREUM_CASES, *AVALANCHE_CASES, *VENUE_AND_REFUSAL_CASES)
+# Ethereum and Avalanche have their own cases above.
+DETAILED_CHAINS = frozenset({ChainId(ETHEREUM), ChainId(AVALANCHE)})
+
+
+def chain_cases(chain: ChainId) -> tuple[ReadCase, ...]:
+    """The cases every other listed chain gets, from the SDK's own network record.
+
+    The wrapped-native token holds the coin it wraps, so it is the balance account,
+    and it is an Aave V3 reserve on every chain the connector serves.
+    """
+    network = evm_network(chain)
+    native, wrapped = str(network.native_asset), str(network.wrapped_native)
+    holder = wrapped.rpartition(":")[2]
+    cases = [
+        ReadCase(
+            f"balance/native/{chain}",
+            str(chain),
+            (*balance(native, holder), "--block", "latest"),
+            checks.native_balance,
+        )
+    ]
+    if chain in AAVE_V3_POOLS:
+        cases.append(
+            ReadCase(
+                f"lending-reserve/aave_v3/{chain}-wrapped-native",
+                str(chain),
+                reserve("aave_v3", str(chain), "--asset", wrapped),
+                checks.pooled_reserve,
+            )
+        )
+    return tuple(cases)
+
+
+OTHER_CHAIN_CASES = tuple(
+    case
+    for chain in sorted({chain for chains in PUBLIC_RPC.values() for chain in chains}, key=str)
+    if chain not in DETAILED_CHAINS
+    for case in chain_cases(chain)
+)
+
+CASES: tuple[ReadCase, ...] = (
+    *ETHEREUM_CASES,
+    *AVALANCHE_CASES,
+    *OTHER_CHAIN_CASES,
+    *VENUE_AND_REFUSAL_CASES,
+)

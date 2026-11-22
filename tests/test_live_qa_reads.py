@@ -13,6 +13,7 @@ import httpx
 import pytest
 import yaml
 
+from almanak.caip import ChainId
 from almanak.cli_arguments import build_parser, parse_validated
 from almanak.gateway.providers import PUBLIC_RPC
 from scripts.live_qa import __main__ as entry
@@ -399,6 +400,31 @@ def test_case_ids_are_unique_and_every_public_chain_is_covered():
     assert len(ids) == len(set(ids))
     served = {str(chain) for chains in PUBLIC_RPC.values() for chain in chains}
     assert served <= {case.chain for case in CASES}
+    # Every listed endpoint has at least one case that reads through it.
+    plan = reads.planned(CASES, sorted(PUBLIC_RPC), live_conftest.served)
+    assert {endpoint for _, endpoint in plan} == set(PUBLIC_RPC)
+    balances = {case.chain for case in CASES if case.id.startswith("balance/native/")}
+    assert served <= balances
+
+
+def test_a_chain_without_its_own_cases_gets_them_from_its_network_record():
+    from scripts.live_qa.read_cases import chain_cases
+
+    balance, reserve = chain_cases(ChainId("eip155:8453"))
+    wrapped = "0x4200000000000000000000000000000000000006"
+    assert balance.arguments[:5] == (
+        "balance",
+        "--asset",
+        "eip155:8453/slip44:60",
+        "--account",
+        wrapped,
+    )
+    assert balance.check is checks.native_balance
+    assert reserve.arguments[-1] == f"eip155:8453/erc20:{wrapped}"
+    assert reserve.check is checks.pooled_reserve
+    # Aave V3 has no Pool there, so only the balance is read.
+    (only,) = chain_cases(ChainId("eip155:4663"))
+    assert only.id == "balance/native/eip155:4663"
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case.id)
@@ -413,9 +439,9 @@ def test_every_case_is_a_command_the_cli_accepts(case, tmp_path, monkeypatch):
 
 def test_the_bugs_found_by_hand_stay_in_the_catalog_as_known_issues():
     known = {case.id: case.known_issue for case in CASES if case.known_issue is not None}
-    aave = [issue for name, issue in known.items() if "/aave_v3/" in name]
+    # Main admits the Aave V3 Pool revision the reads refused, so that marker is gone.
+    assert not [name for name in known if "/aave_v3/" in name]
     gmx = [name for name in known if name.startswith("perp-markets/gmx_v2/avalanche")]
-    assert len(aave) >= 2 and {issue.signature for issue in aave} == {"deployment_changed"}
     assert known["lending-markets/aave_v4/avalanche"].signature == "revert getReserveCount()"
     assert len(gmx) >= 2
     queries = {case.arguments[-1] for case in CASES if case.id in gmx}
@@ -644,6 +670,18 @@ def test_only_a_revert_counts_as_reverting():
     assert not isinstance(raised.value, RpcReverted)
 
 
+def test_a_run_keeps_one_direct_client_per_endpoint_and_chain():
+    from scripts.live_qa.rpc import direct_clients
+
+    client = direct_clients()
+    first = client("publicnode", "eip155:1")
+    assert client("publicnode", "eip155:1") is first
+    assert client("drpc", "eip155:1") is not first
+    assert client("publicnode", "eip155:43114") is not first
+    assert first.url == "https://ethereum-rpc.publicnode.com"
+    assert client("publicnode", "eip155:999").url is None
+
+
 def test_a_chain_the_endpoint_does_not_serve_has_no_direct_client():
     assert endpoint_url("publicnode", "eip155:1") == "https://ethereum-rpc.publicnode.com"
     assert endpoint_url("publicnode", "eip155:8453") is None
@@ -681,7 +719,10 @@ def test_listing_the_plan_contacts_nothing_and_writes_nothing(tmp_path, capsys, 
     with pytest.raises(SystemExit, match="--output is required"):
         entry.main(["reads", "--case", "gmx_v2"])
     assert lines and all("gmx_v2" in line for line in lines)
-    assert {line.split()[0] for line in lines} == set(PUBLIC_RPC)
+    # GMX cases are on Avalanche, which one listed endpoint serves.
+    assert {line.split()[0] for line in lines} == {"publicnode"}
+    assert entry.main(["reads", "--list"]) == 0
+    assert {line.split()[0] for line in capsys.readouterr().out.splitlines()} == set(PUBLIC_RPC)
 
 
 def test_a_run_writes_its_report_into_a_new_directory_only(tmp_path, capsys, monkeypatch):

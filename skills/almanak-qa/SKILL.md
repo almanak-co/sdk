@@ -25,8 +25,8 @@ or of hosted CI, and you must not add them there.
 
 ## Read checks (free)
 
-They run `almanak ax` reads against the named public endpoints (`publicnode` and
-`drpc`) on Ethereum and Avalanche, the way a user without a provider key would,
+They run `almanak ax` reads against every endpoint of the reviewed `--public-rpc`
+list, on each chain it serves, the way a user without a provider key would,
 and compare what the CLI prints with direct reads of the same endpoint at the same
 block. They take no key, no wallet and no funds.
 
@@ -134,7 +134,8 @@ Ask for, and wait for, each of these. Do not fill any in yourself:
   the chain's native asset. The second caps each transaction, so the round trip
   can cost up to four times it. You may propose 20 gwei (`20000000000`) and 0.01
   ETH (`10000000000000000`) on Ethereum; the user decides.
-- The transport: `--public-rpc publicnode` or `--public-rpc drpc`, or
+- The transport: `--public-rpc publicnode`, which serves both chains
+  (`--public-rpc drpc` serves the Ethereum markets only), or
   `--env-file <path>` when they prefer their provider key. A public endpoint's
   operator sees the wallet address and each transaction before it is mined.
 

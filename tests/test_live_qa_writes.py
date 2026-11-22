@@ -12,6 +12,7 @@ import pytest
 
 from almanak.caip import ChainId
 from almanak.cli_arguments import build_parser, parse_validated
+from almanak.gateway.providers import PUBLIC_RPC
 from scripts.live_qa import __main__ as entry
 from scripts.live_qa import cli, writes
 
@@ -235,6 +236,17 @@ def test_it_refuses_without_exactly_one_named_transport(wallet, tmp_path):
         assert code == 2 and "exactly one of --public-rpc and --env-file" in said
 
 
+def test_it_refuses_a_public_endpoint_that_does_not_serve_the_markets_chain(wallet, tmp_path):
+    """Named before any command, with the endpoints that do serve the chain."""
+    request = request_for(wallet, market="avalanche-usdc", public_rpc="drpc")
+    code, said, _ = check(request, SPEND, never, tmp_path)
+    assert code == 2 and "--public-rpc drpc does not serve eip155:43114" in said
+    assert "choose from publicnode" in said
+    for market in writes.MARKETS.values():
+        assert any(market.chain in chains for chains in PUBLIC_RPC.values())
+        assert market.spoke == market.spoke.lower() and len(market.spoke) == 42
+
+
 def test_every_unmet_gate_is_named_at_once_and_none_touches_the_network(tmp_path):
     refusals = writes.gates(writes.WriteRequest(), {"CI": "true"})
     assert len(refusals) == 7
@@ -374,7 +386,7 @@ def test_a_failed_withdrawal_says_the_funds_may_still_be_supplied(wallet, tmp_pa
 
 
 @pytest.mark.parametrize("market", sorted(writes.MARKETS))
-@pytest.mark.parametrize("transport", [{"public_rpc": "drpc"}, {"env_file": Path(".env")}])
+@pytest.mark.parametrize("transport", [{"public_rpc": "publicnode"}, {"env_file": Path(".env")}])
 def test_each_action_is_a_command_almanak_ax_accepts(wallet, market, transport):
     request = request_for(wallet, market=market, **{"public_rpc": None, **transport})
     for name in ("supply", "withdraw"):

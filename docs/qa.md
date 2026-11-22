@@ -405,6 +405,13 @@ workflow, and neither may be added to them: public endpoints rate-limit and
 stall, so their result cannot gate a merge. Both live in `scripts/live_qa/` and
 run from a checkout.
 
+They ask a different question from the
+[public endpoint qualification](#public-endpoint-qualification) above. That tool
+decides whether an endpoint belongs in the reviewed list, by driving the SDK's
+readers through the RPC methods a command needs. The live checks take the list as
+given and run the `almanak ax` commands themselves against real markets, to find
+what the SDK gets wrong on today's chain state.
+
 | Level | Costs | Needs | Run it |
 | --- | --- | --- | --- |
 | Live read checks | Nothing | Network access | Any time; weekly is reasonable |
@@ -420,9 +427,8 @@ The offline suite reads pinned fixtures and the fork lanes read through a
 provider key, so neither sees what a user without a key sees today: an on-chain
 upgrade the SDK's pins do not know, a market the venue names differently, or a
 public endpoint that answers differently. The read level runs `almanak ax`
-reads as that user would, one process per command, with `--public-rpc publicnode`
-and `--public-rpc drpc`, on Ethereum and Avalanche, the chains those endpoints
-serve. The provider key and the session read gateway are removed from each
+reads as that user would, one process per command, with `--public-rpc` naming
+each endpoint of the reviewed list on each chain it serves. The provider key and the session read gateway are removed from each
 command's environment. It needs no key, wallet or funds.
 
 ```bash
@@ -437,14 +443,18 @@ a user installs it:
 
 ```bash
 uv run --locked python -m scripts.live_qa reads --output artifacts/live-reads \
-  --almanak-command "uvx --from almanak==3.2.1 almanak"
+  --almanak-command "uvx --from almanak==<version> almanak"
 ```
 
-Cases. `scripts/live_qa/read_cases.py` names known markets and public contracts:
-native and ERC-20 balances, Aave V4, Aave V3, SparkLend, Compound V3 and Morpho
-Blue reserves and listings, Uniswap V3 and V4 pools, GMX V2 markets, a
-HyperCore market, and the refusals a public endpoint must give (a
-vendor-key lookup, a chain it does not serve). Each case states the correct
+Cases. `scripts/live_qa/read_cases.py` names known markets and public contracts.
+On Ethereum and Avalanche: native and ERC-20 balances, Aave V4, Aave V3,
+SparkLend, Compound V3 and Morpho Blue reserves and listings, Uniswap V3 and V4
+pools and GMX V2 markets. On every other chain of the reviewed list, taken from
+the SDK's own network record so that a newly listed chain is covered without an
+edit: the native balance, and the wrapped-native Aave V3 reserve where Aave V3
+has a Pool. Beside them, a HyperCore market and the refusals a public endpoint
+must give (a vendor-key lookup, a chain the named endpoint does not serve, and
+HyperEVM, which no endpoint serves). Each case states the correct
 behavior. Where practical its output is compared with direct `eth_call`,
 `eth_getBalance` and block-header reads of the same endpoint at the block the
 command pinned, made by `scripts/live_qa/rpc.py` without the SDK's reader. A
@@ -477,25 +487,22 @@ Known issues. A defect found by hand stays in the catalog as a case with a
 `KnownIssue`: the case still states the correct behavior and still fails, and the
 report's `known_issue` column says whether the known defect reproduced, was not
 observed, or no longer reproduces, in which case its marker is removed. The
-catalog currently holds three:
+catalog currently holds two:
 
-- Aave V3 reads refuse with `deployment_changed: Aave V3 pool has an unverified
-  revision` on Ethereum and Avalanche, since the on-chain Pool was upgraded past
-  the revision whose code hashes the SDK pins.
 - GMX V2 on Avalanche indexes its markets by `BTC.b` and `WAVAX`, so the
   `BTC/USD` and `AVAX/USD` labels match nothing. `BTC.b/USD [BTC.b-USDC]` and
   `WAVAX/USD [WAVAX-USDC]` resolve and are held as passing controls.
 
 - `ax lending-markets --connector aave_v4` on Avalanche reports the Spokes that
   hold no reserves as `unreadable`. Such a Spoke reverts `getReserveCount()`.
-  Both public endpoints report that revert with JSON-RPC code -32000, and the
+  The public endpoint reports that revert with JSON-RPC code -32000, and the
   listing recognizes a revert only by code 3, so it takes the answer for an
   endpoint failure. The case confirms each revert with a direct read before it
   fails; a Spoke the endpoint really did not answer still blocks it.
 
 Not covered: `ax lending-markets --connector compound_v3` reads the
-Configurator's whole event history in one request, which both public endpoints
-refuse; `ax resolve` and `ax dex-pools` need a vendor key; and `ax perp-position`
+Configurator's whole event history in one request, which the public endpoints
+tried refuse; `ax resolve` and `ax dex-pools` need a vendor key; and `ax perp-position`
 takes a fully resolved GMX market document that no `ax` command prints.
 
 The same cases run under pytest with an explicit flag. Without `--live-public`
@@ -544,7 +551,8 @@ these hold. Every unmet gate is named at once.
    and 0.02 ETH on Ethereum, 200 gwei and 0.2 AVAX on Avalanche).
 4. `--market` is one of the reviewed markets below and `--amount` is at most its
    largest accepted size.
-5. Exactly one of `--public-rpc` and `--env-file` names the transport.
+5. Exactly one of `--public-rpc` and `--env-file` names the transport, and a
+   public endpoint serves the market's chain.
 6. Neither `CI` nor `GITHUB_ACTIONS` is set, to any value, an empty one included.
 7. `--output` is a new or empty directory that can be created. A report is never written over an
    earlier one, which may hold the only record of the transactions a run sent.

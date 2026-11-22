@@ -10,7 +10,7 @@ import pytest
 
 from almanak.gateway.providers import PUBLIC_RPC
 from scripts.live_qa import cli, reads
-from scripts.live_qa.rpc import Rpc, endpoint_url
+from scripts.live_qa.rpc import direct_clients, endpoint_url
 
 
 def pytest_ignore_collect(collection_path, config):
@@ -28,7 +28,7 @@ def live_session(request, tmp_path_factory):
     workdir = tmp_path_factory.mktemp("live-public")
     return reads.Session(
         run=cli.runner(cli.default_command(), workdir),
-        rpc=lambda endpoint, chain: Rpc(endpoint_url(endpoint, chain)),
+        rpc=direct_clients(),
         workdir=workdir,
     )
 

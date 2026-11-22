@@ -12,7 +12,7 @@ from pathlib import Path
 from almanak.gateway.providers import PUBLIC_RPC
 from scripts.live_qa import cli, reads, writes
 from scripts.live_qa.read_cases import CASES
-from scripts.live_qa.rpc import Rpc, endpoint_url
+from scripts.live_qa.rpc import direct_clients, endpoint_url
 
 
 def whole(value: str) -> int:
@@ -127,7 +127,7 @@ def read_level(args: argparse.Namespace) -> int:
     workdir.mkdir()
     session = reads.Session(
         run=cli.runner(args.almanak_command, workdir),
-        rpc=lambda endpoint, chain: Rpc(endpoint_url(endpoint, chain)),
+        rpc=direct_clients(),
         workdir=workdir,
         policy=reads.RetryPolicy(args.attempts, args.backoff_seconds, args.timeout_seconds),
         report=announce,
