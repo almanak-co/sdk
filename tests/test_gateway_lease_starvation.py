@@ -21,9 +21,10 @@ from almanak.operator_runtime import OperatorRuntime
 from almanak.state import Journal
 from tests.test_operator_runtime import Backend, Desk
 
-LEASE = 2
+# Short, but long enough that a loaded runner does not lose the lease before the send.
+LEASE = 3
 # Longer than the lease: every renewal due while the send runs finds the lock held.
-HOLD = 3.0
+HOLD = 4.0
 
 
 @pytest.fixture(autouse=True)
