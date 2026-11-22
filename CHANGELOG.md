@@ -8,6 +8,13 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Fixed
+- `almanak ax lending-markets --connector aave_v4` counts a Spoke that reverts
+  `getReserveCount()` in `source.without_reserves` whichever JSON-RPC code the node
+  answers the revert with. Avalanche nodes answer a revert without data as `-32000`
+  `execution reverted`, so every empty Spoke there was named in `source.unreadable`. A
+  read the node refused or could not serve under the same code is still unreadable.
+
 ## [3.4.1] - 2026-11-25
 
 ### Changed

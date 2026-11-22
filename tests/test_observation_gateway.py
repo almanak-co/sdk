@@ -13,7 +13,13 @@ from almanak.ax_lending_markets import MarketQuery
 from almanak.caip import ChainId
 from almanak.gateway import observation_gateway
 from almanak.gateway.auth import loopback_endpoint
-from almanak.gateway.ethereum import DataError, EthereumReader, ProviderBusy, throttled
+from almanak.gateway.ethereum import (
+    DataError,
+    EthereumReader,
+    ProviderBusy,
+    Reverted,
+    throttled,
+)
 from almanak.gateway.observation_gateway import (
     GatewayReader,
     GatewayRequest,
@@ -355,18 +361,22 @@ def test_ax_block_tags_pin_one_concrete_header_on_a_direct_provider(tag):
     assert requests[2][1][1] == {"blockHash": BLOCK_HASH, "requireCanonical": True}
 
 
-def test_a_contract_revert_keeps_its_json_rpc_code_through_the_gateway(
-    served, token_file, provider, monkeypatch
+@pytest.mark.parametrize("code", [3, -32000])
+def test_a_contract_revert_keeps_its_verdict_and_code_through_the_gateway(
+    served, token_file, provider, monkeypatch, code
 ):
-    # A Spoke without reserves reverts getReserveCount() (JSON-RPC 3); a listing
-    # through the gateway must still tell that from a read that failed.
+    # A Spoke without reserves reverts getReserveCount(), under JSON-RPC 3 or, without
+    # data, -32000; a listing through the gateway must still tell that from a read
+    # that failed.
     endpoint, _ = served
     treasury = "0x" + "52" * 20
     answer = provider._rpc
 
     def reverting(method, params, *, allow_none=False):
         if method == "eth_call" and params[0]["to"].lower() == treasury:
-            raise DataError("rpc", "eth_call: RPC rejected the requested read (JSON-RPC 3)", code=3)
+            raise Reverted(
+                f"eth_call: RPC rejected the requested read (JSON-RPC {code})", None, code
+            )
         return answer(method, params, allow_none=allow_none)
 
     monkeypatch.setattr(provider, "_rpc", reverting)
@@ -376,10 +386,41 @@ def test_a_contract_revert_keeps_its_json_rpc_code_through_the_gateway(
         block = reader.pin_block(BLOCK_NUMBER)
         with pytest.raises(DataError) as reverted:
             reader.call(treasury, "getReserveCount()", block)
-        assert (reverted.value.kind, reverted.value.code) == ("rpc", 3)
+        assert (reverted.value.kind, reverted.value.code) == ("rpc", code)
+        assert reverted.value.reverted is True
         query = MarketQuery(connector="aave_v4", asset=None, collateral=None, limit=10)
         source = ax_lending_markets.spoke_reserves(reader, None, block, query).source
     assert (source["listed"], source["without_reserves"], source["unreadable"]) == (0, 1, [])
+
+
+def test_a_refused_read_under_the_revert_code_is_no_revert_through_the_gateway(
+    served, token_file, provider, monkeypatch
+):
+    # -32000 also answers a read the node could not serve; that Spoke stays unread.
+    endpoint, _ = served
+    spoke = "0x" + "52" * 20
+    answer = provider._rpc
+    message = "eth_call: RPC rejected the requested read (JSON-RPC -32000)"
+
+    def refusing(method, params, *, allow_none=False):
+        if method == "eth_call" and params[0]["to"].lower() == spoke:
+            raise DataError("rpc", message, code=-32000)
+        return answer(method, params, allow_none=allow_none)
+
+    monkeypatch.setattr(provider, "_rpc", refusing)
+    monkeypatch.setattr(ax_lending_markets, "hubs_for", lambda chain: (TARGET,))
+    monkeypatch.setattr(ax_lending_markets, "served_spokes", lambda *_: ([spoke], []))
+    with gateway_reader(ARBITRUM, endpoint, token_file) as reader:
+        block = reader.pin_block(BLOCK_NUMBER)
+        with pytest.raises(DataError) as refused:
+            reader.call(spoke, "getReserveCount()", block)
+        assert (refused.value.code, refused.value.reverted) == (-32000, False)
+        query = MarketQuery(connector="aave_v4", asset=None, collateral=None, limit=10)
+        source = ax_lending_markets.spoke_reserves(reader, None, block, query).source
+    assert (source["listed"], source["without_reserves"]) == (0, 0)
+    assert source["unreadable"] == [
+        {"spoke": spoke, "status": "refused", "reason": "rpc: " + message}
+    ]
 
 
 def test_a_provider_throttle_keeps_its_code_through_the_gateway(
