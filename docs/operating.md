@@ -106,7 +106,9 @@ lock under a current lease leaves the lease running for its full duration from
 the moment the lock is released, whether the request committed or failed, and the
 coordinator's renewal waits for its own request instead of giving up. No other
 coordinator can be admitted while the lock is held. A lease that is lost is
-reported with the renewal failure that lost it.
+reported with the renewal failure that lost it. A direct action then names the
+command that resolves its record, `almanak ax recover --record <path>` with the
+record's own path; the record is kept only while it holds a signed step.
 Replacement families keep the lock for their whole request. Each
 `gateway_request` log line reports provider calls by method (`rpc_calls`,
 `rpc`), HTTP exchanges with the provider (`rpc_round_trips`, a batch counting

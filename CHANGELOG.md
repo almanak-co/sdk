@@ -276,7 +276,8 @@ its changelog is on the `v2` branch.
   for the coordinator's own request. The send still runs under the lock, so a signed
   step is recorded and sent exactly as before (#46).
 - A lost coordinator lease is reported with the renewal failure that lost it, and a
-  direct action names `almanak ax recover` where it said `resume to recover`.
+  direct action names `almanak ax recover --record <path>`, with its record's path,
+  where it said `resume to recover`.
 
 ## [3.3.1] - 2026-11-21
 

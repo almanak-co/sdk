@@ -122,8 +122,6 @@ class LocalGateway(GatewayClient):
     loopback server reports them, because the inherited lease renewal retries only that.
     """
 
-    lease_recovery = "run `almanak ax recover` on a kept record"
-
     def __init__(self, service):
         self.service = service
         self.fenced = Fenced()
@@ -154,6 +152,14 @@ class LocalGateway(GatewayClient):
         if isinstance(result, tuple):
             return [item.model_dump(mode="json") for item in result]
         return result
+
+    def lease_recovery(self) -> str:
+        # A direct command has no resume. Its record is the directory of its journal,
+        # and `ax recover` resolves it only when named with `--record`.
+        return (
+            "the record is kept while a signed step is unresolved; then run "
+            f"`almanak ax recover --record {self.service.journal.path.parent}`"
+        )
 
     def close(self):
         self.stopped.set()

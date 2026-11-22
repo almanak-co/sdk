@@ -51,6 +51,8 @@ class Fenced:
         self.lock = threading.Lock()
         self.running = 0
         self.answered = 0
+        # `answered` as the renewal last saw it.
+        self.seen = 0
 
     def __enter__(self):
         with self.lock:
@@ -62,16 +64,20 @@ class Fenced:
             if not (isinstance(exc, DataError) and exc.kind == "gateway_unavailable"):
                 self.answered += 1
 
-    def since(self, answered: int) -> bool:
-        """Whether a request is running, or one was answered after `answered` was read."""
+    def progressed(self) -> bool:
+        """Whether a request is running, or one was answered since this was last asked.
+
+        The renewal asks when it has renewed and when a failed attempt finds the lease
+        run out, so a request answered while it waited for that attempt counts there,
+        and counts once.
+        """
         with self.lock:
-            return self.running > 0 or self.answered != answered
+            progressed = self.running > 0 or self.answered != self.seen
+            self.seen = self.answered
+            return progressed
 
 
 class GatewayClient:
-    # What the operator does about a lost lease; a direct command has no resume.
-    lease_recovery = "resume to recover"
-
     def __init__(self, endpoint: str, token_file: Path):
         self.endpoint = loopback_endpoint(endpoint)
         self.token = read_token(token_file)
@@ -81,7 +87,7 @@ class GatewayClient:
         self.stopped = threading.Event()
         self.heartbeat: threading.Thread | None = None
         self.lease_error: Exception | None = None
-        # Start time of the latest lease-fenced request the gateway answered successfully.
+        # When the gateway last answered a lease-fenced request successfully.
         self.lease_confirmed: float | None = None
         self.fenced = Fenced()
 
@@ -134,19 +140,28 @@ class GatewayClient:
             cause = self.lease_error
             raise RuntimeError(
                 "gateway coordinator heartbeat failed: the lease was not renewed and is "
-                f"expired or lost ({type(cause).__name__}: {cause}); {self.lease_recovery}"
+                f"expired or lost ({type(cause).__name__}: {cause}); {self.lease_recovery()}"
             ) from cause
-        started = time.monotonic()
         with nullcontext() if method == "renew" or method in UNFENCED else self.fenced:
             result = self.request(
                 method, coordinator=self.coordinator, deployment_id=self.deployment_id, **fields
             )
         if method not in UNFENCED:
-            # The gateway extends the lease in the same commit as every fenced request it
-            # completes, so a success proves the lease runs until at least `started` plus
-            # its duration. That keeps the lease counted if a renewal fails transiently.
-            self.lease_confirmed = max(self.lease_confirmed or started, started)
+            # The gateway extends the lease in the commit of every fenced request it
+            # completes, for its full duration from the release of the journal lock. The
+            # answer follows that release, so the lease is counted from the answer, not
+            # from the start of a request that may have held the lock for a whole send.
+            # That keeps the lease counted if a renewal then fails transiently. It can
+            # overstate the lease by the time the answer took to arrive, which only
+            # decides how long a renewal is asked again: the gateway refuses an expired
+            # lease whatever this clock says.
+            answered = time.monotonic()
+            self.lease_confirmed = max(self.lease_confirmed or answered, answered)
         return result
+
+    def lease_recovery(self) -> str:
+        """What the operator does about a lost lease."""
+        return "resume to recover"
 
     def configuration(self):
         config = configuration_from_json(json.dumps(self.request("configuration")))
@@ -198,6 +213,8 @@ class GatewayClient:
         self.coordinator = uuid4().hex
         admitted_at = time.monotonic()
         lease = self.scoped("acquire")
+        # The admission itself is not a request the renewal waits for.
+        self.fenced.progressed()
 
         def renew():
             period = lease["lease_seconds"] / 3
@@ -212,13 +229,14 @@ class GatewayClient:
 
             while not self.stopped.wait(delay):
                 started = time.monotonic()
-                answered = self.fenced.answered
                 try:
                     # Asked even past the deadline: the gateway, not this clock, decides
                     # whether the lease still runs, and it refuses an expired one.
                     self.scoped("renew")
                     deadline = started + lease["lease_seconds"]
                     delay = period
+                    # Requests answered before this renewal are covered by it.
+                    self.fenced.progressed()
                 except Exception as exc:
                     # Retry only temporary unavailability for this same lease, never admission
                     # under a new identity or signing/broadcasting an economic operation.
@@ -228,10 +246,11 @@ class GatewayClient:
                         if remaining > 0:
                             delay = min(period / 2, remaining)
                             continue
-                        if self.fenced.since(answered):
-                            # The gateway is busy with this coordinator's own request, which
-                            # may hold the journal lock for a whole send. It extends the
-                            # lease when that request ends, so ask again then.
+                        if self.fenced.progressed():
+                            # This coordinator's own request is running, or was answered
+                            # while the renewal waited. It may hold the journal lock for a
+                            # whole send, and the gateway extends the lease when it ends,
+                            # also when it fails under the lock, so ask again.
                             delay = min(period / 2, 1.0)
                             continue
                     self.lease_error = exc
