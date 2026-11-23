@@ -159,6 +159,13 @@ def test_a_quote_keeps_the_venue_answer_as_received():
         {"outputAmount": "999_897_038"},
         {"outputAmount": "+1"},
         {"outputAmount": "\u0663"},
+        {"outputAmount": "9" * 79},
+        {
+            "inputToken": {
+                "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+                "decimals": "6" * 5000,
+            }
+        },
         {"outputAmount": -1},
         {"outputAmount": 1.0},
         {"inputToken": "0xaf88d065e77c8cc2239327c5edb3a432268e5831"},
