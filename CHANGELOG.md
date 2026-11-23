@@ -49,6 +49,11 @@ its changelog is on the `v2` branch.
 ## [3.3.0] - 2026-11-20
 
 ### Added
+- The agent skill sets up scheduled checks in the agent's own environment when the user
+  asks to be kept informed. A run reads the wallet's positions and overview, compares
+  them with the user's levels and the last check, and reports what needs attention with
+  a preview of the action the user named for it. A scheduled run never executes and
+  never resolves a kept record.
 - `almanak ax portfolio --account` reports an account's wallet tokens and protocol
   positions on every chain, with US dollar values, as Rabby's backend reports them. It
   needs no key and takes no transport. Every figure is the vendor's and unverified: the
