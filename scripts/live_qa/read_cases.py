@@ -71,6 +71,12 @@ def balance(asset: str, account: str) -> tuple[str, ...]:
     return ("balance", "--asset", asset, "--account", account)
 
 
+def balance_case(case_id: str, chain: str, asset: str, account: str, *options: str) -> ReadCase:
+    """A balance read whose check holds the output to the asset and account it requests."""
+    held = checks.erc20_balance if "/erc20:" in asset else checks.native_balance
+    return ReadCase(case_id, chain, (*balance(asset, account), *options), held(asset, account))
+
+
 def aave_v4(command: str, chain: str, spoke: str, reserve: int) -> tuple[str, ...]:
     selector = ("--chain", chain, "--spoke", spoke, "--reserve-id", str(reserve))
     return (command, "--connector", "aave_v4", *selector)
@@ -94,18 +100,15 @@ def v3_pool(chain: str, pool: str) -> tuple[str, ...]:
 
 
 ETHEREUM_CASES = (
-    ReadCase(
+    balance_case(
         "balance/native/ethereum",
         ETHEREUM,
-        (*balance("eip155:1/slip44:60", DEPOSIT_CONTRACT), "--block", "latest"),
-        checks.native_balance,
+        "eip155:1/slip44:60",
+        DEPOSIT_CONTRACT,
+        "--block",
+        "latest",
     ),
-    ReadCase(
-        "balance/erc20/ethereum-usdc",
-        ETHEREUM,
-        balance(USDC, ETHEREUM_V3_POOL),
-        checks.erc20_balance,
-    ),
+    balance_case("balance/erc20/ethereum-usdc", ETHEREUM, USDC, ETHEREUM_V3_POOL),
     ReadCase(
         "lending-reserve/aave_v4/ethereum-weth",
         ETHEREUM,
@@ -199,18 +202,15 @@ ETHEREUM_CASES = (
 )
 
 AVALANCHE_CASES = (
-    ReadCase(
+    balance_case(
         "balance/native/avalanche",
         AVALANCHE,
-        (*balance("eip155:43114/slip44:9005", WAVAX_TOKEN), "--block", "latest"),
-        checks.native_balance,
+        "eip155:43114/slip44:9005",
+        WAVAX_TOKEN,
+        "--block",
+        "latest",
     ),
-    ReadCase(
-        "balance/erc20/avalanche-usdc",
-        AVALANCHE,
-        balance(AVALANCHE_USDC, AVALANCHE_V3_POOL),
-        checks.erc20_balance,
-    ),
+    balance_case("balance/erc20/avalanche-usdc", AVALANCHE, AVALANCHE_USDC, AVALANCHE_V3_POOL),
     ReadCase(
         "lending-reserve/aave_v4/avalanche-usdc",
         AVALANCHE,
@@ -348,12 +348,7 @@ def chain_cases(chain: ChainId) -> tuple[ReadCase, ...]:
     native, wrapped = str(network.native_asset), str(network.wrapped_native)
     holder = wrapped.rpartition(":")[2]
     cases = [
-        ReadCase(
-            f"balance/native/{chain}",
-            str(chain),
-            (*balance(native, holder), "--block", "latest"),
-            checks.native_balance,
-        )
+        balance_case(f"balance/native/{chain}", str(chain), native, holder, "--block", "latest")
     ]
     if chain in AAVE_V3_POOLS:
         cases.append(

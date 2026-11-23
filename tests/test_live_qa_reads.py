@@ -94,7 +94,10 @@ def native_output(amount="5"):
     return {"product": "ax-balance", "observations": [observation]}
 
 
-CASE = reads.ReadCase("balance/native", "eip155:1", ("balance",), checks.native_balance)
+NATIVE = "eip155:1/slip44:60"
+CASE = reads.ReadCase(
+    "balance/native", "eip155:1", ("balance",), checks.native_balance(NATIVE, ACCOUNT)
+)
 
 
 def test_a_read_that_agrees_with_the_direct_read_passes():
@@ -121,7 +124,8 @@ def test_an_unanswered_direct_read_blocks_instead_of_failing():
 def test_a_direct_read_that_reverts_is_an_answer_so_the_case_fails_without_a_retry():
     """The endpoint answered. Only a read it did not answer is blocked."""
     output = {"observations": [{**native_output()["observations"][0], "asset": USDC}]}
-    case = reads.ReadCase("balance/erc20", "eip155:1", ("balance",), checks.erc20_balance)
+    check = checks.erc20_balance(USDC, ACCOUNT)
+    case = reads.ReadCase("balance/erc20", "eip155:1", ("balance",), check)
     run, calls = scripted(succeeded(output))
     rpc = FakeRpc(reverting=("balanceOf(address)",))
     result = reads.run_case(case, "publicnode", run, rpc, Path("."), sleep=pytest.fail)
@@ -131,7 +135,7 @@ def test_a_direct_read_that_reverts_is_an_answer_so_the_case_fails_without_a_ret
 
 
 def test_a_balance_read_without_observations_compares_nothing_and_fails():
-    for check in (checks.native_balance, checks.erc20_balance):
+    for check in (checks.native_balance(NATIVE, ACCOUNT), checks.erc20_balance(USDC, ACCOUNT)):
         case = reads.ReadCase("balance", "eip155:1", ("balance",), check)
         verdict = reads.judge(case, succeeded({"observations": []}), FakeRpc())
         assert verdict.status == "fail" and "no observations" in verdict.detail
@@ -440,7 +444,6 @@ def test_a_chain_without_its_own_cases_gets_them_from_its_network_record():
         "--account",
         wrapped,
     )
-    assert balance.check is checks.native_balance
     assert reserve.arguments[-1] == f"eip155:8453/erc20:{wrapped}"
     assert reserve.check is checks.pooled_reserve
     # Aave V3 has no Pool there, so only the balance is read.
@@ -493,9 +496,28 @@ def test_an_erc20_balance_is_compared_with_balance_of_and_decimals():
     }
     output = {"observations": [observation]}
     agreeing = FakeRpc({"balanceOf(address)": (9,), "decimals()": (6,)})
-    assert checks.erc20_balance(output, agreeing) == []
+    check = checks.erc20_balance(USDC, ACCOUNT)
+    assert check(output, agreeing) == []
     differing = FakeRpc({"balanceOf(address)": (9,), "decimals()": (18,)})
-    assert checks.erc20_balance(output, differing) == ["decimals: CLI 6, direct read 18"]
+    assert check(output, differing) == ["decimals: CLI 6, direct read 18"]
+
+
+def test_a_balance_of_another_account_or_asset_fails_before_any_direct_read():
+    """A correct balance of the wrong account would agree with a direct read of it."""
+    other = "0x" + "22" * 20
+    unread = FakeRpc(down=True)
+    observation = native_output()["observations"][0]
+    for reported, check, finding in (
+        ({"account": {"address": other}}, CASE.check, f"account: CLI '{other}'"),
+        ({"account": {"address": None}}, CASE.check, "account: CLI None"),
+        ({}, checks.erc20_balance(USDC, ACCOUNT), "asset: CLI 'eip155:1/slip44:60'"),
+    ):
+        (difference,) = check({"observations": [{**observation, **reported}]}, unread)
+        assert difference.startswith(finding) and ", requested " in difference
+    # The same address in another letter case is the same account.
+    checksummed = {**observation, "account": {"address": "0x" + "AB" * 20}}
+    check = checks.native_balance(NATIVE, "0x" + "ab" * 20)
+    assert check({"observations": [checksummed]}, FakeRpc()) == []
 
 
 MARKET_ASSET = "0x" + "a1" * 20

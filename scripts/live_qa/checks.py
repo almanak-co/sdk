@@ -37,32 +37,69 @@ def same_block(observation: Output, rpc: Rpc) -> tuple[str, Any, Any]:
 NO_OBSERVATIONS = ["the command reported no observations, so no balance was compared"]
 
 
-def native_balance(output: Output, rpc: Rpc) -> list[str]:
-    if not output["observations"]:
-        return NO_OBSERVATIONS
-    pairs = []
-    for observation in output["observations"]:
-        number = observation["block"]["number"]
-        account = observation["account"]["address"]
-        pairs.append(("balance", int(observation["amount"]), rpc.balance(account, number)))
-        pairs.append(same_block(observation, rpc))
-    return differences(pairs)
+def lowered(value: Any) -> Any:
+    return value.lower() if isinstance(value, str) else value
 
 
-def erc20_balance(output: Output, rpc: Rpc) -> list[str]:
-    if not output["observations"]:
+def other_identity(observation: Output, asset: str, account: str) -> list[str]:
+    """Where an observation names another asset or account than the case requested.
+
+    A direct read of what the command reported would agree with a correct balance of
+    the wrong account, so identity is held to the case before any read.
+    """
+    pairs = (
+        ("asset", observation["asset"], asset),
+        ("account", observation["account"]["address"], account),
+    )
+    return [
+        f"{label}: CLI {reported!r}, requested {requested!r}"
+        for label, reported, requested in pairs
+        if lowered(reported) != requested.lower()
+    ]
+
+
+def unrequested(output: Output, asset: str, account: str) -> list[str]:
+    """Why the output's observations cannot be compared: none, or another identity."""
+    observations = output["observations"]
+    if not observations:
         return NO_OBSERVATIONS
-    pairs = []
-    for observation in output["observations"]:
-        number = observation["block"]["number"]
-        token = asset_address(observation["asset"])
-        account = observation["account"]["address"]
-        (held,) = rpc.call(token, "balanceOf(address)", number, ("uint256",), (account,))
-        (decimals,) = rpc.call(token, "decimals()", number, ("uint8",))
-        pairs.append(("balance", int(observation["amount"]), held))
-        pairs.append(("decimals", observation["decimals"], decimals))
-        pairs.append(same_block(observation, rpc))
-    return differences(pairs)
+    return [found for item in observations for found in other_identity(item, asset, account)]
+
+
+def native_balance(asset: str, account: str) -> Check:
+    """A native balance of the requested account, held to `eth_getBalance`."""
+
+    def check(output: Output, rpc: Rpc) -> list[str]:
+        if refused := unrequested(output, asset, account):
+            return refused
+        pairs = []
+        for observation in output["observations"]:
+            number = observation["block"]["number"]
+            pairs.append(("balance", int(observation["amount"]), rpc.balance(account, number)))
+            pairs.append(same_block(observation, rpc))
+        return differences(pairs)
+
+    return check
+
+
+def erc20_balance(asset: str, account: str) -> Check:
+    """An ERC-20 balance of the requested account, held to `balanceOf` and `decimals()`."""
+    token = asset_address(asset)
+
+    def check(output: Output, rpc: Rpc) -> list[str]:
+        if refused := unrequested(output, asset, account):
+            return refused
+        pairs = []
+        for observation in output["observations"]:
+            number = observation["block"]["number"]
+            (held,) = rpc.call(token, "balanceOf(address)", number, ("uint256",), (account,))
+            (decimals,) = rpc.call(token, "decimals()", number, ("uint8",))
+            pairs.append(("balance", int(observation["amount"]), held))
+            pairs.append(("decimals", observation["decimals"], decimals))
+            pairs.append(same_block(observation, rpc))
+        return differences(pairs)
+
+    return check
 
 
 def v3_pool(output: Output, rpc: Rpc) -> list[str]:
