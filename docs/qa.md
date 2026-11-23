@@ -610,9 +610,13 @@ It stops and exits 1, leaving the rest to you, when:
 
 - the supply preview is refused, or the wallet already holds a position in the
   market, since the withdrawal would take all of it. Nothing was signed.
-- the supply did not complete. Its approval may have been sent. Do not run the
-  check again: read `outcomes` and `refused`, and resolve a kept record with
-  `almanak ax recover` as [Operating](operating.md#operator-actions) describes.
+- the supply did not complete. Its approval may have been sent, and so may the
+  supply itself. Do not run the check again: read `outcomes` and `refused`, and
+  resolve a kept record with `almanak ax recover` as
+  [Operating](operating.md#operator-actions) describes. Recovery can send a
+  signed supply or find it mined, so read the position with
+  `ax lending-position` afterwards, and withdraw with `almanak ax withdraw` if
+  the amount is supplied.
 - the wallet's position changed between the preview and the supply. The
   withdrawal is not run, since it would take more than the check supplied. The
   supplied amount is still in the market.

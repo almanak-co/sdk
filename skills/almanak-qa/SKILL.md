@@ -191,19 +191,31 @@ directory. Report each transaction hash from `summary.md` and the verdict.
 
 When it exits 1, read what it printed and report it exactly. Do not run it again.
 
-- A supply that did not complete may have sent its approval. List the kept
-  records with `almanak ax recover` and tell the user what you found.
+- A supply that did not complete may have sent its approval, and so may the
+  supply itself. List the kept records with `almanak ax recover` and tell the
+  user what you found. Resolve a kept record, as below, only if they authorize
+  it, then read the position with `ax lending-position`. If the amount is
+  supplied, tell them; withdraw it only if they ask.
 - A message that the supplied amount is still in the market means the withdrawal
   was not run or its preview was refused. Tell the user plainly that their funds
   are still supplied, and that `almanak ax withdraw` for that market returns them;
   run it only if they ask, preview first, as the `almanak` skill describes.
 - A withdrawal that was executed but did not complete has an unknown outcome: the
   funds may still be supplied, or the withdrawal may have been mined. Do not
-  withdraw again. List the kept records with `almanak ax recover`, tell the user
-  what is unresolved, and read the position before proposing anything.
+  withdraw again. List the kept records with `almanak ax recover` and tell the
+  user what is unresolved. Resolve a kept record, as below, only if they
+  authorize it, then read the position before proposing anything.
+
+Without `--record`, `almanak ax recover` only lists the kept records. With
+`--record` and the record's `path` it resolves that record: from its receipt, or
+by sending its signed transaction again. That can spend gas and complete the
+supply or the withdrawal, so ask the user first. Without a transport flag it uses
+the public endpoint the check ran on; after a run with `--env-file`, pass the same
+`--env-file`.
 
 ```bash
 almanak ax recover
+almanak ax recover --record <path>
 ```
 
 ## Rules

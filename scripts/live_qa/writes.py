@@ -307,7 +307,9 @@ class WriteCheck:
         if not completed(supply):
             return (
                 "the supply did not complete. Do not run this again: read `outcomes` and"
-                " `refused` above, then `almanak ax recover` if a record was kept"
+                " `refused` above, then `almanak ax recover` if a record was kept. Recovery"
+                " can complete the supply, so read the position afterwards and withdraw"
+                " with `almanak ax withdraw` if the amount is supplied"
             )
         if not holds_nothing(supply.output.get("position_before")):
             # The supply adopted what the wallet held when it ran, after the preview.

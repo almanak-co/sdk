@@ -23,6 +23,7 @@ PLACEHOLDERS = {
     "<phrase>": "supply 100000 ethereum-usdc and withdraw",
     "<version>": "3.2.1",
     "<text>": "gmx_v2",
+    "<path>": "record",
 }
 
 
