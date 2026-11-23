@@ -286,7 +286,7 @@ treat it the same way. Read the overview at most once per request of the user.
 | Base (`eip155:8453`) | `base`, then `drpc` | `eip155:8453/slip44:60` |
 | Optimism (`eip155:10`) | `drpc`, then `optimism` | `eip155:10/slip44:60` |
 | Arbitrum (`eip155:42161`) | `arbitrum` | `eip155:42161/slip44:60` |
-| BNB (`eip155:56`) | `bnbchain` | `eip155:56/slip44:714` |
+| BNB (`eip155:56`) | `blastapi` | `eip155:56/slip44:714` |
 | Polygon (`eip155:137`) | `drpc` | `eip155:137/slip44:966` |
 | Robinhood (`eip155:4663`) | `drpc` | `eip155:4663/slip44:60` |
 | HyperEVM (`eip155:999`) | none | `eip155:999/slip44:2457` |

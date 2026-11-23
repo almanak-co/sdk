@@ -8,6 +8,14 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Changed
+- `--public-rpc blastapi` is the public endpoint for BNB Chain (`eip155:56`), and
+  `bnbchain` is no longer a name. BNB Chain's own endpoint keeps less than a minute of
+  state, so a direct action that took longer than that between a mined step and its
+  reconciliation ended with `missing trie node` and a record that `ax recover` could
+  not resolve through it. A record kept on `bnbchain` is resolved by naming a
+  transport, such as `ax recover --record <path> --public-rpc blastapi` (#42).
+
 ### Fixed
 - A direct action run with `--execute` no longer ends over its own step that was just
   mined. When the endpoint served neither the receipt nor the transaction of that step

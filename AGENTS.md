@@ -277,9 +277,12 @@ independently.
   list is in code and excludes HyperEVM. Each reader verifies the chain number,
   the pinned genesis block and a recent head. Strategy runs, forks, checks and
   backtests refuse it.
-- Accepted: the Base and BNB Chain operators' own endpoints, listed under the
-  operator's name as `base` and `bnbchain`. Proposed, not accepted: the
-  `arbitrum` and `optimism` entries, listed under the same rule.
+- Accepted: the Base operator's own endpoint, listed under the operator's name
+  as `base`. Accepted: BNB Chain's own endpoint is not listed, because it keeps
+  less than a minute of state. Proposed, not accepted: the `arbitrum`,
+  `optimism` and `blastapi` entries. The first two are their chain operators'
+  own endpoints; `blastapi` is a shared provider's keyless endpoint and serves
+  BNB Chain.
 - A (name, chain) pair is listed only after it passed every check of
   `scripts/qualify_public_rpc.py` in repeated full live runs. A pass is a
   point-in-time result, and a transient refusal fails a run as it would fail a
