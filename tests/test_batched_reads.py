@@ -671,6 +671,160 @@ def test_a_re_send_ends_by_the_read_deadline_and_a_first_attempt_keeps_its_timeo
     assert busy.value.transient and len(sent) == 1 and timeouts == [httpx.USE_CLIENT_DEFAULT]
 
 
+@pytest.fixture
+def clock(monkeypatch):
+    """A fake clock that both waits and provider attempts advance; nothing sleeps."""
+    now, waits = [0.0], []
+
+    def wait(seconds):
+        waits.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(ethereum, "sleep", wait)
+    monkeypatch.setattr(ethereum, "monotonic", lambda: now[0])
+    return now, waits
+
+
+def timed_reads(reader, now, *attempts):
+    """Answer a reader's single reads in turn; each attempt is (seconds taken, answer).
+
+    An answer of None is a provider timeout. `sent` records each attempt's method and
+    the read timeout the client gave it.
+    """
+    sent, left = [], list(attempts)
+
+    def respond(request):
+        body = json.loads(request.content)
+        sent.append((body["method"], request.extensions["timeout"]["read"]))
+        took, answer = left.pop(0)
+        now[0] += took
+        if answer is None:
+            raise httpx.ReadTimeout("timed out", request=request)
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], **answer})
+
+    reader._client = httpx.Client(
+        transport=httpx.MockTransport(respond), timeout=ethereum.PROVIDER_TIMEOUT
+    )
+    return sent
+
+
+TIMEOUT = ethereum.PROVIDER_TIMEOUT
+BUDGET = ethereum.EXECUTION_RETRY_BUDGET
+
+
+def test_a_read_that_timed_out_is_sent_once_more(connect, clock):
+    """The timeout outlasts the execution budget, and the read still gets one re-send."""
+    now, waits = clock
+    authority, _ = connect(FakeChain(START), retry_budget=BUDGET)
+    sent = timed_reads(authority.reader, now, (TIMEOUT, None), (0.2, {"result": "0x1"}))
+    assert authority.reader._rpc("eth_chainId", []) == "0x1"
+    # The re-send follows the first backoff and may take the budget, not the full timeout.
+    assert sent == [("eth_chainId", TIMEOUT), ("eth_chainId", BUDGET)]
+    assert waits == [ethereum.BUSY_BACKOFF]
+
+
+def test_a_read_that_keeps_timing_out_ends_within_its_stated_bound(connect, clock):
+    now, waits = clock
+    authority, _ = connect(FakeChain(START), retry_budget=BUDGET)
+    attempts = [(TIMEOUT, None), (BUDGET, None), (0.1, {"result": "0x1"})]
+    sent = timed_reads(authority.reader, now, *attempts)
+    with pytest.raises(DataError) as failed:
+        authority.reader._rpc("eth_chainId", [])
+    assert failed.value.kind == "transport" and failed.value.transient
+    assert len(sent) == 2 and waits == [ethereum.BUSY_BACKOFF]
+    assert now[0] == TIMEOUT + ethereum.BUSY_BACKOFF + BUDGET == 23.5
+
+
+@pytest.mark.parametrize(
+    ("took", "resend"),
+    [
+        # Budget left for the first backoff: the bounds are the ones a quick failure has.
+        (BUDGET - ethereum.BUSY_BACKOFF, TIMEOUT),
+        # Less than the first backoff left: the one re-send, bounded by the budget.
+        (BUDGET - ethereum.BUSY_BACKOFF + 0.1, BUDGET),
+    ],
+)
+def test_only_a_first_attempt_that_spent_the_budget_gets_the_bounded_re_send(
+    connect, clock, took, resend
+):
+    now, waits = clock
+    authority, _ = connect(FakeChain(START), retry_budget=BUDGET)
+    sent = timed_reads(authority.reader, now, (took, None), (0.1, {"result": "0x1"}))
+    assert authority.reader._rpc("eth_chainId", []) == "0x1"
+    assert [timeout for _, timeout in sent] == [TIMEOUT, resend]
+    assert waits == [ethereum.BUSY_BACKOFF]
+
+
+def test_a_later_attempt_past_the_budget_is_not_sent_again(connect, clock):
+    """The one re-send belongs to the first attempt; a later slow failure ends the read."""
+    now, waits = clock
+    authority, _ = connect(FakeChain(START), retry_budget=BUDGET)
+    attempts = [(1.0, None), (TIMEOUT, None), (0.1, {"result": "0x1"})]
+    sent = timed_reads(authority.reader, now, *attempts)
+    with pytest.raises(DataError) as failed:
+        authority.reader._rpc("eth_chainId", [])
+    assert failed.value.transient and len(sent) == 2
+    assert [timeout for _, timeout in sent] == [TIMEOUT, TIMEOUT]
+
+
+def test_a_submission_that_timed_out_is_never_sent_again(connect, clock):
+    now, waits = clock
+    authority, _ = connect(FakeChain(START), retry_budget=BUDGET)
+    sent = timed_reads(authority.reader, now, (TIMEOUT, None), (0.1, {"result": "0x1"}))
+    with pytest.raises(DataError) as failed:
+        authority.reader._rpc("eth_sendRawTransaction", ["0x00"])
+    assert failed.value.kind == "transport" and not failed.value.transient
+    assert len(sent) == 1 and waits == []
+
+
+def test_a_reader_without_a_budget_does_not_re_send_a_timeout(connect, clock):
+    now, waits = clock
+    authority, _ = connect(FakeChain(START))
+    sent = timed_reads(authority.reader, now, (TIMEOUT, None), (0.1, {"result": "0x1"}))
+    with pytest.raises(DataError) as failed:
+        authority.reader._rpc("eth_chainId", [])
+    assert not failed.value.transient and len(sent) == 1 and waits == []
+
+
+@pytest.mark.parametrize(
+    ("deadline", "timeouts"),
+    [
+        # 4.5 s of the request remain after the backoff, less than the budget.
+        (TIMEOUT + 5.0, [TIMEOUT, 4.5]),
+        # The backoff would end past the request's deadline: nothing is re-sent.
+        (TIMEOUT + 0.2, [TIMEOUT]),
+    ],
+)
+def test_the_re_send_after_a_timeout_ends_by_the_read_deadline(connect, clock, deadline, timeouts):
+    from almanak.gateway.request_scope import request_scope
+
+    now, waits = clock
+    authority, _ = connect(FakeChain(START), retry_budget=BUDGET)
+    sent = timed_reads(authority.reader, now, (TIMEOUT, None), (4.5, None))
+    with request_scope() as scope:
+        scope.read_deadline = deadline
+        with pytest.raises(DataError) as failed:
+            authority.reader._rpc("eth_chainId", [])
+    assert failed.value.transient and [timeout for _, timeout in sent] == timeouts
+    assert now[0] <= deadline or len(sent) == 1
+
+
+def test_pruned_state_is_a_named_refusal_and_is_not_sent_again(connect, no_backoff):
+    authority, _ = connect(FakeChain(START), retry_budget=BUDGET)
+    message = "missing trie node 5f3a (path ) state 0x9c is not available at https://x/KEY"
+    sent = single_reads(authority.reader, {"error": {"code": -32000, "message": message}})
+    pinned = {"blockHash": "0x" + "11" * 32, "requireCanonical": True}
+    with pytest.raises(DataError) as refused:
+        authority.reader._rpc("eth_call", [{"to": "0x" + "00" * 20}, pinned])
+    assert not isinstance(refused.value, ethereum.BlockNotServed)
+    assert refused.value.kind == "rpc" and not refused.value.transient
+    assert str(refused.value) == (
+        "eth_call: RPC rejected the requested read"
+        " (JSON-RPC -32000: the endpoint no longer serves state at that block)"
+    )
+    assert sent == ["eth_call"] and no_backoff == []
+
+
 def test_an_empty_batch_sends_nothing(connect):
     """JSON-RPC 2.0 refuses an empty batch, so no calls answer with no results."""
     authority, transport = connect(FakeChain(START))
