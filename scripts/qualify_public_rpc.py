@@ -252,7 +252,9 @@ def aged_block(reader: EthereumReader, head: Block, seconds: int) -> Block:
     Block times come from the timestamps the endpoint itself reports, never from a
     stated block time of the chain. The search reads at most `STATE_AGE_LOOKUPS`
     headers and stops at the first block within `STATE_AGE_SLACK_SECONDS` of the age.
-    The returned block is the reader's last pin.
+    The returned block is the reader's last pin, which takes one more header read when
+    the search did not end on it. On a chain with very uneven block times the block
+    can be much older than the slack allows for.
     """
     near, far, last = head, None, head
     candidate: int | None = max(0, head.number - NUMBER_DEPTH)
@@ -271,7 +273,7 @@ def aged_block(reader: EthereumReader, head: Block, seconds: int) -> Block:
     if far is None:
         raise DataError(
             "unavailable",
-            f"no block at least {seconds} seconds behind the head in "
+            f"no block at least {seconds} seconds behind the head in at most "
             f"{STATE_AGE_LOOKUPS} header reads",
         )
     return far if far is last else reader.pin_block(far.number)
@@ -285,6 +287,12 @@ def reads_at_age(probe: Probe) -> dict:
     head = reader.pin_block("latest")
     block = aged_block(reader, head, STATE_AGE_SECONDS)
     age = head.timestamp - block.timestamp
+    # The search may pin its block a second time; the header that pin returned is the
+    # one the reads run at, so its age is the one that counts.
+    require(
+        age >= STATE_AGE_SECONDS,
+        f"block {block.number} is {age} seconds behind the head, less than {STATE_AGE_SECONDS}",
+    )
     try:
         served = pinned_reads(probe, block)
     except DataError as error:

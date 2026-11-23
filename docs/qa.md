@@ -363,7 +363,9 @@ not by a block time stated for the chain. It reads the block 64 behind the head,
 estimates from the two timestamps how many blocks make 360 seconds, and reads that
 block's header. A block whose timestamp is 360 to 420 seconds behind the head's is
 taken; otherwise the estimate is corrected from the timestamps read so far, for at
-most six header reads, and the youngest block found that is old enough is used. An
+most six header reads, and the youngest block found that is old enough is used. On a
+chain with very uneven block times that block can be much older than 420 seconds, so
+an endpoint that keeps only a little more than the floor can fail there. An
 endpoint that keeps less state fails the check with the reader's refusal, for a
 geth node `the endpoint does not serve state at that block`.
 

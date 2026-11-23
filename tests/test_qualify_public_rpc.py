@@ -304,6 +304,16 @@ def test_the_search_for_an_aged_block_is_bounded_and_takes_the_youngest_found():
     assert len(stalled.pinned) == 1 + tool.STATE_AGE_LOOKUPS
 
 
+def test_the_block_the_reads_run_at_is_held_to_the_required_age(monkeypatch):
+    """A second pin of the chosen block may return another header; its age is checked."""
+    reader = Paced(even(1_000))
+    young = reader.pin_block(PACED_HEAD - 10)
+    monkeypatch.setattr(tool, "aged_block", lambda *arguments: young)
+    with pytest.raises(DataError, match="seconds behind the head, less than 360") as refused:
+        tool.reads_at_age(probe(reader))
+    assert refused.value.kind == "inconsistent"
+
+
 def test_a_chain_younger_than_the_required_age_has_no_aged_block():
     young = Endpoint()
     head = block(40)
