@@ -420,6 +420,10 @@ def test_case_ids_are_unique_and_every_public_chain_is_covered():
     # Every listed endpoint has at least one case that reads through it.
     plan = reads.planned(CASES, sorted(PUBLIC_RPC), live_conftest.served)
     assert {endpoint for _, endpoint in plan} == set(PUBLIC_RPC)
+    # A case's chain is a CAIP-2 reference, and no case is left without an endpoint to
+    # run on, as a mistyped chain would leave it without failing anything.
+    assert all(str(ChainId(case.chain)) == case.chain for case in CASES)
+    assert {case.id for case, _ in plan} == set(ids)
     balances = {case.chain for case in CASES if case.id.startswith("balance/native/")}
     assert served <= balances
 
