@@ -374,8 +374,9 @@ independently.
 - A bridge is an economic intent between two named fund accounts of one
   strategy on different chains. It is planned, signed and routed on the chain
   it leaves. Across is the first connector. It plans, signs and reconciles the
-  deposit on the source chain and opens the transfer; arrival and refund are
-  not reconciled yet, and it declares no run mode on any chain.
+  deposit on the source chain and opens the transfer, reconciles its arrival on
+  the destination chain and its refund on the source chain, and declares no run
+  mode on any chain.
 - A bridge market is one direction: the sent asset on its chain, the received
   asset on the destination chain, the author's fee ceiling `max_fee_bps` and
   the named quote source. Its allocation names a source account and a
@@ -428,8 +429,8 @@ independently.
   deposit itself. Only the gateway enforces the fee ceiling. Never describe the
   ceiling as on-chain enforcement.
 - A transfer and its two accounts stay within one environment.
-- Proposed, not accepted: teardown waits for open transfers and does not bridge
-  back.
+- Proposed, not accepted: teardown waits for open transfers on both chains and
+  does not bridge back.
 - Proposed, not accepted: the backtest model charges the author's full fee
   ceiling and delays arrival by a latency stated in the backtest configuration,
   both reported as model assumptions.
@@ -442,9 +443,57 @@ independently.
   operator key is read from `ALMANAK_ACROSS_API_KEY` in the gateway's
   environment. If the vendor retires the endpoint, deposits refuse until the
   quote reader is rebuilt on its successor.
-- Unresolved: market resolution reads one chain per market, so the received
-  asset is not yet verified by its on-chain `decimals()` and `symbol()` on the
-  destination chain. No run mode is declared before it is.
+- A two-chain market is resolved on its source chain and completed on its
+  destination chain at that chain's own anchor: the received asset is verified
+  there by its on-chain `decimals()` and `symbol()`, with those reads retained
+  and replayed separately. A route that was not completed forms no allocation.
+- A relay is hashed under the chain number each SpokePool reads from its own
+  node, so on identified forks both sides use the isolated signing chain. The
+  transfer's reference keeps the deposit identifier, that relay hash and the
+  quote's timestamp, because the destination chain sees no source outcome.
+- An arrival is a `FilledRelay` whose whole relay hashes to the retained hash,
+  never a matching deposit identifier alone. It must pay the destination fund,
+  and the received amount is the ERC-20 transfer to the fund in the fill
+  transaction, held to the event's amount. An arrival below the offer is a
+  measurement. `fillStatuses` is a cross-check only: a fill needs a filled
+  status, and a filled status with no fill in the scanned pages halts.
+- Page rule: an arrival scan starts at the last destination block not after
+  the quote's timestamp, and a refund scan at the last source block not after
+  the earliest open fill deadline. Nothing is read before the head has passed
+  that time. Later pages continue at the block after the last one and span at
+  most 2,000 blocks. A page is committed when it starts its scan, is full,
+  holds an outcome or ends an arrival scan past the fill deadline; a shorter
+  empty page is read again. The gateway re-derives every page before it is
+  recorded.
+- A refund is read only after the fill deadline has passed on the source chain
+  and never inferred from time. Refund attribution rule: a payment of the sent
+  asset from the SpokePool to the fund counts only in a transaction whose
+  `ExecutedRelayerRefundRoot` leaves name the fund for that asset with the same
+  amounts. The total is attributed to the one set of the fund's open transfers
+  of that asset, past their fill deadline at that block, whose sent amounts sum
+  to it exactly. No such set, or more than one, stops the source chain with an
+  accounting cause. Two refunds to one fund in one block stop it too.
+- A refund the SpokePool deferred because its transfer failed is detected by
+  `getRelayerRefund` and reported as unresolved. Claiming it is not built.
+- A transfer is resolved at most once. A fill found for a refunded transfer
+  halts the destination chain with both transactions named. A refund found
+  when no open transfer can take it stops the source chain as unattributable.
+- A deployment closes only when no transfer is open and no allowance stands.
+  A transfer opened towards a chain that had already closed reopens that chain.
+- The destination chain's tick runs `decide` with no observation of the
+  allocation and owns nothing there. A bridge decided on that tick is refused
+  as routed to another chain, so a strategy bridges only when its allocation's
+  observation is present.
+- Fork settlement: a fill is the destination SpokePool's own `fillRelay` by a
+  relayer the fixture funds. A refund is a fork-constructed bundle: the
+  impersonated admin relays a root of one leaf the fixture wrote, executed
+  through the real contract code. Label it so wherever it is reported; it is
+  never promotion or Fork Qualification evidence. It is defined for an
+  Arbitrum source only.
+- Proposed, not accepted: a refund does not wait for the destination's scan to
+  pass the fill deadline, so a destination outage does not hold a refund back.
+- Proposed, not accepted: refund attribution considers at most 12 open
+  transfers of one fund and asset, and refuses beyond that.
 
 ## Hyperliquid
 
