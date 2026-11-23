@@ -30,13 +30,15 @@ from tests.test_across_records import config as config  # noqa: F401 - a fixture
 from tests.test_across_settlement import FILL_DEADLINE
 
 L1_ADMIN = "0x" + "c1" * 20
+FILL_STATUSES = "0x" + keccak(text="fillStatuses(bytes32)")[:4].hex()
+FILL_RELAY = "0x" + keccak(text=f"fillRelay({RELAY},uint256,bytes32)")[:4].hex()
 
 
 class Rpc:
     """A fork node that mines every transaction at once and keeps what was sent."""
 
     def __init__(self, now):
-        self.now, self.sent, self.calls = now, [], []
+        self.now, self.sent, self.calls, self.fill_status = now, [], [], 0
 
     def __call__(self, method, params=()):
         self.calls.append(method)
@@ -45,9 +47,13 @@ class Rpc:
         if method == "evm_setNextBlockTimestamp":
             self.now = params[0]
         if method == "eth_call":
+            if params[0]["data"].startswith(FILL_STATUSES):
+                return hex(self.fill_status)
             return "0x" + word(L1_ADMIN).hex()
         if method == "eth_sendTransaction":
             self.sent.append(params[0])
+            if params[0]["data"].startswith(FILL_RELAY):
+                self.fill_status = 2
             return hex(len(self.sent))
         if method == "eth_getTransactionReceipt":
             topics = [RELAYED_ROOT_TOPIC, "0x" + (7).to_bytes(32).hex()]
@@ -102,6 +108,24 @@ def test_a_fill_is_the_pools_own_call_by_a_relayer_funded_with_the_offer(run, tm
     )
     assert len(list((tmp_path / "keepers").iterdir())) == 1
     assert run.settler.align(run.state, 30) == 30 and run.nodes[FORK_ARB.chain_id].sent == []
+
+
+def test_a_settler_started_again_reads_the_pool_and_fills_nothing_twice(run, tmp_path):
+    transfer = run.state.transfers[0]
+    destination = run.nodes[FORK_BASE.chain_id]
+    assert len(run.settler.settle(run.state)) == 1
+    filled = len(destination.sent)
+    # The run has not read the arrival yet: the transfer is still open in its state.
+    restarted = Settler(run.settler.forks, tmp_path / "keepers")
+    assert restarted.settle(run.state) == () and run.settler.settle(run.state) == ()
+    assert len(destination.sent) == filled
+    asked = [c for c in destination.calls if c == "eth_call"]
+    assert len(asked) == 3
+    # A requested slow fill can still be filled; only a filled relay is skipped.
+    destination.fill_status = 1
+    assert not restarted.filled(transfer)
+    reference = transfer.reference.split(":")[1]
+    assert reference.startswith("0x") and len(reference) == 66
 
 
 def test_a_refund_is_a_labelled_fork_constructed_bundle_past_the_deadline(run):
