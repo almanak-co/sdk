@@ -285,13 +285,17 @@ def test_settled_requires_no_pending_plan_or_decision():
 
 
 def bridge_fixture(positions, bound, bindings):
+    """`positions` are (chain, receiving account) pairs, `bound` maps account names to chains."""
     record = deployment(operator_with({"author_gas": "unenforced"}), (), None)
     record.preparation.policy = None
     parameters = record.preparation.prepared.parameters
-    parameters.positions = tuple(SimpleNamespace(chain=chain) for chain in positions)
+    parameters.positions = tuple(
+        SimpleNamespace(chain=chain, destination_account=receiver) for chain, receiver in positions
+    )
     accounts = SimpleNamespace(
         bindings=tuple(
-            SimpleNamespace(profile=SimpleNamespace(fund=SimpleNamespace(chain=c))) for c in bound
+            SimpleNamespace(name=name, profile=SimpleNamespace(fund=SimpleNamespace(chain=c)))
+            for name, c in bound.items()
         )
     )
     parameters.accounts = record.fixture.accounts = accounts
@@ -300,11 +304,17 @@ def bridge_fixture(positions, bound, bindings):
 
 
 def test_a_fixture_chain_is_acted_on_or_holds_a_receiving_account():
+    funds = {"source": "a", "receiver": "b"}
     # A bridge acts on its source chain only; its receiving account binds the other.
-    PreparedDeployment.require_fixture(bridge_fixture(("a",), ("a", "b"), ("a", "b")))
+    PreparedDeployment.require_fixture(bridge_fixture((("a", "receiver"),), funds, ("a", "b")))
     for positions, bound, bindings in (
-        (("a", "c"), ("a", "b"), ("a", "b")),
-        (("a",), ("a",), ("a", "b")),
+        # A position acts on a chain the fixture has no environment for.
+        ((("a", "receiver"), ("c", "receiver")), funds, ("a", "b")),
+        # An environment no account is bound on.
+        ((("a", None),), {"source": "a"}, ("a", "b")),
+        # An account bound on another chain that receives nothing adds no environment.
+        ((("a", None),), funds, ("a", "b")),
+        ((("a", "receiver"),), {**funds, "unrelated": "c"}, ("a", "b", "c")),
     ):
         with pytest.raises(ValueError, match="fork positions differ"):
             PreparedDeployment.require_fixture(bridge_fixture(positions, bound, bindings))
