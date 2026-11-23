@@ -313,7 +313,7 @@ KNOWN_REASONS: Reasons = (
     ("EVM error OpcodeNotFound", ("opcodenotfound", "opcode not found", "invalid opcode")),
     ("header not found", ("header not found",)),
     # geth's answer when it holds no state for the block, most often because it pruned an
-    # old one. A refusal and never transient: a pruned block only gets older.
+    # old one. A refusal that is not sent again: a pruned block only gets older.
     ("the endpoint does not serve state at that block", ("missing trie node",)),
 )
 # Calls that submit a transaction rather than read; a refusal names the submission.
