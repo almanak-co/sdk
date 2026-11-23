@@ -246,7 +246,7 @@ def test_a_strategy_deployment_keeps_the_requests_window_after_its_approval():
     assert refusal.value.kind == "stale_plan"
 
 
-def test_a_pool_call_carries_its_own_deadline_or_the_requests_and_no_other():
+def test_a_pool_call_carries_its_planned_deadline_and_no_other():
     chain = SlowChain(MARKET, **SLOW)
     runtime, intent, _ = chain.swap()
     approval, swap = chain.journal.load().outcomes
@@ -257,19 +257,16 @@ def test_a_pool_call_carries_its_own_deadline_or_the_requests_and_no_other():
     planned = execution.operation(chain.config, state, intent, swap.before)
     assert planned == swap.operation
     validate_operation(None, state, planned, swap.before)
-    later = planned.model_copy(update={"deadline": planned.deadline + 1})
-    with pytest.raises(ValueError, match="operation differs from its retained economic intent"):
-        validate_operation(None, state, later, swap.before)
-
-    # The request's own, earlier deadline is the tighter bound: a call that carries it
-    # is admitted while that deadline holds, and refused once it has passed.
-    tighter = planned.model_copy(update={"deadline": intent.deadline})
+    # Neither a later deadline nor the request's own earlier one is admitted: the pool
+    # call must carry exactly what planning derives from the retained outcomes.
     early = approval.after.model_copy(update={"entry_quote": swap.before.entry_quote})
     assert early.block.timestamp < intent.deadline
-    validate_operation(None, state, tighter, early)
-    with pytest.raises(DataError, match="retained deadline expired") as refusal:
-        validate_operation(None, state, tighter, swap.before)
-    assert refusal.value.kind == "stale_plan"
+    for deadline, seen in ((planned.deadline + 1, swap.before), (intent.deadline, early)):
+        other = planned.model_copy(update={"deadline": deadline})
+        with pytest.raises(ValueError, match="operation differs from its retained economic"):
+            validate_operation(None, state, other, seen)
+    # An unsigned plan is checked at signing against the deadline it carries.
+    tighter = planned.model_copy(update={"deadline": intent.deadline})
     unsigned = SimpleNamespace(operation=tighter, before=early, decision=swap.decision)
     with pytest.raises(DataError, match="retained deadline expired"):
         validate_current(SimpleNamespace(config=chain.config), unsigned, swap.before)

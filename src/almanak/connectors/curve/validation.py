@@ -83,28 +83,12 @@ def fresh_quote(intent, seen, allocation):
 def step_limit(intent, operation):
     """The deadline a pool call carries, which may follow a mined approval; else None.
 
-    `admitted_operation` binds that deadline to the recorded approval.
+    `validate_operation` binds that deadline to the recorded approval by requiring the
+    operation to equal the one planning derives from the retained outcomes.
     """
     if isinstance(intent, (RevokeExchange, ExitExchange)):
         return None
     return operation.deadline if isinstance(operation, (ops.Swap, ops.Addition)) else None
-
-
-def admitted_operation(state, intent, operation, before):
-    """Refuse an operation that is not the one the retained intent plans at `before`.
-
-    A pool call is also admitted with the intent's own deadline in place of the later
-    one a mined approval gives it (`planning.step_deadline`): that bound is the
-    tighter of the two, and `deadline` has checked the observation against it.
-    """
-    planned = planning.operation(state.config, state, intent, before)
-    if operation == planned:
-        return
-    if step_limit(intent, planned) is not None and operation == planned.model_copy(
-        update={"deadline": intent.deadline}
-    ):
-        return
-    raise ValueError("operation differs from its retained economic intent or owned shares")
 
 
 def swap_limits(intent, decision, allocation):
@@ -214,7 +198,8 @@ def validate_operation(backend, state, operation, before):
     intent_limits(intent, decision, before, allocation)
     if isinstance(intent, SwapExactInput) and isinstance(operation, ops.Swap):
         fresh_quote(intent, before, allocation)
-    admitted_operation(state, intent, operation, before)
+    if operation != planning.operation(state.config, state, intent, before):
+        raise ValueError("operation differs from its retained economic intent or owned shares")
     if isinstance(intent, (OpenPoolLiquidity, IncreasePoolLiquidity)) or increases_exposure(
         state.config, operation
     ):
