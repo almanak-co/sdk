@@ -10,7 +10,11 @@ from almanak.configuration.yaml import ConfigurationError, Document
 from almanak.connectors.across.author_inputs import AllocationInput
 from almanak.connectors.across.domain import SPOKE_POOLS
 from almanak.connectors.across.observations import IMPLEMENTATION_SLOT, snapshot
-from almanak.connectors.across.resolution import MarketSelection, resolve_market
+from almanak.connectors.across.resolution import (
+    MarketSelection,
+    complete_market,
+    resolve_market,
+)
 from almanak.connectors.composition import connector_for, connector_from_wire
 from almanak.connectors.support import RunMode
 from almanak.gateway.ethereum import DataError
@@ -70,6 +74,24 @@ class Reader:
         return BLOCK
 
 
+class DestinationReader:
+    """The destination chain's own reads at its own anchor."""
+
+    def __init__(self, block, decimals=6):
+        self.block, self.chain, self.decimals = block, block.chain, decimals
+
+    def pin_block(self, number):
+        return self.block
+
+    def asset(self, identifier, block):
+        return Asset(chain=block.chain, identifier=identifier, decimals=self.decimals)
+
+
+def completed(resolved, chain=BASE, decimals=6):
+    block = BLOCK.model_copy(update={"chain": chain, "number": 30_000_000})
+    return complete_market(DestinationReader(block, decimals), resolved, block)
+
+
 def selection(**changes):
     values = {
         "connector": "across",
@@ -107,7 +129,16 @@ def test_a_resolved_route_becomes_an_allocation_between_two_accounts(monkeypatch
         update={"implementation_code_hash": "0x" + keccak(bytes.fromhex(CODE[2:])).hex()}
     )
     monkeypatch.setitem(SPOKE_POOLS, ARBITRUM.chain_id, reviewed)
-    resolved = resolve_market(Reader(), selection(), BLOCK)
+    unverified = resolve_market(Reader(), selection(), BLOCK)
+    with pytest.raises(ValueError, match="not verified on its chain"):
+        _ = unverified.route
+    resolved = completed(unverified)
+    assert resolved.destination == Asset(chain=BASE, identifier=BASE_USDC, decimals=6)
+    with pytest.raises(ValueError, match="different decimals: 6 sent, 18 received"):
+        completed(unverified, decimals=18)
+    with pytest.raises(DataError) as error:
+        completed(unverified, chain=ARBITRUM)
+    assert error.value.kind == "chain_mismatch"
     assert resolved.assets == (Asset(chain=ARBITRUM, identifier=USDC, decimals=6),)
     assert resolved.summary()["spoke_pool"] == PIN.address and len(resolved.digest) == 64
     choice = AllocationInput(
@@ -235,10 +266,13 @@ def test_resolution_through_two_fork_nodes_takes_each_chain_from_its_account(mon
     monkeypatch.setitem(SPOKE_POOLS, ARBITRUM.chain_id, reviewed)
     here = Chain(chain_id=ARBITRUM.chain_id, environment="anvil:0x" + "a1" * 32)
     there = Chain(chain_id=BASE.chain_id, environment="anvil:0x" + "b2" * 32)
-    resolved = resolve_market(
-        ForkReader(BLOCK.model_copy(update={"chain": here})),
-        selection(),
-        BLOCK.model_copy(update={"chain": here}),
+    resolved = completed(
+        resolve_market(
+            ForkReader(BLOCK.model_copy(update={"chain": here})),
+            selection(),
+            BLOCK.model_copy(update={"chain": here}),
+        ),
+        chain=there,
     )
     choice = AllocationInput(
         market="usdc", account="arb", destination_account="base", minimum_native_balance="0"
@@ -252,3 +286,59 @@ def test_resolution_through_two_fork_nodes_takes_each_chain_from_its_account(mon
     mixed = StrategyAccounts(bindings=(eoa("arb", here, SENDER), eoa("base", BASE, RECIPIENT)))
     with pytest.raises(ValueError, match="one environment"):
         parameters(allocation, accounts=mixed)
+
+
+class SymbolReader(DestinationReader):
+    """The destination's reads, each recorded as evidence as the bootstrap reader does."""
+
+    def __init__(self, block):
+        super().__init__(block)
+        self.evidence = []
+
+    def call(self, address, signature, block, inputs=(), args=(), outputs=()):
+        from almanak.gateway.resolution_evm import ResolutionRead
+
+        read = ResolutionRead(
+            method="eth_call", params=(address, signature), result="USDC", retrieved_at=1.0
+        )
+        self.evidence.append(read)
+        return ("USDC",)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *error):
+        return False
+
+
+def test_a_two_chain_market_is_completed_and_replayed_on_its_destination(monkeypatch):
+    from almanak.configuration import parameters
+    from almanak.gateway.bootstrap import MarketFacts, complete_named_market
+
+    reviewed = PIN.model_copy(
+        update={"implementation_code_hash": "0x" + keccak(bytes.fromhex(CODE[2:])).hex()}
+    )
+    monkeypatch.setitem(SPOKE_POOLS, ARBITRUM.chain_id, reviewed)
+    monkeypatch.setitem(VALUES, "symbol()", "USDC")
+    source = resolve_market(Reader(), selection(), BLOCK)
+    anchor = BLOCK.model_copy(update={"chain": BASE, "number": 30_000_000})
+    partial = MarketFacts(name="usdc", resolved=source, evidence=(), symbols={USDC: "USDC"})
+    reader = SymbolReader(anchor)
+    facts = complete_named_market(reader, partial, anchor)
+    assert facts.resolved.destination == Asset(chain=BASE, identifier=BASE_USDC, decimals=6)
+    assert facts.resolved.destination_block == anchor
+    assert facts.symbols == {USDC: "USDC", BASE_USDC: "USDC"}
+    (read,) = facts.destination_evidence
+    assert read.params == (BASE_USDC.reference, "symbol()")
+    assert "destination_evidence" not in partial.model_dump()
+    # The replay reads the destination facts from their own retained reads again.
+    opened = []
+
+    def retained(chain, evidence):
+        opened.append((chain, evidence))
+        return SymbolReader(anchor)
+
+    monkeypatch.setattr(parameters, "RetainedResolutionReader", retained)
+    observed, symbols = parameters.replayed_market(Reader(), facts)
+    assert (observed, symbols) == (facts.resolved, facts.symbols)
+    assert opened == [(BASE, facts.destination_evidence)]

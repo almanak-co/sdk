@@ -1,5 +1,7 @@
 """Construct complete parameters only from matching, replay-checked resolution."""
 
+from typing import Any
+
 from pydantic import ValidationError
 
 from almanak.caip import AssetType
@@ -28,18 +30,31 @@ def replay_facts(result):
         evidence = tuple(row for market in markets for row in market.evidence)
         with RetainedResolutionReader(anchor.chain, evidence) as reader:
             for market in markets:
-                selection = market.resolved.selection
-                resolve = binding_for(selection.connector).resolve
-                observed = resolve(reader, selection, market.resolved.block)
+                observed, symbols = replayed_market(reader, market)
                 if observed != market.resolved:
                     raise DataError(
                         "resolution_evidence", "resolved facts differ from retained reads"
                     )
-                block = market.resolved.block
-                if asset_symbols(reader, market.resolved.assets, block) != market.symbols:
+                if symbols != market.symbols:
                     raise DataError(
                         "resolution_evidence", "asset symbols differ from retained reads"
                     )
+
+
+def replayed_market(reader, market):
+    """A market's facts and symbols again, from its retained reads alone."""
+    selection, block = market.resolved.selection, market.resolved.block
+    binding = binding_for(selection.connector)
+    observed: Any = binding.resolve(reader, selection, block)
+    symbols = asset_symbols(reader, observed.assets, block)
+    if binding.complete is None:
+        return observed, symbols
+    # A two-chain market replays its second chain's reads against that chain's anchor.
+    remote = market.resolved.destination_block
+    with RetainedResolutionReader(remote.chain, market.destination_evidence) as destination:
+        observed = binding.complete(destination, observed, remote)
+        symbols = {**symbols, **asset_symbols(destination, (observed.destination,), remote)}
+    return observed, symbols
 
 
 def admit_new_positions(document: InputDocument, result):
