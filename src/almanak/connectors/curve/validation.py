@@ -66,6 +66,13 @@ def fresh_quote(intent, seen, allocation):
     of the request's original quote. The pool enforces that minimum when the swap is
     mined; this refuses before a signature when the pool, at the block the step is
     planned or signed at, no longer quotes it for the stated amount.
+
+    An observation read without quotes passes here, so the check holds only where the
+    observation carries them. Preparation observes with quotes, and so does the
+    gateway's `validate_current` at signing, whose snapshot inherits
+    `quotes_included` from the plan's own observation. `CurveExecution.current_checks`
+    reads without quotes and relies on that caller; a new caller that validates an
+    unsigned late swap must read with quotes.
     """
     if seen.block.timestamp < intent.deadline or not seen.quotes_included:
         return

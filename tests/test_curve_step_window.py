@@ -305,6 +305,25 @@ def test_a_deposit_follows_its_last_mined_approval_and_keeps_its_minimum_shares(
     assert "which the same request stated again spends" in message
     assert "without another approval" not in message and str(last) not in message
 
+    # A mined approval restarts no window for the next coin's approval: planned after
+    # the request's window, it is refused, and the first coin's allowance stands.
+    first_approval = step(observed(0, {}))
+    assert (first_approval.kind, first_approval.asset) == ("approve", first)
+    deciding.outcomes = (
+        SimpleNamespace(
+            operation=first_approval,
+            success=True,
+            decision=deciding.decision,
+            after=observed(WINDOW - 50, {first: wanted[first]}),
+            accounting_issues=(),
+        ),
+    )
+    with pytest.raises(DataError, match=f"window that ends at {intent.deadline}") as late:
+        step(observed(WINDOW + 10, {first: wanted[first]}))
+    assert late.value.kind == "stale_plan" and f"{wanted[first]} of {first} stands" in str(
+        late.value
+    )
+
     # The last approval is mined 10 s before the request's window ends.
     mined = observed(WINDOW - 10, dict(wanted))
     deciding.outcomes = (

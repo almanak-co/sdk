@@ -1230,7 +1230,9 @@ def swap_arguments(action) -> None:
         " signed curve swap stays valid until it is mined or its nonce is used, bound"
         " only by its minimum output, and a curve swap whose approval was mined first"
         " may be signed this long after the block that mined the approval, at the"
-        f" same minimum output (default: {DEFAULT_DEADLINE_SECONDS})",
+        " same minimum output, never later than twice this after the observed block,"
+        " and past the first window only while the pool still quotes that minimum"
+        f" (default: {DEFAULT_DEADLINE_SECONDS})",
     )
 
 

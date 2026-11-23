@@ -840,13 +840,15 @@ until it is mined or its nonce is used, protected by its minimum output alone. A
 swap whose approval the same command had mined is not charged the time the approval
 took: it may be signed for `--deadline-seconds` after the block that mined the
 approval, and never later than twice that after the observed block. Its minimum
-output is still the one of the first quote. Once the first window has passed, the pool
+output is still the one of the first quote. The approval itself, and one that follows
+the reset of an allowance of another amount, is held to the first window: an approval
+planned after it is refused `stale_plan`. Once the first window has passed, the pool
 must also still quote at least that minimum, or nothing more is signed. A swap refused
 for time or for that quote reports `stale_plan` with the block and the window that
 ended. When the pool's allowance equals the stated amount it says that the allowance
 stands: the same command run again spends it and needs one step. An allowance of any
-other amount is not named, and the same command resets it and approves again. The gateway applies this window when it plans and signs.
-It is not enforced on chain.
+other amount is not named, and the same command resets it and approves again. The
+gateway applies this window when it plans and signs. It is not enforced on chain.
 
 The wallet must hold the amount. `position_before` and `position_after` list the
 `inventory` of the pool currencies the action owns, the amount sold and then what
@@ -1366,8 +1368,10 @@ pool and pays its fee. The deployment owns the wallet's whole LP balance in the
 pool, whoever deposited it. `--deadline-seconds` bounds only how late a step may be
 signed, since Curve calls carry no deadline. Each approval is held to that window
 from the observed block, and the deposit that follows the last mined approval has the
-same number of seconds from the block that mined it, as a Curve swap has. A deposit
-approves the pool for exactly each stated amount, so a completed one leaves no
+same number of seconds from the block that mined it, as a Curve swap has. A coin's
+approval planned after that window is refused `stale_plan`, and the approvals already
+mined stand; the same command run again spends them and approves only the rest. A
+deposit approves the pool for exactly each stated amount, so a completed one leaves no
 allowance on the coins it deposited. A deposit in other proportions than the pool's, like a one-coin burn,
 trades against the pool and pays its fee; `--slippage-bps` bounds how far the LP
 shares minted may fall below what the amounts were worth at the observed block. The read takes
