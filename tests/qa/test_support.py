@@ -14,6 +14,12 @@ BINDINGS = [
 
 @pytest.mark.parametrize("name,support", BINDINGS, ids=[f"{n}-{s.chain}" for n, s in BINDINGS])
 def test_support_refuses_unadvertised_combinations(name, support):
+    if not support.modes:
+        # A chain named before any lifecycle proof exists admits no run in any mode.
+        for mode in RunMode:
+            with pytest.raises(ValueError, match="unsupported"):
+                support.require(mode, model="unknown_model")
+        return
     # A backtest-only binding (HyperCore) is checked in its own mode and refuses forks.
     mode = RunMode.FORK if RunMode.FORK in support.modes else RunMode.BACKTEST
     model = support.historical[0].model if mode == RunMode.BACKTEST else None

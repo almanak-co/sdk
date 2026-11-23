@@ -48,8 +48,8 @@ With neither it is over 100 kilobytes; do not run it. In an entry:
 
 - `direct_actions` lists the kinds that chain serves for your wallet. When the key
   is missing, or the answer is empty, nothing is served there.
-- `actions` is what a strategy may do, not what `ax` serves. GMX V2, Hyperliquid
-  and Morpho Blue on HyperEVM list `actions` and have no `direct_actions`.
+- `actions` is what a strategy may do, not what `ax` serves. GMX V2, Hyperliquid,
+  Across and Morpho Blue on HyperEVM list `actions` and have no `direct_actions`.
 - `restrictions` mixes limits on pools and markets with rules for strategies.
   Before you name a pool or a market, take from it only the lines that say which
   ones the connector takes; ignore the rest of the entry.
@@ -75,7 +75,8 @@ HyperEVM (`eip155:999`), which has none. The limits:
 - The wallet is a plain account (EOA) that holds the funds itself. A Safe with
   delegated permissions is not available for these actions. If the user asks for a
   Safe, say so and offer the EOA wallet.
-- GMX V2 and Hyperliquid serve no direct action, and no direct action is served on
+- GMX V2, Hyperliquid and Across serve no direct action, so no command bridges
+  between chains, and no direct action is served on
   HyperEVM: a provider key there serves reads only.
 - `curve` takes only a pool that a reviewed StableSwap NG, TwoCrypto NG or
   TriCrypto NG factory registers, and no metapool. Every Curve command refuses an

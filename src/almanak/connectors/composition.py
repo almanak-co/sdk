@@ -24,6 +24,7 @@ CONNECTOR_IDS = (
     ConnectorId("curve"),
     ConnectorId("gmx_v2"),
     ConnectorId("hyperliquid"),
+    ConnectorId("across"),
 )
 
 
@@ -76,6 +77,13 @@ def connector_for(config):
         from almanak.connectors.hyperliquid.connector import connector as hyperliquid
 
         return hyperliquid()
+
+    from almanak.connectors.across.models import Parameters as AcrossParameters
+
+    if isinstance(config, AcrossParameters):
+        from almanak.connectors.across.connector import connector as across
+
+        return across()
 
     if isinstance(config, (CurveParameters, CurveForkConfig)):
         from almanak.connectors.curve.connector import connector as curve
@@ -141,6 +149,10 @@ def connector_from_wire(config):
         return composed()
     if kind not in tuple(map(str, CONNECTOR_IDS)):
         raise ValueError("unsupported connector discriminator")
+    if kind == "across":
+        from almanak.connectors.across.connector import connector as across
+
+        return across()
     if kind == "gmx_v2":
         from almanak.connectors.gmx_v2.connector import connector as gmx
 

@@ -118,6 +118,9 @@ def cases():
     from almanak.connectors.hyperliquid.models import Allocation as PerpAllocation
 
     yield "hyperliquid", (PerpAllocation.model_construct(account="fund"),), [("perp", 1, {}, ())]
+    from almanak.connectors.across.models import Allocation as BridgeAllocation
+
+    yield "across", (BridgeAllocation.model_construct(account="fund"),), [("bridge", 1, {}, ())]
 
 
 CASES = list(cases())

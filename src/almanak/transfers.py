@@ -11,6 +11,7 @@ from pydantic import Field, model_validator
 
 from almanak.connectors.identifiers import ConnectorId, Name
 from almanak.effects import WalletAsset
+from almanak.gateway.environments import same_environment
 from almanak.models import AssetAmount, Chain, Model
 from almanak.triggers import UtcInstant
 
@@ -51,7 +52,7 @@ class Transfer(Model):
         if self.source.chain.chain_id == self.destination.chain.chain_id:
             raise ValueError("a transfer requires two different chains")
         # A fork never sends to production, nor production to a fork.
-        if self.source.chain.environment != self.destination.chain.environment:
+        if not same_environment(self.source.chain, self.destination.chain):
             raise ValueError("a transfer stays within one environment")
         if self.source.account == self.destination.account:
             raise ValueError("a transfer requires two different named accounts")

@@ -77,6 +77,8 @@ class PerpDiscovery:
 NOT_DISCOVERED: dict[str, str] = {
     "hyperliquid": "HyperCore markets are venue lookups, not chain discovery: "
     "`ax hypercore-markets` lists them from `/info` (blueprint 30, section 6.1).",
+    "across": "a bridge route is two assets on two chains with one pinned SpokePool on "
+    "each; it has no pool or market to list",
 }
 
 

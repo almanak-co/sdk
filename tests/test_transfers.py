@@ -252,3 +252,26 @@ def test_a_chain_appends_and_refunds_in_one_change():
     first, second = transfer("deposit-1"), transfer("deposit-2")
     changed = (*resolved((first,), first.identity, REFUNDED), second)
     assert merged((first,), changed, ORIGIN) == changed
+
+
+def test_two_fork_nodes_are_one_environment():
+    here = ORIGIN.model_copy(update={"environment": "anvil:aaaa"})
+    there = DESTINATION.model_copy(update={"environment": "anvil:bbbb"})
+    source, destination = transfer().source, transfer().destination
+    forked = transfer(
+        source=source.model_copy(update={"chain": here}),
+        destination=destination.model_copy(update={"chain": there}),
+    )
+    assert forked.open
+    with pytest.raises(ValidationError, match="one environment"):
+        transfer(destination=destination.model_copy(update={"chain": there}))
+
+
+def test_a_fork_prefix_alone_names_no_environment():
+    from almanak.gateway.environments import same_environment
+
+    bare = ORIGIN.model_copy(update={"environment": "anvil:"})
+    node = DESTINATION.model_copy(update={"environment": "anvil:bbbb"})
+    live = DESTINATION.model_copy(update={"environment": "mainnet"})
+    assert not same_environment(bare, bare) and not same_environment(bare, node)
+    assert not same_environment(node, live) and same_environment(live, live)
