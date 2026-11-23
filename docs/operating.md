@@ -1338,7 +1338,7 @@ it:
 | --- | --- | --- |
 | `publicnode` | Allnodes PublicNode | `eip155:1`, `eip155:43114` |
 | `drpc` | dRPC | `eip155:1`, `eip155:8453`, `eip155:10`, `eip155:137`, `eip155:4663` |
-| `blastapi` | Blast API | `eip155:56` |
+| `blastapi` | Blast API, served by Alchemy | `eip155:56` |
 | `base` | Base, the chain's own endpoint | `eip155:8453` |
 | `arbitrum` | Arbitrum, the chain's own endpoint | `eip155:42161` |
 | `optimism` | Optimism, the chain's own endpoint | `eip155:10` |
@@ -1391,7 +1391,8 @@ earlier. A shared provider is absent from a chain where its keyless tier refused
 one of those reads in those runs.
 
 What a public endpoint serves beyond that sample was measured on 2026-11-19 with
-the commands below, each through the listed pairs named. Nothing else is claimed:
+the commands below, each through the listed pairs named. The BNB Chain results were
+measured through `blastapi` on 2026-11-23. Nothing else is claimed:
 
 | Command | Measured |
 | --- | --- |
@@ -1401,16 +1402,15 @@ the commands below, each through the listed pairs named. Nothing else is claimed
 | `ax lending-reserve --connector aave_v3`, for the chain's wrapped native coin | Measured on 2026-11-20, with every Pool at revision 12: served on every listed pair of the connector's seven chains. |
 | `ax perp-markets --connector gmx_v2`, by market address | Served on Arbitrum through `arbitrum` and on Avalanche through `publicnode`. |
 | `ax perp-position`, and `ax lending-reserve` for SparkLend | Not measured. |
-| `ax lending-markets` for `aave_v3`, `sparklend` and `aave_v4` | The record is read with calls at the pinned block and listed on each chain the connector supports. Three rows of each listing were read: the SparkLend and Aave V4 rows were `verified`. The Aave V3 rows were read again on 2026-11-20, with every Pool at revision 12: `verified` on every listed pair except `drpc` on Base and Optimism, where each row was `refused` with `http: eth_getCode: HTTP 429` or `http: eth_getStorageAt: HTTP 429`. On Avalanche the Aave V4 listing named 8 Spokes in `source.unreadable`, each with `rpc: eth_call: RPC rejected the requested read (JSON-RPC -32000)`, and listed the others. A Spoke counts as holding no reserves only when its revert is reported as JSON-RPC 3, so these may be Spokes without reserves; that was not verified. |
+| `ax lending-markets` for `aave_v3`, `sparklend` and `aave_v4` | The record is read with calls at the pinned block and listed on each chain the connector supports. Three rows of each listing were read: the SparkLend and Aave V4 rows were `verified`. The Aave V3 rows were read again on 2026-11-20, with every Pool at revision 12: `verified` on every listed pair except `drpc` on Base and Optimism, where each row was `refused` with `http: eth_getCode: HTTP 429` or `http: eth_getStorageAt: HTTP 429`. On BNB Chain all eight rows were read through `blastapi` on 2026-11-23: seven were `verified` and the wstETH row was `refused` with `deployment_changed: Aave V3 a_token has an unverified revision`. On Avalanche the Aave V4 listing named 8 Spokes in `source.unreadable`, each with `rpc: eth_call: RPC rejected the requested read (JSON-RPC -32000)`, and listed the others. A Spoke counts as holding no reserves only when its revert is reported as JSON-RPC 3, so these may be Spokes without reserves; that was not verified. |
 | `ax lending-markets --connector morpho_blue` | Listed on Ethereum, Base, Optimism, Polygon, Robinhood and Arbitrum, where Morpho's API names the markets. Refused on Avalanche and BNB, where it reads the core's event history. |
 | `ax lending-markets --connector compound_v3` | Refused on Ethereum, Base, Arbitrum and Optimism, through every endpoint listed there: it reads the Configurator's event history. |
 | `ax resolve`, `ax dex-pools` | Refused with `this lookup uses a vendor key; give --env-file or the read gateway`, measured on Base and Arbitrum; the refusal does not depend on the chain. |
 
 An event history is asked for from block zero in one request. Every endpoint such
 a listing was run through refused it: `publicnode` on Ethereum and Avalanche, `drpc`
-on Ethereum, Base and Optimism, and `base`, `arbitrum` and `optimism`. It was not
-run through `blastapi` on BNB Chain, and no listing sends that request on Polygon or
-Robinhood, so nothing is known there. The
+on Ethereum, Base and Optimism, and `base`, `arbitrum`, `optimism` and `blastapi`. No
+listing sends that request on Polygon or Robinhood, so nothing is known there. The
 refusal is `eth_getLogs: the provider refused <contract>'s event history in one
 request`, or `eth_getLogs: HTTP 429` or `eth_getLogs: RPC rejected the requested
 read (JSON-RPC -32005)` where the endpoint answers with its rate-limit code and the
