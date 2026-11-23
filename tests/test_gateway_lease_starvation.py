@@ -8,9 +8,11 @@ made under the lock, takes longer than the lease. The lease and the journal's lo
 are shortened so the cases stay fast; nothing is signed and no network is used.
 """
 
+import shlex
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -296,10 +298,17 @@ def test_a_lost_lease_names_the_renewal_failure_that_lost_it(tmp_path, recorded)
     assert "DataError: gateway storage unavailable" in message
     # The command that resolves a kept record, with this record's own path; without
     # `--record` it only lists them.
-    assert f"`almanak ax recover --record {desk.store.path.parent}`" in message
+    assert f"`almanak ax recover --record {shlex.quote(str(desk.store.path.parent))}`" in message
     assert "resume to recover" not in message
     assert refused.value.__cause__ is client.lease_error
     assert client.lease_error.kind == "gateway_unavailable"
+
+
+def test_the_named_record_is_quoted_so_the_command_pastes(tmp_path):
+    record = tmp_path / "state dir"
+    service = SimpleNamespace(journal=SimpleNamespace(path=record / "state.sqlite"))
+    hint = ax_actions.LocalGateway(service).lease_recovery()
+    assert f"`almanak ax recover --record '{record}'`" in hint
 
 
 class Renewals(ax_actions.LocalGateway):

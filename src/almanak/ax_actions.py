@@ -18,6 +18,7 @@ Without `--execute` the command plans the first step and signs nothing.
 import fcntl
 import json
 import os
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -155,10 +156,12 @@ class LocalGateway(GatewayClient):
 
     def lease_recovery(self) -> str:
         # A direct command has no resume. Its record is the directory of its journal,
-        # and `ax recover` resolves it only when named with `--record`.
+        # and `ax recover` resolves it only when named with `--record`. Quoted, so the
+        # command pastes whatever the state directory is called.
+        record = shlex.quote(str(self.service.journal.path.parent))
         return (
             "the record is kept while a signed step is unresolved; then run "
-            f"`almanak ax recover --record {self.service.journal.path.parent}`"
+            f"`almanak ax recover --record {record}`"
         )
 
     def close(self):
