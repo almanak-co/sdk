@@ -445,3 +445,32 @@ def test_the_composed_bridge_reference_stays_out_of_the_production_rehearsal():
     # Across declares no production support, so no market scope of this reference does.
     assert not declares_production("arbitrum_base_bridge_and_lend")
     assert "arbitrum_base_bridge_and_lend" not in production_references()
+
+
+def test_the_composed_fork_keeper_settles_transfers_through_the_bridge_component(
+    monkeypatch,
+    config,  # noqa: F811
+):
+    from almanak.connectors.across.settlement import ExternalEffects
+    from almanak.connectors.composed.requests import ComposedRequests
+
+    seen = []
+
+    class Settler:
+        def align(self, state, seconds):
+            return seconds + 5
+
+        def settle(self, state):
+            seen.append((state.config, state.transfers))
+            return ({"advanced_seconds": 0},)
+
+    monkeypatch.setattr(ExternalEffects, "fork_keeper", staticmethod(lambda *a: Settler()))
+    keeper = ComposedRequests.fork_keeper(None, None)
+    quiet = checkpoint(composed(config))
+    assert not ComposedRequests.fork_unsettled(quiet) and not ComposedRequests.unresolved(quiet)
+    state, transfer = deposited(monkeypatch, config)
+    # Request handling still asks about GMX requests alone; only the fork keeper is owed.
+    assert ComposedRequests.fork_unsettled(state) and not ComposedRequests.unresolved(state)
+    assert keeper.align(state, 60) == 65
+    assert keeper.settle(state) == ({"advanced_seconds": 0},)
+    assert seen == [(state.config.component(ACROSS), (transfer,))]

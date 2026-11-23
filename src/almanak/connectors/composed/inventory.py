@@ -99,7 +99,8 @@ def decision_view(position, amounts, transfers):
     target = position.target
     # A chain's view holds only its own wallets: a bridge seen from its destination
     # chain states no source cash.
-    cash = amounts.get(wallet_key(target, target.asset))
+    key = wallet_key(target, target.asset)
+    cash = amounts.get(key) if isinstance(position, AcrossOwnership) else amounts[key]
     update: dict = {
         "inventory": None if cash is None else AssetAmount(asset=target.asset, amount=cash)
     }

@@ -118,7 +118,10 @@ class Keepers:
 
         binding, state = self.binding(wire)
         # A composed deployment also owes the settlement of its transfers in flight.
-        if binding is None or not getattr(binding, "fork_unsettled", binding.unresolved)(state):
+        if binding is None:
+            return
+        owed = getattr(type(binding), "fork_unsettled", None) or binding.unresolved
+        if not owed(state):
             return
         for row in self.keeper.settle(state):
             self.rows.append(row)

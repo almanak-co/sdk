@@ -570,6 +570,62 @@ independently.
   moves the destination fork past the fill deadline. Label it so wherever it
   is reported; it is never promotion or Fork Qualification evidence. It is
   defined for an Arbitrum source only.
+- Current contract: a bridge allocation composes with allocations of other
+  connectors. Its deposit debits the source account's owned inventory of the
+  sent asset. A transfer in flight is in no wallet's inventory. The measured
+  arrival credits the destination account's inventory of the received asset,
+  and the measured refund credits the source account's. Nothing spends the
+  offered amount: the gateway checks every spend against retained inventory,
+  which holds the amount only after its arrival is measured.
+- Current contract: composed `inventory` covers the sent asset on the source
+  account and the received asset on the destination account, and another
+  allocation on the destination account must hold the received asset, because
+  only its observation measures that wallet. A configuration without either is
+  refused. Accepted consequence: a composed bridge cannot deliver to an account
+  that holds no other allocation.
+- Current contract: the composed checkpoint retains `transfers`, omitted while
+  there are none, and its `external_scans` hold GMX liquidation pages and
+  Across settlement pages, each decoded by its own kind. Each component sees
+  only its own pages, outcomes, requests and transfers. Composed external
+  effects read, verify and audit a page through the component that owns it,
+  starting after the connector of the last committed page. Composed requests
+  stay GMX only.
+- Current contract: on the source chain's tick a composed bridge allocation's
+  owned record reports the source account's owned cash and its transfers in
+  flight, with sent, offered, fill deadline and the unfilled mark, and no
+  received amount. Retained records carry neither. The destination tick has no
+  bridge record; arrival and refund reach `on_outcome` there and on the source
+  chain as in a single-connector deployment.
+- Current contract: an open transfer holds closure of both of its chains in a
+  composed deployment too, including a chain where the bridge has no record.
+  Composed teardown unwinds the other allocations, revokes a standing bridge
+  approval and does not bridge back.
+- Current contract: composed reports and dashboards list transfers with their
+  quote source, and unattributed refund payments, apart from fund cash. Value
+  in flight is never added to a balance and never shown as zero.
+- Current contract: the composed reference is
+  `strategies/arbitrum_base_bridge_and_lend`: Across from Arbitrum to Base,
+  then a Compound V3 supply of exactly the measured arrival, EOA accounts,
+  fork runs only. Its supervised fork proofs cover the lifecycle with a pause
+  and resume, each stage with owned inventory asserted, and the refund with
+  nothing supplied. It has no backtest configuration, and it stays out of the
+  production rehearsal because Across declares no production support.
+- Current contract: a runtime process killed around the arrival commit is
+  proven on the composed reference with real processes and fork nodes
+  (`tests/fork/test_composed_bridge_fault.py`): killed at the runtime's
+  `external_evidence` and `external_commit` fault points, a new runtime
+  records the arrival once, credits the destination inventory once and
+  supplies exactly that amount. The proof drives the runtime and gateway
+  processes directly, not the supervised commands, which expose no fault
+  point.
+- Current contract: the in-process fork workspace provisions an account that
+  only receives a bridge on its own chain's node.
+- Current contract: a composed fork route names the constructed quote on the
+  bridge's source chain only, under the fork quote rule above, whose status
+  this does not change.
+- Proposed, not accepted: the composed fork keeper used by `almanak test` runs
+  settles a composed deployment's transfers in flight beside GMX requests. It
+  is covered at component level only; no fork run exercises it.
 
 ## Hyperliquid
 

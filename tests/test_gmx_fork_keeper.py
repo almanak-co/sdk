@@ -318,14 +318,15 @@ def test_a_keeper_row_names_how_the_request_settled(logs, fields):
 
 def composed(reference):
     _, parameters = resolved_parameters(reference)
-    return Mock(config=parameters, outcomes=(), requests=())
+    return Mock(config=parameters, outcomes=(), requests=(), transfers=())
 
 
 def test_a_composed_deployment_settles_its_gmx_component(monkeypatch):
     monkeypatch.setattr(composed_requests, "component_state", lambda state, gmx: "gmx state")
     settled = composed_requests.ComposedRequests.fork_keeper(None, Path("."))
-    assert settled.project(composed("arbitrum_aave_borrow_and_trade_gmx")) == "gmx state"
-    assert settled.project(composed("arbitrum_aave_borrow_and_trade")) is None
+    parts = list(settled.parts(composed("arbitrum_aave_borrow_and_trade_gmx")))
+    assert parts == [(settled.gmx, "gmx state")]
+    assert list(settled.parts(composed("arbitrum_aave_borrow_and_trade"))) == []
     assert Requests.fork_keeper(None, Path(".")).project("state") == "state"
 
 
