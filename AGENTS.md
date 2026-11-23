@@ -374,9 +374,37 @@ independently.
 - A bridge is an economic intent between two named fund accounts of one
   strategy on different chains. It is planned, signed and routed on the chain
   it leaves. Across is the first connector. It plans, signs and reconciles the
-  deposit on the source chain and opens the transfer, reconciles its arrival on
-  the destination chain and its refund on the source chain, and declares no run
-  mode on any chain.
+  deposit on the source chain and opens the transfer, and reconciles its arrival
+  on the destination chain and its refund on the source chain.
+- Current contract: Across declares fork mode on Arbitrum only, for EOA
+  accounts, as the source of a route to Base. Base declares no run mode: no
+  reference lifecycle sends from it and no fork refund is defined there, so it
+  is a destination only. No chain declares production or backtest. The
+  declaration follows the chain a bridge leaves; the destination chain needs
+  only its pinned SpokePool and a bound account.
+- Current contract: the reference is
+  `strategies/across_usdc_arbitrum_base_bridge`. Its supervised fork proofs
+  cover the arrival with a pause and resume, the refund after the destination
+  proved the transfer unfilled, a coordinator killed between the mined deposit
+  and the arrival, a destination outage while the source bridges, and a
+  teardown that revokes an approval whose deposit was never signed. A kill
+  between arrival evidence and its commit is not proven: the supervised
+  commands expose no fault point.
+- Proposed, not accepted: the fork quote. A fork run asks no venue. The
+  connector's fork binding names a constructed quote in the source chain's
+  fork route, and that chain's fork gateway builds each quote from it: a stated
+  fee of one basis point, the pinned block's own timestamp, a fill deadline one
+  hour later, no exclusivity and the pinned SpokePools. It is parsed and
+  admitted exactly as a venue answer, and its retained answer carries the
+  `forkConstructed` label and the fee. A fork route that names none refuses
+  the deposit with `quote_unavailable`; a chain outside a fork never reads
+  one. The author's `quote: across_api` is unchanged. A constructed quote is
+  never evidence of what the venue would quote.
+- Current contract: a generated fork operator file provisions plain EOA
+  accounts, with no fixture operator, for the accounts of a connector that
+  supports only EOAs on its chain, the receiving account of a bridge included.
+  A fork fixture chain is one a position acts on or one a bound account is on,
+  and the fork key file names the receiving account too, which signs nothing.
 - A bridge market is one direction: the sent asset on its chain, the received
   asset on the destination chain, the author's fee ceiling `max_fee_bps` and
   the named quote source. Its allocation names a source account and a
