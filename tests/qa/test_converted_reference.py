@@ -91,12 +91,16 @@ def test_fresh_targets_and_providers_cover_converted_and_harness_references(tmp_
 
 
 def test_provider_fault_lane_runs_required_recovery_suites():
-    faults = next(case for case in CASES if case.lane == "faults")
+    faults = next(case for case in CASES if case.id == "fork/faults")
+    proofs = "tests/strategy_fork/test_across_bridge.py"
     assert faults.nodes == (
         "tests/fork",
         "tests/strategy_fork/test_composed_outages.py",
         "tests/strategy_fork/test_multichain_outages.py",
         "tests/strategy_fork/test_production_rehearsals.py",
+        f"{proofs}::test_an_unfilled_transfer_is_refunded_only_after_the_destination_proves_it",
+        f"{proofs}::test_a_coordinator_killed_after_the_deposit_sends_no_second_one",
+        f"{proofs}::test_the_source_bridges_while_the_destination_is_unavailable",
     )
 
 

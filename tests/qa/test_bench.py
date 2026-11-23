@@ -55,6 +55,32 @@ def test_declared_matrix_and_new_chain_cannot_silently_lose_coverage():
         validate([*cases, cases[0]])
 
 
+def test_the_across_revoke_is_claimed_by_its_own_proof_and_by_no_clean_lifecycle():
+    import ast
+
+    from tests.qa.catalog import ACROSS_PROOFS, ROOT
+
+    cases = catalog()
+    across = [c for c in cases if c.connector == ConnectorId("across")]
+    revoke = [c for c in across if EconomicAction.REVOKE_BRIDGE in c.actions]
+    assert [c.id for c in revoke] == ["cleanup/across_usdc_arbitrum_base_bridge/eoa"]
+    clean = [c for c in across if c.lane == "fork"]
+    assert clean and all(c.actions == (EconomicAction.BRIDGE,) for c in clean)
+    # Without the revoke proof the declared action has no proof, under either policy.
+    with pytest.raises(ValueError, match="coverage gaps.*revoke_bridge"):
+        validate([c for c in cases if c not in revoke])
+    # Every supervised Across proof is listed by a bench case, each exactly once.
+    faults = next(c for c in cases if c.id == "fork/faults")
+    listed = [n for n in (*faults.nodes, *revoke[0].nodes) if n.startswith(ACROSS_PROOFS)]
+    module = ast.parse((ROOT / ACROSS_PROOFS).read_text())
+    proofs = [
+        f"{ACROSS_PROOFS}::{node.name}"
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+    ]
+    assert sorted(listed) == sorted(proofs) and len(proofs) == 4
+
+
 def test_unsupported_action_claim_is_not_a_proof():
     cases = catalog()
     extra = replace(

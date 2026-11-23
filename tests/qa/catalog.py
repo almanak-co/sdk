@@ -394,6 +394,10 @@ def fork_cases(common, actions):
     # the gmx_cleanup cases prove revoke_exchange after a crash instead.
     if common["connector"] == ConnectorId("gmx_v2"):
         actions = tuple(a for a in actions if a != "revoke_exchange")
+    # A clean bridge clears its own approval inside the bridge and requests no revoke;
+    # across_supplemental_cases proves revoke_bridge from an interrupted run instead.
+    if common["connector"] == ConnectorId("across"):
+        actions = tuple(a for a in actions if a != "revoke_bridge")
     declared = declared_profiles(common["connector"], common["chains"])
     for policy in ("pinned", "fresh"):
         for profile, operator in (
@@ -480,6 +484,7 @@ def catalog(root=ROOT):
                 "tests/strategy_fork/test_composed_outages.py",
                 "tests/strategy_fork/test_multichain_outages.py",
                 "tests/strategy_fork/test_production_rehearsals.py",
+                *(f"{ACROSS_PROOFS}::{name}" for name in ACROSS_FAULT_PROOFS),
             ),
         ),
         Case(id="offline/support-refusals", lane="pytest", nodes=("tests/qa/test_support.py",)),
@@ -488,6 +493,7 @@ def catalog(root=ROOT):
         *curve_supplemental_cases(root),
         *uniswap_supplemental_cases(root),
         *gmx_supplemental_cases(root),
+        *across_supplemental_cases(root),
         *hypercore_supplemental_cases(),
         *curve_base_model_cases(),
         *curve_arbitrum_model_cases(),
@@ -589,6 +595,10 @@ def hypercore_supplemental_cases():
     )
 
 
+# A case that runs pytest nodes takes no input policy: its proof stands for both.
+NODE_LANES = ("pytest", "faults")
+
+
 def validate(cases, bindings=None):
     ids = [case.id for case in cases]
     if len(set(ids)) != len(ids):
@@ -607,7 +617,7 @@ def validate(cases, bindings=None):
         )
     for policy in ("pinned", "fresh"):
         present = set().union(
-            *(c.obligations() for c in cases if c.input_policy == policy or c.lane == "pytest")
+            *(c.obligations() for c in cases if c.input_policy == policy or c.lane in NODE_LANES)
         )
         if gaps := expected - present:
             raise ValueError(f"QA {policy} coverage gaps: {sorted(gaps, key=repr)}")
@@ -841,6 +851,34 @@ def curve_robinhood_model_cases():
             connector=ConnectorId("curve"),
             chains=(ChainId("eip155:4663"),),
         )
+
+
+ACROSS_PROOFS = "tests/strategy_fork/test_across_bridge.py"
+# The supervised proofs that claim no action of their own: a refund, a restart and an outage.
+ACROSS_FAULT_PROOFS = (
+    "test_an_unfilled_transfer_is_refunded_only_after_the_destination_proves_it",
+    "test_a_coordinator_killed_after_the_deposit_sends_no_second_one",
+    "test_the_source_bridges_while_the_destination_is_unavailable",
+)
+ACROSS_REVOKE_PROOF = "test_teardown_revokes_an_approval_whose_deposit_was_never_signed"
+
+
+def across_supplemental_cases(root=ROOT):
+    """A bridge leaves an approval to revoke only when it is interrupted between its
+    approval and its deposit; this supervised proof is the one that revokes."""
+    reference = "across_usdc_arbitrum_base_bridge"
+    yield Case(
+        id=f"cleanup/{reference}/eoa",
+        lane="faults",
+        reference=reference,
+        mode="fork",
+        profile="eoa",
+        actions=(EconomicAction.REVOKE_BRIDGE,),
+        connector=ConnectorId("across"),
+        # The source chain alone: no position acts where the bridge is received.
+        chains=(ChainId("eip155:42161"),),
+        nodes=(f"{ACROSS_PROOFS}::{ACROSS_REVOKE_PROOF}",),
+    )
 
 
 def gmx_supplemental_cases(root=ROOT):
