@@ -118,6 +118,10 @@ def test_a_refund_is_a_labelled_fork_constructed_bundle_past_the_deadline(run):
     assert bytes.fromhex(relayed["data"][10:74]) == keccak(encode((LEAF,), (leaf,)))
     assert (row["kind"], row["evidence"], row["root_bundle"]) == ("refund", FORK_CONSTRUCTED, 7)
     assert "no dataworker" in FORK_CONSTRUCTED and run.nodes[FORK_BASE].sent == []
+    # The destination fork is moved past the deadline too, so its scan can prove the
+    # transfer unfilled: the refund is read only after that.
+    destination = run.nodes[FORK_BASE]
+    assert destination.now == FILL_DEADLINE + 1 and "evm_mine" in destination.calls
 
 
 def test_the_settler_refuses_what_it_cannot_settle(run, config, monkeypatch):  # noqa: F811

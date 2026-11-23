@@ -145,9 +145,12 @@ class Settler:
         )
         now = timestamp(rpc)
         sent(rpc, RELAYER, target.destination_asset.reference, approve)
-        # Another relayer may fill only once the named one's exclusivity has ended.
-        if int.from_bytes(relay[2]) and now <= relay[10]:
-            rpc("evm_setNextBlockTimestamp", [relay[10] + 1])
+        # The two forks keep separate clocks. A fill mined at or before the quote's
+        # timestamp would lie before the arrival scan's first block, and another relayer
+        # may fill only once the named one's exclusivity has ended.
+        earliest = max(operation.quote.timestamp, relay[10] if int.from_bytes(relay[2]) else 0)
+        if now <= earliest:
+            rpc("evm_setNextBlockTimestamp", [earliest + 1])
         chain = node_number(target.destination_fund.chain)
         mined = sent(rpc, RELAYER, pool, fill_call(relay, chain, RELAYER))
         return self.retained(
@@ -171,6 +174,7 @@ class Settler:
         now, deadline = timestamp(rpc), int(transfer.fill_deadline.timestamp())
         if now <= deadline:
             rpc("evm_setNextBlockTimestamp", [deadline + 1])
+        self.expire(target.destination_fund.chain, deadline)
         relay, execute = refund_calls(
             node_number(target.fund.chain), token, target.fund.address, transfer.sent.amount
         )
@@ -192,6 +196,14 @@ class Settler:
                 "advanced_seconds": timestamp(rpc, mined["blockNumber"]) - now,
             }
         )
+
+    def expire(self, chain, deadline: int) -> None:
+        """Mine a destination block past the fill deadline: a refund is read only once
+        the destination chain's own scan has shown that no fill can follow."""
+        rpc, _ = self.fork(chain)
+        if timestamp(rpc) <= deadline:
+            rpc("evm_setNextBlockTimestamp", [deadline + 1])
+            rpc("evm_mine")
 
     def retained(self, row: dict) -> dict:
         self.directory.mkdir(parents=True, exist_ok=True)

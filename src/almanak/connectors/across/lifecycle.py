@@ -7,7 +7,7 @@ from almanak.connectors.across.observations import Ownership
 from almanak.connectors.across.settlement_types import CONNECTOR, ArrivalOutcome, RefundOutcome
 from almanak.connectors.closure_obligations import obligation, require_closed
 from almanak.gateway.ethereum import DataError
-from almanak.transfers import Arrived, Refunded, opened, resolved
+from almanak.transfers import Arrived, Refunded, opened, proven_unfilled, resolved
 from almanak.triggers import DecisionSchedule
 from almanak.work import initial_work
 
@@ -51,14 +51,28 @@ def settled(state, outcome):
     return transfers
 
 
+def unfilled(state, transfers):
+    """Mark each open transfer whose arrival scan, retained in this chain's view, ended
+    past the fill deadline without a fill. Only the destination chain holds such a page."""
+    for page in getattr(state, "external_scans", ()):
+        if not page.expired:
+            continue
+        identity = (CONNECTOR, page.target.fund.chain, page.transfer)
+        current = next((t for t in transfers if t.identity == identity), None)
+        if current is not None and current.open and not current.unfilled:
+            transfers = proven_unfilled(transfers, identity)
+    return transfers
+
+
 def ownership(state, outcome=None):
-    """The owned fields after `outcome`: a mined deposit opens its transfer, and an
-    arrival or a refund resolves the transfers it settles."""
+    """The owned fields after `outcome`: a mined deposit opens its transfer, an arrival
+    or a refund resolves the transfers it settles, and an expired arrival scan proves
+    its transfer unfilled."""
     if isinstance(outcome, (ArrivalOutcome, RefundOutcome)):
         return {"owned": state.owned, "transfers": settled(state, outcome)}
     transfer = getattr(outcome, "transfer", None)
     transfers = state.transfers if transfer is None else opened(state.transfers, transfer)
-    return {"owned": state.owned, "transfers": transfers}
+    return {"owned": state.owned, "transfers": unfilled(state, transfers)}
 
 
 def validate_closure(state, observations):
@@ -67,9 +81,10 @@ def validate_closure(state, observations):
         "Across teardown retains a SpokePool allowance",
         (obligation(observed, {"allowance": observed.allowance}) for observed in observations),
     )
-    waiting = [t.reference for t in state.transfers if t.open]
+    waiting = [t.reference for t in state.transfers if t.resolution is None]
     if waiting:
-        # Teardown does not bridge back and cannot cancel: it waits for arrival or refund.
+        # Teardown does not bridge back and cannot cancel: it waits until every transfer
+        # is arrived or refunded. One proven unfilled still waits for its refund.
         raise DataError(
             "transfer_in_flight",
             "Across teardown waits for transfers in flight: " + ", ".join(waiting),

@@ -6,6 +6,8 @@ The chains are fakes with evenly spaced blocks. No run mode is declared for Acro
 the `config` fixture installs a fork declaration for the test alone.
 """
 
+from datetime import timedelta
+
 import pytest
 from pydantic import ValidationError
 
@@ -23,6 +25,7 @@ from almanak.connectors.across.relay import (
     relay_hash,
 )
 from almanak.connectors.across.settlement_reader import MAXIMUM_EVENT_BLOCK_SPAN as SPAN
+from almanak.connectors.across.settlement_reader import decoded_fill
 from almanak.connectors.across.state import Checkpoint
 from almanak.gateway import external_effects as gateway_effects
 from almanak.gateway.ethereum import DataError
@@ -87,6 +90,32 @@ def flying(config, *transfers, **changes):
     return state.model_copy(update={"work": works})
 
 
+def proven(config, *transfers, **changes):
+    """Transfers the destination chain has already proven unfilled."""
+    marked = (transfer.model_copy(update={"unfilled": True}) for transfer in transfers)
+    return flying(config, *marked, **changes)
+
+
+def expire(state, config):
+    """Tick the destination chain past the fill deadline: its scan proves every open
+    transfer unfilled, through the same commit, verification and merge as any page."""
+    chain = there(FILL_DEADLINE + 10)
+    for _ in range(3 * len(state.transfers)):
+        state = settle(state, config, chain)
+    return state
+
+
+def later(transfer, seconds):
+    """Another transfer of the same route whose fill deadline is `seconds` later."""
+    identifier, relay_hash, quoted_at = transfer.reference.split(":")
+    return transfer.model_copy(
+        update={
+            "reference": f"{int(identifier) + 500}:{relay_hash}:{quoted_at}",
+            "fill_deadline": transfer.fill_deadline + timedelta(seconds=seconds),
+        }
+    )
+
+
 def delivered(state):
     return state.model_copy(update={"delivered": len(state.outcomes)})
 
@@ -101,12 +130,14 @@ def filled(config, chain, number, serial=0, **changes):
     data = relay(config, serial)
     paid = changes.get("paid", OFFERED)
     moved = changes.pop("moved", paid)
+    tx = changes.pop("tx", FILL_TX)
+    payer = changes.pop("payer", POOL_THERE if changes.get("fill_type") == 2 else RELAYER)
     rows = [
         fill(POOL_THERE, data, **changes),
-        payment(TOKEN_THERE, RELAYER, fund(config, "destination"), moved),
+        payment(TOKEN_THERE, payer, fund(config, "destination"), moved),
     ]
     chain.views["fillStatuses(bytes32)"] = 2
-    return chain.mine(number, FILL_TX, rows)
+    return chain.mine(number, tx, rows)
 
 
 def refunded(config, chain, number, amounts, tx=REFUND_TX, payments=None, token=TOKEN_HERE):
@@ -188,6 +219,15 @@ def test_a_slow_fill_below_the_offer_is_a_measurement(config):
     assert arrival.offered.amount == OFFERED and arrival.accounting_issues == ()
 
 
+def test_a_slow_fill_paid_by_anyone_but_the_spoke_pool_is_refused(config):
+    chain = there()
+    state = settle(flying(config, flight(config)), config, chain)
+    filled(config, chain, chain.head + 1, fill_type=2, payer=RELAYER)
+    with pytest.raises(DataError, match="was not paid by the SpokePool") as error:
+        settle(state, config, chain)
+    assert error.value.kind == "accounting"
+
+
 def test_a_fill_of_another_relay_under_the_same_deposit_identifier_is_not_ours(config):
     chain = there()
     state = settle(flying(config, flight(config)), config, chain)
@@ -234,6 +274,8 @@ def test_an_arrival_scan_ends_past_the_fill_deadline_and_cross_checks_the_status
     state = settle(state, config, chain)
     page = state.external_scans[-1]
     assert page.expired and page.outcome is None and state.transfers[0].open
+    # The page is the destination's proof: the transfer is unfilled and still in flight.
+    assert state.transfers[0].unfilled and project(state, FORK_ARB).transfers[0].unfilled
     assert page.end.timestamp > FILL_DEADLINE
     chain.head += 500
     assert settle(state, config, chain) == state
@@ -248,17 +290,34 @@ def test_a_fill_event_without_a_filled_status_is_refused(config):
         settle(state, config, chain)
 
 
-def test_a_refund_is_read_only_after_the_fill_deadline_and_resolves_the_transfer(config):
-    transfer, chain = flight(config), here()
+def test_a_refund_waits_for_the_destination_to_prove_the_transfer_unfilled(config):
+    """The destination is unavailable: the deadline has passed and a refund-leaf payment
+    is on the source chain, yet nothing is read. The source chain still opens transfers."""
+    transfer, chain = flight(config), here(FILL_DEADLINE + 50)
     state = flying(config, transfer)
-    # Before the deadline nothing is read: a refund is never inferred from time alone.
-    refunded(config, chain, chain.at(NOW + 10), [AMOUNT], tx="0x" + "0a" * 32)
+    refunded(config, chain, chain.head - 5, [AMOUNT])
     assert settle(state, config, chain) == state
-    chain.head = chain.at(FILL_DEADLINE) + 50
+    local = project(state, FORK_ARB)
+    second = flight(config, 1)
+    state = merge(state, FORK_ARB, local.model_copy(update={"transfers": (transfer, second)}))
+    assert settle(state, config, chain) == state and state.transfers == (transfer, second)
+    # The source chain cannot state the proof itself.
+    claimed = local.model_copy(update={"transfers": proven(config, transfer).transfers})
+    with pytest.raises(ValueError, match="chain that measured"):
+        merge(flying(config, transfer), FORK_ARB, claimed)
+    state = expire(state, config)
+    assert [(t.open, t.unfilled) for t in state.transfers] == [(True, True), (True, True)]
+    assert [page.expired for page in state.external_scans] == [False, True, False, True]
+    assert state.outcomes == ()
+
+
+def test_a_refund_of_a_proven_unfilled_transfer_is_measured_and_resolves_it(config):
+    transfer, chain = flight(config), here(FILL_DEADLINE + 50)
+    state = expire(flying(config, transfer), config)
     state = settle(state, config, chain)
-    (first,) = state.external_scans
+    first = state.external_scans[-1]
     assert first.side == "refund" and first.start == chain.block(chain.at(FILL_DEADLINE))
-    assert (first.outcome, state.transfers) == (None, (transfer,))
+    assert (first.outcome, first.unsolicited, state.transfers[0].open) == (None, None, True)
     refunded(config, chain, chain.head + 100, [AMOUNT])
     state = settle(state, config, chain)
     refund = state.outcomes[0]
@@ -277,52 +336,145 @@ def test_a_refund_is_read_only_after_the_fill_deadline_and_resolves_the_transfer
     assert project(state, FORK_BASE).outcomes == ()
 
 
-def test_one_refund_of_the_sum_resolves_every_expired_transfer(config):
+def test_one_refund_of_the_sum_resolves_every_proven_transfer(config):
     one, two = flight(config), flight(config, 1)
     chain = here(FILL_DEADLINE + 50)
-    state = settle(flying(config, one, two), config, chain)
+    state = settle(proven(config, one, two), config, chain)
     refunded(config, chain, chain.head + 3, [2 * AMOUNT])
     state = settle(state, config, chain)
     assert state.outcomes[0].transfers == (one.reference, two.reference)
     assert [t.resolution.returned.amount for t in state.transfers] == [AMOUNT, AMOUNT]
 
 
-@pytest.mark.parametrize(
-    ("amounts", "payments", "kind", "cause"),
-    [
-        # Two equal transfers and a refund of one: it cannot be told which.
-        ([AMOUNT], None, "accounting", "matches 2 sets"),
-        ([AMOUNT + 1], None, "accounting", "matches 0 sets"),
-        ([2 * AMOUNT], [AMOUNT], "accounting", "did not pay the fund what its leaf names"),
-    ],
-)
-def test_a_refund_that_cannot_be_attributed_stops_with_its_cause(
-    config, amounts, payments, kind, cause
-):
+def test_equal_transfers_refunded_in_two_bundles_resolve_oldest_first(config):
+    one, two = flight(config, 1), flight(config)
     chain = here(FILL_DEADLINE + 50)
-    state = settle(flying(config, flight(config), flight(config, 1)), config, chain)
-    refunded(config, chain, chain.head + 3, amounts, payments=payments)
-    with pytest.raises(DataError, match=cause) as error:
+    state = settle(proven(config, one, two), config, chain)
+    refunded(config, chain, chain.head + 3, [AMOUNT])
+    state = delivered(settle(state, config, chain))
+    # Equal deadlines: the lower reference is taken first, whatever the retained order.
+    assert state.outcomes[0].transfers == (two.reference,)
+    assert [t.open for t in state.transfers] == [True, False]
+    refunded(config, chain, chain.head + 3, [AMOUNT], tx="0x" + "e4" * 32)
+    state = settle(state, config, chain)
+    assert state.outcomes[1].transfers == (one.reference,)
+    older = later(one, -60)
+    waiting = settlement.candidates(proven(config, one, older), config.target("move"), NOW * 2)
+    assert [t.reference for t in waiting] == [older.reference, one.reference]
+
+
+def test_a_refund_leaf_payment_that_matches_nothing_is_retained_and_stops_nothing(config):
+    """A stranger deposits dust naming the fund as depositor and lets it expire."""
+    from almanak.connectors.across.connector import AcrossProjection
+
+    transfer, chain = flight(config), here(FILL_DEADLINE + 50)
+    state = settle(proven(config, transfer), config, chain)
+    refunded(config, chain, chain.head + 3, [5], tx="0x" + "d0" * 32)
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    assert (page.unsolicited.amount.amount, page.unsolicited.tx_hash) == (5, "0x" + "d0" * 32)
+    # No outcome, so no accounting issue that would stop new exposure on this chain.
+    assert (page.outcome, state.outcomes, state.transfers[0].open) == (None, (), True)
+    assert page.end == chain.block(chain.head)
+    listed = AcrossProjection.report(state)["unattributed_refund_payments"]
+    assert listed == [{"block": page.end.number, **page.unsolicited.model_dump(mode="json")}]
+    refunded(config, chain, chain.head + 3, [AMOUNT])
+    state = settle(state, config, chain)
+    assert state.outcomes[0].transfers == (transfer.reference,)
+    assert Checkpoint.model_validate_json(state.model_dump_json()) == state
+    settlement.audit(backend(config, chain), project(state, FORK_ARB))
+
+
+def test_a_foreign_refund_of_an_equal_amount_resolves_the_transfer_and_ours_is_left(config):
+    transfer, chain = flight(config), here(FILL_DEADLINE + 50)
+    state = settle(proven(config, transfer), config, chain)
+    refunded(config, chain, chain.head + 3, [AMOUNT], tx="0x" + "f0" * 32)
+    state = delivered(settle(state, config, chain))
+    assert state.outcomes[0].tx_hash == "0x" + "f0" * 32
+    assert state.transfers[0].resolution.returned.amount == AMOUNT
+    # The transfer's own refund pays the same amount later. Nothing waits for it.
+    refunded(config, chain, chain.head + 3, [AMOUNT])
+    chain.head += SPAN
+    assert settle(state, config, chain) == state
+
+
+def test_a_refund_in_the_deadline_block_itself_pays_no_transfer_of_that_deadline(config):
+    """A transfer can still be filled in the block whose time equals its deadline."""
+    chain = here(FILL_DEADLINE + 50)
+    refunded(config, chain, chain.at(FILL_DEADLINE), [AMOUNT])
+    state = settle(proven(config, flight(config)), config, chain)
+    (page,) = state.external_scans
+    assert page.start == page.end == chain.block(chain.at(FILL_DEADLINE))
+    assert page.unsolicited.amount.amount == AMOUNT and state.transfers[0].open
+
+
+def test_only_the_twelve_oldest_transfers_are_considered_for_one_refund(config):
+    transfers = [flight(config, serial) for serial in range(13)]
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, *transfers), config, chain)
+    refunded(config, chain, chain.head + 3, [13 * AMOUNT], tx="0x" + "d1" * 32)
+    state = settle(state, config, chain)
+    assert state.external_scans[-1].unsolicited.amount.amount == 13 * AMOUNT
+    refunded(config, chain, chain.head + 3, [12 * AMOUNT])
+    state = settle(state, config, chain)
+    assert state.outcomes[0].transfers == tuple(t.reference for t in transfers[:12])
+    assert [t.open for t in state.transfers] == [False] * 12 + [True]
+
+
+def test_two_allocations_of_one_source_fund_and_asset_are_refused_at_configuration():
+    from tests.across_support import allocation, parameters
+
+    with pytest.raises(ValidationError, match="one allocation per source fund and sent asset"):
+        parameters(allocation(), allocation(name="again"))
+
+
+def test_the_refund_scan_jumps_to_a_later_deadline_and_waits_for_an_unproven_one(config):
+    one, chain = flight(config), here(FILL_DEADLINE + 50)
+    two = later(one, 6000)
+    state = settle(proven(config, one), config, chain)
+    refunded(config, chain, chain.head + 3, [AMOUNT])
+    state = delivered(settle(state, config, chain))
+    reached = state.external_scans[-1].end
+    # A second transfer is in flight and not proven: the scan stays short of its deadline.
+    transfers = (state.transfers[0], two)
+    state = state.model_copy(update={"transfers": transfers})
+    chain.head = chain.at(FILL_DEADLINE + 6000) + 40
+    assert settle(state, config, chain) == state
+    state = state.model_copy(
+        update={"transfers": (transfers[0], two.model_copy(update={"unfilled": True}))}
+    )
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    assert page.start == chain.block(chain.at(FILL_DEADLINE + 6000))
+    assert page.start.number > reached.number + SPAN
+
+
+def test_a_refund_whose_leaf_and_payment_differ_is_refused(config):
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, flight(config), flight(config, 1)), config, chain)
+    refunded(config, chain, chain.head + 3, [2 * AMOUNT], payments=[AMOUNT])
+    with pytest.raises(DataError, match="did not pay the fund what its leaf names") as error:
         settle(state, config, chain)
-    assert error.value.kind == kind and state.transfers[0].open
+    assert error.value.kind == "accounting" and state.transfers[0].open
 
 
 def test_a_payment_from_the_spoke_pool_without_a_refund_leaf_is_not_a_refund(config):
     chain = here(FILL_DEADLINE + 50)
-    state = settle(flying(config, flight(config)), config, chain)
+    state = settle(proven(config, flight(config)), config, chain)
     payee = fund(config, "source")
     chain.mine(chain.head + 1, "0x" + "5f" * 32, [payment(TOKEN_HERE, POOL_HERE, payee, AMOUNT)])
     # A leaf for another token names the fund but pays nothing in the sent asset.
     refunded(config, chain, chain.head + 1, [AMOUNT], payments=[], token="0x" + "44" * 20)
     chain.head += SPAN
     state = settle(state, config, chain)
-    assert state.external_scans[-1].outcome is None and state.transfers[0].open
-    assert len(state.external_scans[-1].events) == 1
+    page = state.external_scans[-1]
+    assert (page.outcome, page.unsolicited, state.transfers[0].open) == (None, None, True)
+    assert len(page.events) == 1
 
 
 def test_two_refunds_in_one_block_and_a_deferred_refund_are_refused(config):
     chain = here(FILL_DEADLINE + 50)
-    state = settle(flying(config, flight(config)), config, chain)
+    state = settle(proven(config, flight(config)), config, chain)
     chain.views["getRelayerRefund(address,address)"] = AMOUNT
     chain.head += SPAN
     with pytest.raises(DataError, match="unresolved until the fund claims it") as error:
@@ -337,31 +489,51 @@ def test_two_refunds_in_one_block_and_a_deferred_refund_are_refused(config):
     assert error.value.kind == "ordering"
 
 
-def test_a_fill_seen_after_a_refund_halts_with_both(config):
-    source, destination = here(FILL_DEADLINE + 50), there(NOW + 20)
-    state = settle(flying(config, flight(config)), config, destination)
-    state = settle(state, config, source)
-    refunded(config, source, source.head + 3, [AMOUNT])
-    state = delivered(settle(state, config, source))
-    assert state.transfers[0].resolution.kind == "refunded"
-    filled(config, destination, destination.head + 4)
-    with pytest.raises(DataError, match="was refunded and is also filled") as error:
-        settle(state, config, destination)
+def test_a_fill_found_for_a_transfer_marked_unfilled_halts_with_both(config):
+    """The proof ends the arrival scan, so this state cannot be reached through it. Were
+    a transfer ever marked without that page, a fill found for it stops the chain."""
+    chain = there()
+    state = proven(config, flight(config))
+    filled(config, chain, chain.at(QUOTED_AT) + 3)
+    with pytest.raises(DataError, match="proven unfilled or refunded and is also filled") as error:
+        settle(state, config, chain)
     assert error.value.kind == "integrity" and FILL_TX in str(error.value)
 
 
-def test_the_source_keeps_working_while_the_destination_is_unavailable(config):
-    """The destination never ticks here; the source opens a second transfer and refunds."""
-    one, two = flight(config), flight(config, 1)
-    source = here(FILL_DEADLINE + 50)
-    state = flying(config, one)
-    local = project(state, FORK_ARB)
-    state = merge(state, FORK_ARB, local.model_copy(update={"transfers": (one, two)}))
-    assert state.transfers == (one, two)
-    state = settle(state, config, source)
-    refunded(config, source, source.head + 3, [2 * AMOUNT])
-    state = settle(state, config, source)
-    assert not any(t.open for t in state.transfers)
+def test_a_fill_in_the_first_block_and_one_in_the_deadline_block_are_both_found(config):
+    chain = there()
+    filled(config, chain, chain.at(QUOTED_AT))
+    state = settle(flying(config, flight(config)), config, chain)
+    (page,) = state.external_scans
+    assert page.start == page.end == chain.block(chain.at(QUOTED_AT)) and page.outcome
+    # The deadline block is exactly one in which the SpokePool still accepts a fill.
+    chain = FakeChain(FORK_BASE, GENESIS, 1, 0)
+    chain.head = chain.at(FILL_DEADLINE) - 100
+    state = flying(config, flight(config))
+    for _ in range(5):
+        state = settle(state, config, chain)
+    chain.head = chain.at(FILL_DEADLINE)
+    assert chain.block(chain.head).timestamp == FILL_DEADLINE
+    state = settle(state, config, chain)
+    assert not any(page.expired for page in state.external_scans)
+    filled(config, chain, chain.head)
+    chain.head += 1
+    state = settle(state, config, chain)
+    assert state.outcomes[0].block.timestamp == FILL_DEADLINE and not state.transfers[0].unfilled
+
+
+def test_a_relay_filled_twice_and_a_log_from_another_emitter_are_refused(config):
+    chain = there()
+    state = settle(flying(config, flight(config)), config, chain)
+    filled(config, chain, chain.head + 1)
+    filled(config, chain, chain.head + 1, tx="0x" + "f2" * 32)
+    with pytest.raises(DataError, match="filled one relay twice"):
+        settle(state, config, chain)
+    chain.logs[-2] = {**chain.logs[-2], "address": "0x" + "66" * 20}
+    answered = chain.logs
+    chain._rpc = lambda method, params, allow_none=False: answered
+    with pytest.raises(DataError, match="a log outside its query"):
+        settle(state, config, chain)
 
 
 def test_teardown_waits_on_both_chains_and_closes_once_the_transfer_is_resolved(config):
@@ -497,10 +669,14 @@ def test_a_deposit_arrives_is_delivered_and_the_deployment_closes(monkeypatch, c
 def test_a_deposit_is_refunded_is_delivered_and_the_deployment_closes(monkeypatch, config):
     state, transfer = opened(monkeypatch, config, mode="teardown")
     chain = here(FILL_DEADLINE + 50)
-    state = settle(state, config, chain)
-    with pytest.raises(DataError) as error:
-        close(state, config)
-    assert error.value.kind == "transfer_in_flight"
+    assert settle(state, config, chain) == state
+    state = settle(expire(state, config), config, chain)
+    # Proven unfilled is not closed: the refund is still owed on both chains' views.
+    assert state.transfers[0].unfilled and state.mode == "teardown"
+    for scope, seen in ((FORK_ARB, (observed(config),)), (FORK_BASE, ())):
+        with pytest.raises(DataError) as error:
+            validate_closure(project(state, scope), seen)
+        assert error.value.kind == "transfer_in_flight"
     refunded(config, chain, chain.head + 3, [AMOUNT])
     state = settle(state, config, chain)
     refund = state.outcomes[-1]
@@ -521,3 +697,70 @@ def test_the_destination_tick_decides_with_nothing_owned_and_may_not_bridge(monk
     work = work_for(state, FORK_BASE).model_copy(update={"decision": decision(config)})
     with pytest.raises(ValueError, match="routed to another chain"):
         validate_local_work(work)
+
+
+# A real deposit on Arbitrum One and its fill on Base, read from the two chains. The
+# fill's log is kept as the chain returned it. The Base SpokePool answered
+# `fillStatuses` with 2 (filled) under HASH at the fill's block and with 0 under the
+# same relay hashed with the origin's chain number, so HASH is the contract's own key.
+DEPOSIT_TX = "0xc0fb18ef5c5d4c633ede0ceb77cbfe882acb368dd2f4eaaa78ebf947ccd8b6cb"
+REAL_FILL_TX = "0x1f6021e82723595d59ee42b992e13d3e28f9b19e7ed57c5252cfe999021762f8"
+REAL_HASH = "0x95c216247297ae4375838e9f2d1bf6a2fa3ea29378659bcf4f1d13d1baa2dacf"
+REAL_DEPOSITOR = "0x62a63f10d6a6689b90cca9acf2b3ab82f1576b86"
+REAL_EXCLUSIVE = "0x000000000004598d17aad017bf0734a364c5588b"
+REAL_DEPOSIT_ID = int("0x82f0a284fbb8a93294419bdd5fb3dab4e3b19949954d6da2d441e46d529506e7", 16)
+REAL_FILL = {
+    "address": POOL_THERE,
+    "topics": [
+        "0x44b559f101f8fbcc8a0ea43fa91a05a729a5ea6e14a7c75aa750374690137208",
+        "0x000000000000000000000000000000000000000000000000000000000000a4b1",
+        "0x82f0a284fbb8a93294419bdd5fb3dab4e3b19949954d6da2d441e46d529506e7",
+        "0x000000000000000000000000394311a6aaa0d8e3411d8b62de4578d41322d1bd",
+    ],
+    "data": (
+        "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        "000000000000000000000000833589fcd6edb6e08f4c7c32d4f71b54bda02913"
+        "0000000000000000000000000000000000000000000000000000000000989680"
+        "0000000000000000000000000000000000000000000000000000000000989680"
+        "000000000000000000000000000000000000000000000000000000000000a4b1"
+        "000000000000000000000000000000000000000000000000000000006b040cc4"
+        "000000000000000000000000000000000000000000000000000000006b040cc4"
+        "000000000000000000000000000000000004598d17aad017bf0734a364c5588b"
+        "00000000000000000000000062a63f10d6a6689b90cca9acf2b3ab82f1576b86"
+        "00000000000000000000000062a63f10d6a6689b90cca9acf2b3ab82f1576b86"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "00000000000000000000000062a63f10d6a6689b90cca9acf2b3ab82f1576b86"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000989680"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    ),
+    "blockNumber": hex(61185152),
+    "logIndex": "0x0",
+    "transactionHash": REAL_FILL_TX,
+}
+
+
+def test_the_relay_hash_equals_the_key_a_real_spoke_pool_filled():
+    """Known answer: the relay is rebuilt from the deposit's own event fields, in the
+    order the deposit states them, and hashed for another chain than its origin."""
+    relay = (
+        word(REAL_DEPOSITOR),
+        word(REAL_DEPOSITOR),
+        word(REAL_EXCLUSIVE),
+        word(USDC.reference),
+        word(BASE_USDC.reference),
+        10_000_000,
+        10_000_000,
+        42161,
+        REAL_DEPOSIT_ID,
+        1_795_427_524,
+        1_795_427_524,
+        b"",
+    )
+    assert relay_hash(relay, node_number(BASE)) == REAL_HASH
+    assert relay_hash(relay, 42161) != REAL_HASH
+    # The fill's own log decodes to the same relay and is matched by that hash alone.
+    assert decoded_fill(REAL_FILL)["relay"] == relay
+    row, fill = settlement.matching_fill((REAL_FILL,), REAL_HASH, 8453)
+    assert (row, fill["fill_type"], fill["updated_output"]) == (REAL_FILL, 0, 10_000_000)
+    assert settlement.matching_fill((REAL_FILL,), REAL_HASH, 42161) is None

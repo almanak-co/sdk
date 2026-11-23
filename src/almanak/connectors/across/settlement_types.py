@@ -155,20 +155,33 @@ class RefundOutcome(Settlement):
         )
 
 
+class Unsolicited(Model):
+    """A refund-leaf payment to the fund that matches no transfer proven unfilled.
+
+    Retained as evidence and never attributed. It is no outcome and carries no
+    accounting issue of one, so a stranger's payment cannot stop new exposure.
+    """
+
+    tx_hash: Hash32
+    amount: AssetAmount
+
+
 class Scan(ExternalScan):
     """One bounded page of one side of settlement, with every log its query returned."""
 
     kind: Literal["across_scan"] = "across_scan"
     side: Literal["arrival", "refund"]
     target: Target
-    # An arrival page follows one transfer. A refund page serves every expired open
-    # transfer of its allocation, because one refund can pay several at once.
+    # An arrival page follows one transfer. A refund page serves every transfer of its
+    # allocation proven unfilled, because one refund can pay several at once.
     transfer: Reference | None = None
     start: Block
     end: Block
     events: tuple[dict, ...] = ()
     # An arrival page that ends past the fill deadline without a fill: none can follow.
     expired: bool = False
+    # A refund page that ends at a payment to the fund it could not attribute.
+    unsolicited: Unsolicited | None = None
     outcome: ArrivalOutcome | RefundOutcome | None = None
 
     @model_validator(mode="after")
@@ -186,6 +199,8 @@ class Scan(ExternalScan):
         if arrival != (self.transfer is not None) or (self.expired and not arrival):
             raise ValueError("an arrival page follows one transfer; a refund page follows none")
         outcome = self.outcome
+        if self.unsolicited is not None and (arrival or outcome is not None):
+            raise ValueError("an unattributed payment ends a refund page that settles nothing")
         if outcome is not None:
             if isinstance(outcome, ArrivalOutcome) != arrival or outcome.block != self.end:
                 raise ValueError("Across scan ends at its own side's settlement block")

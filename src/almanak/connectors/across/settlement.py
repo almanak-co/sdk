@@ -18,10 +18,10 @@ from almanak.connectors.across.settlement_types import (
     ArrivalOutcome,
     RefundOutcome,
     Scan,
+    Unsolicited,
     arrival_scope,
     refund_scope,
 )
-from almanak.effects import WalletAsset
 from almanak.external_effects import ExternalIdentity
 from almanak.gateway.ethereum import DataError
 from almanak.models import AssetAmount
@@ -85,12 +85,13 @@ def bounds(reader, pages, anchor: int, reference):
 
 def committable(page, first: bool) -> bool:
     full = page.end.number - page.start.number + 1 == SPAN
-    return page.outcome is not None or page.expired or first or full
+    settled = page.outcome is not None or page.unsolicited is not None
+    return settled or page.expired or first or full
 
 
 def waiting_arrivals(state, reader_chain):
-    """Transfers whose fill this chain may still show: open ones, and refunded ones until
-    their arrival scan has passed the fill deadline, so a fill beside a refund is seen."""
+    """Transfers whose fill this chain may still show: those whose arrival scan has
+    neither found a fill nor ended past the fill deadline."""
     for transfer in state.transfers:
         if transfer.connector != CONNECTOR or transfer.destination.chain != reader_chain:
             continue
@@ -98,8 +99,7 @@ def waiting_arrivals(state, reader_chain):
         pages = pages_of(state, "arrival", target, transfer.reference)
         if any(page.outcome is not None or page.expired for page in pages):
             continue
-        if transfer.open or transfer.resolution.kind == "refunded":
-            yield transfer, target, pages
+        yield transfer, target, pages
 
 
 def matching_fill(rows, relay: str, destination):
@@ -119,7 +119,9 @@ def measured_arrival(reader, target, row, fill) -> tuple[dict, int]:
     if fill["updated_recipient"] != word(fund):
         raise chain.integrity("an Across fill paid another recipient than the destination fund")
     receipt = chain.receipt_of(reader, row)
-    paid = chain.paid_to(receipt, target.destination_asset.reference, fund, chain.position(row)[1])
+    payer = row["address"].lower() if FILL_TYPES[fill["fill_type"]] == "slow" else None
+    token, after = target.destination_asset.reference, chain.position(row)[1]
+    paid = chain.paid_to(receipt, token, fund, after, payer)
     if paid is None or paid != fill["updated_output"]:
         raise DataError(
             "accounting",
@@ -130,10 +132,10 @@ def measured_arrival(reader, target, row, fill) -> tuple[dict, int]:
 
 
 def arrival_outcome(reader, transfer, target, row, fill, block):
-    if not transfer.open:
+    if not transfer.open or transfer.unfilled:
         raise chain.integrity(
-            f"Across transfer {transfer.reference} was refunded and is also filled in "
-            f"{row['transactionHash']}; both are retained"
+            f"Across transfer {transfer.reference} was proven unfilled or refunded and is "
+            f"also filled in {row['transactionHash']}; both are retained"
         )
     receipt, paid = measured_arrival(reader, target, row, fill)
     asset = target.destination_asset
@@ -208,44 +210,38 @@ def checked(page, first, reference, cross_check):
     return page
 
 
-def expired_open(state, wallet: WalletAsset, timestamp: int):
-    return [
+def candidates(state, target, timestamp: int):
+    """The transfers a refund mined at `timestamp` may pay: this allocation's, proven
+    unfilled by the destination chain, past their fill deadline. Oldest deadline first,
+    then by reference, and only the oldest few: attribution enumerates their subsets."""
+    waiting = [
         transfer
         for transfer in state.transfers
         if transfer.connector == CONNECTOR
         and transfer.open
-        and transfer.source == wallet
+        and transfer.unfilled
+        and transfer.allocation == target.allocation
         and seconds(transfer.fill_deadline) < timestamp
     ]
+    waiting.sort(key=lambda transfer: (transfer.fill_deadline, transfer.reference))
+    return waiting[:MAXIMUM_REFUND_CANDIDATES]
 
 
-def attributed(total: int, own, others):
-    """The transfers a refund of `total` pays: the one subset of the wallet asset's expired
-    open transfers whose sent amounts sum to it.
+def attributed(total: int, waiting) -> tuple:
+    """The transfers a refund of `total` pays, or none when it matches no set of them.
 
-    A refund returns each transfer's whole sent amount. Own transfers are returned;
-    another allocation's are None, left to that allocation's scan. No subset, or more
-    than one, is refused: the refund cannot be told apart.
+    A refund returns each transfer's whole sent amount. Sets of equal sum are
+    interchangeable: the totals are the same whichever is taken, so the one with the
+    oldest transfers is. A foreign payment of an equal amount can therefore resolve a
+    transfer; that transfer's own later refund is then the unattributed one.
     """
-    everyone = (*own, *others)
-    if len(everyone) > MAXIMUM_REFUND_CANDIDATES:
-        raise DataError("accounting", "too many expired Across transfers to attribute a refund")
-    subsets = [
+    matches = [
         subset
-        for size in range(1, len(everyone) + 1)
-        for subset in combinations(everyone, size)
-        if sum(t.sent.amount for t in subset) == total
+        for size in range(1, len(waiting) + 1)
+        for subset in combinations(range(len(waiting)), size)
+        if sum(waiting[index].sent.amount for index in subset) == total
     ]
-    if len(subsets) != 1:
-        raise DataError(
-            "accounting",
-            f"an Across refund of {total} matches {len(subsets)} sets of expired transfers "
-            "and cannot be attributed",
-        )
-    mine = [t for t in subsets[0] if t in own]
-    if mine and len(mine) != len(subsets[0]):
-        raise DataError("accounting", "an Across refund pays transfers of two allocations at once")
-    return tuple(mine) or None
+    return tuple(waiting[index] for index in min(matches)) if matches else ()
 
 
 def refund_total(receipt, target) -> int | None:
@@ -262,12 +258,8 @@ def refund_total(receipt, target) -> int | None:
     return sum(entries)
 
 
-def source_wallet(target) -> WalletAsset:
-    return WalletAsset(account=target.account, chain=target.fund.chain, asset=target.asset)
-
-
 def refund_found(reader, state, target, events):
-    """The first refund in the page that pays this allocation's transfers."""
+    """The first refund-leaf payment to the fund in the page, and the transfers it pays."""
     seen = set()
     for row in events:
         if row["transactionHash"] in seen:
@@ -278,11 +270,8 @@ def refund_found(reader, state, target, events):
         if total is None:
             continue
         block = reader.pin_block(chain.position(row)[0])
-        expired = expired_open(state, source_wallet(target), block.timestamp)
-        own = [t for t in expired if t.allocation == target.allocation]
-        paid = attributed(total, own, [t for t in expired if t not in own])
-        if paid is not None:
-            return row, receipt, block, total, paid
+        paid = attributed(total, candidates(state, target, block.timestamp))
+        return row, receipt, block, total, paid
     return None
 
 
@@ -326,18 +315,36 @@ def require_undeferred(reader, target, block):
         )
 
 
+def in_flight(state, target):
+    return [
+        transfer
+        for transfer in state.transfers
+        if transfer.connector == CONNECTOR
+        and transfer.open
+        and transfer.allocation == target.allocation
+    ]
+
+
 def waiting_refunds(state, reader_chain):
+    """Allocations with a transfer the destination chain has proven unfilled, and the
+    earliest fill deadline among those: a refund is read for nothing else."""
     for allocation in state.config.positions:
         target = state.config.target(allocation.name)
         if target.fund.chain != reader_chain:
             continue
-        waiting = [
-            t
-            for t in state.transfers
-            if t.connector == CONNECTOR and t.open and t.allocation == allocation.name
-        ]
+        waiting = [transfer for transfer in in_flight(state, target) if transfer.unfilled]
         if waiting:
-            yield target, min(seconds(t.fill_deadline) for t in waiting)
+            yield target, min(seconds(transfer.fill_deadline) for transfer in waiting)
+
+
+def held_back(state, target, end) -> bool:
+    """Whether the page would pass the fill deadline of a transfer not yet proven
+    unfilled. Its refund could lie there and would be read as unattributed, so the
+    refund scan waits for the destination chain's proof or its arrival."""
+    return any(
+        not transfer.unfilled and seconds(transfer.fill_deadline) <= end.timestamp
+        for transfer in in_flight(state, target)
+    )
 
 
 def refund_page(backend, state, target, earliest: int, reference=None):
@@ -349,13 +356,21 @@ def refund_page(backend, state, target, earliest: int, reference=None):
     pool, token, fund = target.route.spoke_pool, target.asset.reference, target.fund.address
     events = chain.refund_logs(reader, token, pool, fund, start, end)
     found = refund_found(reader, state, target, events)
-    outcome = None
+    outcome = unsolicited = None
     if found is not None:
         row, receipt, block, total, paid = found
         if reference is None and block.number < end.number:
             end, events = block, chain.refund_logs(reader, token, pool, fund, start, block)
         require_single(events, row)
-        outcome = refund_outcome(target, row, receipt, block, total, paid)
+        if paid:
+            outcome = refund_outcome(target, row, receipt, block, total, paid)
+        else:
+            amount = AssetAmount(asset=target.asset, amount=total)
+            unsolicited = Unsolicited(tx_hash=row["transactionHash"], amount=amount)
+    if held_back(state, target, end):
+        if reference is not None:
+            raise chain.integrity("Across refund page passes an unproven fill deadline")
+        return None
     page = Scan(
         connector=CONNECTOR,
         scope=refund_scope(target),
@@ -364,6 +379,7 @@ def refund_page(backend, state, target, earliest: int, reference=None):
         start=start,
         end=end,
         events=events,
+        unsolicited=unsolicited,
         outcome=outcome,
     )
     return checked(page, first, reference, lambda: require_undeferred(reader, target, page.end))

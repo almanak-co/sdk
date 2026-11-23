@@ -141,6 +141,13 @@ def settled(state, config, reader):
     raise AssertionError("no settlement was recorded")
 
 
+def ticked(state, config, reader):
+    """A few ticks of one chain, each committing at most one page."""
+    for _ in range(4):
+        state = settle(state, config, reader)
+    return state
+
+
 def balance(rpc, token, holder):
     data = "0x70a08231" + holder[2:].rjust(64, "0")
     return int(rpc("eth_call", [{"to": token, "data": data}, "latest"]), 16)
@@ -197,11 +204,15 @@ def returned(run, state):
     """Refund the second transfer through a fork-constructed bundle and read it back."""
     refunded, reader = state.transfers[1], run.readers[0]
     token = run.target.asset.reference
-    unchanged = settle(state, run.config, reader) == state
+    before = settle(state, run.config, reader)
     row = run.settler.refund(run.retained, refunded)
+    # The refund is on chain, yet nothing is read before the destination's own proof.
+    unchanged = (before, settle(state, run.config, reader)) == (state, state)
+    state = ticked(state, run.config, run.readers[1])
+    proven = state.transfers[1].unfilled
     state = settled(state, run.config, reader)
     refund = state.outcomes[-1]
-    assert (unchanged, row["evidence"]) == (True, FORK_CONSTRUCTED)
+    assert (unchanged, proven, row["evidence"]) == (True, True, FORK_CONSTRUCTED)
     assert (refund.kind, refund.transfers, refund.tx_hash, refund.returned.amount) == (
         "across_refund",
         (refunded.reference,),

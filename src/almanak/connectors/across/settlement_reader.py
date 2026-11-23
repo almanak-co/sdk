@@ -162,8 +162,14 @@ def receipt_of(reader, row) -> dict:
     return receipt
 
 
-def paid_to(receipt, token: str, payee: str, after: int) -> int | None:
-    """Base units of the first transfer of `token` to `payee` after log index `after`."""
+def paid_to(receipt, token: str, payee: str, after: int, sender: str | None) -> int | None:
+    """Base units of the first transfer of `token` to `payee` after log index `after`.
+
+    The SpokePool emits the fill, then pays. A slow fill is paid from the pool's own
+    balance, so `sender` is the pool. A fast fill is pulled from whoever called the
+    pool, which the event does not name (its relayer field is the repayment address),
+    so `sender` is None and any payer is taken.
+    """
     for row in sorted(receipt["logs"], key=position):
         if (
             row["address"].lower() == token
@@ -172,6 +178,11 @@ def paid_to(receipt, token: str, payee: str, after: int) -> int | None:
             and topic_address(row, 2) == payee
             and position(row)[1] > after
         ):
+            if sender is not None and topic_address(row, 1) != sender:
+                raise DataError(
+                    "accounting",
+                    f"Across slow fill {receipt['transactionHash']} was not paid by the SpokePool",
+                )
             return uint_data(row)
     return None
 

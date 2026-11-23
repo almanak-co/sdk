@@ -34,7 +34,17 @@ class AcrossProjection:
 
     @staticmethod
     def report(state):
-        return {"transfers": [t.model_dump(mode="json") for t in state.transfers]}
+        # A refund-leaf payment that matched no transfer is listed with its evidence:
+        # it is in the wallet, attributed to nothing.
+        unattributed = [
+            {"block": page.end.number, **page.unsolicited.model_dump(mode="json")}
+            for page in getattr(state, "external_scans", ())
+            if page.unsolicited is not None
+        ]
+        return {
+            "transfers": [t.model_dump(mode="json") for t in state.transfers],
+            "unattributed_refund_payments": unattributed,
+        }
 
 
 def connector():
