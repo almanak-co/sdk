@@ -843,8 +843,9 @@ approval, and never later than twice that after the observed block. Its minimum
 output is still the one of the first quote. Once the first window has passed, the pool
 must also still quote at least that minimum, or nothing more is signed. A swap refused
 for time or for that quote reports `stale_plan` with the block and the window that
-ended, and says that the approval stands; the same command run again spends that
-approval and needs one step. The gateway applies this window when it plans and signs.
+ended. When the pool's allowance equals the stated amount it says that the allowance
+stands: the same command run again spends it and needs one step. An allowance of any
+other amount is not named, and the same command resets it and approves again. The gateway applies this window when it plans and signs.
 It is not enforced on chain.
 
 The wallet must hold the amount. `position_before` and `position_after` list the

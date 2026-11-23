@@ -35,7 +35,8 @@ that mined the approval, and never later than twice that many after the observed
 block. Its minimum output stays the one of the request's quote. Planned or signed
 after the request's own window, it also needs the pool to quote at least that minimum
 for the stated amount at that block; otherwise nothing is signed. A refusal for time
-or for that quote names the block and the bound, and says that the approval stands.
+or for that quote names the block and the bound, and says that the approval stands
+when the allowance equals the stated amount, which the same request then spends.
 Once signed, the bytes stay valid until
 they are mined or the wallet's nonce is used by another transaction. However long ago
 they were signed, `almanak ax recover` reconciles their receipt or, when no provider

@@ -33,20 +33,30 @@ def deadline(intent, before, allocation, limit=None):
             "stale_plan",
             "retained deadline expired or exceeds configured policy: block"
             f" {block.number} at time {block.timestamp} is outside the {window}s"
-            f" `deadline_seconds` window that ends at {limit}" + standing(before),
+            f" `deadline_seconds` window that ends at {limit}" + standing(intent, before),
         )
 
 
-def standing(before) -> str:
-    """What a refusal says of the allowances the pool holds at the refused block."""
-    held = [value for value in before.allowances if value.amount]
+def standing(intent, before) -> str:
+    """What a refusal says of the allowances the request spends at the refused block.
+
+    It names only an allowance equal to what the intent spends of that coin, which the
+    same request stated again spends as it is. Any other allowance is reset and
+    approved again (`planning.approval`), so it is not named. Only when every coin the
+    intent spends is covered does it say that no other approval is needed.
+    """
+    spent = {value.asset: value.amount for value in spending(intent, before) if value.amount}
+    granted = {value.asset: value.amount for value in before.allowances}
+    held = [(asset, amount) for asset, amount in spent.items() if granted.get(asset) == amount]
     if not held:
         return ""
-    listed = ", ".join(f"{value.amount} of {value.asset}" for value in held)
-    return (
-        f"; the pool's allowance of {listed} stands, and the same request stated again"
-        " spends it without another approval"
-    )
+    listed = ", ".join(f"{amount} of {asset}" for asset, amount in held)
+    if len(held) == len(spent):
+        return (
+            f"; the pool's allowance of {listed} stands, and the same request stated again"
+            " spends it without another approval"
+        )
+    return f"; the pool's allowance of {listed} stands, which the same request stated again spends"
 
 
 def fresh_quote(intent, seen, allocation):
@@ -76,7 +86,7 @@ def fresh_quote(intent, seen, allocation):
         f"the request's {allocation.deadline_seconds}s `deadline_seconds` window ended at"
         f" {intent.deadline}, and at block {block.number} (time {block.timestamp}) the pool"
         f" {found} for the stated amount, below the request's minimum output"
-        f" {minimum.amount}" + standing(seen),
+        f" {minimum.amount}" + standing(intent, seen),
     )
 
 

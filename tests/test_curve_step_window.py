@@ -18,7 +18,7 @@ import pytest
 from almanak.connectors.composition import connector_from_wire
 from almanak.connectors.curve import direct as curve_direct
 from almanak.connectors.curve import liquidity_quotes, planning
-from almanak.connectors.curve.validation import validate_current, validate_operation
+from almanak.connectors.curve.validation import standing, validate_current, validate_operation
 from almanak.connectors.direct import ALLOCATION
 from almanak.gateway.ethereum import DataError
 from tests.curve_slow_chain import AMOUNT, QUOTED, SlowChain
@@ -294,10 +294,16 @@ def test_a_deposit_follows_its_last_mined_approval_and_keeps_its_minimum_shares(
         return liquidity.observation(late, config, owned, allowances=granted)
 
     first, last = wanted
-    in_time = step(observed(WINDOW - 1, {first: wanted[first]}))
+    in_time = step(observed(WINDOW - 11, {first: wanted[first]}))
     assert (in_time.kind, in_time.asset) == ("approve", last)
-    with pytest.raises(DataError, match=f"window that ends at {intent.deadline}"):
+    with pytest.raises(DataError, match=f"window that ends at {intent.deadline}") as refused:
         step(observed(WINDOW, {first: wanted[first]}))
+    # Only the first coin is approved: the refusal names it, and does not say that the
+    # same request needs no other approval.
+    message = str(refused.value)
+    assert f"the pool's allowance of {wanted[first]} of {first} stands" in message
+    assert "which the same request stated again spends" in message
+    assert "without another approval" not in message and str(last) not in message
 
     # The last approval is mined 10 s before the request's window ends.
     mined = observed(WINDOW - 10, dict(wanted))
@@ -324,3 +330,26 @@ def test_a_deposit_follows_its_last_mined_approval_and_keeps_its_minimum_shares(
     deciding.outcomes = ()
     with pytest.raises(DataError, match=f"window that ends at {intent.deadline}"):
         step(observed(WINDOW + 60, dict(wanted)))
+
+
+def test_a_refusal_names_only_an_allowance_the_request_spends_as_it_is():
+    chain = SlowChain(MARKET, **SLOW)
+    intent = curve_direct.intent(chain.config, chain.observe(), chain.stated)
+    sold, bought = MARKET.sold, MARKET.bought
+
+    def seen(granted):
+        values = (SimpleNamespace(asset=asset, amount=amount) for asset, amount in granted.items())
+        return SimpleNamespace(allowances=tuple(values), owned=None, exit_quotes=())
+
+    exact = standing(intent, seen({sold: AMOUNT, bought: 0}))
+    assert exact == (
+        f"; the pool's allowance of {AMOUNT} of {sold} stands, and the same request stated"
+        " again spends it without another approval"
+    )
+    # A different allowance of the sold coin is reset and approved again, and an
+    # allowance of a coin the swap does not spend is not the request's.
+    assert standing(intent, seen({sold: AMOUNT + 5, bought: 0})) == ""
+    assert standing(intent, seen({sold: 0, bought: AMOUNT})) == ""
+    # An intent that spends no coin, as a removal, names no allowance.
+    removal = SimpleNamespace(kind="close_pool_liquidity")
+    assert standing(removal, seen({sold: AMOUNT, bought: AMOUNT})) == ""

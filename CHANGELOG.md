@@ -73,7 +73,9 @@ its changelog is on the `v2` branch.
   is signed only while the pool still quotes at least the request's minimum output. No
   Curve call carries a deadline, so this is the gateway's bound, not the chain's (#41).
 - A Curve `stale_plan` refusal names the block, its time, the window and when it
-  ended, and says when an allowance stands that the same request spends.
+  ended. It names an allowance that stands only when it equals what the same request
+  spends of that coin, and says that the request stated again needs no other approval
+  only when every coin it spends is covered.
 
 ## [3.4.2] - 2026-11-26
 
