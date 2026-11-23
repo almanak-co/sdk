@@ -101,6 +101,7 @@ def test_provider_fault_lane_runs_required_recovery_suites():
         f"{proofs}::test_an_unfilled_transfer_is_refunded_only_after_the_destination_proves_it",
         f"{proofs}::test_a_coordinator_killed_after_the_deposit_sends_no_second_one",
         f"{proofs}::test_the_source_bridges_while_the_destination_is_unavailable",
+        "tests/strategy_fork/test_composed_bridge.py",
     )
 
 
