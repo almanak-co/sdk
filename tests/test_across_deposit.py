@@ -386,6 +386,10 @@ def test_a_signed_deposit_is_rechecked_at_the_current_block():
         before=snapshot(), operation=RevokeOperation(target=TARGET, final=True)
     )
     execution.validate_current(backend(), revoke, paused)
+    # Tokens that left the fund after signing do not hold a revocation back.
+    execution.validate_current(backend(), revoke, snapshot(wallet_balance=1))
+    with pytest.raises(DataError):
+        execution.validate_current(backend(), revoke, snapshot(allowance=1))
 
 
 def test_simulation_results_are_checked_per_step():
