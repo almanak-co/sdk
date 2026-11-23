@@ -15,6 +15,7 @@ from almanak.connectors.across.api import (
     BridgeIntent,
     Parameters,
     RefundResult,
+    RevokeBridgeIntent,
 )
 
 ALLOCATION = "move"
@@ -34,6 +35,9 @@ class State(StrategyState):
     returned: int | None = None
     # A step of the bridge failed; nothing is sent again.
     failed: bool = False
+    # The revoke of a standing approval failed. A running strategy does not ask again;
+    # teardown does.
+    revoke_failed: bool = False
 
 
 def state(context) -> State:
@@ -65,8 +69,9 @@ def decide(context):
         # The destination chain's turn: it observes no bridge allocation and sends nothing.
         return context.decision(reason=progress(memory))
     if context.teardown or memory.failed:
-        # A bridge clears its own approval. One whose deposit never was mined is left.
-        if observed.allowance:
+        # A bridge clears its own approval. One whose deposit never was mined is left:
+        # a failed bridge asks to clear it once, and teardown asks until it is cleared.
+        if observed.allowance and (context.teardown or not memory.revoke_failed):
             return context.decision(intent=context.actions.revoke(ALLOCATION))
         return context.decision(reason=progress(memory))
     if memory.sent is None:
@@ -81,6 +86,8 @@ def progress(memory: State) -> str:
         return "Arrived on the destination account; nothing left to do"
     if memory.returned is not None:
         return "Refunded to the source account; nothing left to do"
+    if memory.revoke_failed:
+        return "A bridge step failed and its approval still stands; teardown clears it"
     if memory.failed:
         return "A bridge step failed; nothing is sent again"
     if memory.sent is not None:
@@ -98,8 +105,11 @@ def on_outcome(context):
 
 
 def on_action(memory: State, result: ActionResult):
+    revoke = isinstance(result.intent, RevokeBridgeIntent)
     if result.status == "failed":
-        return memory.updated(failed=True)
+        return memory.updated(failed=True, revoke_failed=revoke or memory.revoke_failed)
+    if revoke:
+        return memory.updated(revoke_failed=False)
     if isinstance(result.intent, BridgeIntent) and result.transfer is not None:
         return memory.updated(sent=result.sent.amount)
     return memory
