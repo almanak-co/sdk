@@ -297,8 +297,10 @@ class OperatorRuntime(Runtime):
         transaction: the gateway signs the recorded plan's own call, nonce, gas and gas
         price, and the plan cannot change, since replacing it means discarding it, which
         ends an operator request. A signature made before the failure is in no record
-        and is never sent, because only a recorded signed step is. Of two signatures of
-        one transaction only one can be mined. The gateway checks the plan at every
+        and is never sent, because only a recorded signed step is. A direct command
+        signs with the local keystore, whose signature of one transaction is always the
+        same bytes; of two different signatures of one transaction only one could be
+        mined. The gateway checks the plan at every
         signature as it does at the first: its observation's age, the state it rests
         on, the fee ceilings and the margin before a calldata deadline. A refusal there
         ends the command at once. No fee-replacement candidate exists at this point:

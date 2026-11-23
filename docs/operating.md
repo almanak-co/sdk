@@ -1001,8 +1001,10 @@ recorded outcome is delivered once.
 
 Once the step's plan is recorded, a repeated check signs that same plan again. The
 plan cannot change while the request lasts, so both signatures are of one
-transaction, with the same call, nonce, gas and gas price, and only one of them can
-be mined. A signature made before the failure is in no record, and the command sends
+transaction, with the same call, nonce, gas and gas price. A direct command signs
+with the local keystore, which signs one transaction to the same bytes every time,
+and of two different signatures of one transaction only one could be mined. A
+signature made before the failure is in no record, and the command sends
 only a signed step it has recorded, so nothing unrecorded is sent. The gateway
 checks the plan at every signature as it does at the first: the age of its
 observation, the state it rests on, the fee ceilings and the time left before a
