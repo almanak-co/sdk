@@ -434,29 +434,23 @@ def test_a_nonce_that_is_only_occupied_keeps_the_signed_step(desk):
     assert (state.pending, state.superseded, asked) == (pending, (), [pending])
 
 
-def not_final(pending):
-    from almanak.gateway.consumed_nonce import refused
-
-    raise refused("not consumed at the finalized block", ask_again=True)
-
-
-def test_recovery_does_not_wait_for_a_proof_that_is_not_final_yet(desk):
-    """One recovery asks once: the refusal the gateway marks as open to waiting ends it
-    as any other does, and the caller asks again when it chooses to."""
-    pending, asked = nonce_taken(desk, not_final)
-    with pytest.raises(DataError, match="not consumed at the finalized block") as refusal:
-        desk.runtime().recover()
-    state = desk.store.load()
-    assert refusal.value.kind == "nonce_conflict"
-    assert (state.pending, state.superseded, asked) == (pending, (), [pending])
+# What the proof answers about a step's own transaction that was just mined: above the
+# finalized block, inside it, on a network that states no finality margin, and served
+# by the proof's own receipt read.
+OWN_STEP_REFUSALS = [
+    ("nonce_conflict", "is not consumed at the finalized block"),
+    ("inconsistent", "the recorded transaction is in block 200 but has no receipt"),
+    ("nonce_conflict", "states no finality margin"),
+    ("nonce_conflict", "a mined transaction is resolved only by its recorded outcome"),
+]
 
 
-def lagging_reads(desk, misses):
+def lagging_reads(desk, misses, refusal):
     """Serve each mined step's receipt and transaction only after `misses` ticks.
 
     The account's count already includes the step, as on an endpoint whose nodes do not
     all hold a block that was just mined, so asking for the broadcast again answers
-    `nonce_conflict` and the proof that the nonce is not consumed at the finalized block.
+    `nonce_conflict` and the proof refuses with `refusal`.
     """
     receipt, broadcast, missed, asked = desk.gateway.receipt, desk.gateway.broadcast, {}, []
 
@@ -473,15 +467,16 @@ def lagging_reads(desk, misses):
 
     def superseded(pending):
         asked.append(pending.tx_hash)
-        not_final(pending)
+        raise DataError(*refusal)
 
     desk.gateway.receipt, desk.gateway.broadcast = lagging_receipt, lagging_broadcast
     desk.gateway.superseded = superseded
     return asked
 
 
-def test_execution_waits_for_a_mined_step_the_endpoint_does_not_serve_yet(desk):
-    asked = lagging_reads(desk, misses=3)
+@pytest.mark.parametrize("refusal", OWN_STEP_REFUSALS)
+def test_execution_waits_for_a_mined_step_the_endpoint_does_not_serve_yet(desk, refusal):
+    asked = lagging_reads(desk, 3, refusal)
     runtime = desk.runtime()
     runtime.submit(desk.intent("supply"), REQUEST)
     outcomes = runtime.execute()
@@ -494,41 +489,95 @@ def test_execution_waits_for_a_mined_step_the_endpoint_does_not_serve_yet(desk):
     assert runtime.refused is None
 
 
-def test_execution_stops_waiting_for_a_proof_after_its_bound(desk, monkeypatch):
-    """A nonce another transaction holds without becoming final ends the command as
-    before: `nonce_conflict`, with the signed step still recorded."""
-    from almanak import operator_runtime
+def slow_proof(desk, refusal, seconds=25.0):
+    """A proof that takes `seconds` on the returned clock and then refuses."""
+    clock = [0.0]
 
-    seconds = [0.0]
+    def unproven(pending):
+        clock[0] += seconds
+        raise DataError(*refusal)
 
-    def slow_and_not_final(pending):
-        seconds[0] += 25
-        not_final(pending)
-
-    pending, asked = nonce_taken(desk, slow_and_not_final)
-    monkeypatch.setattr(operator_runtime.time, "monotonic", lambda: seconds[0])
+    pending, asked = nonce_taken(desk, unproven)
     runtime = desk.runtime()
+    runtime.monotonic = lambda: clock[0]
+    return runtime, clock, pending, asked
+
+
+@pytest.mark.parametrize("refusal", [*OWN_STEP_REFUSALS, ("inconsistent", "try again")])
+def test_execution_stops_waiting_for_a_proof_after_its_bound(desk, refusal):
+    """A nonce another transaction holds without a proof ends the command as before:
+    the proof's refusal, with the signed step still recorded."""
+    runtime, _, pending, asked = slow_proof(desk, refusal)
     assert runtime.proof_wait == 60.0
-    with pytest.raises(DataError, match="not consumed at the finalized block") as refusal:
+    with pytest.raises(DataError, match=refusal[1]) as ended:
         runtime.execute()
     state = desk.store.load()
-    assert refusal.value.kind == "nonce_conflict"
-    # Held at 0, 25 and 50 seconds after the first answer, and ended at 75.
-    assert (state.pending, state.superseded, asked) == (pending, (), [pending] * 4)
+    # The ticks that ended in the refusal took 25, 50 and then 75 seconds.
+    assert ended.value.kind == refusal[0]
+    assert (state.pending, state.superseded, asked) == (pending, (), [pending] * 3)
     assert desk.gateway.broadcasts == []
 
 
-@pytest.mark.parametrize(
-    "message", ["states no finality margin", "holds no single transaction of submitter"]
-)
-def test_execution_does_not_wait_for_a_proof_that_waiting_cannot_change(desk, message):
+def test_held_transient_failures_between_proofs_do_not_spend_the_bound(desk):
+    """A throttled read is held without limit, as before, and its time is not the
+    proof's. Each refused proof still spends its own tick, so the wait ends."""
+    runtime, clock, pending, asked = slow_proof(desk, OWN_STEP_REFUSALS[0])
+    reads = []
+
+    def throttled_every_other_read(pending):
+        reads.append(pending)
+        if len(reads) % 2:
+            clock[0] += 100
+            raise DataError("rpc", "throttled", code=429, transient=True)
+
+    desk.gateway.receipt = throttled_every_other_read
+    with pytest.raises(DataError, match="not consumed at the finalized block"):
+        runtime.execute()
+    assert (len(reads), asked, clock[0]) == (6, [pending] * 3, 375.0)
+    assert desk.store.load().pending == pending
+
+
+def test_execution_drops_the_step_when_the_proof_arrives_within_the_wait(desk):
+    """Only the full proof drops the step, and the wait does not stand in its way."""
+    answers = iter([None, None])
+
+    def later(pending):
+        if next(answers, pending) is None:
+            raise DataError("nonce_conflict", "is not consumed at the finalized block")
+        return superseded_evidence(pending)
+
+    pending, _ = nonce_taken(desk, later)
+    assert desk.runtime().execute() == ()
+    state = desk.store.load()
+    assert (state.pending, state.superseded) == (None, (superseded_evidence(pending),))
+    assert desk.gateway.broadcasts == []
+
+
+def test_a_refusal_outside_the_proof_is_not_waited_for(desk):
+    pending, asked = nonce_taken(desk, superseded_evidence)
+
+    def unsendable(pending):
+        raise DataError("signed_attempt_unsendable", "current validation refuses it")
+
+    desk.gateway.broadcast = unsendable
+    with pytest.raises(DataError, match="current validation refuses it"):
+        desk.runtime().execute()
+    assert (desk.store.load().pending, asked) == (pending, [])
+
+
+@pytest.mark.parametrize("refusal", OWN_STEP_REFUSALS)
+def test_recovery_does_not_wait_for_a_refused_proof(desk, refusal):
+    """One recovery asks once and the caller asks again when it chooses to."""
+
     def unproven(pending):
-        raise DataError("nonce_conflict", message)
+        raise DataError(*refusal)
 
     pending, asked = nonce_taken(desk, unproven)
-    with pytest.raises(DataError, match=message):
-        desk.runtime().execute()
-    assert (desk.store.load().pending, asked) == (pending, [pending])
+    with pytest.raises(DataError, match=refusal[1]) as ended:
+        desk.runtime().recover()
+    state = desk.store.load()
+    assert (ended.value.kind, ended.value.details) == (refusal[0], None)
+    assert (state.pending, state.superseded, asked) == (pending, (), [pending])
 
 
 def test_a_proof_that_names_another_step_is_refused(desk):

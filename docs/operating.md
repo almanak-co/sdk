@@ -1068,12 +1068,20 @@ Otherwise the record stays and `resolved` is false:
 A command that runs with `--execute` asks for the same proof when a step it waits on
 has no receipt and the wallet's count is past the step's nonce. That is also what the
 step's own transaction looks like just after it is mined, while not every node of the
-endpoint serves it yet. So when the proof answers that the nonce is not consumed at the
-`finalized` block, or that the transaction that took it is within the margin, the
-command reads the receipt again, and keeps asking for 60 seconds per step. After that
-it ends with `nonce_conflict` and keeps the record, as `ax recover` does on its first
-such answer. The other refusals end the command at once. Nothing is dropped, planned
-or sent while it asks.
+endpoint serves it yet, and the proof then refuses in one of the ways above: the nonce
+is not consumed at the `finalized` block, the block holds the recorded transaction
+itself, or the network states no margin. So the command does not end on a refused
+proof at once. It reads the receipt again and asks again, until the checks that ended
+in such a refusal have taken 60 seconds for that step, each counted with the pause
+after it. Time spent on a held provider failure in between is not counted. After that
+the command ends with the last refusal and keeps the record, as `ax recover` does on
+its first one. The cost is that a refusal no wait can change, such as a network
+without a margin whose nonce another transaction did take, ends the command up to
+that much later. While it asks, the step stays recorded and nothing new is planned or
+signed. Each check may send the same signed bytes again, as every check without a
+receipt does, and only the full proof drops the step: where the transaction that took
+the nonce becomes final within the wait, as it can on Avalanche, the command ends with
+the step under `released_consumed_nonce`.
 
 This check runs in the gateway process and is not enforced on chain. It rests on one
 endpoint's report of its head, its finalized block and that block's transactions. An
