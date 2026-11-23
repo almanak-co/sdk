@@ -448,11 +448,11 @@ uv run --locked python -m scripts.live_qa reads --output artifacts/live-reads \
 
 Cases. `scripts/live_qa/read_cases.py` names known markets and public contracts.
 On Ethereum and Avalanche: native and ERC-20 balances, Aave V4, Aave V3,
-SparkLend, Compound V3 and Morpho Blue reserves and listings, Uniswap V3 and V4
-pools and GMX V2 markets. On every other chain of the reviewed list, taken from
-the SDK's own network record so that a newly listed chain is covered without an
-edit: the native balance, and the wrapped-native Aave V3 reserve where Aave V3
-has a Pool. Beside them, a HyperCore market and the refusals a public endpoint
+SparkLend and Morpho Blue reserves and listings, a Compound V3 reserve, Uniswap
+V3 and V4 pools and GMX V2 markets. On every other chain of the reviewed list,
+taken from the SDK's own network record so that a newly listed chain is covered
+without an edit: the native balance, and the wrapped-native Aave V3 reserve where
+Aave V3 has a Pool. Beside them, a HyperCore market and the refusals a public endpoint
 must give (a vendor-key lookup, a chain the named endpoint does not serve, and
 HyperEVM, which no endpoint serves). Each case states the correct
 behavior. Where practical its output is compared with direct `eth_call`,
