@@ -17,6 +17,17 @@ its changelog is on the `v2` branch.
   transport, such as `ax recover --record <path> --public-rpc blastapi` (#42).
 
 ### Fixed
+- A direct action run with `--execute` no longer ends over one failed read between two
+  of its steps once a step is mined. A transient provider or storage failure was held
+  only while a signed step was unresolved, so between a reconciled step and the next
+  signature it ended the command with exit 1, the approvals standing and no position.
+  The command now runs the check again until the next signed step is recorded, for at
+  most 60 seconds per request counted over the checks that ended in such a failure,
+  and then ends as before, with a message that says the mined steps stand. A check
+  repeated at signing signs the same recorded plan again: both signatures are of one
+  transaction, only one can be mined, and nothing unrecorded is sent. A failure before
+  any step is mined and a refusal that waiting cannot change still end the command at
+  once, and `ax recover` is unchanged (#42).
 - A direct action run with `--execute` no longer ends over its own step that was just
   mined. When the endpoint served neither the receipt nor the transaction of that step
   in one check, the command took the wallet's advanced count for another transaction

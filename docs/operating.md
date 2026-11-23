@@ -494,6 +494,8 @@ fails the command with that refusal and signs nothing.
 Standard output carries one JSON document, the result. Events and the error are
 JSON lines on standard error. While a signed step is unresolved, a transient
 provider or storage failure is held and asked again instead of ending the command.
+So is one [between two steps](#a-failure-between-two-steps) of a request that has
+a mined step, for at most 60 seconds.
 An outcome lists `accounting_issues` when the step does not explain a wallet movement.
 
 `position_before` and `position_after` state the requested position in the
@@ -972,11 +974,64 @@ claim, once it can read the record and see that nothing is signed. That includes
 journal with no checkpoint yet, left by a command killed while creating it. A
 record that cannot be read at all is kept with its claim, and `record_kept` can
 name such a record. Do not kill a command that runs with `--execute`: it waits for each receipt
-without a time limit, and stops between steps on SIGINT, SIGTERM or SIGHUP. The one
-wait with a limit is for a [step whose nonce was used](#a-step-whose-nonce-was-used).
+without a time limit, and stops between steps on SIGINT, SIGTERM or SIGHUP. The
+waits with a limit are for a [step whose nonce was used](#a-step-whose-nonce-was-used)
+and for a [failure between two steps](#a-failure-between-two-steps).
 
 An action has no amount ceiling: it is bounded by the wallet's balance and the two
 fee ceilings.
+
+#### A failure between two steps
+
+An action of several steps, such as two approvals and a mint, plans, signs and
+reconciles one step at a time. Between a reconciled step and the recording of the
+next signed step the command delivers the recorded outcome, observes and plans the
+next step, signs it and records the signed bytes. A transient provider or storage
+failure there does not end the command once a step of the request is mined: ending
+would leave that step standing, such as an approval, without the rest of the action.
+The command runs the same check again, until the checks that ended in such a failure
+have taken 60 seconds for the request, each counted with the pause after it.
+Planning and signing share that one limit. Waiting for a receipt and every check
+that passes are not counted. A stop requested meanwhile is honoured before the next
+check.
+
+While the next step is not planned, a repeated check only reads and plans. A failed
+preparation recorded nothing, so the next one observes the wallet afresh, and a
+recorded outcome is delivered once.
+
+Once the step's plan is recorded, a repeated check signs that same plan again. The
+plan cannot change while the request lasts, so both signatures are of one
+transaction, with the same call, nonce, gas and gas price. A direct command signs
+with the local keystore, which signs one transaction to the same bytes every time,
+and of two different signatures of one transaction only one could be mined. A
+signature made before the failure is in no record, and the command sends
+only a signed step it has recorded, so nothing unrecorded is sent. The gateway
+checks the plan at every signature as it does at the first: the age of its
+observation, the state it rests on, the fee ceilings and the time left before a
+calldata deadline. These checks run in the gateway process and are not enforced on
+chain.
+
+The time held still runs down the request's calldata deadline, which is set when the
+request is observed: a step that carries one is refused as `stale_plan` when it is
+planned past the deadline or its recorded plan has aged past the accepted
+observation age, and as `deadline_margin` when less than half of
+`--deadline-seconds` is left at signing. Either refusal ends the command as it does
+without a hold, with the mined steps standing.
+
+The hold does not apply:
+
+- before any step of the request is mined. Nothing is on chain, so the failure ends
+  the command at once and stating it again costs nothing.
+- to a refusal the same request cannot pass later, such as a fee quote above a
+  ceiling, a revert in simulation, `stale_plan` or a signer's refusal.
+- to a plan that is not a chain transaction. No direct action plans one.
+- in `ax recover`, which plans and signs nothing.
+
+When the 60 seconds run out the command ends with the failure under `refused`, whose
+message says how many steps of the request are mined, and with those steps under
+`outcomes`. They stand. State the command again: it is planned against what the
+wallet holds now, so an allowance that an earlier approval set is read as it is. This
+hold runs in the command's own process and is not enforced on chain.
 
 #### A step whose nonce was used
 
