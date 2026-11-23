@@ -82,3 +82,16 @@ class BridgeIntent[Target: BridgeTarget](Model):
         if self.amount.asset != self.target.asset:
             raise ValueError("bridge amount must identify the target's sent asset")
         return self
+
+
+def arrival_wallet(target):
+    """The wallet asset a bridge target's transfers arrive in; None for any other target."""
+    from almanak.effects import WalletAsset
+
+    if not isinstance(target, BridgeTarget):
+        return None
+    return WalletAsset(
+        account=target.destination_account,
+        chain=target.destination_fund.chain,
+        asset=target.destination_asset,
+    )

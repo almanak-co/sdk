@@ -43,8 +43,8 @@ def quoted(backend, intent, before):
     return venue.fetch(intent.target, intent.amount.amount, transport, before.block.timestamp)
 
 
-def venue_transports() -> dict:
-    """What a production gateway asks: the venue's own API."""
+def venue_transports(config=None) -> dict:
+    """What a production gateway asks for this deployment: the venue's own API."""
     return {venue.QUOTE_VENUE: venue.HttpTransport()}
 
 

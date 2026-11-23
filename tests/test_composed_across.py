@@ -14,8 +14,14 @@ from pydantic import ValidationError
 from almanak import external_effects
 from almanak.connectors.across.observations import Ownership as AcrossOwnership
 from almanak.connectors.composed.authority import declared
-from almanak.connectors.composed.execution import ComposedExecution, validate_inventory
-from almanak.connectors.composed.inventory import ownership, validate
+from almanak.connectors.composed.execution import (
+    ComposedExecution,
+    held_snapshot,
+    held_wallets,
+    planned,
+    validate_inventory,
+)
+from almanak.connectors.composed.inventory import ownership, repayment_top_up, validate
 from almanak.connectors.composed.lifecycle import (
     ComposedLifecycle,
     component_state,
@@ -26,17 +32,24 @@ from almanak.connectors.composed.requests import ComposedExternalEffects
 from almanak.connectors.composed.state import Checkpoint
 from almanak.connectors.compound_v3.domain import Market, Reserve
 from almanak.connectors.compound_v3.models import Allocation as CompoundAllocation
-from almanak.connectors.compound_v3.operations import SupplyOperation
+from almanak.connectors.compound_v3.operations import RepayOperation, SupplyOperation
 from almanak.connectors.identifiers import ConnectorId
 from almanak.effects import Balance, WalletAsset
 from almanak.gateway import external_effects as gateway_effects
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm import native_asset
-from almanak.models import AssetAmount
+from almanak.models import AssetAmount, Model
 from almanak.strategy import StrategyDefinition
 from almanak.work import merge, project
 from tests.across_support import AMOUNT, BASE, BASE_USDC, BASE_WETH, USDC
-from tests.test_across_records import FORK_ARB, FORK_BASE, mined_deposit, observed
+from tests.test_across_records import (
+    FORK_ARB,
+    FORK_BASE,
+    deposit,
+    mined_deposit,
+    observed,
+    pending,
+)
 from tests.test_across_records import config as config  # noqa: F401 - a fixture
 from tests.test_across_settlement import (
     FILL_DEADLINE,
@@ -54,13 +67,13 @@ SOURCE = WalletAsset(account="arb", chain=FORK_ARB, asset=USDC)
 DESTINATION = WalletAsset(account="base", chain=FORK_BASE, asset=BASE_USDC)
 
 
-def earn(asset=BASE_USDC):
-    market = Market(chain=FORK_BASE, comet=COMET, base_asset=BASE_USDC, base_price_feed=FEED)
+def earn(asset=BASE_USDC, name="earn", account="base", chain=FORK_BASE, base=BASE_USDC):
+    market = Market(chain=chain, comet=COMET, base_asset=base, base_price_feed=FEED)
     return CompoundAllocation(
-        name="earn",
-        account="base",
+        name=name,
+        account=account,
         reserve=Reserve(market=market, asset=asset, price_feed=FEED),
-        native_asset=native_asset(BASE.chain_id),
+        native_asset=native_asset(chain.chain_id),
         minimum_native_balance=0,
     )
 
@@ -154,6 +167,14 @@ def test_a_bridge_names_both_funds_and_its_arrival_asset_must_be_held(config):  
             config,
             allocations=(*config.allocations, earn(BASE_WETH)),
             inventory=(balances()[0], Balance(key=elsewhere, amount=0)),
+        )
+    # Naming the delivered asset in the inventory does not make an allocation hold it:
+    # the cause reported is the bridge's, not a surplus inventory entry.
+    with pytest.raises(ValidationError, match="arrive in a wallet asset"):
+        composed(
+            config,
+            allocations=(*config.allocations, earn(BASE_WETH)),
+            inventory=(*balances(), Balance(key=elsewhere, amount=0)),
         )
     # A bridge alone has nothing on the receiving account that holds what arrives.
     with pytest.raises(ValidationError, match="arrive in a wallet asset"):
@@ -317,7 +338,172 @@ def test_planning_asks_the_component_quote_through_this_gateways_transport(
     fake = SimpleNamespace(config=state.config, venue_transports={})
     assert ComposedExecution.quoted_operation(fake, state, intent, observed(config)) == "planned"
     assert seen["config"] == state.config.component(ACROSS) and seen["intent"] == intent
-    assert set(ComposedExecution.venue_transports()) == set(execution.venue_transports())
+
+
+class Debt(Model):
+    borrowed_base: int
+
+
+class Wallet(Model):
+    """What a full repay reads of a Comet snapshot: the debt and the wallet balance."""
+
+    wallet_balance: int
+    account: Debt
+
+
+def indebted(across, **changes):
+    """The composed bridge with Comet debt in the bridged asset on both accounts."""
+    owe = earn(USDC, name="owe", account="arb", chain=FORK_ARB, base=USDC)
+    return composed(across, allocations=(*across.allocations, earn(), owe), **changes)
+
+
+def repay(state, allocation, bound):
+    target = state.config.target(allocation)
+    amount = AssetAmount(asset=target.asset, amount=bound)
+    return RepayOperation(target=target, amount=amount, full=True)
+
+
+def wallet(balance, debt):
+    return Wallet(wallet_balance=balance, account=Debt(borrowed_base=debt))
+
+
+def spent(state, allocation, amount):
+    """The top-up a mined full repay that spent `amount` books against the inventory."""
+    from types import SimpleNamespace
+
+    operation = repay(state, allocation, amount)
+    key = WalletAsset(
+        account=operation.target.account,
+        chain=operation.target.fund.chain,
+        asset=operation.target.asset,
+    )
+    outcome = SimpleNamespace(operation=operation, success=True)
+    return repayment_top_up(state.inventory, outcome, (SimpleNamespace(key=key, amount=-amount),))
+
+
+def test_a_full_repay_never_absorbs_a_mined_and_unrecorded_arrival(config):  # noqa: F811
+    """The fill is mined after the tick's scan found nothing and before the repay's
+    snapshot. The wallet holds it; no record does. A full repay of debt in that asset
+    reads only the retained inventory, so the arrival is credited once."""
+    retained, debt = 40, 100
+    state = checkpoint(
+        indebted(config), transfers=(flight(config),), inventory=balances(0, retained)
+    )
+    local = project(state, FORK_BASE)
+    assert held_wallets(local) == {SOURCE, DESTINATION}
+    before = wallet(retained + OFFERED, debt)
+    # Unheld, this repay would pass and book 60 of the arrival as an operator top-up.
+    free = local.model_copy(update={"transfers": ()})
+    validate_inventory(free, repay(state, "earn", debt), before)
+    assert spent(free, "earn", debt)[0].amount == debt - retained
+    with pytest.raises(DataError, match="not counted while a bridge transfer") as error:
+        validate_inventory(local, repay(state, "earn", debt), before)
+    assert error.value.kind == "repayment_funding"
+    # The lending component plans and validates from the wallet cut to the inventory.
+    target = state.config.target("earn")
+    assert held_snapshot(local, target, before).wallet_balance == retained
+    assert planned(local, target, before, lambda seen: seen.wallet_balance) == retained
+    # A repay the retained inventory covers proceeds, and absorbs nothing.
+    covered = wallet(retained + OFFERED, retained)
+    validate_inventory(local, repay(state, "earn", retained), covered)
+    assert spent(local, "earn", retained) == ()
+    # An approval standing from before the transfer opened cannot widen the repay.
+    with pytest.raises(DataError, match="standing repay approval"):
+        validate_inventory(local, repay(state, "earn", retained + 1), covered)
+    # The arrival is recorded once, and with it the top-up path works again.
+    chain = there()
+    filled(config, chain, chain.head + 1)
+    for _ in range(3):
+        state = settle(state, chain)
+    assert inventory(state)[DESTINATION] == retained + OFFERED
+    local = project(state, FORK_BASE)
+    assert held_wallets(local) == set() and held_snapshot(local, target, before) is before
+    topped = wallet(retained + OFFERED + 7, retained + OFFERED + 7)
+    validate_inventory(local, repay(state, "earn", retained + OFFERED + 7), topped)
+    assert spent(local, "earn", retained + OFFERED + 7)[0].amount == 7
+
+
+def test_a_full_repay_never_absorbs_a_mined_and_unrecorded_refund(config):  # noqa: F811
+    retained, debt = 40, 100
+    state = checkpoint(
+        indebted(config), transfers=(flight(config),), inventory=balances(retained, 0)
+    )
+    state = expire(state)
+    assert state.transfers[0].unfilled and state.transfers[0].open
+    local = project(state, FORK_ARB)
+    target = state.config.target("owe")
+    # The refund leaf paid the fund before the source scan recorded it.
+    before = wallet(retained + AMOUNT, debt)
+    with pytest.raises(DataError, match="not counted while a bridge transfer"):
+        validate_inventory(local, repay(state, "owe", debt), before)
+    assert held_snapshot(local, target, before).wallet_balance == retained
+    validate_inventory(local, repay(state, "owe", retained), wallet(retained + AMOUNT, retained))
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(state, chain)
+    refunded(config, chain, chain.head + 3, [AMOUNT])
+    state = settle(state, chain)
+    assert inventory(state)[SOURCE] == retained + AMOUNT
+    local = project(state, FORK_ARB)
+    assert held_wallets(local) == set()
+    validate_inventory(local, repay(state, "owe", debt), before)
+    assert spent(local, "owe", debt) == ()
+
+
+def test_a_deposit_another_chain_has_signed_holds_the_wallet_it_delivers_into(
+    config,  # noqa: F811
+):
+    """A signed deposit can be mined and filled before its outcome opens the transfer.
+    The destination chain's view names the wallet until then; nothing retains the name."""
+    signed = pending(config, deposit(config), observed(config))
+    state = checkpoint(indebted(config), inventory=balances(AMOUNT, 40))
+    signing = tuple(
+        work.model_copy(update={"pending": signed, "decision": signed.decision})
+        if work.chain == FORK_ARB
+        else work
+        for work in state.work
+    )
+    state = state.model_copy(update={"work": signing})
+    assert state.inbound == () and "inbound" not in state.model_dump(mode="json")
+    assert Checkpoint.model_validate_json(state.model_dump_json()) == state
+    local = project(state, FORK_BASE)
+    assert local.inbound == (DESTINATION,) and project(state, FORK_ARB).inbound == ()
+    with pytest.raises(DataError, match="not counted while a bridge transfer"):
+        validate_inventory(local, repay(state, "earn", 100), wallet(40 + OFFERED, 100))
+    # The view's field is not merged back, and a whole checkpoint cannot carry it.
+    assert merge(state, FORK_BASE, local).inbound == ()
+    with pytest.raises(ValidationError, match="never retained"):
+        Checkpoint.model_validate({**state.model_dump(), "inbound": (DESTINATION,)})
+
+
+def test_a_held_planner_names_the_hold_instead_of_a_top_up(config):  # noqa: F811
+    state = checkpoint(indebted(config), transfers=(flight(config),), inventory=balances(0, 40))
+    local, target = project(state, FORK_BASE), state.config.target("earn")
+
+    def refuse(seen):
+        raise DataError("repayment_funding", f"send the shortfall beyond {seen.wallet_balance}")
+
+    with pytest.raises(DataError, match="not counted while a bridge transfer"):
+        planned(local, target, wallet(500, 100), refuse)
+    # Unheld, the connector's own refusal and its top-up remedy stand.
+    free = local.model_copy(update={"transfers": ()})
+    with pytest.raises(DataError, match="send the shortfall beyond 500"):
+        planned(free, target, wallet(500, 100), refuse)
+
+
+def test_only_a_deployment_with_a_bridge_declares_the_venue_transport(config):  # noqa: F811
+    from almanak.connectors.across import execution
+
+    bridged = composed(config)
+    assert set(ComposedExecution.venue_transports(bridged)) == set(execution.venue_transports())
+    lending = bridged.component(COMPOUND)
+    alone = Config(
+        decision_trigger=bridged.decision_trigger,
+        accounts=lending.accounts,
+        allocations=(earn(),),
+        inventory=balances()[1:],
+        fork_bindings=tuple(b for b in bridged.fork_bindings if b.chain == FORK_BASE),
+    )
+    assert ComposedExecution.venue_transports(alone) == {}
 
 
 FATES = ("arrive", "refund", "wait")
@@ -328,10 +514,21 @@ def test_inventory_is_conserved_over_every_sequence_of_settlements(config, fates
     """Three equal transfers each arrive, are refunded or stay in flight, beside a
     refund-leaf payment that matches nothing. After every page, what the funds own in
     wallets plus what is in flight plus the fees arrivals paid equals what they began with.
+    Both funds also owe Comet debt in the bridged asset: whenever a wallet holds tokens
+    of a transfer that no page has recorded yet, a full repay reads only the inventory.
     """
     transfers = tuple(flight(config, serial) for serial in range(3))
-    state = checkpoint(composed(config), transfers=transfers, inventory=balances(source=0))
+    state = checkpoint(indebted(config), transfers=transfers, inventory=balances(source=0))
     total = 3 * AMOUNT
+
+    def held(current, chain, key, allocation, paid):
+        """`paid` is what transfers have paid this wallet on chain so far."""
+        unrecorded = paid - inventory(current)[key]
+        assert unrecorded >= 0
+        if unrecorded:
+            before = wallet(inventory(current)[key] + unrecorded, total)
+            seen = held_snapshot(project(current, chain), current.config.target(allocation), before)
+            assert seen.wallet_balance == inventory(current)[key]
 
     def conserved(current):
         in_flight = sum(t.sent.amount for t in current.transfers if t.open)
@@ -343,13 +540,16 @@ def test_inventory_is_conserved_over_every_sequence_of_settlements(config, fates
         assert sum(inventory(current).values()) + in_flight + fees == total
         assert Checkpoint.model_validate_json(current.model_dump_json()) == current
 
-    destination = there()
+    destination, paid = there(), 0
     for serial, fate in enumerate(fates):
         if fate == "arrive":
             filled(config, destination, destination.head + 1, serial, tx=f"0x{serial + 1:064x}")
+            paid += OFFERED
+        held(state, FORK_BASE, DESTINATION, "earn", paid)
         for _ in range(4):
             state = settle(state, destination)
             conserved(state)
+            held(state, FORK_BASE, DESTINATION, "earn", paid)
     arrived = fates.count("arrive")
     assert inventory(state) == {SOURCE: 0, DESTINATION: arrived * OFFERED}
     if "refund" in fates:
@@ -369,7 +569,9 @@ def test_inventory_is_conserved_over_every_sequence_of_settlements(config, fates
     if refunds:
         # "wait" transfers were proven unfilled too; the leaf pays only the refunded ones.
         refunded(config, source, source.head + 2, [refunds * AMOUNT])
+        held(state, FORK_ARB, SOURCE, "owe", refunds * AMOUNT)
         state = settle(state, source)
+        held(state, FORK_ARB, SOURCE, "owe", refunds * AMOUNT)
         conserved(state)
         assert inventory(state)[SOURCE] == refunds * AMOUNT
     assert inventory(state)[DESTINATION] == arrived * OFFERED

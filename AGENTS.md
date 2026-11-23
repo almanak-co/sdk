@@ -575,13 +575,33 @@ independently.
   sent asset. A transfer in flight is in no wallet's inventory. The measured
   arrival credits the destination account's inventory of the received asset,
   and the measured refund credits the source account's. Nothing spends the
-  offered amount: the gateway checks every spend against retained inventory,
-  which holds the amount only after its arrival is measured.
+  offered amount: the gateway checks every spend except a full repay against
+  retained inventory, which holds the amount only after its arrival is
+  measured. A full repay follows the rule below.
+- Proposed, not accepted: a full repay in a composed deployment may spend loan
+  asset sent to the fund beyond retained inventory, the operator top-up of
+  "Lending exits". While a wallet asset may hold tokens of a bridge transfer
+  that no record credits yet, a full repay of that wallet asset is held to
+  retained inventory: its funding check, its approval and its approved upper
+  bound all stay within it, so an arrival or a refund is never absorbed as a
+  top-up and credited again. A wallet asset is held while an open transfer
+  names it as source or destination, and, in a chain's view, while another
+  chain has planned or signed bridge work that delivers into it. The view's
+  `inbound` field is derived by the gateway from durable state and never
+  retained. Consequences: during the hold a full repay that retained inventory
+  covers proceeds, one it does not cover refuses with `repayment_funding`
+  naming the hold, a top-up counts only once the transfer is recorded as
+  arrived or refunded, with no restart, and a repay approval larger than
+  retained inventory that was standing before the hold refuses the repay until
+  then. The hold is not an author amount bound: it is derived from the
+  checkpoint and ends by evidence. It is a gateway check, not on-chain
+  enforcement. It is proven at component level only.
 - Current contract: composed `inventory` covers the sent asset on the source
   account and the received asset on the destination account, and another
   allocation on the destination account must hold the received asset, because
   only its observation measures that wallet. A configuration without either is
-  refused. Accepted consequence: a composed bridge cannot deliver to an account
+  refused, before resolution where the author file already names the assets
+  and at the resolved configuration otherwise. Accepted consequence: a composed bridge cannot deliver to an account
   that holds no other allocation.
 - Current contract: the composed checkpoint retains `transfers`, omitted while
   there are none, and its `external_scans` hold GMX liquidation pages and

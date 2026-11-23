@@ -591,8 +591,16 @@ The bridged amount then moves between the two accounts'
   arrival. A configuration without either is refused.
 - A mined deposit takes the sent amount out of the source account's owned
   inventory. While the transfer is in flight the amount is in neither
-  account's inventory. The gateway refuses any action on the destination
-  account sized from the bridge's offer, with `inventory_unavailable`.
+  account's inventory. The gateway refuses a supply, swap, liquidity or bridge
+  action on the destination account sized from the bridge's offer, with
+  `inventory_unavailable`.
+- A full repayment is the one action that may spend loan asset sent to the
+  fund beyond its owned inventory. While a transfer that has neither arrived
+  nor been refunded names a wallet asset as its source or destination, or
+  another chain has planned or signed a bridge that delivers into it, a full
+  repayment of that asset spends owned inventory only. One the inventory does
+  not cover is refused with `repayment_funding`, and continues without a
+  restart once the transfer is recorded as arrived or refunded.
 - The measured arrival adds `received` to the destination account's owned
   inventory, and another allocation there can spend it from its next decision.
   A measured refund adds `returned` back to the source account's.

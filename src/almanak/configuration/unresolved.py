@@ -376,19 +376,45 @@ def require_arrival_inventory(inputs: AuthorInputs, positions, declared):
     for name, value in positions.items():
         destination = getattr(value, "destination_account", None)
         asset = getattr(inputs.markets[value.market], "destination_asset", None)
-        if destination is None or (destination, asset) in declared:
+        if destination is None:
             continue
-        raise ConfigurationError(
-            f"composed inventory must cover what a bridge delivers; {name!r} delivers "
-            f"{asset} to fund {destination!r}",
-            field="inventory",
-            code="composed_inventory_incomplete",
-            remedy=(
-                f"Add an inventory entry for {asset} on account {destination!r}, with "
-                "quantity '0' when the strategy starts without it, and an allocation on "
-                "that account that holds the asset."
-            ),
-        )
+        if (destination, asset) not in declared:
+            raise ConfigurationError(
+                f"composed inventory must cover what a bridge delivers; {name!r} delivers "
+                f"{asset} to fund {destination!r}",
+                field="inventory",
+                code="composed_inventory_incomplete",
+                remedy=(
+                    f"Add an inventory entry for {asset} on account {destination!r}, with "
+                    "quantity '0' when the strategy starts without it, and an allocation on "
+                    "that account that holds the asset."
+                ),
+            )
+        if arrival_unheld(inputs, positions, destination, asset):
+            raise ConfigurationError(
+                f"a composed bridge must arrive in an asset that another allocation on the "
+                f"destination account holds; {name!r} delivers {asset} to fund "
+                f"{destination!r}, where no allocation holds it",
+                field=f"strategy.allocations.{name}.destination_account",
+                code="composed_arrival_unheld",
+                remedy=(
+                    f"Add an allocation on account {destination!r} that holds {asset}, or "
+                    "deliver to an account that has one."
+                ),
+            )
+
+
+def arrival_unheld(inputs: AuthorInputs, positions, account, asset) -> bool:
+    """Whether no position on the account can hold the asset.
+
+    Only that position's observation measures the wallet an arrival is credited to. A
+    pool position names its coins only after resolution, so one on the account leaves
+    the question to the resolved configuration.
+    """
+    holders = [value for value in positions.values() if value.account == account]
+    if any(asset in known_assets(inputs, value) for value in holders):
+        return False
+    return all(hasattr(inputs.markets[value.market], "asset") for value in holders)
 
 
 def require_chain_support(inputs: AuthorInputs):

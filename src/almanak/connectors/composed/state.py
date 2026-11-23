@@ -51,7 +51,7 @@ from almanak.connectors.uniswap_v3.models import Intent as ExchangeIntent
 from almanak.connectors.uniswap_v3.positions import Ownership as ExchangeOwnership
 from almanak.connectors.uniswap_v4 import state as v4
 from almanak.connectors.uniswap_v4.models import Intent as V4Intent
-from almanak.effects import Balance
+from almanak.effects import Balance, WalletAsset
 from almanak.gateway.permission_models import PermissionManifest
 from almanak.models import Model, UInt
 from almanak.strategy import StrategyDefinition
@@ -338,6 +338,9 @@ class Checkpoint(Model):
     # Value in flight between two of the deployment's chains: owned, and in no wallet's
     # inventory until its arrival or its refund is measured. Omitted while there is none.
     transfers: tuple[Transfer, ...] = Field(default=(), exclude_if=lambda value: not value)
+    # One chain's view only, never retained: this chain's wallet assets that a bridge
+    # deposit another chain has planned or signed, and not yet recorded, delivers into.
+    inbound: tuple[WalletAsset, ...] = Field(default=(), exclude_if=lambda value: not value)
     baseline: tuple[Observation, ...] = ()
     pending: Pending | None = None
     # Signed attempts released past their protocol deadline, kept as reconciliation evidence
@@ -390,6 +393,8 @@ class Checkpoint(Model):
         gmx.validate_request_history(self)
         gmx.validate_active_decisions(self)
         validate_transfers(self.transfers)
+        if self.work and self.inbound:
+            raise ValueError("inbound bridge work is one chain's view and is never retained")
         if any(
             self.config.target(page.target.allocation) != page.target
             for page in self.external_scans

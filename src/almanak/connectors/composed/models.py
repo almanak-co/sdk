@@ -120,15 +120,9 @@ def target_assets(target):
 
 def arrival_key(target) -> WalletAsset | None:
     """The wallet asset a bridge target's transfers arrive in; None for any other target."""
-    from almanak.bridge_intents import BridgeTarget
+    from almanak.bridge_intents import arrival_wallet
 
-    if not isinstance(target, BridgeTarget):
-        return None
-    return WalletAsset(
-        account=target.destination_account,
-        chain=target.destination_fund.chain,
-        asset=target.destination_asset,
-    )
+    return arrival_wallet(target)
 
 
 def configured_targets(config):
@@ -148,17 +142,18 @@ def validate_inventory(config, inventory):
     if len(set(keys)) != len(keys):
         raise ValueError("composed fund inventory cannot duplicate a wallet asset")
     held = inventory_keys(config)
-    if set(keys) != held:
-        raise ValueError("composed inventory must explicitly cover every configured fund asset")
     arrivals = {arrival_key(target) for target in configured_targets(config)} - {None}
     if not arrivals <= held:
         # An arrival is credited to owned inventory, which only an allocation on that
         # chain measures and spends. A bridge towards a wallet asset nothing holds
-        # would credit cash no observation covers.
+        # would credit cash no observation covers. Checked before the coverage of the
+        # inventory, which would otherwise report it as a surplus entry.
         raise ValueError(
             "a composed bridge must arrive in a wallet asset that an allocation on the "
             "destination account holds"
         )
+    if set(keys) != held:
+        raise ValueError("composed inventory must explicitly cover every configured fund asset")
 
 
 def component_for_allocation(config, name):

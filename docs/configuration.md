@@ -61,8 +61,12 @@ another market. One allocation is taken per source account and sent asset.
 When a bridge shares a strategy with another connector, `inventory` states the
 sent asset on the source account and the received asset on the destination
 account (quantity `'0'` when it starts without it), and another allocation on
-the destination account must hold the received asset. A file that names
-neither is refused with `composed_inventory_incomplete`.
+the destination account must hold the received asset. A file without the
+inventory entry is refused with `composed_inventory_incomplete`. A file whose
+destination account has no allocation that holds the received asset is refused
+with `composed_arrival_unheld`; where the only other allocation there is a pool,
+whose assets are known after resolution, the resolved configuration refuses it
+instead.
 
 `strategy.gas` names payer accounts, the chain, the quote source and the exact
 fee bounds. Production runs require it. Only `accounts`, `chain`,
