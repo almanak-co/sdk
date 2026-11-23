@@ -15,6 +15,7 @@ from almanak.connectors.across.receipts import movement, opened_transfer
 from almanak.connectors.erc20_approval import approval_succeeded
 from almanak.connectors.funding import funding_rows, summed
 from almanak.connectors.gas_lifecycle import GasLifecycle, KindCounts
+from almanak.gateway.environments import is_fork
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm_fees import charged_fees
 from almanak.models import AssetAmount
@@ -35,8 +36,23 @@ def expired(operation, block) -> bool:
     return isinstance(operation, DepositOperation) and block.timestamp > operation.deadline
 
 
+def quoted(backend, intent, before):
+    """The deposit's quote from its one source: the venue, or on an identified fork the
+    constructed quote its fork route names. A fork never asks the venue."""
+    amount = intent.amount.amount
+    if is_fork(intent.target.fund.chain):
+        constructed = getattr(backend, "fork_quote", None)
+        if constructed is None:
+            raise DataError(
+                "quote_unavailable",
+                "a fork run asks no venue, and this fork route names no constructed quote",
+            )
+        return constructed.quote(intent.target, amount, before.block.timestamp)
+    return venue.fetch(intent.target, amount, api_key=os.environ.get(API_KEY_ENV) or None)
+
+
 def quoted_operation(backend, state, intent, before):
-    """Plan the next step, asking the venue before the approval and for the deposit.
+    """Plan the next step, asking for a quote before the approval and for the deposit.
 
     The approval signs no quote, but one the gateway would refuse leaves no approval
     behind: the quote is asked and admitted first and then discarded. The deposit asks
@@ -46,9 +62,8 @@ def quoted_operation(backend, state, intent, before):
     if kind not in ("approve", "deposit"):
         return planning.operation(backend.config, state, intent, before)
     backend.guard()
-    amount = intent.amount.amount
-    quote = venue.fetch(intent.target, amount, api_key=os.environ.get(API_KEY_ENV) or None)
-    venue.admit(quote, intent.target, amount, before.pool, before.block.timestamp)
+    quote = quoted(backend, intent, before)
+    venue.admit(quote, intent.target, intent.amount.amount, before.pool, before.block.timestamp)
     return planning.operation(
         backend.config, state, intent, before, quote=quote if kind == "deposit" else None
     )

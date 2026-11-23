@@ -25,6 +25,7 @@ LP = (*SWAP, "open_liquidity", "collect_liquidity_fees", "close_liquidity")
 V3_SWAP = ("swap_exact_input", "exit_exchange")
 V3_LP = (*LP, "increase_liquidity", "decrease_liquidity")
 BAND_LP = ("swap_exact_input", "exit_exchange", "open_liquidity", "close_liquidity")
+BRIDGE = ("bridge", "revoke_bridge")
 GMX_POSITION = ("increase_position", "close_position")
 HYPERCORE = ("deposit", "set_leverage", "increase_position", "close_position", "withdraw")
 GMX_PATH = (*GMX_POSITION, "decrease_position")
@@ -194,6 +195,7 @@ REFERENCES = {
     "uniswap_v4_ethereum_native_trading": (SWAP, ("economic",)),
     "uniswap_v4_robinhood_lp": (LP, ("economic",)),
     "uniswap_v4_robinhood_lp_band": (BAND_LP, ()),
+    "across_usdc_arbitrum_base_bridge": (BRIDGE, ()),
 }
 # Candidate references remain in the bench denominator. They cannot satisfy a
 # declared obligation or turn a full run green before promotion and proof mapping.
@@ -354,7 +356,10 @@ def reference_scope(source):
     connectors = {ConnectorId(str(m.connector)) for m in inputs.markets.values()}
     if len(connectors) != 1:
         raise ValueError(f"{source.name}: a mapped reference needs one market connector")
-    return connectors.pop(), account_chains(inputs)
+    # An account that only receives a bridge is on a chain no position acts on: the
+    # reference proves nothing there.
+    acting = {market.chain for market in inputs.markets.values()}
+    return connectors.pop(), tuple(c for c in account_chains(inputs) if c in acting)
 
 
 def account_chains(inputs):

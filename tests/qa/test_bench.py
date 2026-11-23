@@ -27,7 +27,10 @@ def test_declared_matrix_and_new_chain_cannot_silently_lose_coverage():
     assert len(expected) > 0
     # Every reference proves EOA beside Safe/Roles, unless its connector declares only
     # Safe/Roles: HyperCore's Safe owns the account (blueprint 30).
-    assert {c.reference for c in cases if c.profile == "eoa"} == {
+    # Across declares only EOA accounts: the Roles grants of a bridge are not built.
+    eoa_only = {c.reference for c in cases if c.connector == ConnectorId("across")}
+    assert eoa_only == {"across_usdc_arbitrum_base_bridge"}
+    assert {c.reference for c in cases if c.profile == "eoa"} - eoa_only == {
         c.reference
         for c in cases
         if c.profile == "safe_roles" and c.connector != ConnectorId("hyperliquid")

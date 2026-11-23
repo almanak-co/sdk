@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Across bridge position",
+  "description": "A bridge between two named accounts of the strategy through one named Across market. The account sends on the market's chain; the destination account receives on the market's destination chain. One allocation per source account and sent asset. The source account is an EOA.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "market",
+    "account",
+    "destination_account",
+    "minimum_native_balance"
+  ],
+  "properties": {
+    "market": {
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "account": {
+      "description": "The named account that sends, on the market's chain.",
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "destination_account": {
+      "description": "The named account that receives, on the market's destination chain. Another account than the sender.",
+      "$ref": "../strategy.schema.json#/$defs/Name"
+    },
+    "capital": {
+      "description": "Optional amount of the sent asset the allocation starts with. The funding statement requires it before the first bridge. It is not a limit: how much to bridge is the strategy's decision. Defaults to zero.",
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    },
+    "minimum_native_balance": {
+      "description": "Native balance the source account's gas payer keeps, on the source chain.",
+      "$ref": "../strategy.schema.json#/$defs/Quantity"
+    }
+  }
+}

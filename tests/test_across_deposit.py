@@ -516,9 +516,6 @@ def test_a_safe_account_has_no_bridge_grants_yet():
     with pytest.raises(ValueError, match="no Roles grants yet"):
         AcrossPermissions.identities(None, "arb", None)
     binding = connector()
-    transfer = opened_transfer(deposit(), MINED)
-    report = binding.projection.report(state(transfers=(transfer,)))
-    assert report["transfers"][0]["reference"] == transfer.reference
     with pytest.raises(ValueError, match="no dashboard"):
         binding.projection.dashboard(state())
     assert (

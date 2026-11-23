@@ -232,13 +232,21 @@ def test_the_author_file_names_a_destination_account_on_the_destination_chain():
         parse_inputs(document(destination_account="nowhere"))
 
 
-def test_the_connector_is_bound_and_declares_no_run_mode_yet():
+def test_the_connector_declares_fork_runs_for_the_proven_source_chain_only():
     binding = connector_from_wire({"connector": "across"})
     assert connector_for(CONFIG).codec.checkpoint is binding.codec.checkpoint
+    source, destination = binding.support_for(ARBITRUM.chain_id), binding.support_for(BASE.chain_id)
+    assert (source.modes, destination.modes) == ((RunMode.FORK,), ())
+    assert source.account_profiles == destination.account_profiles == ("eoa",)
+    assert any("constructs the quote" in text for text in source.restrictions)
+    assert any("no run mode" in text for text in destination.restrictions)
+    binding.require_target(ARBITRUM.chain_id, TARGET, RunMode.FORK, account_profile="eoa")
+    with pytest.raises(ValueError, match="fork is unsupported"):
+        binding.require_target(BASE.chain_id, TARGET, RunMode.FORK)
     for chain in (ARBITRUM.chain_id, BASE.chain_id):
-        assert binding.support_for(chain).modes == ()
-        with pytest.raises(ValueError, match="fork is unsupported"):
-            binding.require_target(chain, TARGET, RunMode.FORK)
+        for mode in (RunMode.PRODUCTION, RunMode.BACKTEST):
+            with pytest.raises(ValueError, match="is unsupported"):
+                binding.require_target(chain, TARGET, mode)
     assert binding.codec.actions(SimpleNamespace(config=CONFIG)) is CONFIG
 
 

@@ -5,6 +5,7 @@ from pydantic import TypeAdapter
 from almanak.connectors.across.asset_effects import effects
 from almanak.connectors.across.authority import capability_codec
 from almanak.connectors.across.execution import AcrossExecution
+from almanak.connectors.across.fork import AcrossFork
 from almanak.connectors.across.lifecycle import AcrossLifecycle
 from almanak.connectors.across.models import Config, Intent, Parameters
 from almanak.connectors.across.observations import Snapshot
@@ -24,9 +25,35 @@ from almanak.connectors.across.support import candidate_support
 from almanak.connectors.interfaces import Codec, Connector
 
 
+def run_facts(state) -> dict:
+    """What every report states of a run: its mode, its evidence and what is unfinished.
+
+    `almanak shutdown` reads the mode: without it a closed run looks unfinished.
+    """
+    issues = [
+        {"tx_hash": o.tx_hash, "issues": list(o.accounting_issues)}
+        for o in state.outcomes
+        if o.accounting_issues
+    ]
+    return {
+        "schema_version": state.schema_version,
+        "connector": "across",
+        "deployment_id": state.deployment_id,
+        "strategy": {"filename": state.strategy.filename, "sha256": state.strategy.sha256},
+        "mode": state.mode,
+        "execution_environment": "production" if state.config.production else "fork",
+        "evidence_status": "invalidated" if state.integrity_error else "recorded",
+        "integrity_error": state.integrity_error,
+        "transaction_accounting_complete": not issues,
+        "accounting_issues": issues,
+        "memory": state.memory.model_dump(mode="json"),
+        "undelivered_outcomes": len(state.outcomes) - state.delivered,
+    }
+
+
 class AcrossProjection:
-    """Reports state each transfer and how it ended; a dashboard follows with the
-    reference strategy."""
+    """Reports state the run and each transfer with how it ended. There is no
+    dashboard projection yet."""
 
     @staticmethod
     def dashboard(state, *, captured_at=None):
@@ -42,6 +69,7 @@ class AcrossProjection:
             if page.unsolicited is not None
         ]
         return {
+            **run_facts(state),
             "transfers": [t.model_dump(mode="json") for t in state.transfers],
             "unattributed_refund_payments": unattributed,
         }
@@ -74,6 +102,5 @@ def connector():
         permissions=AcrossPermissions(),
         projection=AcrossProjection(),
         external_effects=ExternalEffects(),
-        # The fork lifecycle fixture arrives with the reference strategy.
-        fork=None,
+        fork=AcrossFork(),
     )

@@ -49,6 +49,9 @@
       },
       {
         "$ref": "markets/hyperliquid.schema.json"
+      },
+      {
+        "$ref": "markets/across.schema.json"
       }
     ]
   }

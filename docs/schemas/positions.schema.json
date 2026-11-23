@@ -41,6 +41,9 @@
     },
     {
       "$ref": "positions/hyperliquid.schema.json"
+    },
+    {
+      "$ref": "positions/across.schema.json"
     }
   ]
 }
