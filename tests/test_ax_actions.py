@@ -1148,7 +1148,7 @@ def test_a_record_on_a_delisted_endpoint_stays_kept_until_a_transport_is_named(
     proved, opened = [], []
 
     class Reader:
-        def __init__(self, chain, endpoint):
+        def __init__(self, chain, endpoint, **options):
             proved.append(endpoint)
 
         def __enter__(self):
