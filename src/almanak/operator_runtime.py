@@ -300,7 +300,11 @@ class OperatorRuntime(Runtime):
         spends none of it. Then the failure ends the command, and says that the
         mined steps stand.
         """
-        state = self.journal.load()
+        try:
+            state = self.journal.load()
+        except DataError:
+            # The checkpoint cannot be read either; the failure that was met ends it.
+            raise exc from None
         mined = mined_steps(state)
         if not mined or state.plan is not None or state.pending is not None:
             return False

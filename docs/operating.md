@@ -986,7 +986,7 @@ fee ceilings.
 An action of several steps, such as two approvals and a mint, plans, signs and
 reconciles one step at a time. Between a reconciled step and the next signature the
 command delivers the recorded outcome, then observes and plans the next step. A
-transient provider or storage failure there no longer ends the command once a step
+transient provider or storage failure there does not end the command once a step
 of the request is mined: ending would leave that step standing, such as an approval,
 without the rest of the action. The command runs the same check again, until the
 checks that ended in such a failure have taken 60 seconds for the request, each

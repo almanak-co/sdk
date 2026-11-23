@@ -814,3 +814,18 @@ def test_a_strategy_coordinator_never_drops_a_step_for_its_nonce(desk):
     with pytest.raises(DataError, match="occupies the recorded nonce"):
         strategy.resolve_pending(pending)
     assert (desk.store.load().pending, asked) == (pending, [])
+
+
+def test_a_checkpoint_that_cannot_be_read_ends_with_the_failure_that_was_met(desk):
+    """The hold reads the checkpoint; when that fails too, the first failure is kept."""
+    from types import SimpleNamespace
+
+    def unreadable():
+        raise DataError("gateway_unavailable", "storage unavailable")
+
+    runtime = desk.runtime()
+    runtime.journal = SimpleNamespace(load=unreadable)
+    met = DataError("transport", "eth_call: transport failed", transient=True)
+    with pytest.raises(DataError) as ended:
+        runtime.awaits_step(met, runtime.monotonic())
+    assert ended.value is met
