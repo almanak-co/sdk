@@ -820,7 +820,7 @@ def test_pruned_state_is_a_named_refusal_and_is_not_sent_again(connect, no_backo
     assert refused.value.kind == "rpc" and not refused.value.transient
     assert str(refused.value) == (
         "eth_call: RPC rejected the requested read"
-        " (JSON-RPC -32000: the endpoint no longer serves state at that block)"
+        " (JSON-RPC -32000: the endpoint does not serve state at that block)"
     )
     assert sent == ["eth_call"] and no_backoff == []
 

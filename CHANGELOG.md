@@ -13,16 +13,18 @@ its changelog is on the `v2` branch.
   transient failure, within the 8 seconds execution reads have. The reader it proves
   a named `--public-rpc` endpoint with had no retry budget, so one failed read of the
   chain number, the genesis block or the head refused the recovery (#42).
-- A read that timed out is sent once more. The execution reader's 8 second retry
-  budget starts with the first attempt and the provider timeout is 15 seconds, so a
-  timeout had spent the budget and the read failed after one attempt, while a refused
-  connection was tried about five times. The re-send follows a 0.5 second wait and has
-  8 seconds to answer, so one read now ends within 23.5 seconds, where it ended within
-  23. A transaction submission is still never sent again (#42).
-- A read of state the endpoint has pruned is refused with `the endpoint no longer
-  serves state at that block`. geth's `missing trie node` was not a known reason, so
-  the refusal said only `RPC rejected the requested read (JSON-RPC -32000)`. It is
-  not sent again, since the block only gets older (#42).
+- A single execution read whose first attempt timed out is sent once more. The
+  execution reader's 8 second retry budget starts with the first attempt and the
+  provider timeout is 15 seconds, so a timeout had spent the budget and the read failed
+  after one attempt, while a refused connection was tried about five times. The re-send
+  follows a 0.5 second wait and has an 8 second provider timeout. The timeouts apply to
+  each phase of an attempt and not to its total. Batched reads are unchanged, and a
+  transaction submission is still never sent again (#42).
+- A read that geth refuses with `missing trie node` is reported as `the endpoint does
+  not serve state at that block`. It was not a known reason, so the refusal said only
+  `RPC rejected the requested read (JSON-RPC -32000)`. The usual cause is a pinned
+  block whose state the endpoint has pruned. The read is not sent again. Other
+  clients' wordings for the same condition are not recognised (#42).
 
 ## [3.3.1] - 2026-11-21
 

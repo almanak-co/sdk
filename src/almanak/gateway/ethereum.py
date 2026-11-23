@@ -141,9 +141,11 @@ def resend_bounds(attempt: int, left: float, budget: float) -> tuple[float, floa
 
     `left` is what remains of the read's retry budget. A first attempt that leaves less
     than the first backoff, as one that timed out does, is still re-sent once: after that
-    backoff, with at most `budget` as its provider timeout. One read therefore ends within
-    `PROVIDER_TIMEOUT + BUSY_BACKOFF + budget` seconds or, when the budget was not spent,
-    within `budget + PROVIDER_TIMEOUT`.
+    backoff, with at most `budget` as its provider timeout. With attempts that end at
+    their timeout, one read ends within `PROVIDER_TIMEOUT + BUSY_BACKOFF + budget` seconds
+    or, when the budget was not spent, within `budget + PROVIDER_TIMEOUT`. The provider
+    timeout bounds each phase of an attempt (connect, write, each wait for bytes) and not
+    the attempt as a whole, so these are not hard totals.
     """
     if attempt == 0 and left < BUSY_BACKOFF:
         return BUSY_BACKOFF, budget
@@ -310,9 +312,9 @@ Reasons = tuple[tuple[str, tuple[str, ...]], ...]
 KNOWN_REASONS: Reasons = (
     ("EVM error OpcodeNotFound", ("opcodenotfound", "opcode not found", "invalid opcode")),
     ("header not found", ("header not found",)),
-    # A node that pruned the state of an old block. The block only gets older, so this is
-    # a refusal and never transient.
-    ("the endpoint no longer serves state at that block", ("missing trie node",)),
+    # geth's answer when it holds no state for the block, most often because it pruned an
+    # old one. A refusal and never transient: a pruned block only gets older.
+    ("the endpoint does not serve state at that block", ("missing trie node",)),
 )
 # Calls that submit a transaction rather than read; a refusal names the submission.
 SUBMISSIONS = frozenset({"eth_sendRawTransaction", "eth_sendTransaction"})
