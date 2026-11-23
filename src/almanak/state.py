@@ -294,7 +294,14 @@ class Journal:
             connection.close()
 
     def read_fenced(self, identity: str) -> str:
-        """The checkpoint body under a current lease, read without taking the write lock."""
+        """The checkpoint body under a current lease, read without taking the write lock.
+
+        Unlike `authorized`, this counts time under the lock against the lease: it reads
+        the lease row as committed, so while a request of the same coordinator holds
+        the lock past `expires`, this refuses that coordinator although no other one can
+        be admitted. The runtime sends one request at a time, so only a second request
+        during such a hold meets this refusal.
+        """
         with self.connect() as connection:
             # One WAL read snapshot covers both rows and never waits for a writer.
             connection.execute("BEGIN")

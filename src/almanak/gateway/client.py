@@ -45,6 +45,14 @@ class Fenced:
     request instead of counting the time it takes against the lease. A request the
     gateway could not serve at all is not an answer, so an unreachable gateway still
     ends the renewal once the lease has run out.
+
+    Every fenced request counts, not only one that holds the lock: a running `observe`
+    or `plan` also keeps the renewal asking, and a refusal that never reached the lock
+    counts as an answer. The gateway still refuses an expired lease, so this only
+    delays the report of a lease lost for another reason, by up to that request's
+    length. A request this client stopped waiting for (its HTTP timeout) is not an
+    answer either, although the gateway may still be sending under the lock; a strategy
+    run ends on that failure itself, and resume recovers the recorded step.
     """
 
     def __init__(self):
