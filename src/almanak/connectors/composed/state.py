@@ -13,6 +13,10 @@ from almanak.connectors.aave_v3.models import Intent as LendingIntent
 from almanak.connectors.aave_v3.observations import Ownership as LendingOwnership
 from almanak.connectors.aave_v4 import models as aave_v4_models
 from almanak.connectors.aave_v4 import state as aave_v4
+from almanak.connectors.across import settlement_types as across_settlement
+from almanak.connectors.across import state as across
+from almanak.connectors.across.models import Intent as AcrossIntent
+from almanak.connectors.across.observations import Ownership as AcrossOwnership
 from almanak.connectors.aerodrome import state as aerodrome
 from almanak.connectors.aerodrome.models import Intent as AerodromeIntent
 from almanak.connectors.aerodrome.positions import Ownership as AerodromeOwnership
@@ -52,6 +56,7 @@ from almanak.gateway.permission_models import PermissionManifest
 from almanak.models import Model, UInt
 from almanak.strategy import StrategyDefinition
 from almanak.strategy_api import DecisionContext, Memory, OutcomeContext, StrategyDecision
+from almanak.transfers import Transfer, validate_transfers
 from almanak.triggers import DecisionSchedule
 from almanak.work import ChainWork, validate_work
 
@@ -68,6 +73,7 @@ Ownership = (
     | CompoundOwnership
     | CurveOwnership
     | gmx.OwnershipType
+    | AcrossOwnership
 )
 Intent = (
     V4Intent
@@ -82,6 +88,7 @@ Intent = (
     | CompoundIntent
     | CurveIntent
     | GmxIntent
+    | AcrossIntent
 )
 DecisionRecord = (
     v4.DecisionRecord
@@ -96,6 +103,7 @@ DecisionRecord = (
     | compound.DecisionRecord
     | curve.DecisionRecord
     | gmx.DecisionRecord
+    | across.DecisionRecord
 )
 TransactionPlan = (
     v4.TransactionPlan
@@ -110,6 +118,7 @@ TransactionPlan = (
     | compound.TransactionPlan
     | curve.TransactionPlan
     | gmx.TransactionPlan
+    | across.TransactionPlan
 )
 Pending = (
     v4.Pending
@@ -124,6 +133,7 @@ Pending = (
     | compound.Pending
     | curve.Pending
     | gmx.Pending
+    | across.Pending
 )
 Outcome = (
     v4.Outcome
@@ -138,6 +148,9 @@ Outcome = (
     | compound.Outcome
     | curve.Outcome
     | gmx.Outcome
+    | across.Outcome
+    | across_settlement.ArrivalOutcome
+    | across_settlement.RefundOutcome
 )
 DecisionInput = DecisionContext[Config | OwnedParameters | Parameters, Ownership, Observation]
 Decision = StrategyDecision[Intent]
@@ -155,7 +168,10 @@ OutcomeInput = OutcomeContext[
     | compound.ActionResult
     | curve.ActionResult
     | gmx.ActionResult
-    | gmx.LiquidationResult,
+    | gmx.LiquidationResult
+    | across.ActionResult
+    | across_settlement.ArrivalResult
+    | across_settlement.RefundResult,
 ]
 Work = ChainWork[DecisionRecord, TransactionPlan, Pending]
 
@@ -203,6 +219,7 @@ RECORDS = {
     ),
     "curve": (curve.DecisionRecord, curve.TransactionPlan, curve.Pending, curve.Outcome),
     "gmx_v2": (gmx.DecisionRecord, gmx.TransactionPlan, gmx.Pending, gmx.Outcome),
+    "across": (across.DecisionRecord, across.TransactionPlan, across.Pending, across.Outcome),
 }
 RECORD_FIELDS = {"decision": 0, "plan": 1, "pending": 2, "released": 2, "outcomes": 3}
 # Fields that retain a sequence of records rather than one.
@@ -315,7 +332,12 @@ class Checkpoint(Model):
     owned: tuple[Ownership, ...]
     inventory: tuple[Balance, ...]
     requests: tuple[gmx.Request, ...] = ()
-    external_scans: tuple[gmx.Scan, ...] = ()
+    # Committed pages of each component's own scans: GMX liquidations and Across
+    # settlement. A page's kind names the connector that reads and audits it.
+    external_scans: tuple[gmx.Scan | across_settlement.Scan, ...] = ()
+    # Value in flight between two of the deployment's chains: owned, and in no wallet's
+    # inventory until its arrival or its refund is measured. Omitted while there is none.
+    transfers: tuple[Transfer, ...] = Field(default=(), exclude_if=lambda value: not value)
     baseline: tuple[Observation, ...] = ()
     pending: Pending | None = None
     # Signed attempts released past their protocol deadline, kept as reconciliation evidence
@@ -367,6 +389,7 @@ class Checkpoint(Model):
         validate(self)
         gmx.validate_request_history(self)
         gmx.validate_active_decisions(self)
+        validate_transfers(self.transfers)
         if any(
             self.config.target(page.target.allocation) != page.target
             for page in self.external_scans

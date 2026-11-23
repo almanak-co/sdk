@@ -8,6 +8,7 @@ from almanak.configuration.composed import Parameters
 from almanak.configuration.gas_parameters import PreparedConfig
 from almanak.connectors.aave_v3.models import Config as LendingConfig
 from almanak.connectors.aave_v4.models import LendingConfig as AaveV4Config
+from almanak.connectors.across.models import Config as AcrossConfig
 from almanak.connectors.aerodrome.models import Config as AerodromeConfig
 from almanak.connectors.aerodrome_slipstream.models import Config as SlipstreamConfig
 from almanak.connectors.compound_v3.models import Config as CompoundConfig
@@ -73,7 +74,8 @@ def execution_view(config, identity, parameters):
         | type[MorphoConfig]
         | type[CompoundConfig]
         | type[CurveConfig]
-        | type[GmxConfig],
+        | type[GmxConfig]
+        | type[AcrossConfig],
     ] = {
         ConnectorId("aave_v3"): LendingConfig,
         ConnectorId("aave_v4"): AaveV4Config,
@@ -87,6 +89,7 @@ def execution_view(config, identity, parameters):
         ConnectorId("compound_v3"): CompoundConfig,
         ConnectorId("curve"): CurveConfig,
         ConnectorId("gmx_v2"): GmxConfig,
+        ConnectorId("across"): AcrossConfig,
     }
     cls = classes[identity]
     fields = {name: getattr(parameters, name) for name in type(parameters).model_fields}
@@ -105,19 +108,37 @@ def wallet_key(target, asset):
 
 
 def target_assets(target):
+    """The assets a target holds in its own fund's wallet."""
+    from almanak.bridge_intents import BridgeTarget
     from almanak.connectors.gmx_v2.exchange_domain import ExchangeTarget as GmxTarget
     from almanak.lending_intents import LendingTarget
 
     if isinstance(target, GmxTarget):
         return target.accounting_assets
-    return (target.asset,) if isinstance(target, LendingTarget) else target.assets
+    return (target.asset,) if isinstance(target, (LendingTarget, BridgeTarget)) else target.assets
+
+
+def arrival_key(target) -> WalletAsset | None:
+    """The wallet asset a bridge target's transfers arrive in; None for any other target."""
+    from almanak.bridge_intents import BridgeTarget
+
+    if not isinstance(target, BridgeTarget):
+        return None
+    return WalletAsset(
+        account=target.destination_account,
+        chain=target.destination_fund.chain,
+        asset=target.destination_asset,
+    )
+
+
+def configured_targets(config):
+    return tuple(config.target(allocation.name) for allocation in config.positions)
 
 
 def inventory_keys(config):
     return {
         wallet_key(target, asset)
-        for allocation in config.positions
-        for target in (config.target(allocation.name),)
+        for target in configured_targets(config)
         for asset in target_assets(target)
     }
 
@@ -126,8 +147,18 @@ def validate_inventory(config, inventory):
     keys = [balance.key for balance in inventory]
     if len(set(keys)) != len(keys):
         raise ValueError("composed fund inventory cannot duplicate a wallet asset")
-    if set(keys) != inventory_keys(config):
+    held = inventory_keys(config)
+    if set(keys) != held:
         raise ValueError("composed inventory must explicitly cover every configured fund asset")
+    arrivals = {arrival_key(target) for target in configured_targets(config)} - {None}
+    if not arrivals <= held:
+        # An arrival is credited to owned inventory, which only an allocation on that
+        # chain measures and spends. A bridge towards a wallet asset nothing holds
+        # would credit cash no observation covers.
+        raise ValueError(
+            "a composed bridge must arrive in a wallet asset that an allocation on the "
+            "destination account holds"
+        )
 
 
 def component_for_allocation(config, name):

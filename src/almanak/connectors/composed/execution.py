@@ -5,6 +5,7 @@ from copy import copy
 from almanak.connectors.aave_v3.operations import RepayOperation, SupplyOperation
 from almanak.connectors.aave_v4.operations import RepayOperation as AaveV4Repay
 from almanak.connectors.aave_v4.operations import SupplyOperation as AaveV4Supply
+from almanak.connectors.across.operations import FundedOperation as AcrossFunded
 from almanak.connectors.aerodrome.operations import Addition as AerodromeAddition
 from almanak.connectors.aerodrome.operations import Swap as AerodromeSwap
 from almanak.connectors.aerodrome_slipstream.operations import Addition as SlipstreamAddition
@@ -81,6 +82,9 @@ def spending(operation):
             SlipstreamSwap,
             V4Swap,
             CurveSwap,
+            # A bridge approval spends nothing, but one beyond owned cash could only
+            # precede a deposit that is refused.
+            AcrossFunded,
         ),
     ):
         return (operation.amount,)
@@ -194,6 +198,25 @@ class ComposedExecution:
         return connector_for_target(intent.target).execution.operation(
             config.component(identity), component_state(state, identity), intent, before
         )
+
+    @staticmethod
+    def quoted_operation(backend, state, intent, before):
+        """Plan through the component's own venue quote where it asks one. The quote is
+        read through this gateway's declared transport, never another's."""
+        identity = target_connector(intent.target)
+        execution = connector_for_target(intent.target).execution
+        view = component_state(state, identity)
+        quoted = getattr(execution, "quoted_operation", None)
+        if quoted is None:
+            return execution.operation(backend.config.component(identity), view, intent, before)
+        return quoted(backend_view(backend, intent.target), view, intent, before)
+
+    @staticmethod
+    def venue_transports():
+        """What a production gateway asks for its components: each venue's own API."""
+        from almanak.connectors.across.execution import venue_transports
+
+        return venue_transports()
 
     @staticmethod
     def call(config, operation):

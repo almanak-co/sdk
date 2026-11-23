@@ -20,8 +20,21 @@ def local(items, identity):
     return tuple(item for item in items if target_connector(item.target) == identity)
 
 
+def outcome_target(outcome):
+    """The target an outcome settles: the one a transaction observed, or the one an
+    external effect without a submitted transaction names itself."""
+    after = getattr(outcome, "after", None)
+    return outcome.target if after is None else after.target
+
+
+def component_transfers(state, identity):
+    return tuple(t for t in state.transfers if t.connector == identity)
+
+
 def component_state(state, identity):
-    outcomes = tuple(o for o in state.outcomes if target_connector(o.after.target) == identity)
+    """The checkpoint as one component sees it: its own configuration, records, scan
+    pages, requests and transfers, and nothing of another connector's."""
+    outcomes = tuple(o for o in state.outcomes if target_connector(outcome_target(o)) == identity)
     return state.model_copy(
         update={
             "config": state.config.component(identity),
@@ -31,9 +44,10 @@ def component_state(state, identity):
             "closure": local(state.closure, identity),
             "outcomes": outcomes,
             "requests": state.requests if identity == ConnectorId("gmx_v2") else (),
-            "external_scans": state.external_scans if identity == ConnectorId("gmx_v2") else (),
+            "external_scans": tuple(p for p in state.external_scans if p.connector == identity),
+            "transfers": component_transfers(state, identity),
             "delivered": sum(
-                target_connector(o.after.target) == identity
+                target_connector(outcome_target(o)) == identity
                 for o in state.outcomes[: state.delivered]
             ),
         }
@@ -46,7 +60,9 @@ def validate_components(state, observations, method):
     validate_observed(state, observations)
     for identity in state.config.parameter_components:
         view = component_state(state, identity)
-        if not view.owned:
+        # A chain a bridge only delivers to holds none of its records, yet its transfers
+        # in flight are obligations there too: they hold that chain's closure.
+        if not view.owned and not view.transfers:
             continue
         binding = connector_from_wire({"connector": str(identity)})
         validate_component(binding, view, local(observations, identity), method, identity)
@@ -130,7 +146,7 @@ class ComposedLifecycle:
 
     @staticmethod
     def decision_owned(state):
-        return project_cash(state.owned, state.inventory)
+        return project_cash(state.owned, state.inventory, state.transfers)
 
     @staticmethod
     def increases_exposure(intent):

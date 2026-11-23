@@ -6,6 +6,9 @@ from almanak.connectors.aave_v3.observations import Snapshot as LendingSnapshot
 from almanak.connectors.aave_v4.models import LendingSnapshot as AaveV4Snapshot
 from almanak.connectors.aave_v4.models import Ownership as AaveV4Ownership
 from almanak.connectors.aave_v4.models import SupplyTarget as AaveV4Target
+from almanak.connectors.across.domain import Target as AcrossTarget
+from almanak.connectors.across.observations import Ownership as AcrossOwnership
+from almanak.connectors.across.observations import Snapshot as AcrossSnapshot
 from almanak.connectors.aerodrome.models import Target as AerodromeTarget
 from almanak.connectors.aerodrome.observations import Snapshot as AerodromeSnapshot
 from almanak.connectors.aerodrome.positions import Ownership as AerodromeOwnership
@@ -82,23 +85,29 @@ def refresh(owned, balances):
     return tuple(result)
 
 
-def project_cash(owned, balances):
-    """Lending records with the fund's owned cash of their asset, for one decision only;
-    `validate` refuses a retained lending record that carries it."""
+def project_cash(owned, balances, transfers=()):
+    """Lending and bridge records with the fund's owned cash of their asset, and a
+    bridge's transfers in flight, for one decision only; `validate` refuses a retained
+    record that carries either."""
     amounts = {balance.key: balance.amount for balance in balances}
-    return tuple(
-        position.model_copy(
-            update={
-                "inventory": AssetAmount(
-                    asset=position.target.asset,
-                    amount=amounts[wallet_key(position.target, position.target.asset)],
-                )
-            }
+    return tuple(decision_view(position, amounts, transfers) for position in owned)
+
+
+def decision_view(position, amounts, transfers):
+    if not isinstance(position, (*LENDING, AcrossOwnership)):
+        return position
+    target = position.target
+    # A chain's view holds only its own wallets: a bridge seen from its destination
+    # chain states no source cash.
+    cash = amounts.get(wallet_key(target, target.asset))
+    update: dict = {
+        "inventory": None if cash is None else AssetAmount(asset=target.asset, amount=cash)
+    }
+    if isinstance(position, AcrossOwnership):
+        update["in_flight"] = tuple(
+            t for t in transfers if t.allocation == target.allocation and t.resolution is None
         )
-        if isinstance(position, LENDING)
-        else position
-        for position in owned
-    )
+    return position.model_copy(update=update)
 
 
 def refresh_gmx(position, balances):
@@ -146,6 +155,7 @@ def initial_owned(config):
         | CurveOwnership
         | GmxOwnership
         | GmxPositionOwnership
+        | AcrossOwnership
     ] = []
     for allocation in config.positions:
         target = config.target(allocation.name)
@@ -173,6 +183,8 @@ def initial_owned(config):
             )
         elif isinstance(target, CompoundTarget):
             result.append(CompoundOwnership(target=target, principal=0, collateral=0))
+        elif isinstance(target, AcrossTarget):
+            result.append(AcrossOwnership(target=target))
         else:
             result.append(
                 (SparkOwnership if isinstance(target, SparkTarget) else LendingOwnership)(
@@ -191,21 +203,55 @@ def validate(state):
         raise ValueError("connector currency views differ from shared fund inventory")
     if any(isinstance(p, LENDING) and p.inventory is not None for p in state.owned):
         raise ValueError("retained lending ownership cannot carry projected fund cash")
+    if any(
+        isinstance(p, AcrossOwnership) and (p.inventory is not None or p.in_flight)
+        for p in state.owned
+    ):
+        raise ValueError("retained bridge ownership cannot carry projected cash or transfers")
+
+
+def merged_transfers(retained, identity, component):
+    """Put one component's transfers back among the rest, each in its retained place."""
+    changed = {t.identity: t for t in component}
+    kept = tuple(changed.pop(t.identity) if t.connector == identity else t for t in retained)
+    return (*kept, *changed.values())
+
+
+def unchanged_ownership(state):
+    """The owned fields with no outcome. A page recorded without one can still prove a
+    bridge transfer unfilled, which only its own connector decides."""
+    from almanak.connectors.composed.lifecycle import component_state
+
+    transfers = state.transfers
+    for identity in dict.fromkeys(t.connector for t in transfers):
+        native = connector_from_identity(identity).lifecycle.ownership(
+            component_state(state, identity)
+        )
+        transfers = merged_transfers(transfers, identity, native.get("transfers", ()))
+    return {
+        "owned": state.owned,
+        "inventory": state.inventory,
+        "requests": state.requests,
+        "top_ups": state.top_ups,
+        "transfers": transfers,
+    }
+
+
+def connector_from_identity(identity):
+    from almanak.connectors.composition import connector_from_wire
+
+    return connector_from_wire({"connector": str(identity)})
 
 
 def ownership(state, outcome=None):
     if outcome is None:
-        return {
-            "owned": state.owned,
-            "inventory": state.inventory,
-            "requests": state.requests,
-            "top_ups": state.top_ups,
-        }
-    from almanak.connectors.composed.lifecycle import component_state
+        return unchanged_ownership(state)
+    from almanak.connectors.composed.lifecycle import component_state, outcome_target
     from almanak.connectors.target_routing import target_connector
 
     operation = getattr(outcome, "operation", None)
-    target = operation.target if operation is not None else outcome.after.target
+    target = operation.target if operation is not None else outcome_target(outcome)
+    identity = target_connector(target)
     binding = connector_for_target(target)
     if binding.execution_effects is None:
         raise ValueError("connector has no verified execution cash effects")
@@ -215,15 +261,22 @@ def ownership(state, outcome=None):
         state.inventory,
         (*top_up, *effects, *owned_gas_effects(state.inventory, target, outcome)),
     )
-    native = binding.lifecycle.ownership(component_state(state, target_connector(target)), outcome)
+    native = binding.lifecycle.ownership(component_state(state, identity), outcome)
     changed = {position.target: position for position in native["owned"]}
     owned = tuple(changed.get(position.target, position) for position in state.owned)
+    passed = {f: value for f, value in native.items() if f not in ("owned", "transfers")}
+    transfers = (
+        merged_transfers(state.transfers, identity, native["transfers"])
+        if "transfers" in native
+        else state.transfers
+    )
     return {
         "requests": state.requests,
-        **{field: value for field, value in native.items() if field != "owned"},
+        **passed,
         "owned": refresh(owned, inventory),
         "inventory": inventory,
         "top_ups": apply_top_ups(state.top_ups, top_up),
+        "transfers": transfers,
     }
 
 
@@ -257,11 +310,13 @@ def repayment_top_up(inventory, outcome, effects):
 
 def owned_gas_effects(inventory, target, outcome):
     gas = getattr(outcome, "gas_paid", None)
-    if gas is None or not gas.amount or outcome.before.payer != target.fund:
+    before = getattr(outcome, "before", None)
+    # A settlement the deployment did not submit has no payer of its own to charge.
+    if gas is None or before is None or not gas.amount or before.payer != target.fund:
         return ()
     key = wallet_key(target, gas.asset)
     owned = next((balance.amount for balance in inventory if balance.key == key), 0)
-    measured = outcome.before.native_balance
+    measured = before.native_balance
     if measured.asset != gas.asset or owned > measured.amount or gas.amount > measured.amount:
         raise ValueError("fund gas charge requires sufficient measured native cash")
     # Unallocated gas reserves pay first. Keeper outcomes have no submitter charge.
@@ -272,7 +327,14 @@ def owned_gas_effects(inventory, target, outcome):
 def observed_cash(observation):
     if isinstance(
         observation,
-        (LendingSnapshot, AaveV4Snapshot, SparkSnapshot, MorphoSnapshot, CompoundSnapshot),
+        (
+            LendingSnapshot,
+            AaveV4Snapshot,
+            SparkSnapshot,
+            MorphoSnapshot,
+            CompoundSnapshot,
+            AcrossSnapshot,
+        ),
     ):
         return ((observation.target.asset, observation.wallet_balance),)
     return tuple((value.asset, value.amount) for value in observed_wallets(observation))

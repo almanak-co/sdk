@@ -320,7 +320,11 @@ TEMPLATES_AFTER_FREEZE = {
 }
 # Connectors installed after the legacy harness was deleted (HyperCore, backtests only;
 # the Across bridge, forks only).
-NEW_CONNECTOR_REFERENCES = {"hyperliquid_hyperevm_perp", "across_usdc_arbitrum_base_bridge"}
+NEW_CONNECTOR_REFERENCES = {
+    "hyperliquid_hyperevm_perp",
+    "across_usdc_arbitrum_base_bridge",
+    "arbitrum_base_bridge_and_lend",
+}
 AUTHORED_AFTER_FREEZE = (
     BANDS_AFTER_FREEZE
     | PRICE_SERIES_REFERENCES

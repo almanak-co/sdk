@@ -355,6 +355,7 @@ def require_composed_inventory(inputs: AuthorInputs):
     if len({str(inputs.markets[p.market].connector) for p in positions.values()}) < 2:
         return
     declared = {(item.account, item.balance.asset) for item in inputs.inventory}
+    require_arrival_inventory(inputs, positions, declared)
     for name, value in positions.items():
         for asset in known_assets(inputs, value):
             if (value.account, asset) not in declared:
@@ -368,6 +369,26 @@ def require_composed_inventory(inputs: AuthorInputs):
                         "with quantity '0' when the strategy starts without it."
                     ),
                 )
+
+
+def require_arrival_inventory(inputs: AuthorInputs, positions, declared):
+    """A composed bridge delivers into owned inventory of its destination account."""
+    for name, value in positions.items():
+        destination = getattr(value, "destination_account", None)
+        asset = getattr(inputs.markets[value.market], "destination_asset", None)
+        if destination is None or (destination, asset) in declared:
+            continue
+        raise ConfigurationError(
+            f"composed inventory must cover what a bridge delivers; {name!r} delivers "
+            f"{asset} to fund {destination!r}",
+            field="inventory",
+            code="composed_inventory_incomplete",
+            remedy=(
+                f"Add an inventory entry for {asset} on account {destination!r}, with "
+                "quantity '0' when the strategy starts without it, and an allocation on "
+                "that account that holds the asset."
+            ),
+        )
 
 
 def require_chain_support(inputs: AuthorInputs):
