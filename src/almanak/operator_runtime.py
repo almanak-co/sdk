@@ -274,10 +274,12 @@ class OperatorRuntime(Runtime):
         failure, spends none of it, and cannot extend it: every refusal spends its own
         tick. The step stays recorded throughout. The next tick may send the same
         signed bytes again, as every tick without a receipt does; nothing new is
-        planned or signed, and only the gateway's full proof drops the step.
+        planned or signed, and only the gateway's full proof drops the step. A step
+        with a fee-replacement family is not waited for: its ticks may sign another
+        candidate at the same nonce, and the proof refuses every family.
         """
         pending = self.journal.load().pending
-        if pending is None:
+        if pending is None or getattr(pending, "family", None) is not None:
             return False
         spent = self.monotonic() - began + self.poll
         if self.proof_spent is not None and self.proof_spent[0] == pending.tx_hash:

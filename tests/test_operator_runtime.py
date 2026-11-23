@@ -503,6 +503,18 @@ def slow_proof(desk, refusal, seconds=25.0):
     return runtime, clock, pending, asked
 
 
+def test_a_step_with_replacement_candidates_is_not_waited_for(desk):
+    """Its ticks may sign another candidate at the nonce, so the first refusal ends."""
+    from types import SimpleNamespace
+
+    runtime = desk.runtime()
+    step = SimpleNamespace(tx_hash="0x01", family=None)
+    runtime.journal = SimpleNamespace(load=lambda: SimpleNamespace(pending=step))
+    assert runtime.awaits_proof(runtime.monotonic())
+    step.family = object()
+    assert not runtime.awaits_proof(runtime.monotonic())
+
+
 @pytest.mark.parametrize("refusal", [*OWN_STEP_REFUSALS, ("inconsistent", "try again")])
 def test_execution_stops_waiting_for_a_proof_after_its_bound(desk, refusal):
     """A nonce another transaction holds without a proof ends the command as before:

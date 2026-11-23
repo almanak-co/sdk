@@ -1081,7 +1081,11 @@ that much later. While it asks, the step stays recorded and nothing new is plann
 signed. Each check may send the same signed bytes again, as every check without a
 receipt does, and only the full proof drops the step: where the transaction that took
 the nonce becomes final within the wait, as it can on Avalanche, the command ends with
-the step under `released_consumed_nonce`.
+the step under `released_consumed_nonce`. A step with fee-only replacement candidates
+is not waited for, and ends on the first refusal. Each check during the wait trusts
+the endpoint as every check does: one answered wholly by a node that has not seen the
+mined step can still treat a step past its calldata deadline as expired, as it can in
+`ax recover`.
 
 This check runs in the gateway process and is not enforced on chain. It rests on one
 endpoint's report of its head, its finalized block and that block's transactions. An
