@@ -706,26 +706,145 @@ def test_an_expired_plan_between_steps_drops_the_request_at_once(desk):
     assert runtime.refused.kind == "stale_plan" and desk.store.load().decision is None
 
 
-def test_a_passing_failure_at_signing_is_not_held(desk):
-    """A plan is recorded, so a signature may exist that the checkpoint does not hold;
-    asking again would sign the plan a second time."""
-    runtime = desk.runtime()
-    runtime.submit(desk.intent("supply"), REQUEST)
-    sign, asked = desk.gateway.sign, []
+def failing_signs(desk, clock, failures, seconds=10.0, kind="supply", transient=True):
+    """Refuse the next `failures` signatures of the `kind` step, each after `seconds`
+    on `clock`; returns the plan every signing attempt found recorded."""
+    sign, attempts = desk.gateway.sign, []
 
-    def throttled():
-        if desk.store.load().plan.operation.kind == "supply":
-            asked.append("supply")
-            raise DataError(*THROTTLED, transient=True)
+    def refusing():
+        plan = desk.store.load().plan
+        if plan.operation.kind == kind:
+            attempts.append(plan)
+            if len(attempts) <= failures:
+                clock[0] += seconds
+                raise DataError(*THROTTLED, transient=transient)
         return sign()
 
-    desk.gateway.sign = throttled
+    desk.gateway.sign = refusing
+    return attempts
+
+
+def failing_updates(desk, clock, field, failures=1, seconds=10.0):
+    """Fail the next `failures` checkpoint updates that would record the supply step's
+    `field` ("plan" or "pending"), as a read does that the gateway makes to admit it."""
+    update, failed = desk.journal.update, []
+
+    def refusing(change):
+        before = desk.store.load()
+        recorded = getattr(change(before), field)
+        fresh = getattr(before, field) is None and recorded is not None
+        if fresh and recorded.operation.kind == "supply" and len(failed) < failures:
+            failed.append(recorded)
+            clock[0] += seconds
+            raise DataError(*THROTTLED, transient=True)
+        return update(change)
+
+    desk.journal.update = refusing
+    return failed
+
+
+def test_a_passing_failure_at_signing_after_a_mined_step_is_held(desk):
+    runtime, clock, _ = failing_plans(desk, 0)
+    attempts = failing_signs(desk, clock, 2)
+    outcomes = runtime.execute()
+    assert [item.operation.kind for item in outcomes] == ["approve", "supply"]
+    assert desk.gateway.broadcasts == [item.tx_hash for item in outcomes]
+    # Every attempt signed the one recorded plan, and the request spent 20 seconds.
+    assert len(attempts) == 3 and attempts[0] == attempts[1] == attempts[2]
+    assert runtime.step_spent == (outcomes[0].decision.identity, 20.0)
+    state = desk.store.load()
+    assert (state.pending, state.plan, state.decision) == (None, None, None)
+
+
+def test_a_passing_failure_at_the_admission_of_the_signed_bytes_is_held(desk):
+    """The first signature is in no record and is never sent; the plan is signed again."""
+    runtime, clock, _ = failing_plans(desk, 0)
+    attempts = failing_signs(desk, clock, 0)
+    failed = failing_updates(desk, clock, "pending")
+    outcomes = runtime.execute()
+    assert [item.operation.kind for item in outcomes] == ["approve", "supply"]
+    assert desk.gateway.broadcasts == [item.tx_hash for item in outcomes]
+    assert len(failed) == 1 and len(attempts) == 2 and attempts[0] == attempts[1]
+    # The signed step that was recorded and sent is of the same transaction.
+    assert failed[0].tx_hash == outcomes[1].tx_hash
+
+
+def test_a_passing_failure_while_the_plan_is_recorded_is_held(desk):
+    runtime, clock, asked = failing_plans(desk, 0)
+    failed = failing_updates(desk, clock, "plan", failures=2)
+    outcomes = runtime.execute()
+    assert [item.operation.kind for item in outcomes] == ["approve", "supply"]
+    assert desk.gateway.broadcasts == [item.tx_hash for item in outcomes]
+    assert len(failed) == 2 and runtime.step_spent[1] == 20.0
+
+
+@pytest.mark.parametrize(("plans", "signs"), [(0, 3), (2, 1)])
+def test_signing_that_keeps_failing_ends_the_command_after_the_shared_bound(desk, plans, signs):
+    """Planning and signing spend one bound: 25, 50 and then 75 seconds."""
+    runtime, clock, asked = failing_plans(desk, plans, seconds=25.0)
+    attempts = failing_signs(desk, clock, 99, seconds=25.0)
+    with pytest.raises(DataError, match="transport failed; the failure did not pass") as ended:
+        runtime.execute()
+    assert (ended.value.kind, len(asked), len(attempts), clock[0]) == ("rpc", plans, signs, 75.0)
+    state = desk.store.load()
+    assert desk.kinds() == ["approve"] and state.pending is None
+    assert state.plan == attempts[0] and state.plan.operation.kind == "supply"
+    assert desk.gateway.broadcasts == [desk.gateway.outcome("approve").tx_hash]
+
+
+def test_a_signing_refusal_that_cannot_pass_ends_the_command_at_once(desk):
+    runtime, clock, _ = failing_plans(desk, 0)
+    attempts = failing_signs(desk, clock, 99, transient=False)
     with pytest.raises(DataError, match="transport failed$"):
         runtime.execute()
     state = desk.store.load()
-    assert asked == ["supply"] and desk.kinds() == ["approve"]
-    assert state.plan.operation.kind == "supply" and state.pending is None
+    assert len(attempts) == 1 and runtime.step_spent is None
+    assert desk.kinds() == ["approve"] and state.pending is None
     assert desk.gateway.broadcasts == [desk.gateway.outcome("approve").tx_hash]
+
+
+def test_a_passing_failure_at_signing_before_any_step_is_mined_ends_at_once(desk):
+    runtime, clock, _ = failing_plans(desk, 0)
+    attempts = failing_signs(desk, clock, 99, kind="approve")
+    with pytest.raises(DataError, match="transport failed$"):
+        runtime.execute()
+    state = desk.store.load()
+    assert len(attempts) == 1 and runtime.step_spent is None
+    assert (state.outcomes, state.pending, desk.gateway.broadcasts) == ((), None, [])
+
+
+def test_a_plan_that_is_not_a_chain_transaction_is_not_signed_again(desk):
+    """A venue action carries no transaction nonce; a failure at its signing ends."""
+    from types import SimpleNamespace
+
+    decision = SimpleNamespace(identity="ab" * 16)
+    state = SimpleNamespace(
+        decision=decision,
+        outcomes=(SimpleNamespace(decision=decision),),
+        pending=None,
+        plan=SimpleNamespace(kind="hyperliquid_venue_action"),
+    )
+    runtime = desk.runtime()
+    runtime.journal = SimpleNamespace(load=lambda: state)
+    met = DataError("unavailable", "the signer is unavailable", transient=True)
+    assert not runtime.awaits_step(met, runtime.monotonic())
+    state.plan = SimpleNamespace(nonce=7)
+    assert runtime.awaits_step(met, runtime.monotonic())
+    state.plan = None
+    assert runtime.awaits_step(met, runtime.monotonic())
+
+
+def test_a_proof_wait_and_a_wait_between_steps_in_one_request_keep_their_own_counts(desk):
+    asked = lagging_reads(desk, 3, OWN_STEP_REFUSALS[0])
+    runtime, clock, plans = failing_plans(desk, 2)
+    attempts = failing_signs(desk, clock, 1)
+    outcomes = runtime.execute()
+    assert [item.operation.kind for item in outcomes] == ["approve", "supply"]
+    sent = [item.tx_hash for item in outcomes]
+    assert desk.gateway.broadcasts == sent and asked == [hash_ for hash_ in sent for _ in "123"]
+    assert (len(plans), len(attempts)) == (2, 2)
+    assert runtime.step_spent == (outcomes[0].decision.identity, 30.0)
+    assert runtime.proof_spent == (sent[1], 0.0)
 
 
 def test_a_stop_requested_during_the_hold_between_steps_ends_the_command(desk):

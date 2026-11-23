@@ -288,12 +288,24 @@ class OperatorRuntime(Runtime):
         standing without the rest, over one failed read. Before any step is mined
         nothing is on chain, and the failure ends the command at once.
 
-        Only while the checkpoint holds neither a plan nor a signed step, so the next
-        tick can only deliver the recorded outcome, or observe and plan the next step
-        afresh: a failed preparation recorded nothing. A failure with a plan recorded
-        arose at signing or at the admission of the signed bytes, where a signature may
-        exist that the checkpoint does not hold. Asking again there would sign the
-        plan a second time, so that failure ends the command.
+        Only while no signed step is recorded. With no plan either, the next tick can
+        only deliver the recorded outcome, or observe and plan the next step afresh: a
+        failed preparation recorded nothing.
+
+        With a plan recorded the failure arose at signing or at the admission of the
+        signed bytes, and the next tick signs again. That is a signature of the same
+        transaction: the gateway signs the recorded plan's own call, nonce, gas and gas
+        price, and the plan cannot change, since replacing it means discarding it, which
+        ends an operator request. A signature made before the failure is in no record
+        and is never sent, because only a recorded signed step is. Of two signatures of
+        one transaction only one can be mined. The gateway checks the plan at every
+        signature as it does at the first: its observation's age, the state it rests
+        on, the fee ceilings and the margin before a calldata deadline. A refusal there
+        ends the command at once. No fee-replacement candidate exists at this point:
+        those are signed only for a recorded signed step.
+
+        Not for a plan that is not a chain transaction, such as a venue action: its
+        signing was not examined for this, and no direct action plans one.
 
         Until the ticks that ended in such a failure for this request, each with the
         pause after it, have taken `step_wait` seconds. A tick that ends another way
@@ -306,7 +318,7 @@ class OperatorRuntime(Runtime):
             # The checkpoint cannot be read either; the failure that was met ends it.
             raise exc from None
         mined = mined_steps(state)
-        if not mined or state.plan is not None or state.pending is not None:
+        if not mined or state.pending is not None or not transaction_or_none(state.plan):
             return False
         request = state.decision.identity
         spent = self.monotonic() - began + self.poll
@@ -383,6 +395,11 @@ class OperatorRuntime(Runtime):
 def passing(exc: DataError) -> bool:
     """Whether the same request may pass a failure later: a provider or storage failure."""
     return exc.transient or exc.kind == "gateway_unavailable"
+
+
+def transaction_or_none(plan) -> bool:
+    """Whether nothing is planned, or the plan is a chain transaction with its nonce."""
+    return plan is None or getattr(plan, "nonce", None) is not None
 
 
 def mined_steps(state) -> int:
