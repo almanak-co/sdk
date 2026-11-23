@@ -7,17 +7,19 @@ Nothing here is on-chain enforcement, and no other source is ever substituted.
 """
 
 import json
-from typing import Any
+import re
+from typing import Annotated, Literal
 
 import httpx
+from pydantic import Field
 
-from almanak.connectors.across.domain import Target, Uint32, Uint256
+from almanak.connectors.across.domain import Decimals, Target, Uint32, Uint256, spoke_pool
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm import chain_number
 from almanak.models import ZERO_ADDRESS, Address, Model
 
 API = "https://app.across.to/api/suggested-fees"
-SOURCE = "across_api"
+SOURCE: Literal["across_api"] = "across_api"
 TIMEOUT_SECONDS = 15.0
 # A deposit mined with less time than this before its fill deadline gives a relayer too
 # little time to fill it; it would wait for the refund instead.
@@ -25,6 +27,10 @@ MINIMUM_FILL_SECONDS = 600
 # The SpokePool reads an exclusivity parameter up to one year as an offset from the
 # block that mines the deposit, and a larger one as a timestamp.
 MAX_EXCLUSIVITY_OFFSET = 31_536_000
+# The venue's answer is about 1.4 kB. A larger body is refused before it is parsed, so the
+# copy every plan, pending attempt and outcome retains stays bounded.
+MAX_ANSWER_BYTES = 16_384
+DIGITS = re.compile(r"[0-9]+", re.ASCII)
 FIELDS = (
     "outputAmount",
     "timestamp",
@@ -32,14 +38,17 @@ FIELDS = (
     "exclusiveRelayer",
     "exclusivityDeadline",
     "spokePoolAddress",
+    "destinationSpokePoolAddress",
+    "inputToken",
+    "outputToken",
     "isAmountTooLow",
 )
 
 
 class Quote(Model):
-    """The quoted deposit terms, with the venue's answer retained as it was received."""
+    """The quoted deposit terms, with the venue's answer retained in canonical form."""
 
-    source: str
+    source: Literal["across_api"]
     input_amount: Uint256
     output_amount: Uint256
     timestamp: Uint32
@@ -47,8 +56,16 @@ class Quote(Model):
     exclusive_relayer: Address
     exclusivity_parameter: Uint32
     spoke_pool: Address
+    destination_spoke_pool: Address
+    # The tokens the venue says it quoted, with the decimals it holds for them.
+    input_token: Address
+    input_decimals: Decimals
+    output_token: Address
+    output_decimals: Decimals
     amount_too_low: bool
-    response: dict[str, Any]
+    # The whole answer as canonical JSON text: sorted keys, no whitespace, finite numbers.
+    # Text survives a checkpoint round trip byte for byte, which a decoded tree does not.
+    response: Annotated[str, Field(min_length=2, max_length=MAX_ANSWER_BYTES)]
 
 
 def request(target: Target, amount: int) -> dict[str, str]:
@@ -57,7 +74,7 @@ def request(target: Target, amount: int) -> dict[str, str]:
         "inputToken": route.asset.reference,
         "outputToken": route.destination_asset.reference,
         "originChainId": str(chain_number(route.chain.chain_id)),
-        "destinationChainId": str(chain_number(route.destination_chain.chain_id)),
+        "destinationChainId": str(chain_number(route.destination_chain)),
         "amount": str(amount),
         "recipient": target.destination_fund.address,
     }
@@ -71,26 +88,52 @@ def answer(response: httpx.Response) -> dict:
         raise DataError(
             "quote_refused", f"{SOURCE}: the venue refused the quote ({response.status_code})"
         )
+    if response.status_code != 200:
+        raise DataError(
+            "quote_refused", f"{SOURCE}: the venue gave no quote ({response.status_code})"
+        )
+    if len(response.content) > MAX_ANSWER_BYTES:
+        raise DataError("malformed", f"{SOURCE}: the quote exceeds {MAX_ANSWER_BYTES} bytes")
     try:
-        body = response.json()
-    except (json.JSONDecodeError, ValueError):
+        body = json.loads(response.content, parse_constant=non_finite)
+    except ValueError:
         body = None
     if not isinstance(body, dict):
         raise DataError("malformed", f"{SOURCE}: the quote is not a JSON object")
     return body
 
 
-def unsigned(body: dict, field: str) -> int:
-    value = body[field]
-    if isinstance(value, bool) or not isinstance(value, (int, str)):
-        raise DataError("malformed", f"{SOURCE}: {field} is not an integer")
+def non_finite(name: str):
+    raise ValueError(f"non-finite number {name}")
+
+
+def canonical(body: dict) -> str:
+    """The answer as bounded canonical JSON text; a non-finite number has no such form."""
     try:
-        number = int(value)
-    except ValueError:
-        raise DataError("malformed", f"{SOURCE}: {field} is not an integer") from None
-    if number < 0:
-        raise DataError("malformed", f"{SOURCE}: {field} is negative")
-    return number
+        text = json.dumps(body, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        raise DataError("malformed", f"{SOURCE}: the quote has no canonical JSON form") from None
+    if len(text.encode()) > MAX_ANSWER_BYTES:
+        raise DataError("malformed", f"{SOURCE}: the quote exceeds {MAX_ANSWER_BYTES} bytes")
+    return text
+
+
+def unsigned(body: dict, field: str) -> int:
+    """A non-negative integer the venue sends as a number or as ASCII decimal digits."""
+    value = body.get(field)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    if isinstance(value, str) and DIGITS.fullmatch(value):
+        return int(value)
+    raise DataError("malformed", f"{SOURCE}: {field} is not a non-negative integer")
+
+
+def token(body: dict, field: str) -> tuple[str, int]:
+    """The address and decimals of a token the venue says it quoted."""
+    value = body[field]
+    if not isinstance(value, dict) or not isinstance(value.get("address"), str):
+        raise DataError("malformed", f"{SOURCE}: {field} names no token address")
+    return value["address"], unsigned(value, "decimals")
 
 
 def parse(body: dict, amount: int) -> Quote:
@@ -99,6 +142,11 @@ def parse(body: dict, amount: int) -> Quote:
         raise DataError("malformed", f"{SOURCE}: the quote lacks {', '.join(missing)}")
     if not isinstance(body["isAmountTooLow"], bool):
         raise DataError("malformed", f"{SOURCE}: isAmountTooLow is not a boolean")
+    response = canonical(body)
+    (input_token, input_decimals), (output_token, output_decimals) = (
+        token(body, "inputToken"),
+        token(body, "outputToken"),
+    )
     try:
         return Quote(
             source=SOURCE,
@@ -109,8 +157,13 @@ def parse(body: dict, amount: int) -> Quote:
             exclusive_relayer=body["exclusiveRelayer"],
             exclusivity_parameter=unsigned(body, "exclusivityDeadline"),
             spoke_pool=body["spokePoolAddress"],
+            destination_spoke_pool=body["destinationSpokePoolAddress"],
+            input_token=input_token,
+            input_decimals=input_decimals,
+            output_token=output_token,
+            output_decimals=output_decimals,
             amount_too_low=body["isAmountTooLow"],
-            response=body,
+            response=response,
         )
     except ValueError as error:
         raise DataError("malformed", f"{SOURCE}: the quote has an invalid field") from error
@@ -165,9 +218,29 @@ def refusals(quote: Quote, target: Target, amount: int, pool, block_timestamp: i
             f"the quoted bridge fee {amount - quote.output_amount} exceeds the ceiling "
             f"{fee_ceiling(amount, route.max_fee_bps)} ({route.max_fee_bps} bps of {amount})",
         )
+    yield from route_refusals(quote, route)
+    yield from timing_refusals(quote, pool, block_timestamp)
+
+
+def route_refusals(quote: Quote, route):
+    """The venue must have quoted this route's own contracts and tokens.
+
+    The fee ceiling compares base units of the sent and the received asset, which means
+    nothing unless both have the same decimals.
+    """
     if quote.spoke_pool != route.spoke_pool:
         yield "quote_mismatch", "the quote names another SpokePool than the pinned one"
-    yield from timing_refusals(quote, pool, block_timestamp)
+    if quote.destination_spoke_pool != spoke_pool(route.destination_chain).address:
+        yield "quote_mismatch", "the quote names another destination SpokePool than the pinned one"
+    if (quote.input_token, quote.output_token) != (
+        route.asset.reference,
+        route.destination_asset.reference,
+    ):
+        yield "quote_mismatch", "the quote names other tokens than the route's"
+    if quote.input_decimals != route.decimals:
+        yield "quote_mismatch", "the quote holds other decimals for the sent asset than its chain"
+    if quote.output_decimals != route.decimals:
+        yield "decimals_differ", "the sent and the received asset have different decimals"
 
 
 def timing_refusals(quote: Quote, pool, block_timestamp: int):

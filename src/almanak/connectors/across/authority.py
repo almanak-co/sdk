@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import TypeAdapter
 
-from almanak.bridge_intents import BridgeIntent
+from almanak.bridge_intents import BridgeIntent, RevokeBridgeIntent
 from almanak.capabilities import CapabilityCodec, CapabilitySet
 from almanak.connectors.across.domain import Target
 from almanak.connectors.across.models import Config, Parameters
@@ -36,7 +36,7 @@ def admit(capabilities: Capabilities, intent) -> None:
     matches = [c for c in capabilities.requirements if c.target == intent.target]
     if len(matches) != 1:
         raise ValueError("Across intent requires exactly one retained route capability")
-    if not isinstance(intent, BridgeIntent):
+    if not isinstance(intent, (BridgeIntent, RevokeBridgeIntent)):
         raise ValueError("action is outside the Across economic capability")
 
 

@@ -42,6 +42,7 @@ class EconomicAction(StrEnum):
     DEPOSIT = "deposit"
     SET_LEVERAGE = "set_leverage"
     BRIDGE = "bridge"
+    REVOKE_BRIDGE = "revoke_bridge"
 
 
 # OP-family production declarations rely on the gateway's quote-time L1/operator

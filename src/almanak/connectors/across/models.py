@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
-from almanak.bridge_intents import BridgeIntent, Name
+from almanak.bridge_intents import BridgeIntent, Name, RevokeBridgeIntent
 from almanak.caip import AssetType
 from almanak.configuration.gas_parameters import AuthorGas, PreparedConfig
 from almanak.connectors.across.domain import Route, Target, Uint256, refuse_native_output
@@ -108,8 +108,16 @@ class Parameters(AuthorGas):
             target=target, amount=AssetAmount(asset=target.asset, amount=amount)
         )
 
+    def revoke(self, name: str) -> RevokeBridgeIntent[Target]:
+        """Clear the SpokePool approval an unfinished bridge left on the source account.
 
-Intent = BridgeIntent[Target]
+        A bridge revokes its own approval once its deposit is mined. This is for an
+        approval whose deposit never was, which teardown must clear before it can close.
+        """
+        return RevokeBridgeIntent[Target](target=self.target(name))
+
+
+Intent = Annotated[BridgeIntent[Target] | RevokeBridgeIntent[Target], Field(discriminator="kind")]
 
 
 class Config(Parameters, PreparedConfig):

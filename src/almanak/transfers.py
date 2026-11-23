@@ -11,11 +11,11 @@ from pydantic import Field, model_validator
 
 from almanak.connectors.identifiers import ConnectorId, Name
 from almanak.effects import WalletAsset
+from almanak.gateway.environments import same_environment
 from almanak.models import AssetAmount, Chain, Model
 from almanak.triggers import UtcInstant
 
 Reference = Annotated[str, Field(min_length=1, max_length=512, pattern=r"^\S+$")]
-FORK = "anvil:"
 # Connector, source chain and the connector's reference: unique within a checkpoint.
 type Identity = tuple[ConnectorId, Chain, str]
 
@@ -70,12 +70,6 @@ class Transfer(Model):
     @property
     def open(self) -> bool:
         return self.resolution is None
-
-
-def same_environment(source: Chain, destination: Chain) -> bool:
-    """Each fork node names its own environment, so two forks are one environment."""
-    environments = source.environment, destination.environment
-    return environments[0] == environments[1] or all(e.startswith(FORK) for e in environments)
 
 
 def validate_resolution(transfer: Transfer) -> None:

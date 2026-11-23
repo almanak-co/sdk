@@ -76,15 +76,36 @@ def test_a_deposit_is_planned_only_from_a_quote_and_an_exact_allowance():
     with pytest.raises(DataError) as error:
         planning.operation(CONFIG, state(), INTENT, snapshot(allowance=AMOUNT))
     assert error.value.kind == "quote_required"
-    with pytest.raises(DataError) as error:
-        planning.operation(CONFIG, state(), INTENT, snapshot(allowance=AMOUNT - 1))
-    assert error.value.kind == "allowance_mismatch"
+
+
+def test_an_approval_another_decision_left_is_cleared_before_this_one():
+    stale = snapshot(allowance=AMOUNT - 1)
+    assert planning.step(CONFIG, state(), INTENT, stale) == "clear"
+    cleared = planning.operation(CONFIG, state(), INTENT, stale)
+    assert cleared == RevokeOperation(target=TARGET, final=False)
+    assert planning.step(CONFIG, state(), INTENT, snapshot()) == "approve"
+
+
+def test_the_revoke_intent_closes_a_standing_approval_and_nothing_else():
+    revoke = CONFIG.revoke("move")
+    closing = state(
+        decision=SimpleNamespace(intent=revoke, identity="2" * 32),
+        mode="teardown",
+        outcomes=(mined("approve", AMOUNT),),
+    )
+    planned = planning.operation(CONFIG, closing, revoke, snapshot(allowance=AMOUNT))
+    assert planned == RevokeOperation(target=TARGET, final=True)
+    execution.validate_operation(backend(), closing, planned, snapshot(allowance=AMOUNT))
+    with pytest.raises(ValueError, match="already closed"):
+        planning.operation(CONFIG, closing, revoke, snapshot())
+    lifecycle = AcrossLifecycle()
+    assert lifecycle.increases_exposure(INTENT) and not lifecycle.increases_exposure(revoke)
 
 
 def test_a_mined_deposit_is_never_planned_again():
     done = state(outcomes=(mined("deposit", 5),))
     assert planning.operation(CONFIG, done, INTENT, snapshot(allowance=5)) == RevokeOperation(
-        target=TARGET
+        target=TARGET, final=True
     )
     with pytest.raises(DataError) as error:
         planning.operation(CONFIG, done, INTENT, snapshot())
@@ -127,7 +148,7 @@ def test_the_deposit_calldata_matches_a_hand_built_vector():
 
 def test_approval_and_revocation_name_only_the_spoke_pool():
     approve = plan_call(ApproveOperation(target=TARGET, amount=INTENT.amount))
-    revoke = plan_call(RevokeOperation(target=TARGET))
+    revoke = plan_call(RevokeOperation(target=TARGET, final=True))
     assert approve.to == revoke.to == USDC.reference
     assert approve.data == "0x095ea7b3" + word(PIN.address) + word(AMOUNT)
     assert revoke.data == "0x095ea7b3" + word(PIN.address) + word(0)
@@ -243,11 +264,11 @@ def test_an_approval_receipt_names_the_exact_spender_and_bound():
     assert movement(granted, approve, MINED_AT) == (0, None)
     assert movement(
         {"logs": [token_log(APPROVAL_TOPIC, PIN.address, 0)]},
-        RevokeOperation(target=TARGET),
+        RevokeOperation(target=TARGET, final=True),
         MINED_AT,
     ) == (0, None)
     with pytest.raises(DataError, match="another owner, spender or bound"):
-        movement(granted, RevokeOperation(target=TARGET), MINED_AT)
+        movement(granted, RevokeOperation(target=TARGET, final=True), MINED_AT)
 
 
 def backend():
@@ -264,9 +285,12 @@ def test_the_gateway_asks_the_venue_only_for_the_deposit(monkeypatch):
     monkeypatch.setattr(venue, "fetch", fetch)
     monkeypatch.setenv(execution.API_KEY_ENV, "secret")
     approve = execution.quoted_operation(backend(), state(), INTENT, snapshot())
-    assert isinstance(approve, ApproveOperation) and not asked
+    # The approval signs no quote, but the venue is asked first so a refusal leaves none.
+    assert isinstance(approve, ApproveOperation) and asked == [(TARGET, AMOUNT, "secret")]
     planned = execution.quoted_operation(backend(), state(), INTENT, snapshot(allowance=AMOUNT))
-    assert planned == deposit() and asked == [(TARGET, AMOUNT, "secret")]
+    assert planned == deposit() and asked == [(TARGET, AMOUNT, "secret")] * 2
+    stale = execution.quoted_operation(backend(), state(), INTENT, snapshot(allowance=1))
+    assert stale == RevokeOperation(target=TARGET, final=False) and len(asked) == 2
     assert "secret" not in planned.model_dump_json()
 
 
@@ -274,6 +298,9 @@ def test_a_quote_above_the_ceiling_is_refused_before_anything_is_planned(monkeyp
     monkeypatch.setattr(venue, "fetch", lambda *a, **k: quote(outputAmount=str(AMOUNT // 2)))
     with pytest.raises(DataError) as error:
         execution.quoted_operation(backend(), state(), INTENT, snapshot(allowance=AMOUNT))
+    assert error.value.kind == "fee_above_ceiling"
+    with pytest.raises(DataError) as error:
+        execution.quoted_operation(backend(), state(), INTENT, snapshot())
     assert error.value.kind == "fee_above_ceiling"
 
 
@@ -293,7 +320,7 @@ def test_validation_rechecks_the_quote_against_the_pinned_snapshot():
     assert error.value.kind == "fee_above_ceiling"
     with pytest.raises(ValueError, match="differs from its retained economic decision"):
         execution.validate_operation(
-            backend(), approved_state(), RevokeOperation(target=TARGET), before
+            backend(), approved_state(), RevokeOperation(target=TARGET, final=True), before
         )
 
 
@@ -351,7 +378,9 @@ def test_a_signed_deposit_is_rechecked_at_the_current_block():
             execution.validate_current(backend(), plan, snapshot(**changed))
         assert error.value.kind == kind
     paused = snapshot(pool=POOL.model_copy(update={"deposits_paused": True}))
-    revoke = SimpleNamespace(before=snapshot(), operation=RevokeOperation(target=TARGET))
+    revoke = SimpleNamespace(
+        before=snapshot(), operation=RevokeOperation(target=TARGET, final=True)
+    )
     execution.validate_current(backend(), revoke, paused)
 
 
@@ -369,7 +398,7 @@ def test_allowance_and_balances_reconcile_after_each_step():
     approve = ApproveOperation(target=TARGET, amount=INTENT.amount)
     assert execution.allowance_after(approve, 0, 0) == AMOUNT
     assert execution.allowance_after(deposit(), AMOUNT, AMOUNT) == 0
-    assert execution.allowance_after(RevokeOperation(target=TARGET), 5, 0) == 0
+    assert execution.allowance_after(RevokeOperation(target=TARGET, final=True), 5, 0) == 0
     before = snapshot()
     spent = before.native_balance.model_copy(update={"amount": before.native_balance.amount - 7})
     after = snapshot(wallet_balance=0, native_balance=spent)
@@ -390,7 +419,7 @@ def test_funding_and_gas_follow_the_source_account():
     assert tokens[0]["funded"] and pristine
     assert adapter.preflight(CONFIG, "arb", (snapshot(allowance=1),))[1] is False
     assert adapter.increases_exposure(CONFIG, deposit())
-    assert not adapter.increases_exposure(CONFIG, RevokeOperation(target=TARGET))
+    assert not adapter.increases_exposure(CONFIG, RevokeOperation(target=TARGET, final=True))
     adapter.validate_config(CONFIG)
     assert adapter.call(CONFIG, deposit()) == plan_call(deposit())
     with pytest.raises(DataError):
@@ -522,4 +551,77 @@ def test_the_gateway_plans_through_the_quote_hook_only_where_one_exists(monkeypa
         "before",
     )
     assert EvmGateway.enforces_deadline(quoting, deposit())
-    assert not EvmGateway.enforces_deadline(quoting, RevokeOperation(target=TARGET))
+    assert not EvmGateway.enforces_deadline(quoting, RevokeOperation(target=TARGET, final=True))
+
+
+def with_deposit_log(operation, change):
+    mined_receipt = receipt(operation)
+    mined_receipt["logs"][1] = change(mined_receipt["logs"][1])
+    return mined_receipt
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        # Another contract emits the same event: nothing is attributed to the SpokePool.
+        lambda entry: {**entry, "address": "0x" + "77" * 20},
+        # Indexed fields: the destination chain, then the depositor.
+        lambda entry: {
+            **entry,
+            "topics": [entry["topics"][0], "0x" + word(10), *entry["topics"][2:]],
+        },
+        lambda entry: {**entry, "topics": [*entry["topics"][:3], "0x" + word("0x" + "99" * 20)]},
+        lambda entry: {**entry, "topics": entry["topics"][:3]},
+        lambda entry: {**entry, "data": entry["data"][:-64]},
+    ],
+)
+def test_a_deposit_event_from_elsewhere_or_with_other_indexed_fields_is_refused(change):
+    operation = deposit()
+    with pytest.raises(DataError) as error:
+        movement(with_deposit_log(operation, change), operation, MINED_AT)
+    assert error.value.kind == "receipt_mismatch"
+
+
+def test_the_deposit_deadline_is_the_last_timestamp_the_spoke_pool_mines_it_at():
+    planned = deposit()
+    assert planned.deadline == planned.quote.timestamp + 3600
+    assert not execution.expired(planned, SimpleNamespace(timestamp=planned.deadline))
+    assert execution.expired(planned, SimpleNamespace(timestamp=planned.deadline + 1))
+
+
+def test_an_approval_whose_quote_is_refused_leaves_teardown_free_to_close(monkeypatch):
+    """An approval is mined, the deposit's quote is then refused, and teardown revokes."""
+    approved = approved_state()
+    monkeypatch.setattr(venue, "fetch", lambda *a, **k: quote(isAmountTooLow=True))
+    with pytest.raises(DataError) as error:
+        execution.quoted_operation(backend(), approved, INTENT, snapshot(allowance=AMOUNT))
+    assert error.value.kind == "amount_too_low"
+    revoke = CONFIG.revoke("move")
+    closing = approved_state(
+        decision=SimpleNamespace(intent=revoke, identity="2" * 32), mode="teardown"
+    )
+    standing = snapshot(allowance=AMOUNT)
+    planned = execution.quoted_operation(backend(), closing, revoke, standing)
+    assert planned == RevokeOperation(target=TARGET, final=True)
+    execution.validate_operation(backend(), closing, planned, standing)
+    owned = (SimpleNamespace(target=TARGET),)
+    with pytest.raises(DataError):
+        validate_closure(state(owned=owned, mode="teardown"), (standing,))
+    validate_closure(state(owned=owned, mode="teardown"), (snapshot(),))
+
+
+def test_a_stale_revocation_does_not_complete_the_bridge_it_precedes():
+    from almanak.connectors.across.state import Outcome
+
+    settled = Outcome.strategy_result
+    fields = {
+        "decision": SimpleNamespace(intent=INTENT),
+        "success": True,
+        "assets": 0,
+        "transfer": None,
+        "after": snapshot(),
+        "tx_hash": "0x" + "cd" * 32,
+    }
+    stale = SimpleNamespace(operation=RevokeOperation(target=TARGET, final=False), **fields)
+    final = SimpleNamespace(operation=RevokeOperation(target=TARGET, final=True), **fields)
+    assert settled(stale).status == "intermediate" and settled(final).status == "completed"

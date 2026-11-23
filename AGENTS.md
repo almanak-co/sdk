@@ -386,10 +386,26 @@ independently.
   a deposit mined later than that timestamp plus its own quote buffer, which is
   read at the planning block. Expired signed deposits are released under the
   rule in "Execution and recovery".
-- The gateway also refuses a quote whose SpokePool differs from the pin, whose
-  timestamp is ahead of the pinned block or older than the quote buffer, whose
-  fill deadline is beyond the SpokePool's deadline buffer or less than ten
-  minutes away, or whose exclusivity ends after the fill deadline.
+- The gateway also refuses a quote whose SpokePool differs from the pin on
+  either chain, whose tokens are not the route's, whose timestamp is ahead of
+  the pinned block or older than the quote buffer, whose fill deadline is
+  beyond the SpokePool's deadline buffer or less than ten minutes away, or
+  whose exclusivity ends after the fill deadline.
+- The fee ceiling compares base units of the sent and the received asset, so a
+  route needs both to have the same decimals. The gateway holds the quote's
+  decimals to the sent asset's on-chain decimals and refuses a difference.
+- The gateway asks for and admits a quote before it plans the approval, and
+  again for the deposit, which signs its own. A refused quote leaves no
+  approval behind.
+- The retained quote is its typed fields and the venue's answer as canonical
+  JSON text of at most 16 kB. A larger answer or a non-finite number refuses.
+- The author states no approval or revocation inside a bridge. An approval an
+  earlier decision left standing, because its deposit was never mined, is
+  revoked before the next bridge's own. The `revoke` action clears such an
+  approval and increases no exposure, so teardown admits it and can then close.
+- A route names its destination by CAIP-2 chain only. The destination's
+  environment is that of the bound destination account. Two identified fork
+  nodes are one environment; a fork never pairs with anything else.
 - A transfer in flight is owned state, not pending work. It is neither a
   balance nor a measured zero: an open transfer carries no received amount.
 - Arrival and refund are reconciled as external effects, arrival on the

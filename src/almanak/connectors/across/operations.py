@@ -73,9 +73,17 @@ class DepositOperation(FundedOperation):
             raise ValueError("an Across deposit signs the quote of its own amount")
         return self
 
+    @property
+    def deadline(self) -> int:
+        """Unix seconds of the last block timestamp the SpokePool mines this deposit at."""
+        return self.quote.timestamp + self.quote_time_buffer
+
 
 class RevokeOperation(Operation):
     kind: Literal["revoke"] = "revoke"
+    # Whether the revocation ends its decision. One that clears an approval an earlier
+    # decision left standing does not: the approval and deposit of this decision follow.
+    final: bool
 
 
 AcrossOperation = Annotated[
@@ -98,7 +106,7 @@ def deposit_arguments(operation: DepositOperation) -> tuple:
         word(route.destination_asset.reference),
         operation.amount.amount,
         quote.output_amount,
-        chain_number(route.destination_chain.chain_id),
+        chain_number(route.destination_chain),
         word(quote.exclusive_relayer),
         quote.timestamp,
         quote.fill_deadline,

@@ -144,7 +144,9 @@ class Outcome(Model):
         return self
 
     def strategy_result(self):
-        settled = isinstance(self.operation, (DepositOperation, RevokeOperation))
+        settled = isinstance(self.operation, DepositOperation) or (
+            isinstance(self.operation, RevokeOperation) and self.operation.final
+        )
         return ActionResult(
             intent=self.decision.intent,
             success=self.success,

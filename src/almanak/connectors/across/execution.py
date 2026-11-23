@@ -32,21 +32,26 @@ def increases_exposure(config, operation):
 
 def expired(operation, block) -> bool:
     """Whether the SpokePool would revert the deposit at `block` for its quote's age."""
-    return (
-        isinstance(operation, DepositOperation)
-        and block.timestamp > operation.quote.timestamp + operation.quote_time_buffer
-    )
+    return isinstance(operation, DepositOperation) and block.timestamp > operation.deadline
 
 
 def quoted_operation(backend, state, intent, before):
-    """Plan the next step, asking the venue for a quote only when it is the deposit."""
-    if planning.step(backend.config, state, intent, before) != "deposit":
+    """Plan the next step, asking the venue before the approval and for the deposit.
+
+    The approval signs no quote, but one the gateway would refuse leaves no approval
+    behind: the quote is asked and admitted first and then discarded. The deposit asks
+    again and signs its own.
+    """
+    kind = planning.step(backend.config, state, intent, before)
+    if kind not in ("approve", "deposit"):
         return planning.operation(backend.config, state, intent, before)
     backend.guard()
     amount = intent.amount.amount
     quote = venue.fetch(intent.target, amount, api_key=os.environ.get(API_KEY_ENV) or None)
     venue.admit(quote, intent.target, amount, before.pool, before.block.timestamp)
-    return planning.operation(backend.config, state, intent, before, quote=quote)
+    return planning.operation(
+        backend.config, state, intent, before, quote=quote if kind == "deposit" else None
+    )
 
 
 def validate_entry(state, operation, before):
@@ -85,11 +90,15 @@ def require_planned(config, state, operation, before):
     refusal = ValueError("Across operation differs from its retained economic decision")
     if state.decision is None:
         raise refusal
-    intent = state.decision.intent
-    if operation.kind != planning.step(config, state, intent, before):
-        raise refusal
     quote = getattr(operation, "quote", None)
-    if operation != planning.operation(config, state, intent, before, quote=quote):
+    try:
+        planned = planning.operation(config, state, state.decision.intent, before, quote=quote)
+    except DataError as error:
+        if error.kind != "quote_required":
+            raise
+        # The next step is the deposit, and this operation carries no quote: another step.
+        raise refusal from None
+    if operation != planned:
         raise refusal
 
 

@@ -16,7 +16,7 @@ from almanak.connectors.across.domain import FeeBps, Route, spoke_pool
 from almanak.connectors.across.observations import PoolState, read_pool, require_pinned
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm import erc20_address
-from almanak.models import Asset, Block, Chain, Model
+from almanak.models import Asset, Block, Model
 
 
 class MarketSelection(Model):
@@ -67,10 +67,9 @@ class ResolvedRoute(Model):
         return Route(
             chain=source,
             asset=selection.asset,
-            destination_chain=Chain(
-                chain_id=selection.destination_chain, environment=source.environment
-            ),
+            destination_chain=selection.destination_chain,
             destination_asset=selection.destination_asset,
+            decimals=self.asset.decimals,
             spoke_pool=self.pool.address,
             max_fee_bps=selection.max_fee_bps,
             quote=selection.quote,

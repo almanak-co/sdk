@@ -1,12 +1,14 @@
 """The venue quote is parsed strictly and refused whenever it cannot be signed safely."""
 
+import json
+
 import httpx
 import pytest
 from pydantic import ValidationError
 
 from almanak.caip import AssetType
 from almanak.connectors.across import quote as venue
-from almanak.connectors.across.domain import refuse_native_output
+from almanak.connectors.across.domain import SPOKE_POOLS, refuse_native_output
 from almanak.gateway.ethereum import DataError
 from almanak.models import ZERO_ADDRESS, Account, AccountBinding, SafeRoles, StrategyAccounts
 from tests.across_support import (
@@ -39,7 +41,10 @@ WETH = AssetType("eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
 @pytest.mark.parametrize(
     ("changes", "cause"),
     [
-        ({"destination_chain": ARBITRUM, "destination_asset": USDC}, "two different chains"),
+        (
+            {"destination_chain": ARBITRUM.chain_id, "destination_asset": USDC},
+            "two different chains",
+        ),
         ({"spoke_pool": "0x" + "33" * 20}, "another SpokePool"),
         ({"asset": WETH}, "wrapped native"),
         ({"destination_asset": USDC}, "chain"),
@@ -137,7 +142,10 @@ def test_a_quote_keeps_the_venue_answer_as_received():
         NOW - 69 + 7200,
     )
     assert (parsed.exclusivity_parameter, parsed.spoke_pool) == (3, PIN.address)
-    assert parsed.response == body() and parsed.source == "across_api"
+    assert json.loads(parsed.response) == body() and parsed.source == "across_api"
+    assert (parsed.input_token, parsed.output_token) == (USDC.reference, BASE_USDC.reference)
+    assert (parsed.input_decimals, parsed.output_decimals) == (6, 6)
+    assert parsed.destination_spoke_pool == SPOKE_POOLS[BASE.chain_id].address
     venue.admit(parsed, TARGET, AMOUNT, POOL, NOW)
 
 
@@ -147,6 +155,18 @@ def test_a_quote_keeps_the_venue_answer_as_received():
         {"outputAmount": "1.5"},
         {"outputAmount": None},
         {"outputAmount": "-1"},
+        {"outputAmount": " 999 "},
+        {"outputAmount": "999_897_038"},
+        {"outputAmount": "+1"},
+        {"outputAmount": "\u0663"},
+        {"outputAmount": -1},
+        {"outputAmount": 1.0},
+        {"inputToken": "0xaf88d065e77c8cc2239327c5edb3a432268e5831"},
+        {"outputToken": {"address": 5, "decimals": 6}},
+        {"outputToken": {"address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"}},
+        {"extra": float("nan")},
+        {"extra": float("inf")},
+        {"extra": "x" * venue.MAX_ANSWER_BYTES},
         {"timestamp": True},
         {"fillDeadline": str(2**32)},
         {"isAmountTooLow": "false"},
@@ -174,6 +194,11 @@ def test_a_quote_missing_a_field_names_it():
         ({"outputAmount": "0"}, "amount_too_low"),
         ({"isAmountTooLow": True}, "amount_too_low"),
         ({"spokePoolAddress": "0x" + "33" * 20}, "quote_mismatch"),
+        ({"destinationSpokePoolAddress": "0x" + "33" * 20}, "quote_mismatch"),
+        ({"inputToken": {"address": "0x" + "44" * 20, "decimals": 6}}, "quote_mismatch"),
+        ({"outputToken": {"address": "0x" + "44" * 20, "decimals": 6}}, "quote_mismatch"),
+        ({"inputToken": {"address": USDC.reference, "decimals": 18}}, "quote_mismatch"),
+        ({"outputToken": {"address": BASE_USDC.reference, "decimals": 18}}, "decimals_differ"),
         ({"timestamp": str(NOW + 1)}, "quote_time"),
         ({"timestamp": str(NOW - 3601)}, "quote_time"),
         ({"fillDeadline": str(NOW + 21601)}, "fill_deadline"),
@@ -230,6 +255,10 @@ def test_fetch_asks_once_and_sends_the_key_only_as_a_header():
         (httpx.Response(400, json={"message": "no route"}), "quote_refused"),
         (httpx.Response(500), "quote_refused"),
         (httpx.Response(200, text="not json"), "malformed"),
+        (httpx.Response(302, headers={"location": "https://example.invalid"}), "quote_refused"),
+        (httpx.Response(204), "quote_refused"),
+        (httpx.Response(200, text='{"outputAmount": NaN}'), "malformed"),
+        (httpx.Response(200, text='{"pad": "' + "x" * venue.MAX_ANSWER_BYTES + '"}'), "malformed"),
         (httpx.Response(200, json=[]), "malformed"),
     ],
 )
@@ -247,3 +276,13 @@ def test_an_unanswered_request_reports_no_request_detail():
         venue.fetch(TARGET, AMOUNT, api_key="secret", client=client(handler))
     assert error.value.kind == "quote_unavailable"
     assert "secret" not in str(error.value) and RECIPIENT not in str(error.value)
+
+
+def test_the_retained_answer_survives_a_round_trip_byte_for_byte():
+    parsed = quote(extra={"b": 1.5, "a": [1, "two"]})
+    again = venue.Quote.model_validate_json(parsed.model_dump_json())
+    assert again == parsed and again.response == parsed.response
+    assert parsed.response == json.dumps(
+        json.loads(parsed.response), sort_keys=True, separators=(",", ":")
+    )
+    assert len(parsed.response.encode()) <= venue.MAX_ANSWER_BYTES

@@ -6,8 +6,8 @@ from typing import Annotated, Literal, Self
 from pydantic import Field, model_validator
 
 from almanak.caip import AssetType
+from almanak.gateway.environments import same_environment
 from almanak.models import Account, AssetAmount, Model
-from almanak.transfers import same_environment
 
 Name = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
 
@@ -43,6 +43,22 @@ class BridgeTarget(Model, ABC):
             raise ValueError("a bridge stays within one environment")
         if self.account == self.destination_account:
             raise ValueError("a bridge requires two different named accounts")
+        return self
+
+
+class RevokeBridgeIntent[Target: BridgeTarget](Model):
+    """Request closure of the bridge's spending authority; the connector chooses calls.
+
+    It sends nothing and never increases exposure, so teardown admits it.
+    """
+
+    kind: Literal["revoke_bridge"] = "revoke_bridge"
+    target: Target
+
+    @model_validator(mode="after")
+    def concrete_target(self) -> Self:
+        if type(self.target) is not type(self).model_fields["target"].annotation:
+            raise ValueError("bridge intents require their exact concrete target type")
         return self
 
 

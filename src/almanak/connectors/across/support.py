@@ -13,7 +13,7 @@ def candidate_support():
         ConnectorChainSupport(
             chain=chain,
             modes=(),
-            actions=(EconomicAction.BRIDGE,),
+            actions=(EconomicAction.BRIDGE, EconomicAction.REVOKE_BRIDGE),
             account_profiles=("eoa",),
             restrictions=(
                 "ERC-20 routes between two bound accounts; no wrapped native asset is sent",

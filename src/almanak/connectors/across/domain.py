@@ -13,6 +13,7 @@ from almanak.models import Address, Chain, Hash32, Model, UInt
 Uint256 = Annotated[UInt, Field(lt=2**256)]
 Uint32 = Annotated[UInt, Field(lt=2**32)]
 FeeBps = Annotated[int, Field(strict=True, ge=0, le=10_000)]
+Decimals = Annotated[int, Field(strict=True, ge=0, le=255)]
 QUOTE_SOURCE = "across_api"
 
 
@@ -53,8 +54,12 @@ class Route(Model):
     kind: Literal["across"] = "across"
     chain: Chain
     asset: AssetType
-    destination_chain: Chain
+    # CAIP-2 only: the destination's environment is its bound account's, never the route's.
+    destination_chain: ChainId
     destination_asset: AssetType
+    # Of the sent asset, read on its chain. The fee ceiling compares base units of both
+    # assets, so the received asset must have the same decimals; the quote is held to it.
+    decimals: Decimals
     spoke_pool: Address
     # The author's ceiling on the whole bridge fee, in basis points of the amount sent.
     max_fee_bps: FeeBps
@@ -64,12 +69,12 @@ class Route(Model):
     @model_validator(mode="after")
     def scope(self):
         erc20_address(self.asset, self.chain.chain_id)
-        erc20_address(self.destination_asset, self.destination_chain.chain_id)
-        if self.chain.chain_id == self.destination_chain.chain_id:
+        erc20_address(self.destination_asset, self.destination_chain)
+        if self.chain.chain_id == self.destination_chain:
             raise ValueError("an Across route requires two different chains")
         if self.spoke_pool != spoke_pool(self.chain.chain_id).address:
             raise ValueError("Across route names another SpokePool than the pinned one")
-        spoke_pool(self.destination_chain.chain_id)
+        spoke_pool(self.destination_chain)
         if self.asset == evm_network(self.chain.chain_id).wrapped_native:
             # A wrapped native deposit refunds as the wrapped token but can arrive as the
             # native asset, which this scope does not record.
@@ -90,17 +95,17 @@ class Target(BridgeTarget):
 
     @model_validator(mode="after")
     def scope(self):
-        if (self.fund.chain, self.destination_fund.chain) != (
+        if (self.fund.chain, self.destination_fund.chain.chain_id) != (
             self.route.chain,
             self.route.destination_chain,
         ):
-            raise ValueError("Across target funds differ from the route's chains and environment")
+            raise ValueError("Across target funds differ from the route's chains")
         return self
 
 
 def refuse_native_output(route: Route, recipient_kind: str) -> None:
     """An EOA is paid the native asset for a wrapped native output; only a contract keeps it."""
-    wrapped = evm_network(route.destination_chain.chain_id).wrapped_native
+    wrapped = evm_network(route.destination_chain).wrapped_native
     if route.destination_asset == wrapped and recipient_kind == "eoa":
         raise ValueError(
             "Across pays an EOA the native asset for a wrapped native output; "

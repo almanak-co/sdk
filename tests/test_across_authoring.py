@@ -209,3 +209,46 @@ def test_the_connector_is_bound_and_declares_no_run_mode_yet():
         with pytest.raises(ValueError, match="fork is unsupported"):
             binding.require_target(chain, TARGET, RunMode.FORK)
     assert binding.codec.actions(SimpleNamespace(config=CONFIG)) is CONFIG
+
+
+class ForkReader(Reader):
+    """The same reads through one fork node, which names its own environment."""
+
+    def __init__(self, block):
+        super().__init__()
+        self.chain, self.block = block.chain, block
+
+    def call(self, address, signature, block, inputs=(), args=(), outputs=("uint256",)):
+        return super().call(address, signature, BLOCK, inputs, args, outputs)
+
+    def pin_block(self, number):
+        return self.block
+
+
+def test_resolution_through_two_fork_nodes_takes_each_chain_from_its_account(monkeypatch):
+    from almanak.models import Chain, StrategyAccounts
+    from tests.across_support import RECIPIENT, eoa, parameters
+
+    reviewed = PIN.model_copy(
+        update={"implementation_code_hash": "0x" + keccak(bytes.fromhex(CODE[2:])).hex()}
+    )
+    monkeypatch.setitem(SPOKE_POOLS, ARBITRUM.chain_id, reviewed)
+    here = Chain(chain_id=ARBITRUM.chain_id, environment="anvil:0x" + "a1" * 32)
+    there = Chain(chain_id=BASE.chain_id, environment="anvil:0x" + "b2" * 32)
+    resolved = resolve_market(
+        ForkReader(BLOCK.model_copy(update={"chain": here})),
+        selection(),
+        BLOCK.model_copy(update={"chain": here}),
+    )
+    choice = AllocationInput(
+        market="usdc", account="arb", destination_account="base", minimum_native_balance="0"
+    )
+    allocation = choice.resolve("move", resolved)
+    assert (allocation.route.chain, allocation.route.destination_chain) == (here, BASE.chain_id)
+    assert allocation.route.decimals == 6
+    forks = StrategyAccounts(bindings=(eoa("arb", here, SENDER), eoa("base", there, RECIPIENT)))
+    target = parameters(allocation, accounts=forks).target("move")
+    assert (target.fund.chain, target.destination_fund.chain) == (here, there)
+    mixed = StrategyAccounts(bindings=(eoa("arb", here, SENDER), eoa("base", BASE, RECIPIENT)))
+    with pytest.raises(ValueError, match="one environment"):
+        parameters(allocation, accounts=mixed)
