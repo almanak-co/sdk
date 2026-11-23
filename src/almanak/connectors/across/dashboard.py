@@ -19,6 +19,11 @@ COVERAGE = (
     "stay empty until then. The quote source names where the offered amount came from; a "
     "fork-constructed quote is not the venue's."
 )
+UNATTRIBUTED_COVERAGE = (
+    "Refund-leaf payments to the fund that matched no transfer proven unfilled, each at the "
+    "block that paid it. They are in the wallet and attributed to nothing: not a transfer "
+    "amount and not part of owned cash. Do not add them to either."
+)
 
 
 def status(transfer) -> str:
@@ -141,10 +146,63 @@ def transfer_table(state):
     return values, dataset
 
 
+def unattributed_table(state):
+    """Refund-leaf payments to the fund that matched no transfer, each with its block.
+
+    They are in the wallet and attributed to nothing: no transfer amount and no part of
+    owned cash. The table is absent while there are none.
+    """
+    pages = [p for p in getattr(state, "external_scans", ()) if p.unsolicited is not None]
+    kept = list(enumerate(pages))[-MAX_TABLE_ROWS:]
+    values: dict[str, Value] = {}
+    rows = []
+    for index, page in kept:
+        paid, target, key = page.unsolicited.amount, page.target, f"unattributed-refund-{index}"
+        values[key] = Value(
+            id=key,
+            amount=str(paid.amount),
+            unit="base_units",
+            asset=paid.asset,
+            decimals=decimals_of(state, paid.asset),
+            symbol=symbol_of(state, paid.asset),
+            scope=Scope(account=target.account, fund=state.config.profile(target.account).fund),
+            evidence="recorded",
+            block=page.end,
+            reason="A refund-leaf payment to the fund that matched no transfer proven unfilled.",
+        )
+        rows.append(
+            {
+                "allocation": target.allocation,
+                "account": target.account,
+                "block": str(page.end.number),
+                "transaction": page.unsolicited.tx_hash,
+                "amount": Ref(ref=key),
+            }
+        )
+    if not rows:
+        return {}, {}
+    dataset = accounts_dataset(
+        keep=True,
+        columns=(
+            Column(key="allocation", label="Bridge"),
+            Column(key="account", label="Paid account"),
+            Column(key="block", label="Block"),
+            Column(key="transaction", label="Transaction"),
+            Column(key="amount", label="Amount", kind="value"),
+        ),
+        rows=tuple(rows),
+        coverage=UNATTRIBUTED_COVERAGE,
+        truncated=len(pages) > len(kept),
+    )
+    return values, {"unattributed_refund_payments": dataset}
+
+
 def project(state, *, captured_at=None):
     if state.integrity_error:
         raise ValueError("invalidated Across evidence cannot produce a financial dashboard")
     values, dataset = transfer_table(state)
+    extra_values, extra = unattributed_table(state)
+    values = {**values, **extra_values}
     context = Context(
         config=Parameters.model_validate(
             {name: getattr(state.config, name) for name in Parameters.model_fields}
@@ -152,6 +210,6 @@ def project(state, *, captured_at=None):
         memory=state.memory,
         positions=(),
         values=values,
-        datasets={"transfers": dataset},
+        datasets={"transfers": dataset, **extra},
     )
     return context, snapshot(state, values, captured_at)

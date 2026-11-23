@@ -40,6 +40,7 @@ from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm import native_asset
 from almanak.models import AssetAmount, Model
 from almanak.strategy import StrategyDefinition
+from almanak.transfers import Arrived
 from almanak.work import merge, project
 from tests.across_support import AMOUNT, BASE, BASE_USDC, BASE_WETH, USDC
 from tests.test_across_records import (
@@ -550,6 +551,14 @@ def test_inventory_is_conserved_over_every_sequence_of_settlements(config, fates
             state = settle(state, destination)
             conserved(state)
             held(state, FORK_BASE, DESTINATION, "earn", paid)
+        # Each wallet by its own key: a total alone would not notice an arrival
+        # credited to the source. The transfers not yet reached are still open.
+        assert inventory(state) == {SOURCE: 0, DESTINATION: paid}
+        assert sum(t.open for t in state.transfers) == 3 - paid // OFFERED
+        arrived_so_far = [isinstance(t.resolution, Arrived) for t in state.transfers]
+        assert arrived_so_far == [f == "arrive" for f in fates[: serial + 1]] + [False] * (
+            2 - serial
+        )
     arrived = fates.count("arrive")
     assert inventory(state) == {SOURCE: 0, DESTINATION: arrived * OFFERED}
     if "refund" in fates:
@@ -594,6 +603,7 @@ def test_the_report_and_dashboard_show_value_in_flight_apart_from_cash(
     assert "must not be added" in listed["transfer_scope"]
     assert listed["positions"][0]["position_scope"].startswith("A bridge holds nothing")
     context, _ = dashboard(state)
+    assert "unattributed_refund_payments" not in context.datasets
     (shown,) = context.datasets["transfers"].rows
     assert (shown["status"], shown["quote_source"]) == ("open", "across_api")
     assert context.values[shown["received"].ref].amount is None
@@ -610,6 +620,35 @@ def test_the_report_and_dashboard_show_value_in_flight_apart_from_cash(
     assert shown["status"] == "arrived"
     assert context.values[shown["received"].ref].amount == str(OFFERED)
     assert report(state)["inventory"][1]["amount"] == str(OFFERED)
+
+
+def test_an_unattributed_refund_payment_has_its_own_dashboard_table(config):  # noqa: F811
+    """A stranger's refund-leaf payment is in the wallet and attributed to nothing: the
+    dashboard lists it with its block, apart from the transfer amounts and from fund cash."""
+    from almanak.connectors.composed.dashboard import project as dashboard
+    from almanak.connectors.composed.reporting import report
+
+    unfilled = flight(config).model_copy(update={"unfilled": True})
+    state = checkpoint(composed(config), transfers=(unfilled,), inventory=balances(source=0))
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(state, chain)
+    refunded(config, chain, chain.head + 2, [5], tx="0x" + "d0" * 32)
+    state = settle(state, chain)
+    page = state.external_scans[-1]
+    context, _ = dashboard(state)
+    (paid,) = context.datasets["unattributed_refund_payments"].rows
+    assert (paid["allocation"], paid["account"]) == ("move", "arb")
+    assert (paid["block"], paid["transaction"]) == (str(page.end.number), "0x" + "d0" * 32)
+    value = context.values[paid["amount"].ref]
+    assert (value.amount, value.asset, value.block) == ("5", USDC, page.end)
+    # It is no transfer amount and no cash: the transfer stays open and cash stays zero.
+    (shown,) = context.datasets["transfers"].rows
+    assert shown["status"] == "unfilled" and context.values[shown["returned"].ref].amount is None
+    assert paid["amount"].ref not in {shown[name].ref for name in ("sent", "offered")}
+    cash = [context.values[r["amount"].ref].amount for r in context.datasets["fund_inventory"].rows]
+    assert cash == ["0", "0"]
+    (listed,) = report(state)["unattributed_refund_payments"]
+    assert (listed["block"], listed["amount"]["amount"]) == (page.end.number, 5)
 
 
 def test_a_composed_fork_names_the_constructed_quote_on_the_source_chain_only(config):  # noqa: F811
@@ -674,5 +713,5 @@ def test_the_composed_fork_keeper_settles_transfers_through_the_bridge_component
     # Request handling still asks about GMX requests alone; only the fork keeper is owed.
     assert ComposedRequests.fork_unsettled(state) and not ComposedRequests.unresolved(state)
     assert keeper.align(state, 60) == 65
-    assert keeper.settle(state) == ({"advanced_seconds": 0},)
+    assert tuple(keeper.settle(state)) == ({"advanced_seconds": 0},)
     assert seen == [(state.config.component(ACROSS), (transfer,))]

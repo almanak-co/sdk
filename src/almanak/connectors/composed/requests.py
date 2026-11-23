@@ -43,8 +43,11 @@ class ForkKeepers:
             (keeper.align(view, seconds) for keeper, view in self.parts(state)), default=seconds
         )
 
-    def settle(self, state) -> tuple[dict, ...]:
-        return tuple(row for keeper, view in self.parts(state) for row in keeper.settle(view))
+    def settle(self, state):
+        """Each component's rows as soon as it has settled, so the caller records them
+        and shifts its clock before the next component runs and can fail."""
+        for keeper, view in self.parts(state):
+            yield from keeper.settle(view)
 
 
 class ComposedRequests:

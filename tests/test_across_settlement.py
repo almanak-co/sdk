@@ -378,6 +378,15 @@ def test_a_refund_leaf_payment_that_matches_nothing_is_retained_and_stops_nothin
     assert page.end == chain.block(chain.head)
     listed = AcrossProjection.report(state)["unattributed_refund_payments"]
     assert listed == [{"block": page.end.number, **page.unsolicited.model_dump(mode="json")}]
+    # The dashboard lists it too, in a table of its own beside the transfers.
+    from almanak.connectors.across.dashboard import project as dashboard
+
+    context, _ = dashboard(state)
+    (paid,) = context.datasets["unattributed_refund_payments"].rows
+    assert (paid["account"], paid["block"]) == ("arb", str(page.end.number))
+    assert context.values[paid["amount"].ref].amount == "5"
+    assert len(context.datasets["transfers"].rows) == 1
+    assert "unattributed_refund_payments" not in dashboard(proven(config, transfer))[0].datasets
     refunded(config, chain, chain.head + 3, [AMOUNT])
     state = settle(state, config, chain)
     assert state.outcomes[0].transfers == (transfer.reference,)

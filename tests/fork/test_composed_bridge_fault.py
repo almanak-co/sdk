@@ -58,7 +58,11 @@ def assert_interrupted(checks, state, held, boundary):
     """What the killed runtime left: nothing of the arrival, or all of it, never a part."""
     assert state.memory == held.memory and state.delivered == held.delivered
     if boundary == "external_evidence":
-        assert state.outcomes == held.outcomes and state.external_scans == held.external_scans
+        # Empty pages may have moved the cursor before the arrival's page was read, so
+        # the scan history extends the held one; the outcomes are exactly the held ones.
+        assert state.outcomes == held.outcomes
+        assert state.external_scans[: len(held.external_scans)] == held.external_scans
+        assert all(page.outcome is None for page in state.external_scans)
         assert state.transfers == held.transfers and checks.inventory(state) == (0, 0)
         return
     assert len(arrivals(state)) == 1 and state.outcomes[:-1] == held.outcomes

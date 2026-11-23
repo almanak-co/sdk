@@ -213,22 +213,26 @@ def gmx_datasets(state):
 def transfer_datasets(state, values):
     """The bridge component's own transfer table, with its quote source and measured
     amounts. Value in flight is a row here and never part of shared fund cash."""
-    from almanak.connectors.across.dashboard import transfer_table
+    from almanak.connectors.across.dashboard import transfer_table, unattributed_table
     from almanak.connectors.composed.lifecycle import component_state
     from almanak.connectors.identifiers import ConnectorId
 
     identity = ConnectorId("across")
     if identity not in state.config.parameter_components:
         return {}
-    additions, dataset = transfer_table(component_state(state, identity))
+    view = component_state(state, identity)
+    additions, dataset = transfer_table(view)
     add_values(values, additions)
+    unattributed_values, unattributed = unattributed_table(view)
+    add_values(values, unattributed_values)
     return {
+        **unattributed,
         "transfers": dataset.model_copy(
             update={
                 "coverage": dataset.coverage
                 + " An open transfer is in no fund cash balance; do not add it to one."
             }
-        )
+        ),
     }
 
 
