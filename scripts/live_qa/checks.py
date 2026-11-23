@@ -263,11 +263,20 @@ def gmx_market(share: str, symbol: str) -> Check:
     return check
 
 
-def empty_spokes(output: Output, rpc: Rpc) -> list[str]:
-    """Spokes the listing calls unreadable although the endpoint answered: they revert.
+# The keys of an unreadable entry that are its refusal; the others name the entry.
+ENTRY_STATE = ("status", "reason")
 
-    A Spoke without reserves reverts `getReserveCount()`. Any other unreadable entry,
-    and any market refused for an endpoint reason, blocks the case instead.
+
+def entry_name(item: Output) -> str:
+    return ", ".join(f"{key} {value}" for key, value in item.items() if key not in ENTRY_STATE)
+
+
+def unreadable_entries(output: Output, rpc: Rpc) -> list[str]:
+    """Findings on what the listing calls unreadable although the endpoint answered.
+
+    A Spoke without reserves reverts `getReserveCount()`, so calling it unreadable is a
+    misread. An entry refused for a reason that does not name the endpoint fails too.
+    An entry or a market refused for an endpoint reason blocks the case instead.
     """
     unreadable = output["source"].get("unreadable") or []
     block = output["block"]["number"]
@@ -276,15 +285,23 @@ def empty_spokes(output: Output, rpc: Rpc) -> list[str]:
         for item in unreadable
         if "spoke" in item and rpc.reverts(item["spoke"], "getReserveCount()", block)
     ]
-    unanswered = [item.get("reason", "") for item in unreadable if item.get("spoke") not in empty]
-    unanswered += [
-        market["reason"]
-        for market in output["markets"]
-        if market.get("reason", "").startswith(ENDPOINT_REASONS)
+    others = [item for item in unreadable if item.get("spoke") not in empty]
+    refusals = [*others, *output["markets"]]
+    unanswered = [
+        item["reason"] for item in refusals if item.get("reason", "").startswith(ENDPOINT_REASONS)
     ]
     if unanswered:
         raise RpcUnavailable(f"{len(unanswered)} entries unreadable, first: {unanswered[0]}")
-    return empty
+    misread = (
+        [
+            f"{len(empty)} Spokes are reported unreadable, but they revert getReserveCount()"
+            f" on a direct read, as a Spoke without reserves does: {', '.join(empty)}"
+        ]
+        if empty
+        else []
+    )
+    answered = [f"{entry_name(item)} is unreadable: {item.get('reason', '')}" for item in others]
+    return misread + answered
 
 
 def unverified(markets: list[Output]) -> list[str]:
@@ -299,16 +316,7 @@ def unverified(markets: list[Output]) -> list[str]:
 
 def listed_markets(output: Output, rpc: Rpc) -> list[str]:
     """A listing of reviewed deployments: nothing unreadable, every market verified."""
-    empty = empty_spokes(output, rpc)
-    misread = (
-        [
-            f"{len(empty)} Spokes are reported unreadable, but they revert getReserveCount()"
-            f" on a direct read, as a Spoke without reserves does: {', '.join(empty)}"
-        ]
-        if empty
-        else []
-    )
-    return misread + unverified(output["markets"])
+    return unreadable_entries(output, rpc) + unverified(output["markets"])
 
 
 def aave_v4_listing(output: Output, rpc: Rpc) -> list[str]:
@@ -328,10 +336,10 @@ def morpho_listing(core: str) -> Check:
     verified market's loan asset is the one the core records under its ID."""
 
     def check(output: Output, rpc: Rpc) -> list[str]:
-        empty_spokes(output, rpc)
+        answered = unreadable_entries(output, rpc)
         verified = [market for market in output["markets"] if market["status"] == "verified"]
         if not verified:
-            return ["the listing reports no verified market"]
+            return [*answered, "the listing reports no verified market"]
         pairs = []
         for market in verified:
             (loan,) = rpc.call(
@@ -343,7 +351,7 @@ def morpho_listing(core: str) -> Check:
             )
             reported = asset_address(market["loan_asset"]["asset"])
             pairs.append((f"loan asset of {market['market_id'][:10]}", reported, loan.lower()))
-        return differences(pairs)
+        return answered + differences(pairs)
 
     return check
 

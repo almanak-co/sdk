@@ -568,6 +568,26 @@ def test_a_spoke_called_unreadable_that_reverts_on_a_direct_read_is_a_finding():
         checks.listed_markets(partial, FakeRpc(down=True))
 
 
+def test_an_entry_unreadable_for_a_reason_that_is_not_the_endpoint_fails_the_listing():
+    """Only an endpoint that did not answer blocks; anything else is a finding."""
+    unreadable = [
+        {"spoke": "0x1", "status": "refused", "reason": "malformed: reserve count"},
+        {"comet": "0x2", "status": "refused", "reason": "invalid: no base token"},
+    ]
+    assert checks.listed_markets(listing([market()], unreadable), FakeRpc()) == [
+        "spoke 0x1 is unreadable: malformed: reserve count",
+        "comet 0x2 is unreadable: invalid: no base token",
+    ]
+    verified = market(market_id="0x" + "0d" * 32, loan_asset=market()["asset"])
+    core = FakeRpc({"idToMarketParams(bytes32)": (MARKET_ASSET,)})
+    morpho = checks.morpho_listing("0xcore")(listing([verified], unreadable[1:]), core)
+    assert morpho == ["comet 0x2 is unreadable: invalid: no base token"]
+    # An endpoint reason beside it still blocks, so the run retries.
+    unanswered = [*unreadable, {"spoke": "0x3", "reason": "rpc: eth_call: rejected"}]
+    with pytest.raises(RpcUnavailable, match="1 entries unreadable"):
+        checks.listed_markets(listing([market()], unanswered), FakeRpc())
+
+
 def test_a_pool_listing_is_held_to_the_reserves_the_pool_itself_lists():
     output = listing([market()])
     two = FakeRpc({"getReservesList()": ((MARKET_ASSET.upper().replace("0X", "0x"), "0xb"),)})
