@@ -36,6 +36,14 @@ class OperatorRuntime(Runtime):
     proof_spent: tuple[str, float] | None = None
     # The latest refusal that came out of the consumed-nonce proof or its recording.
     unproven: DataError | None = None
+    # Seconds `execute` spends on ticks that end in a passing failure between two steps
+    # of one request, once a step of it is mined, before that failure ends it. Long
+    # enough for several whole retry budgets of a read and a short throttle window.
+    # Short beside a calldata deadline, which the held time still runs down: with the
+    # default 300 second window, signing refuses a step with less than 150 seconds left.
+    step_wait = 60.0
+    # The request whose failure between steps was held, and the seconds spent so far.
+    step_spent: tuple[str, float] | None = None
     monotonic = staticmethod(time.monotonic)
 
     def count_replan(self, exc, *arguments, **options):
@@ -245,7 +253,9 @@ class OperatorRuntime(Runtime):
         failed read. So is any refusal of the consumed-nonce proof, for `proof_wait`
         seconds per signed step: the step's own transaction, mined but not yet served
         by every node of the endpoint, looks the same as another transaction at its
-        nonce, and the next tick reads its receipt first.
+        nonce, and the next tick reads its receipt first. So is a passing failure
+        between two steps of a request that has a mined step, for `step_wait` seconds
+        per request (`awaits_step`).
         """
         state = self.journal.load()
         if state.decision is None and not self.retained(state):
@@ -257,13 +267,61 @@ class OperatorRuntime(Runtime):
             try:
                 done = self.held_tick()
             except DataError as exc:
-                if exc is not self.unproven or not self.awaits_proof(began):
+                if not self.asks_again(exc, began):
                     raise
                 done = False
             if done:
                 break
             self.wait(self.journal.load())
         return self.journal.load().outcomes[before:]
+
+    def asks_again(self, exc: DataError, began: float) -> bool:
+        """Whether `execute` runs another tick after the one that ended in `exc`."""
+        if exc is self.unproven:
+            return self.awaits_proof(began)
+        return passing(exc) and self.awaits_step(exc, began)
+
+    def awaits_step(self, exc: DataError, began: float) -> bool:
+        """Whether a passing failure between two steps is asked again instead of ending.
+
+        Only for a request with a step already mined: ending there leaves that step
+        standing without the rest, over one failed read. Before any step is mined
+        nothing is on chain, and the failure ends the command at once.
+
+        Only while the checkpoint holds neither a plan nor a signed step, so the next
+        tick can only deliver the recorded outcome, or observe and plan the next step
+        afresh: a failed preparation recorded nothing. A failure with a plan recorded
+        arose at signing or at the admission of the signed bytes, where a signature may
+        exist that the checkpoint does not hold. Asking again there would sign the
+        plan a second time, so that failure ends the command.
+
+        Until the ticks that ended in such a failure for this request, each with the
+        pause after it, have taken `step_wait` seconds. A tick that ends another way
+        spends none of it. Then the failure ends the command, and says that the
+        mined steps stand.
+        """
+        state = self.journal.load()
+        mined = mined_steps(state)
+        if not mined or state.plan is not None or state.pending is not None:
+            return False
+        request = state.decision.identity
+        spent = self.monotonic() - began + self.poll
+        if self.step_spent is not None and self.step_spent[0] == request:
+            spent += self.step_spent[1]
+        self.step_spent = (request, spent)
+        if spent >= self.step_wait:
+            raise DataError(
+                exc.kind,
+                f"{exc}; the failure did not pass within {self.step_wait:g} seconds."
+                f" Steps of the request already mined: {mined}. They stand: state the"
+                " command again, and it is planned against what the wallet holds now",
+                code=exc.code,
+                transient=exc.transient,
+                details=exc.details,
+            ) from exc
+        if self.poll:
+            time.sleep(self.poll)
+        return True
 
     def awaits_proof(self, began: float) -> bool:
         """Whether a refused consumed-nonce proof is asked again instead of ending.
@@ -298,9 +356,7 @@ class OperatorRuntime(Runtime):
 
     def holds(self, exc: DataError) -> bool:
         """Whether a failure is a passing one met while a signed step waits."""
-        if not (exc.transient or exc.kind == "gateway_unavailable"):
-            return False
-        return self.journal.load().pending is not None
+        return passing(exc) and self.journal.load().pending is not None
 
     def finish(self):
         """Close the deployment once every obligation it owns is verifiably gone."""
@@ -318,3 +374,22 @@ class OperatorRuntime(Runtime):
                 else current
             )
         )
+
+
+def passing(exc: DataError) -> bool:
+    """Whether the same request may pass a failure later: a provider or storage failure."""
+    return exc.transient or exc.kind == "gateway_unavailable"
+
+
+def mined_steps(state) -> int:
+    """How many recorded outcomes belong to the active request, from the checkpoint.
+
+    An outcome carries the decision its step was signed under, so this needs nothing
+    the process remembers. A request whose decision is still active after an outcome
+    has more steps to go.
+    """
+    if state.decision is None:
+        return 0
+    request = state.decision.identity
+    decisions = (getattr(item, "decision", None) for item in state.outcomes)
+    return sum(getattr(decision, "identity", None) == request for decision in decisions)
