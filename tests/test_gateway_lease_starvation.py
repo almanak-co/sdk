@@ -350,17 +350,32 @@ def test_a_request_answered_while_the_renewal_waited_counts_at_its_next_failure(
     monkeypatch.setattr(service, "dispatch", failing_send)
     client.acquire()
     admitted = time.monotonic()
+    # The renewal asks `progressed` only after it has renewed or when a failed attempt
+    # finds the lease run out by its own count; nothing renews here, so a credit spent
+    # is the renewal's failure past its deadline, wherever that fell on this clock. The
+    # gateway heals there, in the renewal's own thread, before its next attempt; without
+    # the credit that failure would have ended the renewal.
+    spent = threading.Event()
+    progressed = client.fenced.progressed
+
+    def spending():
+        result = progressed()
+        if result:
+            spent.set()
+            client.healed.set()
+        return result
+
+    monkeypatch.setattr(client.fenced, "progressed", spending)
     try:
         # Inside the renewal's first wait.
         with pytest.raises(DataError, match="provider failed"):
             client.scoped("audit")
         assert not client.failed
-        # The gateway stays unavailable until one renewal has failed past the deadline.
-        while not any(at >= admitted + LEASE for at in client.failed):
+        # The gateway stays unavailable until one renewal has failed past its deadline.
+        while not spent.is_set():
             assert client.lease_error is None
             assert time.monotonic() < admitted + 3 * LEASE
             time.sleep(0.02)
-        client.healed.set()
         assert client.renewed.wait(10)
         assert client.lease_error is None
         identity, expires = lease_row(service.journal)
