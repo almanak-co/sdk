@@ -948,3 +948,20 @@ def test_a_checkpoint_that_cannot_be_read_ends_with_the_failure_that_was_met(des
     with pytest.raises(DataError) as ended:
         runtime.awaits_step(met, runtime.monotonic())
     assert ended.value is met
+
+
+def test_a_checkpoint_that_cannot_be_read_before_the_pause_does_not_end_the_command(desk):
+    """The pause reads the checkpoint only to see whether a signed step waits."""
+    from types import SimpleNamespace
+
+    def unreadable():
+        raise DataError("gateway_unavailable", "gateway storage unavailable")
+
+    runtime = desk.runtime()
+    waited = []
+    runtime.wait = waited.append
+    runtime.pause()
+    assert len(waited) == 1
+    runtime.journal = SimpleNamespace(load=unreadable)
+    runtime.pause()
+    assert len(waited) == 1

@@ -455,12 +455,12 @@ independently.
   `--execute` nothing is signed.
 - Accepted: once a step of a direct command's request is mined, a transient
   provider or storage failure before the next step is sent is held and the
-  check repeated, for at most 60 seconds per request, where it ended the
-  command. A failure met at signing may leave a signature the record does not
-  hold, so the repeat can sign the same recorded plan again: the same
-  transaction at the same nonce, of which only the recorded one is sent and
-  only one can be mined. Before any step is mined the failure still ends the
-  command. Never describe the hold as on-chain enforcement.
+  check repeated, for at most 60 seconds per request. A failure met at signing
+  may leave a signature the record does not hold, so the repeat can sign the
+  same recorded plan again: the same transaction at the same nonce, of which
+  only the recorded one is sent and only one can be mined. Before any step is
+  mined such a failure ends the command. Never describe the hold as on-chain
+  enforcement.
 - A direct command is not resumed. A signed step left unresolved keeps its
   record and the wallet's claim, which refuses later actions for that wallet.
   `ax recover` resolves the signed step from its receipt or by sending the

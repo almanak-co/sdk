@@ -272,8 +272,22 @@ class OperatorRuntime(Runtime):
                 done = False
             if done:
                 break
-            self.wait(self.journal.load())
+            self.pause()
         return self.journal.load().outcomes[before:]
+
+    def pause(self):
+        """The pause before the next tick: the poll, while a signed step is unmined.
+
+        A checkpoint that cannot be read does not end the command here. The next tick
+        meets the same storage failure, where it is held or ends as any other.
+        """
+        try:
+            state = self.journal.load()
+        except DataError:
+            if self.poll:
+                time.sleep(self.poll)
+            return
+        self.wait(state)
 
     def asks_again(self, exc: DataError, began: float) -> bool:
         """Whether `execute` runs another tick after the one that ended in `exc`."""
@@ -306,8 +320,8 @@ class OperatorRuntime(Runtime):
         ends the command at once. No fee-replacement candidate exists at this point:
         those are signed only for a recorded signed step.
 
-        Not for a plan that is not a chain transaction, such as a venue action: its
-        signing was not examined for this, and no direct action plans one.
+        Not for a plan that is not a chain transaction, such as a venue action: no
+        direct action plans one.
 
         Until the ticks that ended in such a failure for this request, each with the
         pause after it, have taken `step_wait` seconds. A tick that ends another way
