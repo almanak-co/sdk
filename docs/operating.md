@@ -1335,7 +1335,16 @@ public endpoint and no declared action, the endpoint serves reads only.
 Before any read the endpoint must report the chain's number and its pinned genesis
 block and a head no older than 120 seconds; otherwise the command is refused with
 `chain_mismatch` or `stale`. One endpoint serves a command, and a failure fails the
-read: nothing falls back to another endpoint. Nobody answers for a public endpoint.
+read: nothing falls back to another endpoint. A single execution read of the gateway,
+and the proof `ax recover` runs on a named public endpoint, is sent again after a
+transient failure such as an HTTP 5xx or a refused connection, for at most 8
+seconds. One whose first attempt ran into the 15 second provider timeout is sent
+once more, with an 8 second timeout. A batched read is not sent again after such a
+failure, and a transaction submission is never sent again this way. A read refused
+with `the endpoint does not serve state at that block` got geth's `missing trie
+node`: most often the pinned block is older than the state the endpoint keeps. It
+is not sent again. State the action again, or name a transport that keeps older
+state. Nobody answers for a public endpoint.
 It gives no promise of availability, archive state or wide log ranges, it rate
 limits and times out without notice, and its operator sees the addresses a command
 reads and the transactions it sends before they are mined. An action executed

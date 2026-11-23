@@ -335,6 +335,14 @@ def rejected(error):
             {"message": "header not found"},
             "eth_call: RPC rejected the requested read (header not found)",
         ),
+        (
+            {
+                "code": -32000,
+                "message": "missing trie node 5f3a (path ) state 0x9c is not available",
+            },
+            "eth_call: RPC rejected the requested read"
+            " (JSON-RPC -32000: the endpoint does not serve state at that block)",
+        ),
         ({"code": -32000}, "eth_call: RPC rejected the requested read (JSON-RPC -32000)"),
         (
             {"code": -32000, "message": "nonce too low: secret-key"},
@@ -365,6 +373,8 @@ def test_a_reverted_call_keeps_its_data_and_no_phrase():
         ("INVALID OPCODE 0xfe", "EVM error OpcodeNotFound"),
         ("header not found", "header not found"),
         ("Header Not Found for 0xabc via secret-key", "header not found"),
+        ("missing trie node 5f3a (path )", "the endpoint does not serve state at that block"),
+        ("Missing Trie Node via secret-key", "the endpoint does not serve state at that block"),
         ("execution reverted", None),
         ("invalid project id: 9aa3d95b3bc440fa", None),
         ("https://only.example/secret", None),

@@ -838,9 +838,12 @@ def record_endpoint(config, env_file: Path | None, public_rpc: str | None = None
 
 
 def proven_public(chain, endpoint: str) -> str:
-    from almanak.gateway.ethereum import EthereumReader
+    from almanak.gateway.ethereum import EXECUTION_RETRY_BUDGET, EthereumReader
 
-    with EthereumReader(chain, endpoint) as reader:
+    # The proof reads the chain number, the genesis block and the head, and sends
+    # nothing. A public endpoint can fail one of them for a moment, so each re-sends a
+    # transient failure within the budget execution reads have.
+    with EthereumReader(chain, endpoint, retry_budget=EXECUTION_RETRY_BUDGET) as reader:
         prove_public(reader)
     return endpoint
 
