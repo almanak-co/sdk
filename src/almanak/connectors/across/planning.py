@@ -11,7 +11,13 @@ from almanak.connectors.across.operations import (
     DepositOperation,
     RevokeOperation,
 )
+from almanak.external_effects import ExternalEffect
 from almanak.gateway.ethereum import DataError
+
+
+def executions(state) -> tuple:
+    """The deployment's own mined transactions; arrivals and refunds are not among them."""
+    return tuple(o for o in state.outcomes if not isinstance(o, ExternalEffect))
 
 
 def executed(state, intent) -> bool:
@@ -22,7 +28,7 @@ def executed(state, intent) -> bool:
         outcome.success
         and outcome.decision.identity == state.decision.identity
         and outcome.operation.kind == "deposit"
-        for outcome in state.outcomes
+        for outcome in executions(state)
     )
 
 

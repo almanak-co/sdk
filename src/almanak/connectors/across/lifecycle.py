@@ -4,9 +4,10 @@ from uuid import uuid4
 
 from almanak.bridge_intents import BridgeIntent
 from almanak.connectors.across.observations import Ownership
+from almanak.connectors.across.settlement_types import CONNECTOR, ArrivalOutcome, RefundOutcome
 from almanak.connectors.closure_obligations import obligation, require_closed
 from almanak.gateway.ethereum import DataError
-from almanak.transfers import opened
+from almanak.transfers import Arrived, Refunded, opened, resolved
 from almanak.triggers import DecisionSchedule
 from almanak.work import initial_work
 
@@ -28,8 +29,33 @@ def commit_owned(retained, outcome):
     return retained
 
 
+def settled(state, outcome):
+    """The transfers after an arrival or a refund, each resolved by its measured amount."""
+    source = outcome.target.fund.chain
+    transfers = state.transfers
+    if isinstance(outcome, ArrivalOutcome):
+        identity = (CONNECTOR, source, outcome.transfer)
+        return resolved(transfers, identity, Arrived(received=outcome.received))
+    paid = [
+        t
+        for t in transfers
+        if (t.connector, t.reference) in {(CONNECTOR, r) for r in outcome.transfers}
+    ]
+    if sum(t.sent.amount for t in paid) != outcome.returned.amount:
+        raise ValueError("an Across refund must return exactly what its transfers sent")
+    for reference in outcome.transfers:
+        identity = (CONNECTOR, source, reference)
+        sent = next(t.sent for t in transfers if t.identity == identity)
+        # A refund returns each transfer's whole sent amount; the page proved their sum.
+        transfers = resolved(transfers, identity, Refunded(returned=sent))
+    return transfers
+
+
 def ownership(state, outcome=None):
-    """The owned fields after `outcome`: a mined deposit adds its transfer."""
+    """The owned fields after `outcome`: a mined deposit opens its transfer, and an
+    arrival or a refund resolves the transfers it settles."""
+    if isinstance(outcome, (ArrivalOutcome, RefundOutcome)):
+        return {"owned": state.owned, "transfers": settled(state, outcome)}
     transfer = getattr(outcome, "transfer", None)
     transfers = state.transfers if transfer is None else opened(state.transfers, transfer)
     return {"owned": state.owned, "transfers": transfers}

@@ -50,7 +50,7 @@ from tests.across_support import (
     quote,
     route,
 )
-from tests.test_across_deposit import DEPOSIT_ID, receipt
+from tests.test_across_deposit import MINED, receipt
 
 ARB_NODE, BASE_NODE = "0x" + "a1" * 32, "0x" + "b2" * 32
 FORK_ARB = Chain(chain_id=ARBITRUM.chain_id, environment="anvil:" + ARB_NODE)
@@ -250,7 +250,7 @@ def test_the_gateway_reconciles_a_mined_deposit_into_an_outcome_with_its_transfe
     outcome = mined_deposit(monkeypatch, config)
     assert (outcome.success, outcome.assets, outcome.accounting_issues) == (True, AMOUNT, ())
     transfer = outcome.transfer
-    assert transfer == opened_transfer(deposit(config), {"deposit_id": DEPOSIT_ID})
+    assert transfer == opened_transfer(deposit(config), MINED)
     assert (transfer.source.chain, transfer.destination.chain) == (FORK_ARB, FORK_BASE)
     result = outcome.strategy_result()
     assert (result.status, result.transfer) == ("completed", transfer)

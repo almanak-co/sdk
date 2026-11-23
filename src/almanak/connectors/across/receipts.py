@@ -146,13 +146,10 @@ def movement(receipt, operation, block_timestamp: int) -> tuple[int, dict | None
     return moved, deposit
 
 
-def reference(deposit: dict) -> str:
-    """The transfer's reference: the SpokePool's own deposit identifier on the source chain."""
-    return str(deposit["deposit_id"])
-
-
 def opened_transfer(operation: DepositOperation, deposit: dict) -> Transfer:
     """The claim the fund holds once the deposit is mined."""
+    from almanak.connectors.across.relay import deposit_reference
+
     target, quote = operation.target, operation.quote
     return Transfer(
         connector=CONNECTOR,
@@ -165,6 +162,6 @@ def opened_transfer(operation: DepositOperation, deposit: dict) -> Transfer:
             asset=target.destination_asset,
         ),
         offered=AssetAmount(asset=target.destination_asset, amount=quote.output_amount),
-        reference=reference(deposit),
+        reference=deposit_reference(operation, deposit).text,
         fill_deadline=datetime.fromtimestamp(quote.fill_deadline, UTC),
     )

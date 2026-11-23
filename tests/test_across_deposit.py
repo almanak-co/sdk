@@ -50,6 +50,9 @@ from tests.across_support import (
 
 MINED_AT = NOW + 12
 DEPOSIT_ID = 4_829_265
+# What a mined deposit's event adds to the signed call: the quote's exclusivity is an
+# offset of 3 seconds, so the event states the mined block's time plus 3.
+MINED = {"deposit_id": DEPOSIT_ID, "exclusivity_deadline": MINED_AT + 3}
 
 
 def word(value) -> str:
@@ -220,7 +223,7 @@ def test_a_mined_deposit_reconciles_and_opens_a_transfer():
         "log_index": 7,
     }
     transfer = opened_transfer(operation, identity)
-    assert transfer.open and transfer.reference == str(DEPOSIT_ID)
+    assert transfer.open and transfer.reference.startswith(f"{DEPOSIT_ID}:0x")
     assert (transfer.sent.amount, transfer.offered.amount) == (AMOUNT, 999_897_038)
     assert (transfer.source.account, transfer.destination.account) == ("arb", "base")
     assert (transfer.destination.chain, transfer.destination.asset) == (BASE, BASE_USDC)
@@ -437,7 +440,7 @@ def test_a_changed_implementation_refuses_new_deposits():
 
 def test_a_mined_deposit_adds_its_transfer_to_the_owned_state():
     operation = deposit()
-    transfer = opened_transfer(operation, {"deposit_id": DEPOSIT_ID})
+    transfer = opened_transfer(operation, MINED)
     held = state()
     assert ownership(held) == {"owned": (), "transfers": ()}
     assert ownership(held, SimpleNamespace(transfer=None)) == {"owned": (), "transfers": ()}
@@ -449,7 +452,7 @@ def test_a_mined_deposit_adds_its_transfer_to_the_owned_state():
 
 def test_teardown_waits_for_a_transfer_in_flight_and_a_cleared_allowance():
     owned = (SimpleNamespace(target=TARGET),)
-    transfer = opened_transfer(deposit(), {"deposit_id": DEPOSIT_ID})
+    transfer = opened_transfer(deposit(), MINED)
     validate_closure(state(owned=owned), (snapshot(),))
     with pytest.raises(DataError) as error:
         validate_closure(state(owned=owned, transfers=(transfer,)), (snapshot(),))
@@ -492,7 +495,7 @@ def test_reconciliation_records_the_deposit_and_the_transfer_it_opened(monkeypat
     after = snapshot(wallet_balance=0, native_balance=spent)
     outcome = reconciled(monkeypatch, operation, receipt(operation), after)
     assert (outcome.success, outcome.assets, outcome.accounting_issues) == (True, AMOUNT, ())
-    assert outcome.transfer == opened_transfer(operation, {"deposit_id": DEPOSIT_ID})
+    assert outcome.transfer == opened_transfer(operation, MINED)
     with pytest.raises(DataError) as error:
         reconciled(monkeypatch, operation, receipt(operation), snapshot(allowance=1))
     assert error.value.kind == "ownership_mismatch"
@@ -513,9 +516,9 @@ def test_a_safe_account_has_no_bridge_grants_yet():
     with pytest.raises(ValueError, match="no Roles grants yet"):
         AcrossPermissions.identities(None, "arb", None)
     binding = connector()
-    transfer = opened_transfer(deposit(), {"deposit_id": DEPOSIT_ID})
+    transfer = opened_transfer(deposit(), MINED)
     report = binding.projection.report(state(transfers=(transfer,)))
-    assert report["transfers"][0]["reference"] == str(DEPOSIT_ID)
+    assert report["transfers"][0]["reference"] == transfer.reference
     with pytest.raises(ValueError, match="no dashboard"):
         binding.projection.dashboard(state())
     assert (

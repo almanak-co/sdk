@@ -134,6 +134,19 @@ def transfer_fields(state, chain, changed=None):
     return {"transfers": merged(state.transfers, changed.transfers, chain)}
 
 
+def reopened(works, transfers):
+    """A chain an open transfer touches is not closed: it still owes the arrival or the refund.
+
+    A chain with nothing left can close before another chain's signed work opens a
+    transfer towards it. Opening the transfer reopens that chain.
+    """
+    waiting = {c for t in transfers if t.open for c in (t.source.chain, t.destination.chain)}
+    return tuple(
+        work.model_copy(update={"closed": False}) if work.closed and work.chain in waiting else work
+        for work in works
+    )
+
+
 def merge(state, chain, changed):
     from almanak.external_effects import scoped_fields
 
@@ -152,13 +165,17 @@ def merge(state, chain, changed):
             "closed": changed.mode == "closed",
         }
     )
-    works = tuple(work if item.chain == chain else item for item in state.work)
+    transfers = transfer_fields(state, chain, changed)
+    works = reopened(
+        tuple(work if item.chain == chain else item for item in state.work),
+        transfers.get("transfers", ()),
+    )
     return state.model_copy(
         update={
             **merge_inventory(state, changed, chain),
             **request_fields(state, chain, changed),
             **scoped_fields(state, chain, changed),
-            **transfer_fields(state, chain, changed),
+            **transfers,
             "work": works,
             "memory": changed.memory,
             "schedule": changed.schedule,

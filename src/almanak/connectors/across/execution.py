@@ -76,7 +76,7 @@ def validate_entry(state, operation, before):
 
 
 def retained_allowance(state, before):
-    for outcome in reversed(state.outcomes):
+    for outcome in reversed(planning.executions(state)):
         if outcome.after.target == before.target:
             return outcome.after.allowance
     for baseline in state.baseline:

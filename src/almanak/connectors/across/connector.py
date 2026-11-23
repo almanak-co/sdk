@@ -1,4 +1,4 @@
-"""Across wire binding: the origin side of a bridge, with no declared run mode yet."""
+"""Across wire binding: deposit, arrival and refund of a bridge, with no declared run mode yet."""
 
 from pydantic import TypeAdapter
 
@@ -9,6 +9,7 @@ from almanak.connectors.across.lifecycle import AcrossLifecycle
 from almanak.connectors.across.models import Config, Intent, Parameters
 from almanak.connectors.across.observations import Snapshot
 from almanak.connectors.across.permissions import AcrossPermissions
+from almanak.connectors.across.settlement import ExternalEffects
 from almanak.connectors.across.state import (
     Checkpoint,
     Decision,
@@ -24,7 +25,8 @@ from almanak.connectors.interfaces import Codec, Connector
 
 
 class AcrossProjection:
-    """Reports and dashboards follow once arrival and refund are reconciled."""
+    """Reports state each transfer and how it ended; a dashboard follows with the
+    reference strategy."""
 
     @staticmethod
     def dashboard(state, *, captured_at=None):
@@ -61,6 +63,7 @@ def connector():
         execution=AcrossExecution(),
         permissions=AcrossPermissions(),
         projection=AcrossProjection(),
-        # Fork fixtures arrive with the settlement phase, which needs a fork relayer.
+        external_effects=ExternalEffects(),
+        # The fork lifecycle fixture arrives with the reference strategy.
         fork=None,
     )

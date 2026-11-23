@@ -20,7 +20,8 @@ def candidate_support():
                 "pinned SpokePool proxy and implementation",
                 "the output amount is the venue's quote under the author's fee ceiling, "
                 "a gateway check",
-                "arrival and refund are not reconciled yet",
+                "arrival and refund are read from the SpokePools; a refund that cannot be "
+                "attributed to its transfers stops the source chain",
             ),
         )
         for chain in SPOKE_POOLS
