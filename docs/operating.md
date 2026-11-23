@@ -972,7 +972,8 @@ claim, once it can read the record and see that nothing is signed. That includes
 journal with no checkpoint yet, left by a command killed while creating it. A
 record that cannot be read at all is kept with its claim, and `record_kept` can
 name such a record. Do not kill a command that runs with `--execute`: it waits for each receipt
-without a time limit, and stops between steps on SIGINT, SIGTERM or SIGHUP.
+without a time limit, and stops between steps on SIGINT, SIGTERM or SIGHUP. The one
+wait with a limit is for a [step whose nonce was used](#a-step-whose-nonce-was-used).
 
 An action has no amount ceiling: it is bounded by the wallet's balance and the two
 fee ceilings.
@@ -1063,6 +1064,28 @@ Otherwise the record stays and `resolved` is false:
   without archive state may not for an old record, or a transaction count at a block
   hash, which some endpoints reject. Another endpoint of the record's chain, named
   with `--env-file` or `--public-rpc`, resolves it.
+
+A command that runs with `--execute` asks for the same proof when a step it waits on
+has no receipt and the wallet's count is past the step's nonce. That is also what the
+step's own transaction looks like just after it is mined, while not every node of the
+endpoint serves it yet, and the proof then refuses in one of the ways above: the nonce
+is not consumed at the `finalized` block, the block holds the recorded transaction
+itself, or the network states no margin. So the command does not end on a refused
+proof at once. It reads the receipt again and asks again, until the checks that ended
+in such a refusal have taken 60 seconds for that step, each counted with the pause
+after it. Time spent on a held provider failure in between is not counted. After that
+the command ends with the last refusal and keeps the record, as `ax recover` does on
+its first one. The cost is that a refusal no wait can change, such as a network
+without a margin whose nonce another transaction did take, ends the command up to
+that much later. While it asks, the step stays recorded and nothing new is planned or
+signed. Each check may send the same signed bytes again, as every check without a
+receipt does, and only the full proof drops the step: where the transaction that took
+the nonce becomes final within the wait, as it can on Avalanche, the command ends with
+the step under `released_consumed_nonce`. A step with fee-only replacement candidates
+is not waited for, and ends on the first refusal. Each check during the wait trusts
+the endpoint as every check does: one answered wholly by a node that has not seen the
+mined step can still treat a step past its calldata deadline as expired, as it can in
+`ax recover`.
 
 This check runs in the gateway process and is not enforced on chain. It rests on one
 endpoint's report of its head, its finalized block and that block's transactions. An

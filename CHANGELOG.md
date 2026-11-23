@@ -9,6 +9,15 @@ its changelog is on the `v2` branch.
 ## [Unreleased]
 
 ### Fixed
+- A direct action run with `--execute` no longer ends over its own step that was just
+  mined. When the endpoint served neither the receipt nor the transaction of that step
+  in one check, the command took the wallet's advanced count for another transaction
+  at the step's nonce, asked for the consumed-nonce proof, and ended on its refusal
+  with exit 1 and the record kept although every step was mined, until `ax recover`
+  resolved it. The command now reads the receipt again and asks again while the proof
+  refuses, until those checks have taken 60 seconds for the step, and then ends as
+  before. A refusal that waiting cannot change therefore ends the command up to a
+  minute later. `ax recover` is unchanged, and only the full proof drops a step (#35).
 - `almanak ax recover` sends a read of its public endpoint proof again after a
   transient failure, within the 8 seconds execution reads have. The reader it proves
   a named `--public-rpc` endpoint with had no retry budget, so one failed read of the

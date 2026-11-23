@@ -27,6 +27,16 @@ class OperatorRuntime(Runtime):
     poll = 1.0
     # The latest refusal that dropped the active request's plan; nobody re-decides it.
     refused: DataError | None = None
+    # Seconds `execute` spends on ticks that end in a refused consumed-nonce proof, per
+    # signed step, before that refusal ends it. Long enough for an endpoint's nodes to
+    # agree on a transaction that was just mined. Not tied to a finality margin: where
+    # the margin is shorter, as on Avalanche, the proof may succeed within the wait.
+    proof_wait = 60.0
+    # The signed step whose proof was refused, and the seconds spent on it so far.
+    proof_spent: tuple[str, float] | None = None
+    # The latest refusal that came out of the consumed-nonce proof or its recording.
+    unproven: DataError | None = None
+    monotonic = staticmethod(time.monotonic)
 
     def count_replan(self, exc, *arguments, **options):
         self.refused = exc
@@ -73,7 +83,11 @@ class OperatorRuntime(Runtime):
         except DataError as exc:
             if exc.kind != "nonce_conflict":
                 raise
+        try:
             return self.drop_superseded(pending)
+        except DataError as exc:
+            self.unproven = exc
+            raise
 
     def drop_superseded(self, pending):
         """Drop a signed step whose nonce another, final transaction took.
@@ -228,7 +242,10 @@ class OperatorRuntime(Runtime):
 
         A transient failure while a signed step is unresolved is held and asked again:
         giving up there would leave a sent transaction without its outcome over one
-        failed read.
+        failed read. So is any refusal of the consumed-nonce proof, for `proof_wait`
+        seconds per signed step: the step's own transaction, mined but not yet served
+        by every node of the endpoint, looks the same as another transaction at its
+        nonce, and the next tick reads its receipt first.
         """
         state = self.journal.load()
         if state.decision is None and not self.retained(state):
@@ -236,10 +253,39 @@ class OperatorRuntime(Runtime):
         before = len(state.outcomes)
         while True:
             interrupt()
-            if self.held_tick():
+            began = self.monotonic()
+            try:
+                done = self.held_tick()
+            except DataError as exc:
+                if exc is not self.unproven or not self.awaits_proof(began):
+                    raise
+                done = False
+            if done:
                 break
             self.wait(self.journal.load())
         return self.journal.load().outcomes[before:]
+
+    def awaits_proof(self, began: float) -> bool:
+        """Whether a refused consumed-nonce proof is asked again instead of ending.
+
+        Only while the signed step is still recorded, and until the ticks that ended in
+        such a refusal for that step, each with the pause after it, have taken
+        `proof_wait` seconds. A tick that ends another way, such as a held transient
+        failure, spends none of it, and cannot extend it: every refusal spends its own
+        tick. The step stays recorded throughout. The next tick may send the same
+        signed bytes again, as every tick without a receipt does; nothing new is
+        planned or signed, and only the gateway's full proof drops the step. A step
+        with a fee-replacement family is not waited for: its ticks may sign another
+        candidate at the same nonce, and the proof refuses every family.
+        """
+        pending = self.journal.load().pending
+        if pending is None or getattr(pending, "family", None) is not None:
+            return False
+        spent = self.monotonic() - began + self.poll
+        if self.proof_spent is not None and self.proof_spent[0] == pending.tx_hash:
+            spent += self.proof_spent[1]
+        self.proof_spent = (pending.tx_hash, spent)
+        return spent < self.proof_wait
 
     def held_tick(self) -> bool:
         """One tick; a passing failure while a signed step waits is not an ending."""
