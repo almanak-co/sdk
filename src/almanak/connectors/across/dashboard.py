@@ -108,9 +108,8 @@ def row(index, transfer, deposit) -> dict:
     }
 
 
-def project(state, *, captured_at=None):
-    if state.integrity_error:
-        raise ValueError("invalidated Across evidence cannot produce a financial dashboard")
+def transfer_table(state):
+    """The transfer rows and the values they reference, for this and a composed dashboard."""
     opened, ended = deposits(state), settlements(state)
     kept = list(enumerate(state.transfers))[-MAX_TABLE_ROWS:]
     values: dict[str, Value] = {}
@@ -139,6 +138,13 @@ def project(state, *, captured_at=None):
         coverage=COVERAGE,
         truncated=len(state.transfers) > len(kept),
     )
+    return values, dataset
+
+
+def project(state, *, captured_at=None):
+    if state.integrity_error:
+        raise ValueError("invalidated Across evidence cannot produce a financial dashboard")
+    values, dataset = transfer_table(state)
     context = Context(
         config=Parameters.model_validate(
             {name: getattr(state.config, name) for name in Parameters.model_fields}

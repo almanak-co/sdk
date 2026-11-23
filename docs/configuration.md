@@ -58,6 +58,11 @@ for Across; it is named, never defaulted). Its allocation names the `account`
 that sends, on the market's chain, and a `destination_account` on the
 destination chain. Both are accounts of the same strategy, and bridging back is
 another market. One allocation is taken per source account and sent asset.
+When a bridge shares a strategy with another connector, `inventory` states the
+sent asset on the source account and the received asset on the destination
+account (quantity `'0'` when it starts without it), and another allocation on
+the destination account must hold the received asset. A file that names
+neither is refused with `composed_inventory_incomplete`.
 
 `strategy.gas` names payer accounts, the chain, the quote source and the exact
 fee bounds. Production runs require it. Only `accounts`, `chain`,

@@ -4,6 +4,7 @@ from almanak.configuration.composed import Parameters
 from almanak.connectors.aave_v3.dashboard import position_values as lending_values
 from almanak.connectors.aave_v3.observations import Ownership as LendingOwnership
 from almanak.connectors.aave_v4.models import Ownership as AaveV4Ownership
+from almanak.connectors.across.observations import Ownership as AcrossOwnership
 from almanak.connectors.composed.aave_v4_reporting import position_values as aave_v4_values
 from almanak.connectors.composed.inventory import observed_cash
 from almanak.connectors.composed.models import wallet_key
@@ -39,7 +40,9 @@ from almanak.models import Block
 
 
 def latest_cash(state):
-    observations = (*state.baseline, *(o.after for o in state.outcomes), *state.closure)
+    # A settlement the deployment did not submit carries no wallet observation.
+    after = (o.after for o in state.outcomes if hasattr(o, "after"))
+    observations = (*state.baseline, *after, *state.closure)
     result: dict[WalletAsset, Block] = {}
     for observed in observations:
         for asset, _ in observed_cash(observed):
@@ -103,6 +106,9 @@ def positions(state, cash, values):
                 project(component_state(state, target_connector(target)), owned, additions)
             )
             add_values(values, additions)
+        elif isinstance(owned, AcrossOwnership):
+            # A bridge holds no position; its transfers are their own dataset.
+            continue
         else:
             result.append(
                 ExchangePosition(
@@ -141,6 +147,8 @@ def describe(state, outcome):
     from almanak.connectors.lending_tables import lending_label
 
     module = type(outcome.operation).__module__
+    if ".across." in module:
+        return f"Bridge {outcome.operation.kind} ({outcome.operation.allocation})"
     if "gmx_v2" in module:
         return gmx_label(state, outcome)
     if any(name in module for name in LENDING_MODULES):
@@ -202,6 +210,28 @@ def gmx_datasets(state):
     }
 
 
+def transfer_datasets(state, values):
+    """The bridge component's own transfer table, with its quote source and measured
+    amounts. Value in flight is a row here and never part of shared fund cash."""
+    from almanak.connectors.across.dashboard import transfer_table
+    from almanak.connectors.composed.lifecycle import component_state
+    from almanak.connectors.identifiers import ConnectorId
+
+    identity = ConnectorId("across")
+    if identity not in state.config.parameter_components:
+        return {}
+    additions, dataset = transfer_table(component_state(state, identity))
+    add_values(values, additions)
+    return {
+        "transfers": dataset.model_copy(
+            update={
+                "coverage": dataset.coverage
+                + " An open transfer is in no fund cash balance; do not add it to one."
+            }
+        )
+    }
+
+
 def project(state, *, captured_at=None):
     validate_projection(state)
     cash = cash_values(state)
@@ -228,6 +258,7 @@ def project(state, *, captured_at=None):
             "curve_pool_shares": shares,
             **aave_v4_debts(state, values),
             **gmx_datasets(state),
+            **transfer_datasets(state, values),
             **repayment_datasets(state, values),
         },
     )

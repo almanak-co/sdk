@@ -373,3 +373,75 @@ def test_inventory_is_conserved_over_every_sequence_of_settlements(config, fates
         conserved(state)
         assert inventory(state)[SOURCE] == refunds * AMOUNT
     assert inventory(state)[DESTINATION] == arrived * OFFERED
+
+
+def test_the_report_and_dashboard_show_value_in_flight_apart_from_cash(
+    monkeypatch,
+    config,  # noqa: F811
+):
+    from almanak.connectors.composed.dashboard import project as dashboard
+    from almanak.connectors.composed.reporting import report
+
+    state, transfer = deposited(monkeypatch, config)
+    listed = report(state)
+    (row,) = listed["transfers"]
+    assert (row["quote_source"], row["resolution"]) == ("across_api", None)
+    assert listed["unattributed_refund_payments"] == []
+    # The amount in flight is in no inventory balance, and is not reported as one.
+    assert [b["amount"] for b in listed["inventory"]] == ["0", "0"]
+    assert "must not be added" in listed["transfer_scope"]
+    assert listed["positions"][0]["position_scope"].startswith("A bridge holds nothing")
+    context, _ = dashboard(state)
+    (shown,) = context.datasets["transfers"].rows
+    assert (shown["status"], shown["quote_source"]) == ("open", "across_api")
+    assert context.values[shown["received"].ref].amount is None
+    assert context.values[shown["sent"].ref].amount == str(AMOUNT)
+    cash = [context.values[r["amount"].ref].amount for r in context.datasets["fund_inventory"].rows]
+    assert cash == ["0", "0"]
+    assert [p.allocation for p in context.positions] == ["earn"]
+    chain = there()
+    state = settle(state, chain)
+    filled(config, chain, chain.head + 1)
+    state = settle(state, chain)
+    context, _ = dashboard(state)
+    (shown,) = context.datasets["transfers"].rows
+    assert shown["status"] == "arrived"
+    assert context.values[shown["received"].ref].amount == str(OFFERED)
+    assert report(state)["inventory"][1]["amount"] == str(OFFERED)
+
+
+def test_a_composed_fork_names_the_constructed_quote_on_the_source_chain_only(config):  # noqa: F811
+    from almanak.connectors.across.fork import QUOTE_VENUE, ForkTransport, route_transports
+    from almanak.connectors.composed.fork import ComposedFork
+
+    parameters = composed(config)
+    venues = ComposedFork.venues(parameters, None)
+    assert set(venues) == {FORK_ARB} and set(venues[FORK_ARB]) == {QUOTE_VENUE}
+    assert isinstance(route_transports(venues[FORK_ARB])[QUOTE_VENUE], ForkTransport)
+    assert route_transports({}) == {}
+    with pytest.raises(ValueError, match="only its constructed quote"):
+        route_transports({"other": {}})
+
+
+def test_a_fork_workspace_provisions_an_account_that_only_receives():
+    from types import SimpleNamespace
+
+    from almanak.gateway.fork_workspace import select_origin
+    from tests.across_support import ARBITRUM, allocation
+
+    funds = (SimpleNamespace(account="arb"), SimpleNamespace(account="base"))
+    forks = (SimpleNamespace(chain=ARBITRUM), SimpleNamespace(chain=BASE))
+    fixture = SimpleNamespace(allocations=(allocation(),), funds=funds, operators=(), forks=forks)
+    fixture.model_copy = lambda update: SimpleNamespace(**update)
+    source, destination = select_origin(fixture, ARBITRUM), select_origin(fixture, BASE)
+    assert [f.account for f in source.funds] == ["arb"] and len(source.allocations) == 1
+    # No allocation acts on the destination chain, yet its receiving account is funded.
+    assert [f.account for f in destination.funds] == ["base"] and destination.allocations == ()
+
+
+def test_the_composed_bridge_reference_stays_out_of_the_production_rehearsal():
+    from tests.strategy_fork.rehearsal import declares_production, production_references
+
+    # Across declares no production support, so no market scope of this reference does.
+    assert not declares_production("arbitrum_base_bridge_and_lend")
+    assert "arbitrum_base_bridge_and_lend" not in production_references()

@@ -46,14 +46,14 @@ pytestmark = [pytest.mark.fork, pytest.mark.strategy_fork]
 
 
 @contextmanager
-def supervised(request, tmp_path, proof):
-    """One running supervised workspace of the reference, released and retained after."""
+def supervised(request, tmp_path, proof, case=CASE, operator=OPERATOR):
+    """One running supervised workspace of a reference, released and retained after."""
     env = request.config.getoption("--fork-env").resolve()
-    artifact = ROOT / "artifacts/strategy-fork" / f"{NAME}-{proof}-{uuid4().hex}"
+    artifact = ROOT / "artifacts/strategy-fork" / f"{case.name}-{proof}-{uuid4().hex}"
     artifact.mkdir(parents=True)
     root = tmp_path / "run"
-    record = {"strategy": NAME, "proof": proof, "phases": [], "status": "failed"}
-    follower = start_run(CASE, OPERATOR, env, root, tmp_path / "almanak-run.log")
+    record = {"strategy": case.name, "proof": proof, "phases": [], "status": "failed"}
+    follower = start_run(case, operator, env, root, tmp_path / "almanak-run.log")
     try:
         await_workspace(root, follower)
         await_stage(root, ("running",))
@@ -61,7 +61,7 @@ def supervised(request, tmp_path, proof):
             root=root,
             record=record,
             phases=record["phases"],
-            assertions=load_assertions(CASE),
+            assertions=load_assertions(case),
             journal=Journal(root / "state.sqlite"),
         )
         record["status"] = "passed"

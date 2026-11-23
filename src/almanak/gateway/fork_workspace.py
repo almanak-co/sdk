@@ -90,7 +90,7 @@ class ForkSet:
 
 def select_origin(config, origin):
     allocations = tuple(a for a in config.allocations if a.chain == origin)
-    names = {a.account for a in allocations}
+    names = {a.account for a in allocations} | receiving_accounts(config, origin)
     funds = tuple(f for f in config.funds if f.account in names)
     operators = {f.operator for f in funds if isinstance(f, ForkSafeFund)}
     updates = {
@@ -104,6 +104,17 @@ def select_origin(config, origin):
     if hasattr(config, "inventory"):
         updates["inventory"] = tuple(b for b in config.inventory if b.key.chain == origin)
     return config.model_copy(update=updates)
+
+
+def receiving_accounts(config, origin) -> set[str]:
+    """Accounts on `origin` that a bridge allocation on another chain delivers to. Such
+    an account may hold no allocation of its own, and is provisioned all the same."""
+    return {
+        a.destination_account
+        for a in config.allocations
+        if getattr(a, "destination_account", None) is not None
+        and a.route.destination_chain == origin.chain_id
+    }
 
 
 def prepare_accounts(node, config, chain):

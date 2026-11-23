@@ -578,6 +578,52 @@ in flight. It is not a balance on either chain, and a missing outcome never
 sends the deposit again. Teardown waits for every open transfer to arrive or be
 refunded and does not bridge back.
 
+#### Bridged cash in a composed strategy
+
+A bridge allocation can share a strategy with allocations of other connectors.
+The bridged amount then moves between the two accounts'
+[owned inventory](#wallet-balance-and-owned-inventory):
+
+- `inventory` states the sent asset on the source account and the received
+  asset on the `destination_account`, with quantity `'0'` when the account
+  starts without it. Another allocation on the destination account must hold
+  the received asset, because that allocation's observation measures the
+  arrival. A configuration without either is refused.
+- A mined deposit takes the sent amount out of the source account's owned
+  inventory. While the transfer is in flight the amount is in neither
+  account's inventory. The gateway refuses any action on the destination
+  account sized from the bridge's offer, with `inventory_unavailable`.
+- The measured arrival adds `received` to the destination account's owned
+  inventory, and another allocation there can spend it from its next decision.
+  A measured refund adds `returned` back to the source account's.
+- On the source chain's turn, `ctx.position(name)` of the bridge allocation
+  reports `inventory`, the source account's owned cash of the sent asset, and
+  `in_flight`, the allocation's transfers that have neither arrived nor been
+  refunded. Each states `sent`, `offered`, `fill_deadline` and `unfilled`, and
+  no received amount. On the destination chain's turn the bridge allocation has
+  no position and no observation; size a spend there from the `ArrivalResult`
+  recorded in `on_outcome`, or from the spending allocation's own
+  `owned.inventory`.
+
+```python
+def on_outcome(ctx):
+    if isinstance(ctx.result, ArrivalResult):
+        return state(ctx).updated(received=ctx.result.received.amount)
+    ...
+
+def decide(ctx):
+    memory = state(ctx)
+    if ctx.observation("earn") is not None and memory.received and memory.supplied is None:
+        return ctx.decision(intent=ctx.actions.supply("earn", memory.received))
+    ...
+```
+
+Teardown unwinds the other allocations as usual, waits for every open transfer
+and does not bridge back: funds that arrived stay on the destination account.
+Reports and dashboards list transfers apart from fund cash, and an open
+transfer has no received amount there, never a zero. See the
+[bridge and lend reference](https://github.com/almanak-co/sdk/tree/main/strategies/arbitrum_base_bridge_and_lend).
+
 Across is the first bridge connector. Its source account is an EOA, the sent
 asset is an ERC-20 other than the wrapped native asset, and both assets have the
 same decimals. See [Supported connectors](support.md) for the chains and run

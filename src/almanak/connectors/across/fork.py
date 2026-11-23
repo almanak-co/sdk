@@ -90,6 +90,17 @@ def source_chains(deployment) -> tuple[Chain, ...]:
     return tuple(dict.fromkeys(position.chain for position in deployment.positions))
 
 
+def route_transports(venues) -> dict:
+    """The quote transport a fork route's descriptors declare for its chain's gateway."""
+    if set(venues) - {QUOTE_VENUE}:
+        raise ValueError("an Across fork route names only its constructed quote")
+    descriptor = venues.get(QUOTE_VENUE)
+    # A chain that sends no deposit names no quote, and its gateway declares none.
+    if descriptor is None:
+        return {}
+    return {QUOTE_VENUE: ForkTransport(ForkQuote.model_validate(descriptor))}
+
+
 class AcrossFork:
     @staticmethod
     def venues(deployment, host) -> dict[Chain, dict]:
@@ -104,13 +115,6 @@ class AcrossFork:
     def fork_adapter(config, endpoint, key_file, *, chain=None, venues):
         from almanak.gateway.fork_execution import ForkGateway
 
-        if set(venues) - {QUOTE_VENUE}:
-            raise ValueError("an Across fork route names only its constructed quote")
-        descriptor = venues.get(QUOTE_VENUE)
-        # A chain that sends no deposit names no quote, and its gateway declares none.
-        transports = (
-            {}
-            if descriptor is None
-            else {QUOTE_VENUE: ForkTransport(ForkQuote.model_validate(descriptor))}
+        return ForkGateway(
+            config, endpoint, key_file, chain=chain, venue_transports=route_transports(venues)
         )
-        return ForkGateway(config, endpoint, key_file, chain=chain, venue_transports=transports)

@@ -2,11 +2,12 @@
 
 from pydantic import model_validator
 
-from almanak.configuration.composed import Allocation
+from almanak.configuration.composed import Allocation, named_accounts
 from almanak.connectors.aave_v3.fork import fork_allocation as lending_allocation
 from almanak.connectors.aave_v4.fork import fork_allocation as aave_v4_allocation
 from almanak.connectors.aave_v4.models import Allocation as AaveV4Allocation
 from almanak.connectors.across.fork import fork_allocation as across_allocation
+from almanak.connectors.across.models import Allocation as AcrossAllocation
 from almanak.connectors.aerodrome_slipstream.fork import fork_allocation as slipstream_allocation
 from almanak.connectors.composed.models import Config
 from almanak.connectors.compound_v3.fork import fork_allocation as compound_allocation
@@ -43,6 +44,8 @@ from almanak.gateway.fork_config import (
 )
 from almanak.models import StrategyAccounts
 
+ACROSS = ConnectorId("across")
+
 
 class ForkConfig(ForkConfigBase[Allocation]):
     connector: None = None
@@ -69,7 +72,7 @@ class ForkConfig(ForkConfigBase[Allocation]):
     @model_validator(mode="after")
     def scope(self):
         require_unique([a.name for a in self.allocations], "allocation names")
-        if {a.account for a in self.allocations} != {f.account for f in self.funds}:
+        if named_accounts(self.allocations) != {f.account for f in self.funds}:
             raise ValueError("composed allocations must identify exactly the funded accounts")
         require_unique([b.key for b in self.inventory], "owned fund assets")
         keys = {
@@ -138,6 +141,8 @@ def allocation_assets(allocation):
         ),
     ):
         return (allocation.reserve.asset,)
+    if isinstance(allocation, AcrossAllocation):
+        return (allocation.route.asset,)
     if isinstance(allocation, CurveAllocation):
         return allocation.pool.coins
     if isinstance(allocation, (GmxAllocation, GmxSwapAllocation, GmxLiquidityAllocation)):
@@ -212,3 +217,23 @@ class ComposedFork:
     @staticmethod
     def funding_asset(config, account):
         raise ValueError("composed fixtures require explicit assets, not an inferred funding token")
+
+    @staticmethod
+    def venues(deployment, host):
+        """A bridge component's source chains name its constructed quote in their routes."""
+        from almanak.connectors.across.fork import AcrossFork
+
+        if ACROSS not in deployment.parameter_components:
+            return {}
+        return AcrossFork.venues(deployment.component(ACROSS), host)
+
+    @staticmethod
+    def fork_adapter(config, endpoint, key_file, *, chain=None, venues):
+        from almanak.connectors.across.fork import route_transports
+        from almanak.gateway.fork_execution import ForkGateway
+
+        if venues and ACROSS not in config.parameter_components:
+            raise ValueError("only a connector with a fork venue names one in its route")
+        return ForkGateway(
+            config, endpoint, key_file, chain=chain, venue_transports=route_transports(venues)
+        )
