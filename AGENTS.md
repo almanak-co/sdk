@@ -384,17 +384,19 @@ independently.
   the destination chain records an arrival and only the source chain a refund.
 - The shared transfer record keeps CAIP identity and an opaque connector
   reference. Deposit identifiers, hashes and addresses stay in the adapter.
-- Accepted: a bridge's output amount is the venue's own quote from the venue's
-  API, named explicitly in the market configuration. The gateway refuses before
-  signing when the quote's fee exceeds the author's stated ceiling, so a false
-  quote costs at most that ceiling, or a delay and a refund.
-- Accepted risk: Roles cannot relate a deposit's output amount to its input. A
-  bridge grant pins the token, the destination chain, the Safe as depositor,
-  the destination fund as recipient and an empty message. A compromised
-  operator or gateway host can still move the bridged asset out of the Safe by
-  depositing at a near-zero output and filling the deposit itself. Only the
-  gateway enforces the fee ceiling. Never describe the ceiling as on-chain
-  enforcement.
+- Accepted, and binding on every bridge connector: a bridge's output amount is
+  the venue's own quote from the venue's API, named explicitly in the market
+  configuration. The gateway must refuse before signing when the quote's fee
+  exceeds the author's stated ceiling, so a false quote costs at most that
+  ceiling, or a delay and a refund.
+- Accepted risk of a Safe/Roles bridge: Roles cannot relate a deposit's output
+  amount to its input. A bridge grant must pin the token, the destination
+  chain, the Safe as depositor, the destination fund as recipient and an empty
+  message. A compromised operator or gateway host can still move the bridged
+  asset out of the Safe by depositing at a near-zero output and filling the
+  deposit itself. Only the gateway enforces the fee ceiling. Never describe the
+  ceiling as on-chain enforcement.
+- A transfer and its two accounts stay within one environment.
 - Proposed, not accepted: teardown waits for open transfers and does not bridge
   back.
 - Proposed, not accepted: the backtest model charges the author's full fee

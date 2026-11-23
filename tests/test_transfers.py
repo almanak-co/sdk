@@ -86,7 +86,7 @@ def test_an_arrival_may_differ_from_the_offer():
         ({"destination": transfer().source, "offered": amount(SENT, 990)}, "two different chains"),
         ({"sent": amount(RECEIVED, 1_000)}, "their own wallet assets"),
         ({"offered": amount(SENT, 990)}, "their own wallet assets"),
-        ({"sent": amount(SENT, 0)}, "positive sent amount"),
+        ({"sent": amount(SENT, 0)}, "positive sent and offered"),
         ({"resolution": Arrived(received=amount(SENT, 985))}, "asset of the wallet"),
         ({"resolution": Refunded(returned=amount(RECEIVED, 1_000))}, "asset of the wallet"),
         ({"resolution": Arrived(received=amount(RECEIVED, 0))}, "measured positive amount"),
@@ -192,3 +192,63 @@ def test_the_chain_projection_shows_and_merges_transfers(unbound):
         )
     with pytest.raises(ValueError, match="cannot drop"):
         merge(state, DESTINATION, local.model_copy(update={"transfers": (elsewhere,)}))
+
+
+PRODUCTION = DESTINATION.model_copy(update={"environment": "production"})
+
+
+@pytest.mark.parametrize(
+    ("changes", "cause"),
+    [
+        ({"offered": amount(RECEIVED, 0)}, "positive sent and offered"),
+        ({"resolution": Refunded(returned=amount(SENT, 1_001))}, "cannot exceed"),
+    ],
+)
+def test_a_transfer_refuses_unmeasurable_amounts(changes, cause):
+    with pytest.raises(ValidationError, match=cause):
+        transfer(**changes)
+
+
+def test_a_transfer_stays_within_one_environment_and_between_two_accounts():
+    there = transfer().destination
+    with pytest.raises(ValidationError, match="one environment"):
+        transfer(destination=there.model_copy(update={"chain": PRODUCTION}))
+    with pytest.raises(ValidationError, match="two different named accounts"):
+        transfer(destination=there.model_copy(update={"account": "here"}))
+
+
+@pytest.mark.parametrize(
+    ("update", "chain"),
+    [
+        ({"resolution": Arrived(received=amount(RECEIVED, 0))}, DESTINATION),
+        ({"resolution": Arrived(received=amount(SENT, 5))}, DESTINATION),
+    ],
+)
+def test_a_scoped_change_built_without_validation_is_refused(update, chain):
+    open_transfer = transfer()
+    with pytest.raises(ValidationError):
+        merged((open_transfer,), (open_transfer.model_copy(update=update),), chain)
+
+
+def test_an_unvalidated_appended_transfer_is_refused():
+    invalid = transfer().model_copy(update={"sent": amount(SENT, 0)})
+    with pytest.raises(ValidationError):
+        merged((), (invalid,), ORIGIN)
+
+
+def test_two_chains_merge_one_after_the_other():
+    first, second = transfer("deposit-1"), transfer("deposit-2")
+    sent = merged((first,), (first, second), ORIGIN)
+    arrived = resolved(visible(sent, DESTINATION), first.identity, ARRIVED)
+    settled = merged(sent, arrived, DESTINATION)
+    refunded = resolved(visible(settled, ORIGIN), second.identity, REFUNDED)
+    final = merged(settled, refunded, ORIGIN)
+    assert [t.resolution for t in final] == [ARRIVED, REFUNDED]
+    with pytest.raises(ValueError, match="alter or reopen"):
+        merged(final, resolved(sent, first.identity, REFUNDED), ORIGIN)
+
+
+def test_a_chain_appends_and_refunds_in_one_change():
+    first, second = transfer("deposit-1"), transfer("deposit-2")
+    changed = (*resolved((first,), first.identity, REFUNDED), second)
+    assert merged((first,), changed, ORIGIN) == changed

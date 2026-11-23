@@ -38,6 +38,8 @@ class BridgeTarget(Model, ABC):
             raise ValueError("bridge target destination asset has a different fund chain")
         if self.fund.chain.chain_id == self.destination_fund.chain.chain_id:
             raise ValueError("a bridge requires two different chains")
+        if self.fund.chain.environment != self.destination_fund.chain.environment:
+            raise ValueError("a bridge stays within one environment")
         if self.account == self.destination_account:
             raise ValueError("a bridge requires two different named accounts")
         return self

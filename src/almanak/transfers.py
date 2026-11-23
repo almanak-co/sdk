@@ -15,6 +15,8 @@ from almanak.models import AssetAmount, Chain, Model
 from almanak.triggers import UtcInstant
 
 Reference = Annotated[str, Field(min_length=1, max_length=512, pattern=r"^\S+$")]
+# Connector, source chain and the connector's reference: unique within a checkpoint.
+type Identity = tuple[ConnectorId, Chain, str]
 
 
 class Arrived(Model):
@@ -48,15 +50,20 @@ class Transfer(Model):
     def scope(self) -> Self:
         if self.source.chain.chain_id == self.destination.chain.chain_id:
             raise ValueError("a transfer requires two different chains")
+        # A fork never sends to production, nor production to a fork.
+        if self.source.chain.environment != self.destination.chain.environment:
+            raise ValueError("a transfer stays within one environment")
+        if self.source.account == self.destination.account:
+            raise ValueError("a transfer requires two different named accounts")
         if self.sent.asset != self.source.asset or self.offered.asset != self.destination.asset:
             raise ValueError("transfer amounts must identify their own wallet assets")
-        if self.sent.amount == 0:
-            raise ValueError("a transfer requires a positive sent amount")
+        if self.sent.amount == 0 or self.offered.amount == 0:
+            raise ValueError("a transfer requires positive sent and offered amounts")
         validate_resolution(self)
         return self
 
     @property
-    def identity(self) -> tuple[ConnectorId, Chain, str]:
+    def identity(self) -> Identity:
         return self.connector, self.source.chain, self.reference
 
     @property
@@ -77,6 +84,8 @@ def validate_resolution(transfer: Transfer) -> None:
         raise ValueError("a transfer resolves in the asset of the wallet that received it")
     if measured.amount == 0:
         raise ValueError("a transfer resolves only by a measured positive amount")
+    if isinstance(resolution, Refunded) and measured.amount > transfer.sent.amount:
+        raise ValueError("a refund cannot exceed the amount sent")
 
 
 def resolution_chain(transfer: Transfer) -> Chain:
@@ -103,7 +112,7 @@ def opened(transfers: tuple[Transfer, ...], transfer: Transfer) -> tuple[Transfe
 
 
 def resolved(
-    transfers: tuple[Transfer, ...], identity: tuple, resolution: Arrived | Refunded
+    transfers: tuple[Transfer, ...], identity: Identity, resolution: Arrived | Refunded
 ) -> tuple[Transfer, ...]:
     matches = [transfer for transfer in transfers if transfer.identity == identity]
     if len(matches) != 1:
@@ -145,6 +154,8 @@ def merged(
 ) -> tuple[Transfer, ...]:
     """Apply one chain's scoped view back; transfers it cannot see are retained as they are."""
     before = visible(original, chain)
+    # A scoped view built with `model_copy` skips validation; nothing unvalidated is retained.
+    changed = tuple(Transfer.model_validate(item.model_dump()) for item in changed)
     if len(changed) < len(before):
         raise ValueError("a scoped change cannot drop a retained transfer")
     for prior, current in zip(before, changed, strict=False):

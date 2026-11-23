@@ -91,3 +91,11 @@ def test_the_amount_is_a_positive_quantity_of_the_sent_asset(value, cause):
 def test_an_intent_refuses_any_target_type_but_its_own():
     with pytest.raises(ValidationError, match="exact concrete target type"):
         BridgeIntent[RouteTarget](target=target(OtherTarget), amount=amount(SENT, 7))
+
+
+def test_a_bridge_target_stays_within_one_environment():
+    from tests.bridge_support import DESTINATION, DESTINATION_FUND
+
+    production = DESTINATION.model_copy(update={"environment": "production"})
+    with pytest.raises(ValidationError, match="one environment"):
+        target(destination_fund=DESTINATION_FUND.model_copy(update={"chain": production}))
