@@ -373,8 +373,23 @@ independently.
 
 - A bridge is an economic intent between two named fund accounts of one
   strategy on different chains. It is planned, signed and routed on the chain
-  it leaves. Across is the first connector; the intent and the transfer record
-  are in place, and no connector declares bridge support yet.
+  it leaves. Across is the first connector. It plans, signs and reconciles the
+  deposit on the source chain and opens the transfer; arrival and refund are
+  not reconciled yet, and it declares no run mode on any chain.
+- A bridge market is one direction: the sent asset on its chain, the received
+  asset on the destination chain, the author's fee ceiling `max_fee_bps` and
+  the named quote source. Its allocation names a source account and a
+  `destination_account` on the destination chain.
+- The SpokePool is pinned per chain by proxy address, implementation address
+  and implementation code hash. Another implementation refuses new deposits.
+- The deposit's quote timestamp is its calldata deadline: the SpokePool reverts
+  a deposit mined later than that timestamp plus its own quote buffer, which is
+  read at the planning block. Expired signed deposits are released under the
+  rule in "Execution and recovery".
+- The gateway also refuses a quote whose SpokePool differs from the pin, whose
+  timestamp is ahead of the pinned block or older than the quote buffer, whose
+  fill deadline is beyond the SpokePool's deadline buffer or less than ten
+  minutes away, or whose exclusivity ends after the fill deadline.
 - A transfer in flight is owned state, not pending work. It is neither a
   balance nor a measured zero: an open transfer carries no received amount.
 - Arrival and refund are reconciled as external effects, arrival on the
@@ -402,7 +417,18 @@ independently.
 - Proposed, not accepted: the backtest model charges the author's full fee
   ceiling and delays arrival by a latency stated in the backtest configuration,
   both reported as model assumptions.
-- Proposed, not accepted: the first scope is same-token ERC-20 routes.
+- Proposed, not accepted: the first scope is same-token ERC-20 routes. The
+  connector refuses the wrapped native asset as the sent asset, and as the
+  received asset when the recipient is an EOA, which Across pays in the native
+  asset.
+- Proposed, not accepted: the quote comes from Across's keyless
+  `suggested-fees` endpoint, which the vendor labels legacy. An optional
+  operator key is read from `ALMANAK_ACROSS_API_KEY` in the gateway's
+  environment. If the vendor retires the endpoint, deposits refuse until the
+  quote reader is rebuilt on its successor.
+- Unresolved: market resolution reads one chain per market, so the received
+  asset is not yet verified by its on-chain `decimals()` and `symbol()` on the
+  destination chain. No run mode is declared before it is.
 
 ## Hyperliquid
 
