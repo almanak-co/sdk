@@ -119,17 +119,21 @@ class Settler:
 
     def __init__(self, forks, directory: Path):
         self.forks, self.directory = forks, directory
+        # A fill is mined before the run reads it; the transfer is still open until then.
+        self.filled: set[str] = set()
 
     def align(self, state, seconds: int) -> int:
         return seconds
 
     def settle(self, state) -> tuple[dict, ...]:
-        return tuple(self.fill(state, transfer) for transfer in state.transfers if transfer.open)
+        waiting = [t for t in state.transfers if t.open and t.reference not in self.filled]
+        return tuple(self.fill(state, transfer) for transfer in waiting)
 
     def fork(self, chain):
         if not is_fork(chain):
             raise DataError("unsupported", "Across transfers are settled only on identified forks")
-        return self.forks.rpc(chain), self.forks.origin(chain)
+        # A run names its nodes by the chain they fork, as every fork keeper does.
+        return self.forks.rpc(chain.chain_id), self.forks.origin(chain.chain_id)
 
     def fill(self, state, transfer) -> dict:
         from almanak.gateway.fork_funding import fund_erc20
@@ -149,10 +153,12 @@ class Settler:
         # timestamp would lie before the arrival scan's first block, and another relayer
         # may fill only once the named one's exclusivity has ended.
         earliest = max(operation.quote.timestamp, relay[10] if int.from_bytes(relay[2]) else 0)
-        if now <= earliest:
+        # Read again: the approval's own block may already have passed that time.
+        if timestamp(rpc) <= earliest:
             rpc("evm_setNextBlockTimestamp", [earliest + 1])
         chain = node_number(target.destination_fund.chain)
         mined = sent(rpc, RELAYER, pool, fill_call(relay, chain, RELAYER))
+        self.filled.add(transfer.reference)
         return self.retained(
             {
                 "kind": "fill",
