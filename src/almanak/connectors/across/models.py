@@ -79,11 +79,19 @@ class Parameters(AuthorGas):
         names = [a.name for a in self.allocations]
         if len(set(names)) != len(names):
             raise ValueError("Across allocation names must be unique")
-        used = set()
+        used, sources = set(), set()
         for allocation in self.allocations:
             self.target(allocation.name)
             self.require_profiles(allocation)
             used |= {allocation.account, allocation.destination_account}
+            # A refund names the fund and the token, never the deposit it pays back.
+            source = (allocation.account, allocation.route.asset)
+            if source in sources:
+                raise ValueError(
+                    "Across takes one allocation per source fund and sent asset: a refund "
+                    "could not be told apart between two"
+                )
+            sources.add(source)
         if used != {b.name for b in self.accounts.bindings}:
             raise ValueError("each bound account must send or receive an Across allocation")
         return self

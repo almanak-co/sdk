@@ -13,6 +13,13 @@ from almanak.connectors.across.operations import (
     DepositOperation,
     RevokeOperation,
 )
+from almanak.connectors.across.settlement_types import (
+    ArrivalOutcome,
+    ArrivalResult,
+    RefundOutcome,
+    RefundResult,
+    Scan,
+)
 from almanak.gateway.accounts import ContractCall, HexData, PreparedCall
 from almanak.gateway.evm_fees import OpFeeEvidence, validate_fee_evidence
 from almanak.gateway.permission_models import PermissionManifest
@@ -77,7 +84,7 @@ class ActionResult(Model):
         return self
 
 
-OutcomeInput = OutcomeContext[Config | Parameters, ActionResult]
+OutcomeInput = OutcomeContext[Config | Parameters, ActionResult | ArrivalResult | RefundResult]
 
 
 class TransactionPlan(Model):
@@ -179,13 +186,15 @@ class Checkpoint(Model):
     owned: tuple[Ownership, ...]
     # Value in flight between two of the deployment's chains: owned state, not pending work.
     transfers: tuple[Transfer, ...] = ()
+    # Committed pages of the arrival and refund scans, each on its own chain.
+    external_scans: tuple[Scan, ...] = ()
     baseline: tuple[Snapshot, ...] = ()
     pending: Pending | None = None
     # Signed deposits released past their quote deadline, kept as reconciliation evidence
     # until an attempt at their submitter nonce is reconciled. Omitted when empty.
     released: tuple[Pending, ...] = Field(default=(), exclude_if=lambda value: not value)
     plan: TransactionPlan | None = None
-    outcomes: tuple[Outcome, ...] = ()
+    outcomes: tuple[Outcome | ArrivalOutcome | RefundOutcome, ...] = ()
     closure: tuple[Snapshot, ...] = ()
     integrity_error: str | None = None
 
@@ -194,6 +203,11 @@ class Checkpoint(Model):
         self.schedule.validate_trigger(self.config.decision_trigger)
         validate_work(self)
         validate_transfers(self.transfers)
+        if any(
+            self.config.target(page.target.allocation) != page.target
+            for page in self.external_scans
+        ):
+            raise ValueError("external scan history differs from its configured target")
         if tuple(o.target for o in self.owned) != tuple(
             self.config.target(a.name) for a in self.config.positions
         ):

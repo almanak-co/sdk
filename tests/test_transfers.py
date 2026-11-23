@@ -13,6 +13,7 @@ from almanak.transfers import (
     Transfer,
     merged,
     opened,
+    proven_unfilled,
     resolution_chain,
     resolved,
     visible,
@@ -70,7 +71,7 @@ def test_an_open_transfer_round_trips_and_carries_no_received_amount():
 
 @pytest.mark.parametrize("resolution", [ARRIVED, REFUNDED])
 def test_a_resolved_transfer_round_trips_with_its_measured_amount(resolution):
-    item = transfer(resolution=resolution)
+    item = transfer(unfilled=resolution is REFUNDED, resolution=resolution)
     restored = Transfer.model_validate_json(item.model_dump_json())
     assert restored == item and type(restored.resolution) is type(resolution)
     assert resolution_chain(item) == (DESTINATION if resolution is ARRIVED else ORIGIN)
@@ -88,7 +89,12 @@ def test_an_arrival_may_differ_from_the_offer():
         ({"offered": amount(SENT, 990)}, "their own wallet assets"),
         ({"sent": amount(SENT, 0)}, "positive sent and offered"),
         ({"resolution": Arrived(received=amount(SENT, 985))}, "asset of the wallet"),
-        ({"resolution": Refunded(returned=amount(RECEIVED, 1_000))}, "asset of the wallet"),
+        (
+            {"unfilled": True, "resolution": Refunded(returned=amount(RECEIVED, 1_000))},
+            "asset of the wallet",
+        ),
+        ({"resolution": REFUNDED}, "needs a transfer proven unfilled"),
+        ({"unfilled": True, "resolution": ARRIVED}, "needs a transfer proven unfilled"),
         ({"resolution": Arrived(received=amount(RECEIVED, 0))}, "measured positive amount"),
         ({"reference": "two words"}, "reference"),
     ],
@@ -115,8 +121,16 @@ def test_opening_appends_one_open_transfer_per_identity():
 
 def test_resolving_closes_exactly_the_named_open_transfer():
     first, second = transfer(), transfer("deposit-2")
-    changed = resolved((first, second), second.identity, REFUNDED)
-    assert changed == (first, transfer("deposit-2", resolution=REFUNDED))
+    with pytest.raises(ValidationError, match="needs a transfer proven unfilled"):
+        resolved((first, second), second.identity, REFUNDED)
+    proven = proven_unfilled((first, second), second.identity)
+    assert proven[1].open and proven[1].unfilled and proven[0] == first
+    with pytest.raises(ValueError, match="only one retained open transfer"):
+        proven_unfilled(resolved((first,), first.identity, ARRIVED), first.identity)
+    with pytest.raises(ValidationError, match="needs a transfer proven unfilled"):
+        resolved(proven, second.identity, ARRIVED)
+    changed = resolved(proven, second.identity, REFUNDED)
+    assert changed == (first, transfer("deposit-2", unfilled=True, resolution=REFUNDED))
     with pytest.raises(ValueError, match="resolved again"):
         resolved(changed, second.identity, ARRIVED)
     with pytest.raises(ValueError, match="exactly one"):
@@ -136,8 +150,34 @@ def test_the_source_chain_opens_and_refunds():
     hidden = transfer("deposit-0", leaves=DESTINATION, reaches=THIRD)
     first = transfer()
     assert merged((hidden,), (first,), ORIGIN) == (hidden, first)
-    refunded = transfer(resolution=REFUNDED)
-    assert merged((hidden, first), (refunded,), ORIGIN) == (hidden, refunded)
+    refunded = transfer(unfilled=True, resolution=REFUNDED)
+    with pytest.raises(ValueError, match="separate steps"):
+        merged((hidden, first), (refunded,), ORIGIN)
+    proven = transfer(unfilled=True)
+    assert merged((hidden, proven), (refunded,), ORIGIN) == (hidden, refunded)
+
+
+def test_only_the_destination_proves_a_transfer_unfilled_and_only_the_source_refunds_it():
+    first, proven = transfer(), transfer(unfilled=True)
+    assert merged((first,), (proven,), DESTINATION) == (proven,)
+    with pytest.raises(ValueError, match="chain that measured"):
+        merged((first,), (proven,), ORIGIN)
+    with pytest.raises(ValueError, match="stays so"):
+        merged((proven,), (first,), DESTINATION)
+    # Never unfilled to arrived, on either chain; the model itself refuses the pair.
+    with pytest.raises(ValidationError, match="needs a transfer proven unfilled"):
+        transfer(unfilled=True, resolution=ARRIVED)
+    with pytest.raises(ValueError, match="stays so"):
+        merged((proven,), (transfer(resolution=ARRIVED),), DESTINATION)
+    refunded = transfer(unfilled=True, resolution=REFUNDED)
+    with pytest.raises(ValueError, match="chain that measured"):
+        merged((proven,), (refunded,), DESTINATION)
+    with pytest.raises(ValueError, match="alter or reopen"):
+        merged((refunded,), (proven,), ORIGIN)
+    with pytest.raises(ValueError, match="without a resolution"):
+        merged((), (proven,), ORIGIN)
+    with pytest.raises(ValueError, match="without a resolution"):
+        opened((), proven)
 
 
 def test_the_destination_chain_records_the_arrival_and_keeps_order():
@@ -151,10 +191,14 @@ def test_the_destination_chain_records_the_arrival_and_keeps_order():
     [
         ((), ORIGIN, "cannot drop"),
         ((transfer(resolution=ARRIVED),), ORIGIN, "chain that measured"),
-        ((transfer(resolution=REFUNDED),), DESTINATION, "chain that measured"),
+        ((transfer(unfilled=True, resolution=REFUNDED),), DESTINATION, "chain that measured"),
         ((transfer(offered=amount(RECEIVED, 1)),), ORIGIN, "alter or reopen"),
         ((transfer(), transfer("deposit-2")), DESTINATION, "only on its source chain"),
-        ((transfer(), transfer("deposit-2", resolution=REFUNDED)), ORIGIN, "without a resolution"),
+        (
+            (transfer(), transfer("deposit-2", unfilled=True, resolution=REFUNDED)),
+            ORIGIN,
+            "without a resolution",
+        ),
         ((transfer(), transfer()), ORIGIN, "only once"),
     ],
 )
@@ -165,7 +209,11 @@ def test_a_scoped_change_is_refused(changed, chain, cause):
 
 def test_a_scoped_change_cannot_reopen_reorder_or_replace_a_resolution():
     first, second = transfer(resolution=ARRIVED), transfer("deposit-2")
-    for changed in ((transfer(), second), (second, first), (transfer(resolution=REFUNDED), second)):
+    for changed in (
+        (transfer(), second),
+        (second, first),
+        (transfer(unfilled=True, resolution=REFUNDED), second),
+    ):
         with pytest.raises(ValueError, match="alter or reopen"):
             merged((first, second), changed, ORIGIN)
 
@@ -201,7 +249,7 @@ PRODUCTION = DESTINATION.model_copy(update={"environment": "production"})
     ("changes", "cause"),
     [
         ({"offered": amount(RECEIVED, 0)}, "positive sent and offered"),
-        ({"resolution": Refunded(returned=amount(SENT, 1_001))}, "cannot exceed"),
+        ({"unfilled": True, "resolution": Refunded(returned=amount(SENT, 1_001))}, "cannot exceed"),
     ],
 )
 def test_a_transfer_refuses_unmeasurable_amounts(changes, cause):
@@ -241,15 +289,16 @@ def test_two_chains_merge_one_after_the_other():
     sent = merged((first,), (first, second), ORIGIN)
     arrived = resolved(visible(sent, DESTINATION), first.identity, ARRIVED)
     settled = merged(sent, arrived, DESTINATION)
-    refunded = resolved(visible(settled, ORIGIN), second.identity, REFUNDED)
-    final = merged(settled, refunded, ORIGIN)
+    proven = merged(settled, proven_unfilled(settled, second.identity), DESTINATION)
+    refunded = resolved(visible(proven, ORIGIN), second.identity, REFUNDED)
+    final = merged(proven, refunded, ORIGIN)
     assert [t.resolution for t in final] == [ARRIVED, REFUNDED]
     with pytest.raises(ValueError, match="alter or reopen"):
-        merged(final, resolved(sent, first.identity, REFUNDED), ORIGIN)
+        merged(final, sent, ORIGIN)
 
 
 def test_a_chain_appends_and_refunds_in_one_change():
-    first, second = transfer("deposit-1"), transfer("deposit-2")
+    first, second = transfer("deposit-1", unfilled=True), transfer("deposit-2")
     changed = (*resolved((first,), first.identity, REFUNDED), second)
     assert merged((first,), changed, ORIGIN) == changed
 

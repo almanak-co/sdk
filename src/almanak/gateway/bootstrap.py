@@ -1,7 +1,7 @@
 """Read-only phase of the existing gateway, before executable parameters exist."""
 
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from pydantic import Field, model_validator
 
@@ -67,6 +67,8 @@ class MarketFacts(Model):
     evidence: tuple[ResolutionRead, ...]
     # Display names read beside the facts. They are outside the verified facts digest.
     symbols: dict[AssetType, str] = Field(default_factory=dict, exclude_if=lambda v: not v)
+    # Reads of a two-chain market's second chain, at that chain's anchor. Omitted otherwise.
+    destination_evidence: tuple[ResolutionRead, ...] = Field(default=(), exclude_if=lambda v: not v)
 
 
 class ResolvedMarket(Model):
@@ -198,6 +200,19 @@ class BootstrapService:
                 for market in self.context.markets:
                     if market.selection.chain == anchor.chain.chain_id:
                         facts[market.name] = resolve_named_market(reader, market, block, cache)
+        for anchor in anchors.checkpoints:
+            crossing = [
+                market
+                for market in self.context.markets
+                if getattr(market.selection, "destination_chain", None) == anchor.chain.chain_id
+            ]
+            if not crossing:
+                continue
+            with self.reader(anchor.chain.chain_id) as reader:
+                for market in crossing:
+                    facts[market.name] = complete_named_market(
+                        reader, facts[market.name], evm_block(anchor)
+                    )
         result = ResolutionResult(
             binding=self.binding,
             anchors=anchors,
@@ -228,6 +243,23 @@ def resolve_named_market(reader, market, block, cache) -> MarketFacts:
         resolved=cast(ResolvedMarketFacts, replayed),
         evidence=evidence,
         symbols=symbols,
+    )
+
+
+def complete_named_market(reader, facts: MarketFacts, block) -> MarketFacts:
+    """Complete a two-chain market on its second chain and retain those reads apart."""
+    binding = binding_for(facts.resolved.selection.connector)
+    if binding.complete is None:
+        raise ValueError("market names a destination chain its connector does not resolve")
+    start = len(reader.evidence)
+    resolved = binding.complete(reader, facts.resolved, block)
+    symbols = asset_symbols(reader, (cast(Any, resolved).destination,), block)
+    return MarketFacts(
+        name=facts.name,
+        resolved=cast(ResolvedMarketFacts, resolved),
+        evidence=facts.evidence,
+        symbols={**facts.symbols, **symbols},
+        destination_evidence=tuple(reader.evidence[start:]),
     )
 
 

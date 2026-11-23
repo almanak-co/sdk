@@ -57,6 +57,10 @@ class AuthorBinding:
     # on `kind`; every member carries the connector tag the outer union selects on.
     allocation: Any
     debt: type[Model] | None = None
+    # A market that spans two chains is completed on its second chain, with that chain's
+    # own reader and anchor: `complete(reader, resolved, block)`. The selection names the
+    # chain as `destination_chain` and the completed facts retain `destination_block`.
+    complete: Callable[..., Model] | None = None
 
 
 BINDINGS: tuple[AuthorBinding, ...] = (
@@ -158,6 +162,7 @@ BINDINGS: tuple[AuthorBinding, ...] = (
         resolved=across_resolution.ResolvedRoute,
         resolve=across_resolution.resolve_market,
         allocation=across_inputs.AllocationInput,
+        complete=across_resolution.complete_market,
     ),
 )
 

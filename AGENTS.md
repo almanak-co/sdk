@@ -377,8 +377,9 @@ independently.
 - A bridge is an economic intent between two named fund accounts of one
   strategy on different chains. It is planned, signed and routed on the chain
   it leaves. Across is the first connector. It plans, signs and reconciles the
-  deposit on the source chain and opens the transfer; arrival and refund are
-  not reconciled yet, and it declares no run mode on any chain.
+  deposit on the source chain and opens the transfer, reconciles its arrival on
+  the destination chain and its refund on the source chain, and declares no run
+  mode on any chain.
 - A bridge market is one direction: the sent asset on its chain, the received
   asset on the destination chain, the author's fee ceiling `max_fee_bps` and
   the named quote source. Its allocation names a source account and a
@@ -433,8 +434,8 @@ independently.
   deposit itself. Only the gateway enforces the fee ceiling. Never describe the
   ceiling as on-chain enforcement.
 - A transfer and its two accounts stay within one environment.
-- Proposed, not accepted: teardown waits for open transfers and does not bridge
-  back.
+- Proposed, not accepted: teardown waits for open transfers on both chains and
+  does not bridge back.
 - Proposed, not accepted: the backtest model charges the author's full fee
   ceiling and delays arrival by a latency stated in the backtest configuration,
   both reported as model assumptions.
@@ -447,9 +448,92 @@ independently.
   operator key is read from `ALMANAK_ACROSS_API_KEY` in the gateway's
   environment. If the vendor retires the endpoint, deposits refuse until the
   quote reader is rebuilt on its successor.
-- Unresolved: market resolution reads one chain per market, so the received
-  asset is not yet verified by its on-chain `decimals()` and `symbol()` on the
-  destination chain. No run mode is declared before it is.
+- Current contract: a two-chain market is resolved on its source chain and
+  completed on its destination chain at that chain's own anchor. The received
+  asset is verified there by its on-chain `decimals()` and `symbol()`, with
+  those reads retained and replayed separately. A route that was not completed
+  forms no allocation.
+- Current contract: the transfer's reference keeps the deposit identifier, the
+  relay hash and the quote's timestamp, because the destination chain sees no
+  source outcome.
+- Proposed, not accepted: a relay is hashed under the chain number each
+  SpokePool reads from its own node, so on identified forks both sides use the
+  isolated signing chain. The production hash is held to a known answer from a
+  real deposit and its fill.
+- Current contract: an arrival is a `FilledRelay` whose whole relay hashes to
+  the retained hash, never a matching deposit identifier alone. It must pay
+  the destination fund. The received amount is the value of the token transfer
+  to the fund that follows the event in the fill transaction, required to
+  equal the event's amount; a difference stops with an accounting cause. A
+  slow fill must be paid by the SpokePool. A fast fill's payer is whoever
+  called the SpokePool, which the event does not name, so it is not checked.
+  An arrival below the offer is a measurement.
+- Current contract: `fillStatuses` is a cross-check only. A fill needs a
+  filled status, and a filled status with no fill in the scanned pages halts.
+- Proposed, not accepted: the page rule. An arrival scan starts at the last
+  destination block not after the quote's timestamp, and a refund scan at the
+  last source block not after the earliest fill deadline among the transfers
+  proven unfilled. Nothing is read before the head has passed that time. Later
+  pages continue at the block after the last one and span at most 2,000
+  blocks. A page is committed when it starts its scan, is full, holds an
+  outcome or an unattributed payment, or ends an arrival scan past the fill
+  deadline; a shorter empty page is read again. The gateway re-derives every
+  page before it is recorded.
+- Proposed, not accepted: the unfilled proof. A refund alone does not show
+  that a transfer was not delivered. The destination chain proves a transfer
+  unfilled when its arrival scan has committed contiguous pages past the fill
+  deadline with no fill, and records that on the transfer; only the
+  destination chain may. A transfer proven unfilled is still open and owned
+  value in flight until its refund is measured. A transfer goes from open to
+  unfilled or to arrived on the destination chain and from unfilled to
+  refunded on the source chain, and never otherwise.
+- Proposed, not accepted: a refund is read only for transfers proven unfilled
+  and never inferred from time. With the destination chain unavailable refunds
+  wait, and the source chain keeps working. The refund scan also waits while
+  its page would pass the fill deadline of a transfer of the same allocation
+  that is in flight and not yet proven unfilled.
+- Proposed, not accepted: the refund attribution and tie rule. A payment of
+  the sent asset from the SpokePool to the fund counts only in a transaction
+  whose `ExecutedRelayerRefundRoot` leaves name the fund for that asset with
+  the same amounts. Its total is attributed to a set of the allocation's
+  transfers proven unfilled, past their fill deadline at that block, whose
+  sent amounts sum to it exactly. Sets of equal sum are interchangeable, so
+  the one with the oldest fill deadlines is taken, then the lowest references.
+  Consequence: a foreign payment of an equal amount can resolve a transfer,
+  and that transfer's own later refund is then the unattributed one. The
+  totals stay right.
+- Proposed, not accepted: unsolicited inflow. Anyone can deposit naming the
+  fund as depositor and let it expire. A refund-leaf payment that matches no
+  set is retained in its committed page with its transaction and amount,
+  listed in the report as an unattributed refund payment, never attributed,
+  and the scan continues. It is no outcome and raises no accounting issue of
+  one, because such an issue stops new exposure on the chain and a stranger's
+  dust would then freeze a strategy.
+- Proposed, not accepted: attribution considers the 12 oldest transfers proven
+  unfilled of an allocation.
+- Proposed, not accepted: two refund payments to one fund in one block stop
+  the source chain with an ordering cause.
+- Current contract: an allocation is the only Across allocation of its source
+  fund and sent asset. A second one is refused at configuration.
+- Current contract: a refund the SpokePool deferred because its transfer
+  failed is detected by `getRelayerRefund` and stops the source chain as
+  unresolved. Claiming it is not built.
+- Current contract: a transfer is resolved at most once, and a deployment
+  closes only when every transfer is arrived or refunded and no allowance
+  stands. A fill found for a transfer marked unfilled or refunded halts the
+  destination chain with both named.
+- Proposed, not accepted: a transfer opened towards a chain that had already
+  closed reopens that chain.
+- Current contract: the destination chain's tick runs `decide` with no
+  observation of the allocation and owns nothing there. A bridge decided on
+  that tick is refused as routed to another chain.
+- Proposed, not accepted: fork settlement. A fill is the destination
+  SpokePool's own `fillRelay` by a relayer the fixture funds. A refund is a
+  fork-constructed bundle: the impersonated admin relays a root of one leaf
+  the fixture wrote, executed through the real contract code, and the fixture
+  moves the destination fork past the fill deadline. Label it so wherever it
+  is reported; it is never promotion or Fork Qualification evidence. It is
+  defined for an Arbitrum source only.
 
 ## Hyperliquid
 
