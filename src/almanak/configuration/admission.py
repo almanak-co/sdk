@@ -68,8 +68,12 @@ class PreparedDeployment(Model):
             self.fixture.accounts,
         ):
             raise ValueError("fork preparation changed its generated account binding")
+        # A position acts on one chain. An account that only receives a bridge adds its
+        # own chain, where no position acts.
         chains = {b.chain for b in self.fixture.bindings}
-        if {a.chain for a in prepared.parameters.positions} != chains:
+        acting = {a.chain for a in prepared.parameters.positions}
+        bound = {b.profile.fund.chain for b in prepared.parameters.accounts.bindings}
+        if not acting <= chains <= acting | bound:
             raise ValueError("fork positions differ from their generated account environments")
 
     @property

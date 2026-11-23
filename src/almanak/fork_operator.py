@@ -140,6 +140,7 @@ class FixturePlan:
             key = (str(value.chain), policy[0] if policy else None)
             groups.setdefault(key, []).append(account)
         self.groups = groups
+        self.plain = plain_accounts(inputs)
         self.policies = dict(inputs.strategy.gas)
         self.unenforced = op_family(
             tuple(policy.resolve(name) for name, policy in self.policies.items())
@@ -174,7 +175,11 @@ class FixturePlan:
                 for key, names in self.groups.items()
                 for name in names
             ],
-            "operators": [self.operator(key, funding) for key in self.groups],
+            "operators": [
+                self.operator(key, funding)
+                for key, names in self.groups.items()
+                if not set(names) <= self.plain
+            ],
         }
         if self.unenforced:
             fork["author_gas"] = "unenforced"
@@ -195,6 +200,13 @@ class FixturePlan:
 
     def fund(self, key, account, funding) -> dict:
         assets = [] if funding is None else funded_assets(funding, account)
+        if account in self.plain:
+            return {
+                "kind": "eoa",
+                "account": account,
+                "native_balance": self.operator(key, funding)["native_balance"],
+                "assets": assets,
+            }
         return {
             "kind": "safe_roles",
             "account": account,
@@ -231,6 +243,26 @@ class FixturePlan:
             if resolved.total_budget is None
             else {"total_budget": {"asset": native, "amount": resolved.total_budget.amount}}
         )
+
+
+def plain_accounts(inputs) -> set[str]:
+    """Accounts the fixture provisions as plain EOAs instead of Safes.
+
+    A fixture account is a Safe with delegated permissions unless a connector that acts
+    from it supports only plain accounts on that chain. An account that only receives a
+    bridge holds no venue authority, so it follows its chain's sending accounts.
+    """
+    from almanak.connectors.composition import connector_from_wire
+
+    plain = set()
+    for position in (*inputs.strategy.allocations.values(), *inputs.strategy.debts.values()):
+        market = inputs.markets[position.market]
+        support = connector_from_wire({"connector": str(market.connector)}).support_for(
+            market.chain
+        )
+        if "safe_roles" not in support.account_profiles:
+            plain |= {position.account, getattr(position, "destination_account", position.account)}
+    return plain
 
 
 def funded_assets(funding, account) -> list[dict]:

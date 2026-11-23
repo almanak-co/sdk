@@ -76,7 +76,13 @@ def load_signers(config, chain, key_file):
 
 
 def validate_signer_keys(config, keys):
-    if not isinstance(keys, dict) or set(keys) != {a.account for a in config.allocations}:
+    # An account that only receives a bridge is allocated too; it signs nothing.
+    allocated = {a.account for a in config.allocations} | {
+        a.destination_account
+        for a in config.allocations
+        if getattr(a, "destination_account", None) is not None
+    }
+    if not isinstance(keys, dict) or set(keys) != allocated:
         raise ValueError("fork key file must match the explicitly allocated account names")
 
 

@@ -278,6 +278,36 @@ def test_settled_requires_no_pending_plan_or_decision():
     assert settled({"pending": None, "plan": None, "decision": None})
     assert not settled({"pending": None, "plan": None, "decision": {"identity": "x"}})
     assert not settled({"work": [{"pending": {"x": 1}}]})
+    # A multi-chain checkpoint keeps a chain's decision and plan in that chain's work.
+    assert not settled({"work": [{"chain": "a"}, {"decision": {"identity": "x"}}]})
+    assert not settled({"work": [{"plan": {"x": 1}}]})
+    assert settled({"work": [{"chain": "a", "decision": None}]})
+
+
+def bridge_fixture(positions, bound, bindings):
+    record = deployment(operator_with({"author_gas": "unenforced"}), (), None)
+    record.preparation.policy = None
+    parameters = record.preparation.prepared.parameters
+    parameters.positions = tuple(SimpleNamespace(chain=chain) for chain in positions)
+    accounts = SimpleNamespace(
+        bindings=tuple(
+            SimpleNamespace(profile=SimpleNamespace(fund=SimpleNamespace(chain=c))) for c in bound
+        )
+    )
+    parameters.accounts = record.fixture.accounts = accounts
+    record.fixture.bindings = tuple(SimpleNamespace(chain=chain) for chain in bindings)
+    return record
+
+
+def test_a_fixture_chain_is_acted_on_or_holds_a_receiving_account():
+    # A bridge acts on its source chain only; its receiving account binds the other.
+    PreparedDeployment.require_fixture(bridge_fixture(("a",), ("a", "b"), ("a", "b")))
+    for positions, bound, bindings in (
+        (("a", "c"), ("a", "b"), ("a", "b")),
+        (("a",), ("a",), ("a", "b")),
+    ):
+        with pytest.raises(ValueError, match="fork positions differ"):
+            PreparedDeployment.require_fixture(bridge_fixture(positions, bound, bindings))
 
 
 def test_coordinator_takes_the_test_clock_offset(tmp_path, monkeypatch):
