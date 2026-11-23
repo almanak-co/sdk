@@ -47,22 +47,25 @@ def close(run, check):
     run.phases.append("workspace_shutdown")
 
 
+def assert_arrival_credited_or_spent_exactly(checks, arrived):
+    """One checkpoint decides it: no supply mined yet means the whole measured credit is
+    owned; a mined supply spent exactly the measured amount and nothing else."""
+    received = arrived.transfers[0].resolution.received.amount
+    assert received == checks.OFFERED
+    supplies = checks.mined(arrived, "supply")
+    owned = (0, 0) if supplies else (0, received)
+    # At most one supply, of exactly the measured amount.
+    assert [o.operation.amount.amount for o in supplies] == [received][: len(supplies)]
+    assert checks.inventory(arrived) == owned
+
+
 def test_the_arrived_amount_is_supplied_held_and_withdrawn_on_the_destination(request, tmp_path):
     with supervised(request, tmp_path, "arrival", CASE, OPERATOR) as run:
         state = deposited(run)
         (transfer,) = state.transfers
         settler(run).fill(state, transfer)
         arrived = await_checkpoint(run.root, lambda s: s.transfers[0].resolution is not None)
-        # One checkpoint decides it: no supply mined yet means the whole measured credit
-        # is owned; a mined supply spent exactly the measured amount and nothing else.
-        received = arrived.transfers[0].resolution.received.amount
-        assert received == run.assertions.OFFERED
-        supplies = run.assertions.mined(arrived, "supply")
-        if supplies:
-            assert [o.operation.amount.amount for o in supplies] == [received]
-            assert run.assertions.inventory(arrived) == (0, 0)
-        else:
-            assert run.assertions.inventory(arrived) == (0, received)
+        assert_arrival_credited_or_spent_exactly(run.assertions, arrived)
         run.phases.append("arrival_measured_and_credited_to_the_destination")
         state = await_checkpoint(run.root, run.assertions.entered)
         run.assertions.assert_holding(fork_handle(run.root), state)

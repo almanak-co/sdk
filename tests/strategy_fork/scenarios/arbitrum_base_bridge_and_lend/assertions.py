@@ -173,17 +173,25 @@ def assert_arrived(node, state):
     assert not mined(state, "supply")
 
 
-def assert_holding(node, state):
-    assert_one_deposit(state)
+def assert_supplied_what_arrived(state):
     (transfer,) = state.transfers
     assert transfer.resolution.received.amount == OFFERED
     (supply,) = mined(state, "supply")
     assert supply.operation.amount.amount == OFFERED, "the supply is exactly what arrived"
-    assert inventory(state) == (0, 0)
+    assert remembered(state) == (SENT, OFFERED, None, OFFERED)
+
+
+def assert_lent_on_chain(node, state):
     source, destination, allowance, lent = chain_balances(node, state)
     assert (source, destination, allowance) == (0, 0, 0)
     assert OFFERED - ROUNDING <= lent, "the supplied amount is not in the market"
-    assert remembered(state) == (SENT, OFFERED, None, OFFERED)
+
+
+def assert_holding(node, state):
+    assert_one_deposit(state)
+    assert_supplied_what_arrived(state)
+    assert inventory(state) == (0, 0)
+    assert_lent_on_chain(node, state)
 
 
 def assert_closed(node, state):
@@ -197,11 +205,15 @@ def assert_closed(node, state):
     assert owned_destination == destination >= OFFERED - ROUNDING
 
 
-def assert_refunded(node, state):
-    assert_one_deposit(state)
+def assert_refund_recorded(state):
     (transfer,) = state.transfers
     assert transfer.unfilled and transfer.resolution.returned.amount == SENT
-    assert inventory(state) == (SENT, 0), "the refund makes the source inventory whole"
-    assert chain_balances(node, state) == (SENT, 0, 0, 0)
     assert not mined(state, "supply")
     assert remembered(state) == (SENT, None, SENT, None)
+
+
+def assert_refunded(node, state):
+    assert_one_deposit(state)
+    assert_refund_recorded(state)
+    assert inventory(state) == (SENT, 0), "the refund makes the source inventory whole"
+    assert chain_balances(node, state) == (SENT, 0, 0, 0)
