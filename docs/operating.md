@@ -1349,7 +1349,11 @@ Arbitrum (`eip155:42161`), BNB (`eip155:56`), Polygon (`eip155:137`) and Robinho
 HyperEVM (`eip155:999`) has none and needs a provider key. A name that does not
 serve the command's chain is refused with the names that do. BNB Chain's own
 endpoint is not listed: it keeps less than a minute of state, and a direct action
-reads at blocks older than that when it reconciles a mined step.
+reads at blocks older than that when it reconciles a mined step. A listed pair
+served state 360 seconds behind its head when it was qualified: the 120 seconds
+an observation may age plus 240 seconds allowed for one step. That is the floor
+the qualification checks, not a promise: a slower step, or an `ax recover` run
+later, reads older state, and the endpoint can refuse it.
 
 An endpoint for a chain does not make an action available there. A direct action
 runs only for a connector and chain that declare it, which `almanak support` lists

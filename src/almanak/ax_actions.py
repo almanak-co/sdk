@@ -100,7 +100,8 @@ class FeeLimits:
 
 
 # The longest a step's observation may age before it is refused;
-# `scripts/qualify_public_rpc.py` holds a public endpoint's head to the same.
+# `scripts/qualify_public_rpc.py` holds a public endpoint's head to the same, and
+# requires state this many seconds plus one step's allowance behind the head.
 MAX_OBSERVATION_AGE_SECONDS = 120
 
 

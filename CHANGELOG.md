@@ -16,6 +16,15 @@ its changelog is on the `v2` branch.
   not resolve through it. A record kept on `bnbchain` is resolved by naming a
   transport, such as `ax recover --record <path> --public-rpc blastapi` (#42).
 
+- `scripts/qualify_public_rpc.py` has a tenth check, `reads_at_age`: pinned state must
+  be served at a block at least 360 seconds behind the head, measured by the block
+  timestamps the endpoint itself reports. That is the 120 seconds an observation may
+  age plus an allowance of 240 seconds for one step of a direct action to be planned,
+  signed, mined and reconciled. The read 64 blocks behind the head stays, but 64 blocks
+  are about 29 seconds on BNB Chain, so an endpoint that keeps a minute of state passed
+  every check. The 360 seconds are a floor the tool checks: a slower step or a later
+  `ax recover` reads older state (#42).
+
 ### Fixed
 - A direct action run with `--execute` no longer ends over its own step that was just
   mined. When the endpoint served neither the receipt nor the transaction of that step

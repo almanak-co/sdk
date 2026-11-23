@@ -344,17 +344,34 @@ combined with `--name` or `--chain`. It prints one JSON report that names hosts
 only and exits 1 when any checked endpoint fails; a wrong command line exits 2
 before any endpoint is opened. The checks drive the SDK's own readers through a
 sample of the reads an observation and a direct action make. They do not cover
-every method a connector calls:
+every method a connector calls, and the state they ask for is a floor, not the
+oldest state a command can read:
 
 | Check | What the endpoint must serve |
 | --- | --- |
 | `identity` | The proof every public read asks for: the chain number, the pinned genesis block and a head no older than 120 seconds. Nothing else runs when it fails. |
 | `production_guard` | What a direct action verifies before each privileged step: an HTTPS endpoint, the chain, a client that is not a test node and the genesis again. |
 | `reads_at_finalized`, `reads_at_latest`, `reads_at_number` | Call, code, storage and balance reads that name the block's hash with `requireCanonical`, at the default `finalized`, at `latest` and at a numbered block 64 behind the head. A probe call returns the block timestamp the provider's EVM saw, which must be the pinned block's. |
+| `reads_at_age` | The same reads at a block at least 360 seconds behind the head. A direct action reads its observation again at the observation's block and reconciles a mined step at the receipt's block, so it needs state that old: the 120 seconds an observation may age, plus an allowance of 240 seconds for one step to be planned, signed, mined and reconciled. The result states the block and its `age_seconds`. |
 | `submitter_state` | The head by its number, no older than an action accepts, and the same nonce at `latest` and `pending`. |
 | `fee_quote` | The fee quote of a direct action: gas estimated at the pinned block's hash, a one-block fee history with one reward percentile and the base fee the chain's policy bids on (the next block's, or the observed block's on Avalanche), and the node's gas price on BNB. |
 | `op_fees` | On Base and Optimism, the pinned GasPriceOracle and L1Block revisions and their fee parameters. |
 | `receipts` | A mined transaction and its receipt with the fields reconciliation reads, on a block that is canonical by number, and `null` for a transaction hash the provider does not know, as a transaction that is not mined yet answers. |
+
+`reads_at_age` measures age by the block timestamps the endpoint itself reports,
+not by a block time stated for the chain. It reads the block 64 behind the head,
+estimates from the two timestamps how many blocks make 360 seconds, and reads that
+block's header. A block whose timestamp is 360 to 420 seconds behind the head's is
+taken; otherwise the estimate is corrected from the timestamps read so far, for at
+most six header reads, and the youngest block found that is old enough is used. An
+endpoint that keeps less state fails the check with the reader's refusal, for a
+geth node `the endpoint does not serve state at that block`.
+
+The 360 seconds are a floor the tool checks, not a promise. The allowance is a
+stated figure: steps on BNB Chain over a slow link were measured at 144 to 190
+seconds. A step that takes longer reads older state, and `ax recover` reads a kept
+record's blocks whenever it is run, which can be hours later. A listed endpoint can
+refuse those reads.
 
 A refusal is reported in the SDK's own words, never the provider's, and an answer
 of the wrong shape fails its check as `malformed`. Each failed check carries
