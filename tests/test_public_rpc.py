@@ -292,7 +292,7 @@ def proofs(monkeypatch):
     steps = []
 
     class Opened:
-        def __init__(self, chain, endpoint):
+        def __init__(self, chain, endpoint, **options):
             steps.append(("open", str(chain.chain_id), endpoint))
 
         def __enter__(self):
@@ -380,6 +380,41 @@ def test_a_named_public_endpoint_that_fails_its_proof_resolves_nothing(monkeypat
     with pytest.raises(DataError, match="500 seconds old"):
         ax_actions.record_endpoint(record(public("drpc")), None, "publicnode")
     assert proofs[-1] == "closed"
+
+
+def test_the_recovery_proof_re_sends_a_read_that_failed_for_a_moment(monkeypatch):
+    """The reader `ax recover` proves a named endpoint with has the execution budget."""
+    import json
+
+    import httpx
+
+    from almanak.gateway import ethereum
+    from almanak.models import Chain
+
+    sent, waits, budgets = [], [], []
+
+    def handle(request):
+        body = json.loads(request.content)
+        sent.append(body["method"])
+        if len(sent) == 1:
+            return httpx.Response(503)
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": "0x1"})
+
+    real = ethereum.EthereumReader
+
+    def opened(chain, endpoint, **options):
+        budgets.append(options.get("retry_budget"))
+        client = httpx.Client(transport=httpx.MockTransport(handle))
+        return real(chain, endpoint, client=client, **options)
+
+    monkeypatch.setattr(ethereum, "EthereumReader", opened)
+    monkeypatch.setattr(ethereum, "sleep", waits.append)
+    monkeypatch.setattr(read_endpoints, "verify_public", lambda reader: None)
+    chain = Chain(chain_id=ETHEREUM, environment="mainnet")
+    assert ax_actions.proven_public(chain, "https://public.example") == "https://public.example"
+    assert budgets == [ethereum.EXECUTION_RETRY_BUDGET]
+    # Only reads go through this reader, and the failed one is sent again.
+    assert sent == ["eth_chainId", "eth_chainId"] and waits == [ethereum.BUSY_BACKOFF]
 
 
 def test_recover_takes_one_transport_and_resolves_the_record_through_it(monkeypatch, capsys):

@@ -103,6 +103,8 @@ BUSY_WAIT_LIMIT = 30.0
 # timeout, so each re-sends a transient failure within this shorter budget. It outlasts a
 # load-balanced provider serving a just-mined block a few seconds late.
 EXECUTION_RETRY_BUDGET = 8.0
+# Longer than the execution budget, so a first attempt that times out has spent it; see
+# `resend_bounds` for the one re-send it still gets.
 PROVIDER_TIMEOUT = 15.0
 
 
@@ -132,6 +134,22 @@ def resend_timeout(failure: DataError) -> float:
     if timeout <= 0:
         raise failure
     return timeout
+
+
+def resend_bounds(attempt: int, left: float, budget: float) -> tuple[float, float]:
+    """The longest wait before the next re-send and the longest that re-send may take.
+
+    `left` is what remains of the read's retry budget. A first attempt that leaves less
+    than the first backoff, as one that timed out does, is still re-sent once: after that
+    backoff, with at most `budget` as its provider timeout. With attempts that end at
+    their timeout, one read ends within `PROVIDER_TIMEOUT + BUSY_BACKOFF + budget` seconds
+    or, when the budget was not spent, within `budget + PROVIDER_TIMEOUT`. The provider
+    timeout bounds each phase of an attempt (connect, write, each wait for bytes) and not
+    the attempt as a whole, so these are not hard totals.
+    """
+    if attempt == 0 and left < BUSY_BACKOFF:
+        return BUSY_BACKOFF, budget
+    return left, PROVIDER_TIMEOUT
 
 
 def still_pending(results: list[Any], pending: list[int], busy: ProviderBusy) -> list[int]:
@@ -294,6 +312,9 @@ Reasons = tuple[tuple[str, tuple[str, ...]], ...]
 KNOWN_REASONS: Reasons = (
     ("EVM error OpcodeNotFound", ("opcodenotfound", "opcode not found", "invalid opcode")),
     ("header not found", ("header not found",)),
+    # geth's answer when it holds no state for the block, most often because it pruned an
+    # old one. A refusal that is not sent again: a pruned block only gets older.
+    ("the endpoint does not serve state at that block", ("missing trie node",)),
 )
 # Calls that submit a transaction rather than read; a refusal names the submission.
 SUBMISSIONS = frozenset({"eth_sendRawTransaction", "eth_sendTransaction"})
@@ -418,7 +439,9 @@ class EthereumReader:
     single read fails on a transient failure (see `transient`) unless `retry_budget` is
     positive: `BUSY_WAIT_LIMIT` for observation readers and `EXECUTION_RETRY_BUDGET` for
     execution readers. Those re-send it within the same bounds, and no wait ends more
-    than `retry_budget` seconds after the first attempt. A re-send's provider timeout
+    than `retry_budget` seconds after the first attempt started. The one exception is a
+    first attempt that spent the budget itself, as a timeout does with the execution
+    budget: it is re-sent once (see `resend_bounds`). A re-send's provider timeout
     ends by the gateway request's read deadline, so a transient read still fails below
     its callers' 60 s timeouts. A failure that outlasts the bounds is
     marked `transient`. A transaction submission is never re-sent.
@@ -588,8 +611,9 @@ class EthereumReader:
                 if not self._retries or not transient(method, error):
                     raise
                 error.transient = True
-                wait_out(error, attempt, request_limit(deadline - monotonic()))
-                timeout = resend_timeout(error)
+                wait, longest = resend_bounds(attempt, deadline - monotonic(), self._retry_budget)
+                wait_out(error, attempt, request_limit(wait))
+                timeout = min(resend_timeout(error), longest)
         raise AssertionError("unreachable")
 
     def _rpc_once(
