@@ -163,8 +163,9 @@ independently.
   `execution_fee`. Liquidity mint ticks are unrestricted on-chain; the gateway
   enforces the author's range or band. Accepted risk: a compromised operator or
   gateway host can lose up to the Safe's value held in the configured venues,
-  but cannot move value out of the Safe or call anything ungranted. Never
-  describe runtime risk or timing checks as on-chain enforcement.
+  but cannot move value out of the Safe or call anything ungranted. The one
+  exception is the bridged asset of a bridge grant, stated under "Bridges".
+  Never describe runtime risk or timing checks as on-chain enforcement.
 - Lending exits: authors state no repayment or interest amount. Repay grants
   pin the asset, market and the Safe as beneficiary. A full repay is always
   approve the held balance, the protocol's full-repay form, then revoke the
@@ -367,6 +368,39 @@ independently.
 - HyperEVM (`eip155:999`) uses HYPE as its native asset and Alchemy
   `hyperliquid-mainnet` as provider. The public Hyperliquid RPC is never an SDK
   provider.
+
+## Bridges
+
+- A bridge is an economic intent between two named fund accounts of one
+  strategy on different chains. It is planned, signed and routed on the chain
+  it leaves. Across is the first connector; the intent and the transfer record
+  are in place, and no connector declares bridge support yet.
+- A transfer in flight is owned state, not pending work. It is neither a
+  balance nor a measured zero: an open transfer carries no received amount.
+- Arrival and refund are reconciled as external effects, arrival on the
+  destination chain and refund on the source chain, each from the measured
+  amount. A missing outcome never sends again.
+- The source chain keeps working while the destination is unavailable. Only
+  the destination chain records an arrival and only the source chain a refund.
+- The shared transfer record keeps CAIP identity and an opaque connector
+  reference. Deposit identifiers, hashes and addresses stay in the adapter.
+- Accepted: a bridge's output amount is the venue's own quote from the venue's
+  API, named explicitly in the market configuration. The gateway refuses before
+  signing when the quote's fee exceeds the author's stated ceiling, so a false
+  quote costs at most that ceiling, or a delay and a refund.
+- Accepted risk: Roles cannot relate a deposit's output amount to its input. A
+  bridge grant pins the token, the destination chain, the Safe as depositor,
+  the destination fund as recipient and an empty message. A compromised
+  operator or gateway host can still move the bridged asset out of the Safe by
+  depositing at a near-zero output and filling the deposit itself. Only the
+  gateway enforces the fee ceiling. Never describe the ceiling as on-chain
+  enforcement.
+- Proposed, not accepted: teardown waits for open transfers and does not bridge
+  back.
+- Proposed, not accepted: the backtest model charges the author's full fee
+  ceiling and delays arrival by a latency stated in the backtest configuration,
+  both reported as model assumptions.
+- Proposed, not accepted: the first scope is same-token ERC-20 routes.
 
 ## Hyperliquid
 

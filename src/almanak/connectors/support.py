@@ -41,6 +41,7 @@ class EconomicAction(StrEnum):
     # HyperCore custody and leverage (blueprint 30, section 12).
     DEPOSIT = "deposit"
     SET_LEVERAGE = "set_leverage"
+    BRIDGE = "bridge"
 
 
 # OP-family production declarations rely on the gateway's quote-time L1/operator

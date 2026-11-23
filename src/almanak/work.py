@@ -72,6 +72,7 @@ def project(state, chain):
             **project_inventory(state, chain),
             **request_fields(state, chain),
             **scoped_fields(state, chain),
+            **transfer_fields(state, chain),
             "work": (),
             "scheduler_cursor": 0,
             "initialized": work.initialized,
@@ -121,6 +122,18 @@ def merge_inventory(state, changed, chain):
     return {"inventory": tuple(amounts.get(b.key, b) for b in state.inventory)}
 
 
+def transfer_fields(state, chain, changed=None):
+    # Only checkpoints that retain value in flight between chains declare the field. A
+    # transfer is shown to its source and its destination chain, which each resolve it.
+    if "transfers" not in type(state).model_fields:
+        return {}
+    from almanak.transfers import merged, visible
+
+    if changed is None:
+        return {"transfers": visible(state.transfers, chain)}
+    return {"transfers": merged(state.transfers, changed.transfers, chain)}
+
+
 def merge(state, chain, changed):
     from almanak.external_effects import scoped_fields
 
@@ -145,6 +158,7 @@ def merge(state, chain, changed):
             **merge_inventory(state, changed, chain),
             **request_fields(state, chain, changed),
             **scoped_fields(state, chain, changed),
+            **transfer_fields(state, chain, changed),
             "work": works,
             "memory": changed.memory,
             "schedule": changed.schedule,
