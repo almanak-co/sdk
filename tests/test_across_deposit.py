@@ -528,7 +528,7 @@ def test_a_safe_account_has_no_bridge_grants_yet():
 
 
 def test_the_gateway_plans_through_the_quote_hook_only_where_one_exists(monkeypatch):
-    from almanak.gateway.execution import EvmGateway
+    from almanak.gateway.execution import EvmGateway, plan_operation
 
     monkeypatch.setattr(venue, "fetch", lambda *a, **k: quote())
     quoting = SimpleNamespace(
@@ -536,7 +536,7 @@ def test_the_gateway_plans_through_the_quote_hook_only_where_one_exists(monkeypa
         config=CONFIG,
         guard=lambda: None,
     )
-    planned = EvmGateway.plan_operation(quoting, state(), INTENT, snapshot(allowance=AMOUNT))
+    planned = plan_operation(quoting, state(), INTENT, snapshot(allowance=AMOUNT))
     assert planned == deposit()
     plain = SimpleNamespace(
         connector=SimpleNamespace(
@@ -544,7 +544,7 @@ def test_the_gateway_plans_through_the_quote_hook_only_where_one_exists(monkeypa
         ),
         config="config",
     )
-    assert EvmGateway.plan_operation(plain, "state", "intent", "before") == (
+    assert plan_operation(plain, "state", "intent", "before") == (
         "config",
         "state",
         "intent",

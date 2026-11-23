@@ -656,6 +656,70 @@
    }
   },
   {
+   "connector": "across",
+   "chain": "eip155:42161",
+   "modes": [],
+   "actions": [
+    "bridge",
+    "revoke_bridge"
+   ],
+   "account_profiles": [
+    "eoa"
+   ],
+   "restrictions": [
+    "ERC-20 routes between two bound accounts; no wrapped native asset is sent",
+    "pinned SpokePool proxy and implementation",
+    "the output amount is the venue's quote under the author's fee ceiling, a gateway check",
+    "arrival and refund are not reconciled yet"
+   ],
+   "historical": [],
+   "variants": [],
+   "gas_lifecycle": {
+    "bridge": {
+     "entry": 2,
+     "exit": 0,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
+   "connector": "across",
+   "chain": "eip155:8453",
+   "modes": [],
+   "actions": [
+    "bridge",
+    "revoke_bridge"
+   ],
+   "account_profiles": [
+    "eoa"
+   ],
+   "restrictions": [
+    "ERC-20 routes between two bound accounts; no wrapped native asset is sent",
+    "pinned SpokePool proxy and implementation",
+    "the output amount is the venue's quote under the author's fee ceiling, a gateway check",
+    "arrival and refund are not reconciled yet"
+   ],
+   "historical": [],
+   "variants": [],
+   "gas_lifecycle": {
+    "bridge": {
+     "entry": 2,
+     "exit": 0,
+     "per_entry_slice": 0,
+     "per_item": {},
+     "when_granted": {},
+     "exit_per_item": {},
+     "exit_when_granted": {},
+     "exit_per_unwind_cycle": 0
+    }
+   }
+  },
+  {
    "connector": "aerodrome",
    "chain": "eip155:8453",
    "modes": [
