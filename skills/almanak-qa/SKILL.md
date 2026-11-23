@@ -116,8 +116,10 @@ Ask for, and wait for, each of these. Do not fill any in yourself:
 
 - That they want to spend real funds now, after you repeated the warning above.
 - The wallet directory (written by `almanak wallet create`), funded with gas and
-  with the market's asset. The wallet must hold no position in that market: the
-  withdrawal takes the whole supplied balance. It must have been created with
+  with the market's asset. The check reads no balance, so ask them to make sure
+  it holds the amount and gas for every transaction, the withdrawal's included.
+  The wallet must hold no position in that market: the withdrawal takes the whole
+  supplied balance. It must have been created with
   `--generate-password` or `--password-file`: you have no terminal to type a
   keystore password at, and the check refuses a wallet that would ask for one.
   You never read that password file.
@@ -173,6 +175,9 @@ another new output directory, `--execute` and the phrase:
 ```bash
 ALMANAK_QA_SPEND_REAL_FUNDS=1 uv run --locked python -m scripts.live_qa writes --market <market> --amount <base units> --wallet <wallet directory> --public-rpc publicnode --max-gas-price-wei <wei> --max-transaction-fee <fee> --output <new directory> --execute --confirm "<phrase>"
 ```
+
+The check accepts the phrase you pass without asking again, so passing it is the
+user's approval: never pass it before they confirm.
 
 It previews again, supplies, previews the withdrawal and withdraws everything. It
 waits for each transaction to be mined: give it at least twenty minutes and never

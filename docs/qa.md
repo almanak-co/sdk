@@ -540,13 +540,13 @@ It refuses to start, running no command and contacting nothing, unless all of
 these hold. Every unmet gate is named at once.
 
 1. `ALMANAK_QA_SPEND_REAL_FUNDS=1` is set, on the command line of that run.
-2. `--wallet` names a wallet directory written by `almanak wallet create`, yours
-   and funded by you with gas and the market's asset. The check never creates a
-   wallet and never opens a keystore or a password file; `almanak ax` signs. A
-   wallet created without `--generate-password` or `--password-file` asks for
-   its password on the terminal, once for the supply and once for the
-   withdrawal. Without a terminal, as under an agent, nobody can answer, so the
-   check then requires `wallet.json` to name an existing password file.
+2. `--wallet` names your own wallet directory, written by `almanak wallet create`.
+   The check never creates a wallet and never opens a keystore or a password
+   file; `almanak ax` signs. A wallet created without `--generate-password` or
+   `--password-file` asks for its password on the terminal, once for the supply
+   and once for the withdrawal. Without a terminal, as under an agent, nobody can
+   answer, so the check then requires `wallet.json` to name an existing password
+   file.
 3. `--max-gas-price-wei` and `--max-transaction-fee` are given, as `almanak ax`
    takes them, and neither exceeds the check's own limit for the chain (100 gwei
    and 0.02 ETH on Ethereum, 200 gwei and 0.2 AVAX on Avalanche).
@@ -568,6 +568,11 @@ these hold. Every unmet gate is named at once.
 `--max-transaction-fee` caps each transaction, so a round trip can cost up to
 four times it in gas. The supplied amount returns to the wallet, plus interest.
 
+No gate reads a balance. Before running it, check that the wallet holds the
+amount in the market's asset and gas for every transaction, the withdrawal's
+included. An underfunded wallet passes the gates; one short of gas after the
+supply leaves the amount supplied.
+
 Preview first. Without `--execute` the check plans the supply, prints the
 preview and the confirmation phrase, and signs nothing:
 
@@ -582,7 +587,10 @@ ALMANAK_QA_SPEND_REAL_FUNDS=1 uv run --locked python -m scripts.live_qa writes \
 Then execute, on the same transport, with a new output directory. At a terminal
 the check previews again and asks you to type the phrase,
 `supply <amount> <market> and withdraw`; a non-interactive caller passes it with
-`--confirm`. Anything else signs nothing.
+`--confirm`. Anything else signs nothing. The phrase is predictable from the
+market and amount, and a `--confirm` given at the start is accepted after the
+preview without a further answer. Passing it approves the round trip before this
+run's preview is shown, so pass it only after reading the first run's preview.
 
 ```bash
 ALMANAK_QA_SPEND_REAL_FUNDS=1 uv run --locked python -m scripts.live_qa writes \
