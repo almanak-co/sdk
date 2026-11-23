@@ -23,7 +23,8 @@ SCOPE = (
 FORK_SCOPE = (
     "fork runs only, as the source of a route to eip155:8453; no production run and no backtest",
     "a fork run asks no venue: the fork gateway constructs the quote from a stated fee "
-    "and the fork's block time and labels it; it is no evidence of a venue quote",
+    "and the fork's block time and retains it as across_fork_constructed; it is no "
+    "evidence of a venue quote",
     "a fork refund is a fork-constructed bundle, never Fork Qualification evidence",
 )
 UNPROVEN = (

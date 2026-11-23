@@ -1,7 +1,5 @@
 """Across deposits through the shared guarded EVM execution, account and fee path."""
 
-import os
-
 from almanak.connectors.across import planning
 from almanak.connectors.across import quote as venue
 from almanak.connectors.across.observations import require_pinned, snapshot
@@ -15,14 +13,11 @@ from almanak.connectors.across.receipts import movement, opened_transfer
 from almanak.connectors.erc20_approval import approval_succeeded
 from almanak.connectors.funding import funding_rows, summed
 from almanak.connectors.gas_lifecycle import GasLifecycle, KindCounts
-from almanak.gateway.environments import is_fork
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm_fees import charged_fees
 from almanak.models import AssetAmount
 
-# An optional operator key for the venue's quote API. It stays in the gateway's
-# environment and never reaches author files, logs or retained evidence.
-API_KEY_ENV = "ALMANAK_ACROSS_API_KEY"
+API_KEY_ENV = venue.API_KEY_ENV
 # Approval and deposit; a bridge has no exit transaction of its own.
 ENTRY_TRANSACTIONS = 2
 
@@ -37,18 +32,20 @@ def expired(operation, block) -> bool:
 
 
 def quoted(backend, intent, before):
-    """The deposit's quote from its one source: the venue, or on an identified fork the
-    constructed quote its fork route names. A fork never asks the venue."""
-    amount = intent.amount.amount
-    if is_fork(intent.target.fund.chain):
-        constructed = getattr(backend, "fork_quote", None)
-        if constructed is None:
-            raise DataError(
-                "quote_unavailable",
-                "a fork run asks no venue, and this fork route names no constructed quote",
-            )
-        return constructed.quote(intent.target, amount, before.block.timestamp)
-    return venue.fetch(intent.target, amount, api_key=os.environ.get(API_KEY_ENV) or None)
+    """The deposit's quote through the one transport the gateway declares for it.
+
+    Which transport that is belongs to the gateway's environment, not to this code: a
+    gateway that declares none is refused, and nothing is substituted.
+    """
+    transport = backend.venue_transports.get(venue.QUOTE_VENUE)
+    if transport is None:
+        raise DataError("quote_unavailable", "this gateway declares no Across quote transport")
+    return venue.fetch(intent.target, intent.amount.amount, transport, before.block.timestamp)
+
+
+def venue_transports() -> dict:
+    """What a production gateway asks: the venue's own API."""
+    return {venue.QUOTE_VENUE: venue.HttpTransport()}
 
 
 def quoted_operation(backend, state, intent, before):
@@ -224,6 +221,7 @@ class AcrossExecution:
     validate_operation = staticmethod(validate_operation)
     operation = staticmethod(planning.operation)
     quoted_operation = staticmethod(quoted_operation)
+    venue_transports = staticmethod(venue_transports)
     expired = staticmethod(expired)
     validate_current = staticmethod(validate_current)
     validate_simulation = staticmethod(validate_simulation)

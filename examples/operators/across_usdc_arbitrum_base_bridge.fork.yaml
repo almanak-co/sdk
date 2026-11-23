@@ -3,7 +3,8 @@
 # placeholders: fork provisioning generates the actual fixture accounts, plain
 # EOAs on both chains, because Across deposits are supported from an EOA only.
 # No venue is asked on a fork: the fork gateway constructs each quote from a
-# stated fee and the fork's own block time, and labels it in retained evidence.
+# stated fee and the fork's own block time, and retains it under the source
+# across_fork_constructed.
 schema_version: operator-gateway-config-v1
 modes:
 - fork

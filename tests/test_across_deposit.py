@@ -275,26 +275,27 @@ def test_an_approval_receipt_names_the_exact_spender_and_bound():
 
 
 def backend():
-    return SimpleNamespace(config=CONFIG, guard=lambda: None)
+    return SimpleNamespace(
+        config=CONFIG, guard=lambda: None, venue_transports=execution.venue_transports()
+    )
 
 
 def test_the_gateway_asks_the_venue_only_for_the_deposit(monkeypatch):
     asked = []
 
-    def fetch(target, amount, *, api_key=None):
-        asked.append((target, amount, api_key))
+    def fetch(target, amount, transport, block_timestamp):
+        assert isinstance(transport, venue.HttpTransport)
+        asked.append((target, amount, block_timestamp))
         return quote()
 
     monkeypatch.setattr(venue, "fetch", fetch)
-    monkeypatch.setenv(execution.API_KEY_ENV, "secret")
     approve = execution.quoted_operation(backend(), state(), INTENT, snapshot())
     # The approval signs no quote, but the venue is asked first so a refusal leaves none.
-    assert isinstance(approve, ApproveOperation) and asked == [(TARGET, AMOUNT, "secret")]
+    assert isinstance(approve, ApproveOperation) and asked == [(TARGET, AMOUNT, NOW)]
     planned = execution.quoted_operation(backend(), state(), INTENT, snapshot(allowance=AMOUNT))
-    assert planned == deposit() and asked == [(TARGET, AMOUNT, "secret")] * 2
+    assert planned == deposit() and asked == [(TARGET, AMOUNT, NOW)] * 2
     stale = execution.quoted_operation(backend(), state(), INTENT, snapshot(allowance=1))
     assert stale == RevokeOperation(target=TARGET, final=False) and len(asked) == 2
-    assert "secret" not in planned.model_dump_json()
 
 
 def test_a_quote_above_the_ceiling_is_refused_before_anything_is_planned(monkeypatch):
@@ -516,8 +517,6 @@ def test_a_safe_account_has_no_bridge_grants_yet():
     with pytest.raises(ValueError, match="no Roles grants yet"):
         AcrossPermissions.identities(None, "arb", None)
     binding = connector()
-    with pytest.raises(ValueError, match="no dashboard"):
-        binding.projection.dashboard(state())
     assert (
         binding.execution_effects(
             SimpleNamespace(success=True, assets=AMOUNT, operation=deposit())
@@ -535,6 +534,7 @@ def test_the_gateway_plans_through_the_quote_hook_only_where_one_exists(monkeypa
         connector=SimpleNamespace(execution=execution.AcrossExecution),
         config=CONFIG,
         guard=lambda: None,
+        venue_transports=execution.venue_transports(),
     )
     planned = plan_operation(quoting, state(), INTENT, snapshot(allowance=AMOUNT))
     assert planned == deposit()

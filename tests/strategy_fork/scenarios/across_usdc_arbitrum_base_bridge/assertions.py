@@ -11,6 +11,7 @@ from pathlib import Path
 from eth_abi import encode
 from eth_utils import keccak
 
+from almanak.connectors.across.connector import AcrossProjection
 from almanak.connectors.across.fork_settler import Settler
 from almanak.transfers import Arrived, Refunded
 
@@ -137,7 +138,12 @@ def remembered(state) -> tuple:
 def assert_one_deposit(state):
     (deposit,) = deposits(state)
     quote = deposit.operation.quote
-    assert "forkConstructed" in quote.response, "a fork deposit signs only a constructed quote"
+    assert quote.source == "across_fork_constructed", "a fork deposit signs a constructed quote"
+    report = AcrossProjection.report(state)
+    assert [t["quote_source"] for t in report["transfers"]] == ["across_fork_constructed"]
+    context, _ = AcrossProjection.dashboard(state)
+    (row,) = context.datasets["transfers"].rows
+    assert row["quote_source"] == "across_fork_constructed"
     assert (deposit.operation.amount.amount, quote.output_amount) == (SENT, OFFERED)
 
 

@@ -1,4 +1,4 @@
-"""Across wire binding: deposit, arrival and refund of a bridge, with no declared run mode yet."""
+"""Across wire binding: deposit, arrival and refund of a bridge, declared for fork runs."""
 
 from pydantic import TypeAdapter
 
@@ -52,12 +52,14 @@ def run_facts(state) -> dict:
 
 
 class AcrossProjection:
-    """Reports state the run and each transfer with how it ended. There is no
-    dashboard projection yet."""
+    """Reports and dashboards state the run and each transfer with how it ended and
+    which source quoted its offered amount."""
 
     @staticmethod
     def dashboard(state, *, captured_at=None):
-        raise ValueError("Across has no dashboard projection yet")
+        from almanak.connectors.across.dashboard import project
+
+        return project(state, captured_at=captured_at)
 
     @staticmethod
     def report(state):
@@ -68,9 +70,19 @@ class AcrossProjection:
             for page in getattr(state, "external_scans", ())
             if page.unsolicited is not None
         ]
+        # The source of each transfer's offered amount, from its retained deposit. A
+        # fork-constructed quote is named as one; an unretained deposit states none.
+        sources = {
+            o.transfer.reference: o.operation.quote.source
+            for o in state.outcomes
+            if getattr(o, "operation", None) is not None and o.transfer is not None
+        }
         return {
             **run_facts(state),
-            "transfers": [t.model_dump(mode="json") for t in state.transfers],
+            "transfers": [
+                {**t.model_dump(mode="json"), "quote_source": sources.get(t.reference)}
+                for t in state.transfers
+            ],
             "unattributed_refund_payments": unattributed,
         }
 

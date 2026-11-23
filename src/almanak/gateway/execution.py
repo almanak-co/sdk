@@ -95,6 +95,13 @@ class EvmGateway:
     def connector(self):
         return connector_for(self.config)
 
+    @property
+    def venue_transports(self) -> dict[str, object]:
+        """The transports this gateway's environment lets a connector ask a venue
+        through, by venue name. Each environment's gateway states its own; a connector
+        that finds none for its venue refuses, so none inherits another's transport."""
+        return {}
+
     def close(self):
         self.reader.__exit__()
 
