@@ -387,24 +387,35 @@ independently.
   cover the arrival with a pause and resume, the refund after the destination
   proved the transfer unfilled, a coordinator killed between the mined deposit
   and the arrival, a destination outage while the source bridges, and a
-  teardown that revokes an approval whose deposit was never signed. A kill
-  between arrival evidence and its commit is not proven: the supervised
-  commands expose no fault point.
-- Proposed, not accepted: the fork quote. A fork run asks no venue. The
-  connector's fork binding names a constructed quote in the source chain's
-  fork route, and that chain's fork gateway builds each quote from it: a stated
-  fee of one basis point, the pinned block's own timestamp, a fill deadline one
-  hour later, no exclusivity and the pinned SpokePools. It is parsed and
-  admitted exactly as a venue answer, and its retained answer carries the
-  `forkConstructed` label and the fee. A fork route that names none refuses
-  the deposit with `quote_unavailable`; a chain outside a fork never reads
-  one. The author's `quote: across_api` is unchanged. A constructed quote is
-  never evidence of what the venue would quote.
+  teardown that revokes an approval whose deposit was never signed. A crash
+  between arrival evidence and its commit is covered at component level only:
+  the runtime's own `external_evidence` and `external_commit` fault points
+  around the real commit and the connector's reader over a fake chain record
+  the arrival once, with the same page. It is unproven at the supervised level,
+  where the commands expose no fault point and no process is killed there.
+- Proposed, not accepted: the fork quote. A gateway declares, by venue name,
+  the transports its environment lets a connector ask a venue through. The
+  production gateway declares what the connector states for production, which
+  for Across is the venue's API, and takes no other. A fork gateway declares
+  only what its chain's fork route names, and Across's fork binding names a
+  constructed quote for the source chain: a stated fee of one basis point, the
+  pinned block's own timestamp, a fill deadline one hour later, no exclusivity
+  and the pinned SpokePools. The fork transport returns that as an answer
+  body, which takes the same fetch, size cap, canonical form, parser and
+  admission as the venue's answer. Protocol code does not branch on the
+  environment, except that admission accepts the quote source
+  `across_fork_constructed` on an identified fork only and refuses it on any
+  other chain. A gateway that declares no transport refuses the deposit with
+  `quote_unavailable`, so a fork never asks the venue. The source is retained
+  with the quote and shown beside each transfer in reports and dashboards. The
+  author's `quote: across_api` is unchanged. A constructed quote is never
+  evidence of what the venue would quote.
 - Current contract: a generated fork operator file provisions plain EOA
   accounts, with no fixture operator, for the accounts of a connector that
   supports only EOAs on its chain, the receiving account of a bridge included.
-  A fork fixture chain is one a position acts on or one a bound account is on,
-  and the fork key file names the receiving account too, which signs nothing.
+  A fork fixture chain is one a position acts on or the chain of an account a
+  position names as its `destination_account`; another bound account adds
+  none. The fork key file names the receiving account too, which signs nothing.
 - A bridge market is one direction: the sent asset on its chain, the received
   asset on the destination chain, the author's fee ceiling `max_fee_bps` and
   the named quote source. Its allocation names a source account and a

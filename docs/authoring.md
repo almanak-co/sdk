@@ -548,10 +548,19 @@ if state(ctx).sent is None:
 return ctx.decision()
 ```
 
-The amount received is the venue's own quote, never above the amount sent and
-never below it by more than the market's `max_fee_bps`. The gateway refuses a
-quote above that ceiling before the approval is signed. This is a gateway check,
-not on-chain enforcement.
+The amount received is what the deposit's quote states, never above the amount
+sent and never below it by more than the market's `max_fee_bps`. The gateway
+refuses a quote above that ceiling before the approval is signed. This is a
+gateway check, not on-chain enforcement.
+
+The market's `quote` names the venue's own quote API, and a fork run does not
+ask it: no relayer quotes a fork. A fork gateway constructs the quote instead,
+from a stated fee of one basis point and the fork's own block time, and the
+same checks admit it. Reports and dashboards show its source as
+`across_fork_constructed` beside each transfer. Such a quote says nothing about
+what the venue would have quoted. Across declares fork runs only today, so
+every run an author can start signs a constructed quote; no production run
+and no backtest is declared.
 
 `on_outcome` receives three kinds of result for a bridge:
 
