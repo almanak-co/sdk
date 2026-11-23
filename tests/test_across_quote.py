@@ -239,6 +239,10 @@ def client(handler):
     return httpx.Client(transport=httpx.MockTransport(handler))
 
 
+def fetch(**transport):
+    return venue.fetch(TARGET, AMOUNT, venue.HttpTransport(**transport), NOW)
+
+
 def test_fetch_asks_once_and_sends_the_key_only_as_a_header():
     seen = []
 
@@ -246,12 +250,12 @@ def test_fetch_asks_once_and_sends_the_key_only_as_a_header():
         seen.append(request)
         return httpx.Response(200, json=body())
 
-    fetched = venue.fetch(TARGET, AMOUNT, api_key="secret", client=client(handler))
+    fetched = fetch(api_key="secret", client=client(handler))
     assert fetched == quote() and len(seen) == 1
     assert seen[0].url.params["amount"] == str(AMOUNT)
     assert seen[0].headers["authorization"] == "Bearer secret"
     assert "secret" not in str(seen[0].url) and "secret" not in fetched.model_dump_json()
-    venue.fetch(TARGET, AMOUNT, client=client(handler))
+    fetch(client=client(handler))
     assert "authorization" not in seen[1].headers
 
 
@@ -271,7 +275,7 @@ def test_fetch_asks_once_and_sends_the_key_only_as_a_header():
 )
 def test_a_refusal_or_throttle_is_reported_as_what_it_is(response, kind):
     with pytest.raises(DataError) as error:
-        venue.fetch(TARGET, AMOUNT, client=client(lambda request: response))
+        fetch(client=client(lambda request: response))
     assert error.value.kind == kind
 
 
@@ -280,7 +284,7 @@ def test_an_unanswered_request_reports_no_request_detail():
         raise httpx.ConnectError("refused", request=request)
 
     with pytest.raises(DataError) as error:
-        venue.fetch(TARGET, AMOUNT, api_key="secret", client=client(handler))
+        fetch(api_key="secret", client=client(handler))
     assert error.value.kind == "quote_unavailable"
     assert "secret" not in str(error.value) and RECIPIENT not in str(error.value)
 

@@ -170,7 +170,9 @@ def run(forks, tmp_path):
         target=target,
         state=state.model_copy(update={"work": works}),
         retained=SimpleNamespace(outcomes=(first, second), transfers=state.transfers),
-        settler=Settler(Forks({here: source, there: destination}), tmp_path / "keepers"),
+        settler=Settler(
+            Forks({here.chain_id: source, there.chain_id: destination}), tmp_path / "keepers"
+        ),
         source=source,
         destination=destination,
         readers=(forks.here[2], forks.there[2]),

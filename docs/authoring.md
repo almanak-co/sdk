@@ -526,6 +526,64 @@ the prepared ticks, offers no `entry_quote`. The observation records why as
 `entry_quote_error`, and its exit and rebalance quotes are unaffected. Exit
 observations and teardown in backtests measure no entry quote.
 
+### Bridging between accounts
+
+A bridge allocation moves one asset from one named account to another on a
+different chain. `ctx.actions.bridge(name, amount)` sends `amount` base units of
+the market's asset from the allocation's `account` to its `destination_account`.
+The connector owns the steps: an exact approval, the quoted deposit and the
+revocation of any residue. `ctx.actions.revoke(name)` clears an approval whose
+deposit was never mined. It increases no exposure, so teardown admits it.
+
+A strategy with accounts on two chains is evaluated once per chain. The bridge
+allocation is observed on its source chain only, so on the destination chain's
+turn `ctx.observation(name)` is `None` and the strategy requests nothing:
+
+```python
+observed = ctx.observation("move")
+if observed is None:
+    return ctx.decision()
+if state(ctx).sent is None:
+    return ctx.decision(intent=ctx.actions.bridge("move", amount))
+return ctx.decision()
+```
+
+The amount received is what the deposit's quote states, never above the amount
+sent and never below it by more than the market's `max_fee_bps`. The gateway
+refuses a quote above that ceiling before the approval is signed. This is a
+gateway check, not on-chain enforcement.
+
+The market's `quote` names the venue's own quote API, and a fork run does not
+ask it: no relayer quotes a fork. A fork gateway constructs the quote instead,
+from a stated fee of one basis point and the fork's own block time, and the
+same checks admit it. Reports and dashboards show its source as
+`across_fork_constructed` beside each transfer. Such a quote says nothing about
+what the venue would have quoted. Across declares fork runs only today, so
+every run an author can start signs a constructed quote; no production run
+and no backtest is declared.
+
+`on_outcome` receives three kinds of result for a bridge:
+
+- An `ActionResult` for the strategy's own steps. A completed `bridge` carries
+  the opened `transfer` and `sent`, what left the source account. The received
+  amount is not known yet.
+- An `ArrivalResult` when a relayer filled the transfer. `received` is measured
+  on the destination chain and `offered` is what the deposit asked for.
+- A `RefundResult` when nobody filled it. `returned` is measured on the source
+  chain. A refund is read only after the destination chain has shown that no
+  fill can follow, which is after the quote's fill deadline.
+
+Between the deposit and one of the last two, the source account holds a transfer
+in flight. It is not a balance on either chain, and a missing outcome never
+sends the deposit again. Teardown waits for every open transfer to arrive or be
+refunded and does not bridge back.
+
+Across is the first bridge connector. Its source account is an EOA, the sent
+asset is an ERC-20 other than the wrapped native asset, and both assets have the
+same decimals. See [Supported connectors](support.md) for the chains and run
+modes it declares, and the
+[Across USDC bridge reference](https://github.com/almanak-co/sdk/tree/main/strategies/across_usdc_arbitrum_base_bridge).
+
 ## Typed memory
 
 Define `State` as a subclass of `StrategyState` when a strategy needs durable

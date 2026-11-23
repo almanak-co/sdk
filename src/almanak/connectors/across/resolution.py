@@ -117,14 +117,20 @@ class ResolvedRoute(Model):
         }
 
 
+def require_anchor(reader, block: Block) -> None:
+    if reader.pin_block(block.number) != block:
+        raise DataError("block_mismatch", "Across resolution anchor is no longer canonical")
+
+
 def resolve_market(reader, selection: MarketSelection, block: Block) -> ResolvedRoute:
     if selection.chain != block.chain.chain_id or reader.chain != block.chain:
         raise DataError("chain_mismatch", "Across resolution requires its source chain and anchor")
+    # The reader answers calls only at the block it pinned last.
+    require_anchor(reader, block)
     pool = read_pool(reader, spoke_pool(selection.chain).address, block)
     require_pinned(pool, selection.chain)
     asset = reader.asset(selection.asset, block)
-    if reader.pin_block(block.number) != block:
-        raise DataError("block_mismatch", "Across resolution anchor is no longer canonical")
+    require_anchor(reader, block)
     return ResolvedRoute(selection=selection, block=block, asset=asset, pool=pool)
 
 

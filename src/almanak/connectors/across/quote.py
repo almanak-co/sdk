@@ -7,19 +7,30 @@ Nothing here is on-chain enforcement, and no other source is ever substituted.
 """
 
 import json
+import os
 import re
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol
 
 import httpx
 from pydantic import Field
 
 from almanak.connectors.across.domain import Decimals, Target, Uint32, Uint256, spoke_pool
+from almanak.gateway.environments import is_fork
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm import chain_number
 from almanak.models import ZERO_ADDRESS, Address, Model
 
 API = "https://app.across.to/api/suggested-fees"
 SOURCE: Literal["across_api"] = "across_api"
+# A quote an identified fork's gateway constructed itself. It is admitted on a fork only
+# and is never evidence of what the venue would have quoted.
+FORK_SOURCE: Literal["across_fork_constructed"] = "across_fork_constructed"
+Source = Literal["across_api", "across_fork_constructed"]
+# The name a gateway declares its quote transport under.
+QUOTE_VENUE = "across-quote"
+# An optional operator key for the venue's quote API. It stays in the gateway's
+# environment and never reaches author files, logs or retained evidence.
+API_KEY_ENV = "ALMANAK_ACROSS_API_KEY"
 TIMEOUT_SECONDS = 15.0
 # A deposit mined with less time than this before its fill deadline gives a relayer too
 # little time to fill it; it would wait for the refund instead.
@@ -49,7 +60,7 @@ FIELDS = (
 class Quote(Model):
     """The quoted deposit terms, with the venue's answer retained in canonical form."""
 
-    source: Literal["across_api"]
+    source: Source
     input_amount: Uint256
     output_amount: Uint256
     timestamp: Uint32
@@ -137,7 +148,7 @@ def token(body: dict, field: str) -> tuple[str, int]:
     return value["address"], unsigned(value, "decimals")
 
 
-def parse(body: dict, amount: int) -> Quote:
+def parse(body: dict, amount: int, source: Source = SOURCE) -> Quote:
     missing = [field for field in FIELDS if field not in body]
     if missing:
         raise DataError("malformed", f"{SOURCE}: the quote lacks {', '.join(missing)}")
@@ -150,7 +161,7 @@ def parse(body: dict, amount: int) -> Quote:
     )
     try:
         return Quote(
-            source=SOURCE,
+            source=source,
             input_amount=amount,
             output_amount=unsigned(body, "outputAmount"),
             timestamp=unsigned(body, "timestamp"),
@@ -174,21 +185,43 @@ def headers(api_key: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
 
-def fetch(target: Target, amount: int, *, api_key: str | None = None, client=None) -> Quote:
-    """Ask the venue once. A failure is reported as what it is; nothing is retried here."""
-    owned = client is None
-    client = client or httpx.Client(timeout=TIMEOUT_SECONDS, trust_env=False)
-    try:
-        response = client.get(API, params=request(target, amount), headers=headers(api_key))
-    except httpx.HTTPError as error:
-        # The exception text can carry the request, so only its type is reported.
-        raise DataError(
-            "quote_unavailable", f"{SOURCE}: no answer from the venue ({type(error).__name__})"
-        ) from None
-    finally:
-        if owned:
-            client.close()
-    return parse(answer(response), amount)
+class Transport(Protocol):
+    """Where a gateway gets the answer to one quote request, and the source it labels."""
+
+    source: Source
+
+    def get(self, target: Target, amount: int, block_timestamp: int) -> httpx.Response: ...
+
+
+class HttpTransport:
+    """The venue's own API over HTTPS. The pinned block plays no part in its request."""
+
+    source: Source = SOURCE
+
+    def __init__(self, *, api_key: str | None = None, client=None):
+        self.api_key = api_key
+        self.client = client
+
+    def get(self, target: Target, amount: int, block_timestamp: int) -> httpx.Response:
+        key = self.api_key or os.environ.get(API_KEY_ENV) or None
+        client = self.client or httpx.Client(timeout=TIMEOUT_SECONDS, trust_env=False)
+        try:
+            return client.get(API, params=request(target, amount), headers=headers(key))
+        except httpx.HTTPError as error:
+            # The exception text can carry the request, so only its type is reported.
+            raise DataError(
+                "quote_unavailable", f"{SOURCE}: no answer from the venue ({type(error).__name__})"
+            ) from None
+        finally:
+            if self.client is None:
+                client.close()
+
+
+def fetch(target: Target, amount: int, transport: Transport, block_timestamp: int) -> Quote:
+    """Ask the gateway's one transport once. A failure is reported as what it is; nothing
+    is retried here, and every transport's answer takes the same size cap and parser."""
+    response = transport.get(target, amount, block_timestamp)
+    return parse(answer(response), amount, transport.source)
 
 
 def fee_ceiling(amount: int, max_fee_bps: int) -> int:
@@ -207,7 +240,8 @@ def exclusivity_end(quote: Quote, block_timestamp: int) -> int:
 def refusals(quote: Quote, target: Target, amount: int, pool, block_timestamp: int):
     """Every reason the quote cannot be signed, as (kind, message) pairs."""
     route = target.route
-    if quote.source != route.quote or quote.input_amount != amount:
+    yield from source_refusals(quote, target)
+    if quote.input_amount != amount:
         yield "quote_mismatch", "the quote answers another source or amount"
     if quote.amount_too_low or quote.output_amount == 0:
         yield "amount_too_low", "the venue reports the amount as too low to bridge"
@@ -221,6 +255,20 @@ def refusals(quote: Quote, target: Target, amount: int, pool, block_timestamp: i
         )
     yield from route_refusals(quote, route)
     yield from timing_refusals(quote, pool, block_timestamp)
+
+
+def source_refusals(quote: Quote, target: Target):
+    """A constructed quote is admitted on an identified fork only; any other quote must
+    come from the source the route names."""
+    if quote.source == FORK_SOURCE:
+        if not is_fork(target.fund.chain):
+            yield (
+                "quote_source",
+                "a fork-constructed quote is admitted on an identified fork only, and "
+                f"{target.fund.chain.chain_id} is not one",
+            )
+    elif quote.source != target.route.quote:
+        yield "quote_mismatch", "the quote answers another source or amount"
 
 
 def route_refusals(quote: Quote, route):

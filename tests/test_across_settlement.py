@@ -764,3 +764,108 @@ def test_the_relay_hash_equals_the_key_a_real_spoke_pool_filled():
     row, fill = settlement.matching_fill((REAL_FILL,), REAL_HASH, 8453)
     assert (row, fill["fill_type"], fill["updated_output"]) == (REAL_FILL, 0, 10_000_000)
     assert settlement.matching_fill((REAL_FILL,), REAL_HASH, 42161) is None
+
+
+class Crash(Exception):
+    """The coordinator process dies at a named fault point."""
+
+
+class ChainCoordinator:
+    """One chain's external-effects step as the coordinator runs it, over a durable store.
+
+    `external_effects.progress` is the runtime's own: it asks the gateway for a page,
+    passes the runtime's fault points and commits through the journal. The gateway side
+    is the connector's reader over the fake chain, and the journal side commits in the
+    chain's projection, re-derives the commit as the gateway does and merges it. Only the
+    process around them is a fake; a process kill is proven by the supervised lifecycles.
+    """
+
+    def __init__(self, config, reader, store, crash=None):
+        self.config, self.reader, self.store, self.crash = config, reader, store, crash
+        self.gateway = self.journal = self
+        self.pages = []
+
+    def load(self):
+        return project(self.store["state"], self.reader.chain)
+
+    def external_reconcile(self):
+        return settlement.reconcile(backend(self.config, self.reader), self.load())
+
+    def update(self, change):
+        local = self.load()
+        committed = change(local)
+        fake = backend(self.config, self.reader)
+        assert gateway_effects.verified_commit(fake, local, committed) == committed
+        self.store["state"] = merge(self.store["state"], self.reader.chain, committed)
+
+    def fault(self, stage, page):
+        self.pages.append((stage, page))
+        if stage == self.crash:
+            raise Crash(stage)
+
+    def progress(self):
+        from almanak import external_effects
+
+        return external_effects.progress(self, self.load())
+
+
+def arrivals(state):
+    return [o for o in state.outcomes if getattr(o, "kind", None) == "across_arrival"]
+
+
+def awaiting_arrival(config):
+    """A durable store whose next destination page holds the transfer's mined fill."""
+    chain = there()
+    store = {"state": settle(flying(config, flight(config)), config, chain)}
+    filled(config, chain, chain.head + 5)
+    chain.head += 30
+    return chain, store
+
+
+def test_a_crash_between_arrival_evidence_and_its_commit_records_the_arrival_once(config):
+    chain, store = awaiting_arrival(config)
+    before = store["state"]
+    crashed = ChainCoordinator(config, chain, store, crash="external_evidence")
+    with pytest.raises(Crash):
+        crashed.progress()
+    ((stage, read),) = crashed.pages
+    # The evidence was read and nothing was committed: the transfer is still in flight.
+    assert stage == "external_evidence" and read.outcome.kind == "across_arrival"
+    assert store["state"] == before and store["state"].transfers[0].open
+    restarted = ChainCoordinator(config, chain, store)
+    assert restarted.progress()
+    (evidence, committed) = restarted.pages
+    # The restart reads the same page again and commits it, once.
+    assert evidence == ("external_evidence", read) and committed == ("external_commit", read)
+    state = store["state"]
+    assert arrivals(state) == [read.outcome] and state.external_scans[-1] == read
+    assert state.external_scans.count(read) == 1
+    assert state.transfers[0].resolution.received == read.outcome.received
+
+
+def test_a_crash_after_the_arrival_commit_does_not_record_it_twice(config):
+    from almanak import external_effects
+
+    chain, store = awaiting_arrival(config)
+    crashed = ChainCoordinator(config, chain, store, crash="external_commit")
+    with pytest.raises(Crash):
+        crashed.progress()
+    (_, (stage, page)) = crashed.pages
+    state = store["state"]
+    assert stage == "external_commit" and arrivals(state) == [page.outcome]
+    assert state.delivered == len(state.outcomes) - 1
+    restarted = ChainCoordinator(config, chain, store)
+    # A restarted coordinator delivers the committed arrival before any further page;
+    # until then the commit refuses new external evidence.
+    with pytest.raises(ValueError, match="initialized, delivered, new evidence"):
+        external_effects.commit(restarted.load(), restarted.load(), page)
+    store["state"] = delivered(state)
+    with pytest.raises(ValueError, match="initialized, delivered, new evidence"):
+        external_effects.commit(restarted.load(), restarted.load(), page)
+    chain.head += 40
+    while restarted.progress():
+        pass
+    final = store["state"]
+    assert arrivals(final) == [page.outcome] and final.external_scans.count(page) == 1
+    assert all(p.outcome is None for p in final.external_scans if p != page)
+    assert final.transfers[0].resolution.received == page.outcome.received

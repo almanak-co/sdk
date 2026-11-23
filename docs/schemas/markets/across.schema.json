@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Across bridge market selection",
+  "description": "One direction of one asset between two chains through the pinned Across SpokePools. Bridging back is another market. The amount received is Across's own quote, held under max_fee_bps by the gateway before anything is signed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "connector",
+    "chain",
+    "asset",
+    "destination_chain",
+    "destination_asset",
+    "max_fee_bps",
+    "quote"
+  ],
+  "properties": {
+    "connector": {
+      "const": "across"
+    },
+    "chain": {
+      "description": "The source chain, where the deposit is sent.",
+      "type": "string",
+      "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$"
+    },
+    "asset": {
+      "description": "The ERC-20 asset sent from the source chain. The wrapped native asset is refused.",
+      "type": "string",
+      "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+    },
+    "destination_chain": {
+      "description": "The chain the asset arrives on; another chain than the source.",
+      "type": "string",
+      "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$"
+    },
+    "destination_asset": {
+      "description": "The ERC-20 asset received on the destination chain, with the same decimals as the sent asset.",
+      "type": "string",
+      "pattern": "^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}/[-a-z0-9]{3,8}:[-.%a-zA-Z0-9]{1,128}$"
+    },
+    "max_fee_bps": {
+      "description": "The most the whole bridge may cost, in basis points of the amount sent. A quote above it is refused before the approval.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000
+    },
+    "quote": {
+      "description": "The one source of the amount received: Across's own quote API. It is named, never defaulted, and nothing substitutes it.",
+      "const": "across_api"
+    }
+  }
+}

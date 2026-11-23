@@ -50,6 +50,15 @@ Each DEX connector (Uniswap V3 and V4, PancakeSwap V3, Aerodrome, Aerodrome
 Slipstream, Curve and GMX V2) takes one allocation per fund, so a composed strategy
 that needs a second pool on the same fund uses another DEX connector or another
 fund.
+A bridge market is one direction: `chain` and `asset` are the source, and
+`destination_chain` and `destination_asset` say what arrives where. It also
+states `max_fee_bps`, the most the whole bridge may cost in basis points of the
+amount sent, and `quote`, the one source of the received amount (`across_api`
+for Across; it is named, never defaulted). Its allocation names the `account`
+that sends, on the market's chain, and a `destination_account` on the
+destination chain. Both are accounts of the same strategy, and bridging back is
+another market. One allocation is taken per source account and sent asset.
+
 `strategy.gas` names payer accounts, the chain, the quote source and the exact
 fee bounds. Production runs require it. Only `accounts`, `chain`,
 `max_transaction_fee` and `exit_reserve` are required, plus `total_budget` for a

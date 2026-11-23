@@ -6,6 +6,7 @@ from almanak.configuration.composed import Allocation
 from almanak.connectors.aave_v3.fork import fork_allocation as lending_allocation
 from almanak.connectors.aave_v4.fork import fork_allocation as aave_v4_allocation
 from almanak.connectors.aave_v4.models import Allocation as AaveV4Allocation
+from almanak.connectors.across.fork import fork_allocation as across_allocation
 from almanak.connectors.aerodrome_slipstream.fork import fork_allocation as slipstream_allocation
 from almanak.connectors.composed.models import Config
 from almanak.connectors.compound_v3.fork import fork_allocation as compound_allocation
@@ -173,6 +174,7 @@ def remap_allocation(allocation, chain):
         ConnectorId("uniswap_v4"): v4_allocation,
         ConnectorId("morpho_blue"): morpho_allocation,
         ConnectorId("compound_v3"): compound_allocation,
+        ConnectorId("across"): across_allocation,
         ConnectorId("curve"): curve_allocation,
         ConnectorId("gmx_v2"): gmx_allocation,
         ConnectorId("hyperliquid"): hyperliquid_allocation,

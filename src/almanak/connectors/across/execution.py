@@ -1,7 +1,5 @@
 """Across deposits through the shared guarded EVM execution, account and fee path."""
 
-import os
-
 from almanak.connectors.across import planning
 from almanak.connectors.across import quote as venue
 from almanak.connectors.across.observations import require_pinned, snapshot
@@ -19,9 +17,7 @@ from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm_fees import charged_fees
 from almanak.models import AssetAmount
 
-# An optional operator key for the venue's quote API. It stays in the gateway's
-# environment and never reaches author files, logs or retained evidence.
-API_KEY_ENV = "ALMANAK_ACROSS_API_KEY"
+API_KEY_ENV = venue.API_KEY_ENV
 # Approval and deposit; a bridge has no exit transaction of its own.
 ENTRY_TRANSACTIONS = 2
 
@@ -35,8 +31,25 @@ def expired(operation, block) -> bool:
     return isinstance(operation, DepositOperation) and block.timestamp > operation.deadline
 
 
+def quoted(backend, intent, before):
+    """The deposit's quote through the one transport the gateway declares for it.
+
+    Which transport that is belongs to the gateway's environment, not to this code: a
+    gateway that declares none is refused, and nothing is substituted.
+    """
+    transport = backend.venue_transports.get(venue.QUOTE_VENUE)
+    if transport is None:
+        raise DataError("quote_unavailable", "this gateway declares no Across quote transport")
+    return venue.fetch(intent.target, intent.amount.amount, transport, before.block.timestamp)
+
+
+def venue_transports() -> dict:
+    """What a production gateway asks: the venue's own API."""
+    return {venue.QUOTE_VENUE: venue.HttpTransport()}
+
+
 def quoted_operation(backend, state, intent, before):
-    """Plan the next step, asking the venue before the approval and for the deposit.
+    """Plan the next step, asking for a quote before the approval and for the deposit.
 
     The approval signs no quote, but one the gateway would refuse leaves no approval
     behind: the quote is asked and admitted first and then discarded. The deposit asks
@@ -46,9 +59,8 @@ def quoted_operation(backend, state, intent, before):
     if kind not in ("approve", "deposit"):
         return planning.operation(backend.config, state, intent, before)
     backend.guard()
-    amount = intent.amount.amount
-    quote = venue.fetch(intent.target, amount, api_key=os.environ.get(API_KEY_ENV) or None)
-    venue.admit(quote, intent.target, amount, before.pool, before.block.timestamp)
+    quote = quoted(backend, intent, before)
+    venue.admit(quote, intent.target, intent.amount.amount, before.pool, before.block.timestamp)
     return planning.operation(
         backend.config, state, intent, before, quote=quote if kind == "deposit" else None
     )
@@ -210,6 +222,7 @@ class AcrossExecution:
     validate_operation = staticmethod(validate_operation)
     operation = staticmethod(planning.operation)
     quoted_operation = staticmethod(quoted_operation)
+    venue_transports = staticmethod(venue_transports)
     expired = staticmethod(expired)
     validate_current = staticmethod(validate_current)
     validate_simulation = staticmethod(validate_simulation)

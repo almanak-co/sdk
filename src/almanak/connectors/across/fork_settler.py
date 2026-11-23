@@ -19,7 +19,12 @@ from almanak.caip import ChainId
 from almanak.connectors.across.domain import spoke_pool
 from almanak.connectors.across.operations import DepositOperation, word
 from almanak.connectors.across.receipts import movement
-from almanak.connectors.across.relay import RELAY_TYPES, deposited_relay, node_number
+from almanak.connectors.across.relay import (
+    RELAY_TYPES,
+    deposited_relay,
+    node_number,
+    parse_reference,
+)
 from almanak.gateway.environments import is_fork
 from almanak.gateway.ethereum import DataError
 
@@ -31,6 +36,8 @@ RELAYED_ROOT_TOPIC = "0x" + keccak(text="RelayedRootBundle(uint32,bytes32,bytes3
 ARBITRUM = ChainId("eip155:42161")
 L1_TO_L2_ALIAS = 0x1111000000000000000000000000000000001111
 RECEIPT_SECONDS = 30
+# FillStatus.Filled of the SpokePool. A requested slow fill can still be filled.
+FILLED = 2
 FORK_CONSTRUCTED = (
     "fork-constructed refund bundle: an impersonated admin relayed a one-leaf root "
     "written by the fixture; no dataworker proposed it and no HubPool validated it"
@@ -115,7 +122,11 @@ def admin(rpc, origin: ChainId, pool: str) -> str:
 
 
 class Settler:
-    """Fills each open transfer once. A refund is settled only when asked by name."""
+    """Fills each open transfer once. A refund is settled only when asked by name.
+
+    Whether a transfer was filled is the destination SpokePool's own record, so a
+    settler started again after a fill sends no second one.
+    """
 
     def __init__(self, forks, directory: Path):
         self.forks, self.directory = forks, directory
@@ -124,12 +135,24 @@ class Settler:
         return seconds
 
     def settle(self, state) -> tuple[dict, ...]:
-        return tuple(self.fill(state, transfer) for transfer in state.transfers if transfer.open)
+        # A fill is mined before the run reads it; the transfer is still open until then.
+        waiting = [t for t in state.transfers if t.open and not self.filled(t)]
+        return tuple(self.fill(state, transfer) for transfer in waiting)
+
+    def filled(self, transfer) -> bool:
+        """Whether the destination SpokePool holds the transfer's relay as filled."""
+        chain = transfer.destination.chain
+        rpc, _ = self.fork(chain)
+        relay = parse_reference(transfer.reference).relay_hash
+        data = selector("fillStatuses(bytes32)") + bytes.fromhex(relay[2:])
+        call = {"to": spoke_pool(chain.chain_id).address, "data": "0x" + data.hex()}
+        return int(rpc("eth_call", [call, "latest"]), 16) == FILLED
 
     def fork(self, chain):
         if not is_fork(chain):
             raise DataError("unsupported", "Across transfers are settled only on identified forks")
-        return self.forks.rpc(chain), self.forks.origin(chain)
+        # A run names its nodes by the chain they fork, as every fork keeper does.
+        return self.forks.rpc(chain.chain_id), self.forks.origin(chain.chain_id)
 
     def fill(self, state, transfer) -> dict:
         from almanak.gateway.fork_funding import fund_erc20
@@ -149,7 +172,8 @@ class Settler:
         # timestamp would lie before the arrival scan's first block, and another relayer
         # may fill only once the named one's exclusivity has ended.
         earliest = max(operation.quote.timestamp, relay[10] if int.from_bytes(relay[2]) else 0)
-        if now <= earliest:
+        # Read again: the approval's own block may already have passed that time.
+        if timestamp(rpc) <= earliest:
             rpc("evm_setNextBlockTimestamp", [earliest + 1])
         chain = node_number(target.destination_fund.chain)
         mined = sent(rpc, RELAYER, pool, fill_call(relay, chain, RELAYER))

@@ -1,0 +1,151 @@
+"""Read-only transfer amounts from retained deposits, arrivals and refunds.
+
+A bridge holds no position: a transfer is a claim in flight until its measured end. An
+amount that was not measured has no figure here, never a zero.
+"""
+
+from almanak.connectors.across.models import Parameters
+from almanak.connectors.across.settlement_types import ArrivalOutcome, RefundOutcome
+from almanak.dashboard.bound import MAX_TABLE_ROWS
+from almanak.dashboard.models import Column, Context, Ref, Scope, Value
+from almanak.dashboard.projection import snapshot
+from almanak.dashboard.tables import accounts_dataset, decimals_of, symbol_of, utc
+from almanak.transfers import Arrived, Refunded
+
+AMOUNTS = ("sent", "offered", "received", "returned")
+COVERAGE = (
+    "Transfers the strategy's deposits opened, newest last. Sent and offered come from the "
+    "mined deposit; received and returned are measured on the chain that paid them and "
+    "stay empty until then. The quote source names where the offered amount came from; a "
+    "fork-constructed quote is not the venue's."
+)
+
+
+def status(transfer) -> str:
+    if isinstance(transfer.resolution, Arrived):
+        return "arrived"
+    if isinstance(transfer.resolution, Refunded):
+        return "refunded"
+    return "unfilled" if transfer.unfilled else "open"
+
+
+def deposits(state) -> dict:
+    """Each transfer's deposit outcome, by the transfer's reference."""
+    opened = (o for o in state.outcomes if getattr(o, "transfer", None) is not None)
+    return {o.transfer.reference: o for o in opened if not isinstance(o, ArrivalOutcome)}
+
+
+def settlements(state) -> dict:
+    """The block that measured each transfer's end, by the transfer's reference."""
+    blocks = {}
+    for outcome in state.outcomes:
+        if isinstance(outcome, ArrivalOutcome):
+            blocks[outcome.transfer] = outcome.block
+        elif isinstance(outcome, RefundOutcome):
+            blocks.update(dict.fromkeys(outcome.transfers, outcome.block))
+    return blocks
+
+
+def measured(transfer) -> dict:
+    """The four amounts of a transfer with the wallet each belongs to; None is unmeasured."""
+    resolution = transfer.resolution
+    return {
+        "sent": (transfer.source, transfer.sent.amount),
+        "offered": (transfer.destination, transfer.offered.amount),
+        "received": (
+            transfer.destination,
+            resolution.received.amount if isinstance(resolution, Arrived) else None,
+        ),
+        "returned": (
+            transfer.source,
+            resolution.returned.amount if isinstance(resolution, Refunded) else None,
+        ),
+    }
+
+
+def reason(name: str, amount, deposit) -> str:
+    if amount is None:
+        return f"No measured {name} amount: the transfer did not end this way, or not yet."
+    if name == "sent":
+        return "Left the source fund in the mined deposit."
+    if name == "offered":
+        source = deposit.operation.quote.source if deposit else "an unretained quote"
+        return f"The output the deposit states, from its {source} quote. Not a received amount."
+    wallet = "destination" if name == "received" else "source"
+    return f"Measured on the {wallet} chain."
+
+
+def transfer_values(state, index, transfer, deposit, settled) -> dict:
+    values = {}
+    for name, (wallet, amount) in measured(transfer).items():
+        key = f"transfer-{index}-{name}"
+        # The offered amount is a term of the deposit, observed on no destination block.
+        block = {"sent": deposit and deposit.after.block, "offered": None}.get(name, settled)
+        values[key] = Value(
+            id=key,
+            amount=None if amount is None else str(amount),
+            unit="base_units",
+            asset=wallet.asset,
+            decimals=decimals_of(state, wallet.asset),
+            symbol=symbol_of(state, wallet.asset),
+            scope=Scope(account=wallet.account, fund=state.config.profile(wallet.account).fund),
+            evidence="recorded",
+            block=block if amount is not None else None,
+            reason=reason(name, amount, deposit),
+        )
+    return values
+
+
+def row(index, transfer, deposit) -> dict:
+    return {
+        "allocation": transfer.allocation,
+        "account": transfer.source.account,
+        "destination": transfer.destination.account,
+        "status": status(transfer),
+        "quote_source": deposit.operation.quote.source if deposit else "not retained",
+        "fill_deadline": utc(int(transfer.fill_deadline.timestamp())),
+        **{name: Ref(ref=f"transfer-{index}-{name}") for name in AMOUNTS},
+    }
+
+
+def project(state, *, captured_at=None):
+    if state.integrity_error:
+        raise ValueError("invalidated Across evidence cannot produce a financial dashboard")
+    opened, ended = deposits(state), settlements(state)
+    kept = list(enumerate(state.transfers))[-MAX_TABLE_ROWS:]
+    values: dict[str, Value] = {}
+    rows = []
+    for index, transfer in kept:
+        deposit = opened.get(transfer.reference)
+        values.update(
+            transfer_values(state, index, transfer, deposit, ended.get(transfer.reference))
+        )
+        rows.append(row(index, transfer, deposit))
+    dataset = accounts_dataset(
+        keep=True,
+        columns=(
+            Column(key="allocation", label="Bridge"),
+            Column(key="account", label="Source account"),
+            Column(key="destination", label="Destination account"),
+            Column(key="status", label="Status"),
+            Column(key="quote_source", label="Quote source"),
+            Column(key="fill_deadline", label="Fill deadline"),
+            Column(key="sent", label="Sent", kind="value"),
+            Column(key="offered", label="Offered", kind="value"),
+            Column(key="received", label="Received", kind="value"),
+            Column(key="returned", label="Returned", kind="value"),
+        ),
+        rows=tuple(rows),
+        coverage=COVERAGE,
+        truncated=len(state.transfers) > len(kept),
+    )
+    context = Context(
+        config=Parameters.model_validate(
+            {name: getattr(state.config, name) for name in Parameters.model_fields}
+        ),
+        memory=state.memory,
+        positions=(),
+        values=values,
+        datasets={"transfers": dataset},
+    )
+    return context, snapshot(state, values, captured_at)

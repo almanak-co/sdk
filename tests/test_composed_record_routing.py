@@ -36,10 +36,11 @@ def live(connector) -> bool:
 
 
 def test_every_connector_routes_to_members_of_the_retained_unions():
-    # A Hyperliquid deployment trades through one Safe of its own and joins no composition;
-    # a backtest-only connector keeps no live checkpoint records.
+    # A Hyperliquid deployment trades through one Safe of its own and joins no composition,
+    # and an Across deployment runs alone; a backtest-only connector keeps no live
+    # checkpoint records.
     live_ids = {str(name) for name, c in installed_connectors() if live(c)}
-    assert set(state.RECORDS) == live_ids - {"hyperliquid"}
+    assert set(state.RECORDS) == live_ids - {"hyperliquid", "across"}
     for records in state.RECORDS.values():
         for record, union in zip(records, state.UNIONS, strict=True):
             assert record in get_args(union)

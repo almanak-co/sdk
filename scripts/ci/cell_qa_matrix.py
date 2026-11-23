@@ -29,8 +29,8 @@ HOSTED_LANES = ("fork", "backtest", "pytest")
 DEFAULT_LANES = ("fork", "backtest")
 LOCAL_LANES = {
     "offline": "the full offline gate needs the retained evidence tree and runs locally",
-    "faults": "this case runs every connector's fork faults; the cell's reverse-fault "
-    "nodes run as their own entries instead",
+    "faults": "a fault case runs through the local bench; the cell's reverse-fault nodes, "
+    "and any proof named with the nodes input, run as their own entries instead",
     "blocked": "an unpromoted candidate is refused before provider work and cannot pass",
 }
 # One case bound, as the local bench default. Backtests add the local runbook's
