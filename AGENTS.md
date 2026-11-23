@@ -435,8 +435,10 @@ independently.
   route needs both to have the same decimals. The gateway holds the quote's
   decimals to the sent asset's on-chain decimals and refuses a difference.
 - The gateway asks for and admits a quote before it plans the approval, and
-  again for the deposit, which signs its own. A refused quote leaves no
-  approval behind.
+  again for the deposit, which signs its own. A quote refused before the
+  approval is signed leaves no approval behind. A deposit quote refused after
+  the approval is mined leaves that approval standing until a later bridge or
+  `revoke` clears it.
 - The retained quote is its typed fields and the venue's answer as canonical
   JSON text of at most 16 kB. A larger answer or a non-finite number refuses.
 - The author states no approval or revocation inside a bridge. An approval an

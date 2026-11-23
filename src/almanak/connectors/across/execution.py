@@ -138,10 +138,11 @@ def validate_current(backend, plan, current):
     before, operation = plan.before, plan.operation
     if before.target != current.target or before.allowance != current.allowance:
         raise DataError("precondition_changed", "SpokePool allowance changed after preparation")
-    if current.wallet_balance < before.wallet_balance:
-        raise DataError("precondition_changed", "Across fund inventory decreased after preparation")
+    # A revocation spends nothing, so neither the fund's balance nor the pool's state holds it.
     if isinstance(operation, RevokeOperation):
         return
+    if current.wallet_balance < before.wallet_balance:
+        raise DataError("precondition_changed", "Across fund inventory decreased after preparation")
     if current.pool != before.pool:
         raise DataError("precondition_changed", "the Across SpokePool changed after preparation")
     if isinstance(operation, DepositOperation):

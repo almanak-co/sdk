@@ -41,7 +41,8 @@ MAX_EXCLUSIVITY_OFFSET = 31_536_000
 # The venue's answer is about 1.4 kB. A larger body is refused before it is parsed, so the
 # copy every plan, pending attempt and outcome retains stays bounded.
 MAX_ANSWER_BYTES = 16_384
-DIGITS = re.compile(r"[0-9]+", re.ASCII)
+# At most the 78 digits of a uint256, so a long digit string never reaches integer conversion.
+DIGITS = re.compile(r"[0-9]{1,78}", re.ASCII)
 FIELDS = (
     "outputAmount",
     "timestamp",
