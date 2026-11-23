@@ -277,9 +277,11 @@ class GatewayClient:
             while not self.stopped.wait(delay):
                 started = time.monotonic()
                 answered = self.fenced.count()
+                deadline = confirmed(deadline)
                 try:
-                    # Asked even past the deadline: the gateway, not this clock, decides
-                    # whether the lease still runs, and it refuses an expired one.
+                    # Asked even past the deadline: after a stall this clock cannot tell
+                    # whether another coordinator was admitted. The gateway can, and it
+                    # refuses a lease that was released or superseded.
                     self.scoped("renew")
                     deadline = started + lease["lease_seconds"]
                     delay = period

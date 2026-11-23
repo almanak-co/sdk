@@ -253,7 +253,7 @@ class Journal:
 
     @contextmanager
     def authorized(self, identity: str, duration: float):
-        """Hold the write lock, with a current lease, for one short fenced commit.
+        """Hold the write lock, as the lease's holder, for one short fenced commit.
 
         The same durable lock fences lease changes, checkpoint commits and submission, so
         a superseded coordinator cannot commit or submit after another acquires. Callers
@@ -339,9 +339,20 @@ def lease_extended(exc: BaseException) -> bool:
 
 
 def require_lease(connection, identity: str) -> None:
-    row = connection.execute("SELECT identity, expires FROM coordinator WHERE id=1").fetchone()
-    if row is None or row[0] != identity or row[1] <= time.time():
-        raise RuntimeError("coordinator lease is absent, expired or superseded")
+    """Refuse a coordinator that the lease row does not name.
+
+    The expiry admits a successor in `acquire`; it does not end the holder. An admission
+    writes its own identity and a release clears it, both under the write lock, so a row
+    that still names `identity` proves no other coordinator was admitted since. A holder
+    that outlived its expiry, as after a process stall, therefore continues, and its next
+    commit extends the lease again. One that was superseded meanwhile is refused here,
+    at its read and again under the lock at its commit.
+    """
+    row = connection.execute("SELECT identity FROM coordinator WHERE id=1").fetchone()
+    if row is None or row[0] is None:
+        raise RuntimeError("coordinator lease is absent: it was released or never taken")
+    if row[0] != identity:
+        raise RuntimeError("coordinator lease is superseded: another coordinator took it")
 
 
 def extend_lease(connection, duration: float) -> None:

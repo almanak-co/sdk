@@ -1022,13 +1022,16 @@ def test_a_lease_lost_between_recording_and_sending_sends_nothing(tmp_path):
     service = fenced_service(tmp_path, state, adapter)
     record = service.record_send
 
-    def record_then_expire(db, state, local):
+    def record_then_lose(db, state, local):
         marked = record(db, state, local)
+        # Another coordinator is admitted: expiry alone does not end the holder.
         with sqlite3.connect(tmp_path / "state.sqlite") as connection:
-            connection.execute("UPDATE coordinator SET expires=?", (time.time() - 1,))
+            connection.execute(
+                "UPDATE coordinator SET identity=?, expires=?", ("successor", time.time() + 30)
+            )
         return marked
 
-    service.record_send = record_then_expire
+    service.record_send = record_then_lose
     with pytest.raises(RuntimeError, match="lease"):
         fenced_run(service)
     assert sent == []

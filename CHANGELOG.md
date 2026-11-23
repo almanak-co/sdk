@@ -23,6 +23,20 @@ its changelog is on the `v2` branch.
 - A lost coordinator lease is reported with the renewal failure that lost it, and a
   direct action names `almanak ax recover --record <path>`, with its record's path,
   where it said `resume to recover`.
+- A direct `almanak ax` action, or a strategy run, no longer ends with `coordinator
+  lease is absent, expired or superseded` after its process stalled for longer than the
+  lease (30 s for a direct action), as on a suspended machine or a frozen VM. The lease
+  row still named that coordinator and no other had been admitted, yet nothing took the
+  lease again, so a command whose steps were already mined exited 1 with no result and
+  no kept record. The expiry now decides only when another coordinator may be admitted:
+  a coordinator the lease row still names continues, and its next commit or renewal
+  takes the lease again. A coordinator that was replaced is refused as before, at its
+  read and under the journal lock at every commit and broadcast. The renewal thread
+  asks the gateway after a stall instead of giving up on its own clock, which ended the
+  same stall with `gateway coordinator heartbeat failed` (#60).
+- The lease refusal names its cause: `coordinator lease is superseded: another
+  coordinator took it`, or `coordinator lease is absent: it was released or never
+  taken`.
 
 ## [3.4.2] - 2026-11-26
 

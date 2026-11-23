@@ -122,6 +122,16 @@ Replacement families keep the lock for their whole request. Each
 once), provider, signer and lock time (`rpc_ms`, `signer_ms`, `lock_wait_ms`,
 `lock_held_ms`) alongside `duration_ms`.
 
+The lease's expiry decides when another coordinator may be admitted; it does not
+end the coordinator that holds it. An admission writes its own identity to the
+lease row and a release clears it, so a coordinator that the row still names
+after its expiry, as after a suspended machine or a process stall longer than the
+lease (30 seconds for a direct action), continues, and its next commit or renewal
+takes the lease for its full duration again. Once another coordinator has been
+admitted, the former one is refused at its next read and, under the lock, at every
+commit and broadcast: `coordinator lease is superseded`, or `coordinator lease is
+absent` after a release. This is the journal's fence, not on-chain enforcement.
+
 Fork fixtures fund each declared asset with simulated capital. The chain's
 wrapped native asset is funded by wrapping and transfer, and nothing else is
 tried. Every other ERC-20 goes through an ordered ladder: a reviewed
