@@ -296,10 +296,27 @@ def validate_references(inputs: AuthorInputs):
             raise ConfigurationError(
                 "gas accounts must exist on the policy chain", field=f"strategy.gas.{name}.accounts"
             )
+    require_destination_accounts(inputs)
     validate_inventory(inputs)
     require_one_allocation_per_fund(inputs)
     require_composed_inventory(inputs)
     require_chain_support(inputs)
+
+
+def require_destination_accounts(inputs: AuthorInputs):
+    """A bridge allocation names a second account, on its market's destination chain."""
+    for name, value in inputs.strategy.allocations.items():
+        destination = getattr(value, "destination_account", None)
+        if destination is None:
+            continue
+        field = f"strategy.allocations.{name}.destination_account"
+        if destination not in inputs.accounts:
+            raise unknown_reference("account", destination, inputs.accounts, field)
+        expected = getattr(inputs.markets[value.market], "destination_chain", None)
+        if inputs.accounts[destination].chain != expected:
+            raise ConfigurationError(
+                "destination account and the market's destination chain differ", field=field
+            )
 
 
 def require_one_allocation_per_fund(inputs: AuthorInputs):

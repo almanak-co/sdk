@@ -39,6 +39,7 @@ class AuthorBase(Model):
             "curve",
             "gmx_v2",
             "hyperliquid",
+            "across",
         ]
         | None
     )
@@ -111,6 +112,7 @@ def author_type(connector):
     from almanak.connectors.aave_v3.models import Allocation as V3Allocation
     from almanak.connectors.aave_v4.models import Allocation as LendingAllocation
     from almanak.connectors.aave_v4.models import DebtAllocation
+    from almanak.connectors.across.models import Allocation as AcrossAllocation
     from almanak.connectors.aerodrome.models import Allocation as AerodromeAllocation
     from almanak.connectors.aerodrome_slipstream.models import Allocation as SlipstreamAllocation
     from almanak.connectors.compound_v3.models import Allocation as CompoundAllocation
@@ -197,7 +199,13 @@ def author_type(connector):
         decision_trigger: IntervalTrigger
         allocations: Annotated[tuple[HyperliquidAllocation, ...], Field(min_length=1)]
 
+    class AcrossAuthor(AuthorBase):
+        connector: Literal["across"] = "across"
+        decision_trigger: IntervalTrigger
+        allocations: Annotated[tuple[AcrossAllocation, ...], Field(min_length=1)]
+
     return {
+        "across": AcrossAuthor,
         "gmx_v2": GMXAuthor,
         "hyperliquid": HyperliquidAuthor,
         "curve": CurveAuthor,

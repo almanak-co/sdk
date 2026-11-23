@@ -294,8 +294,21 @@ class EvmGateway:
 
     def prepare(self, state, intent, before, attempt_id):
         self.require_preparation(state, intent, before)
-        operation = self.connector.execution.operation(self.config, state, intent, before)
+        operation = self.plan_operation(state, intent, before)
         return self.prepare_operation(state, operation, before, attempt_id)
+
+    def plan_operation(self, state, intent, before):
+        """The next operation of the retained decision.
+
+        A connector whose step needs a venue quote plans through `quoted_operation`: only
+        this trusted side reads the venue, and the connector's own `validate_operation`
+        re-checks the quoted terms against the pinned snapshot on every later validation.
+        """
+        adapter = self.connector.execution
+        quoted = getattr(adapter, "quoted_operation", None)
+        if quoted is not None:
+            return quoted(self, state, intent, before)
+        return adapter.operation(self.config, state, intent, before)
 
     def require_preparation(self, state, intent, before):
         self.audit_history(state)

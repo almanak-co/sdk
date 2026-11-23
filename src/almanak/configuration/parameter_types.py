@@ -12,6 +12,7 @@ from pydantic import Discriminator, Tag
 from almanak.connectors.aave_v3.models import Parameters as AaveV3Parameters
 from almanak.connectors.aave_v4.models import DebtAllocation as AaveV4Debt
 from almanak.connectors.aave_v4.models import LendingParameters as AaveV4Parameters
+from almanak.connectors.across.models import Parameters as AcrossParameters
 from almanak.connectors.aerodrome.models import Parameters as AerodromeParameters
 from almanak.connectors.aerodrome_slipstream.models import Parameters as SlipstreamParameters
 from almanak.connectors.composed.models import OwnedParameters as ComposedParameters
@@ -43,6 +44,7 @@ PARAMETER_TYPES: dict[str, type[Model]] = {
     "curve": CurveParameters,
     "gmx_v2": GmxParameters,
     "hyperliquid": HyperliquidParameters,
+    "across": AcrossParameters,
     COMPOSED: ComposedParameters,
 }
 
@@ -92,6 +94,7 @@ PARAMETERS = Annotated[
     | Annotated[CurveParameters, Tag("curve")]
     | Annotated[GmxParameters, Tag("gmx_v2")]
     | Annotated[HyperliquidParameters, Tag("hyperliquid")]
+    | Annotated[AcrossParameters, Tag("across")]
     | Annotated[ComposedParameters, Tag(COMPOSED)],
     Discriminator(parameter_tag),
 ]

@@ -19,6 +19,8 @@ from almanak.connectors.aave_v3 import author_inputs as aave_v3_inputs
 from almanak.connectors.aave_v3 import resolution as aave_v3_resolution
 from almanak.connectors.aave_v4 import authoring as aave_authoring
 from almanak.connectors.aave_v4 import resolution as aave_resolution
+from almanak.connectors.across import author_inputs as across_inputs
+from almanak.connectors.across import resolution as across_resolution
 from almanak.connectors.aerodrome import author_inputs as aerodrome_inputs
 from almanak.connectors.aerodrome import resolution as aerodrome_resolution
 from almanak.connectors.aerodrome_slipstream import author_inputs as slipstream_inputs
@@ -150,6 +152,13 @@ BINDINGS: tuple[AuthorBinding, ...] = (
         resolve=hyperliquid_resolution.resolve_market,
         allocation=hyperliquid_inputs.AllocationInput,
     ),
+    AuthorBinding(
+        connector=ConnectorId("across"),
+        selection=across_resolution.MarketSelection,
+        resolved=across_resolution.ResolvedRoute,
+        resolve=across_resolution.resolve_market,
+        allocation=across_inputs.AllocationInput,
+    ),
 )
 
 MarketSelection = Annotated[
@@ -165,7 +174,8 @@ MarketSelection = Annotated[
     | aerodrome_resolution.MarketSelection
     | curve_resolution.MarketSelection
     | gmx_v2_resolution.MarketSelection
-    | hyperliquid_resolution.MarketSelection,
+    | hyperliquid_resolution.MarketSelection
+    | across_resolution.MarketSelection,
     Field(discriminator="connector"),
 ]
 ResolvedMarketFacts = Annotated[
@@ -181,7 +191,8 @@ ResolvedMarketFacts = Annotated[
     | aerodrome_resolution.ResolvedPool
     | curve_resolution.ResolvedPool
     | gmx_v2_resolution.ResolvedMarket
-    | hyperliquid_resolution.ResolvedMarket,
+    | hyperliquid_resolution.ResolvedMarket
+    | across_resolution.ResolvedRoute,
     Field(discriminator="resolver"),
 ]
 AllocationInput = Annotated[
@@ -197,7 +208,8 @@ AllocationInput = Annotated[
     | aerodrome_inputs.AllocationInput
     | curve_inputs.AllocationInput
     | gmx_v2_inputs.AllocationInput
-    | hyperliquid_inputs.AllocationInput,
+    | hyperliquid_inputs.AllocationInput
+    | across_inputs.AllocationInput,
     Field(discriminator="connector"),
 ]
 DebtInput = aave_authoring.DebtInput
