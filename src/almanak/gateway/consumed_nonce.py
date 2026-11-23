@@ -33,8 +33,15 @@ from almanak.operator_deployment import ConsumedNonce
 HASH = re.compile(r"0x[0-9a-f]{64}")
 
 
-def refused(message: str) -> DataError:
-    return DataError("nonce_conflict", message)
+def refused(message: str, *, ask_again: bool = False) -> DataError:
+    """The proof's refusal.
+
+    `ask_again` marks the answers that waiting alone can change: the step turned out
+    to be mined, or what took its nonce is not final yet. A coordinator that still
+    waits on the step may ask again; every other refusal stands until something else
+    changes.
+    """
+    return DataError("nonce_conflict", message, details={"ask_again": True} if ask_again else None)
 
 
 def prove(backend, pending) -> ConsumedNonce:
@@ -51,7 +58,9 @@ def prove(backend, pending) -> ConsumedNonce:
         raise refused("only a single signed transaction is released by its consumed nonce")
     backend.guard()
     if backend.receipt(pending) is not None:
-        raise refused("a mined transaction is resolved only by its recorded outcome")
+        raise refused(
+            "a mined transaction is resolved only by its recorded outcome", ask_again=True
+        )
     submitter, nonce = slot
     reader = backend.reader
     margin = finality_margin(reader.chain)
@@ -118,7 +127,8 @@ def require_margin(block: Block, head: Block, margin: int, nonce: int) -> None:
     if age < margin:
         raise refused(
             f"the transaction that took nonce {nonce} is in block {block.number}, {age}s"
-            f" behind the head; it counts as final {margin}s behind it. Ask again later"
+            f" behind the head; it counts as final {margin}s behind it. Ask again later",
+            ask_again=True,
         )
 
 
@@ -136,7 +146,8 @@ def first_block_past(reader, submitter: str, nonce: int, low: int, finalized: Bl
         raise refused(
             f"nonce {nonce} of submitter {submitter} is not consumed at the finalized block"
             f" {high}: the signed attempt may still be mined, or the transaction that took"
-            " its nonce is not final yet; ask again once it is"
+            " its nonce is not final yet; ask again once it is",
+            ask_again=True,
         )
     if count_at(reader, submitter, low) > nonce:
         raise DataError(

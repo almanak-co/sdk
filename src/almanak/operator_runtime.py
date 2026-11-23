@@ -27,6 +27,12 @@ class OperatorRuntime(Runtime):
     poll = 1.0
     # The latest refusal that dropped the active request's plan; nobody re-decides it.
     refused: DataError | None = None
+    # Seconds `execute` keeps asking for one signed step's consumed-nonce proof while the
+    # gateway answers that waiting may change it. Long enough for an endpoint's nodes to
+    # agree on a transaction that was just mined, and far below every finality margin.
+    proof_wait = 60.0
+    # The signed step whose proof is being asked again, and when the asking began.
+    proof_asked: tuple[str, float] | None = None
 
     def count_replan(self, exc, *arguments, **options):
         self.refused = exc
@@ -228,7 +234,10 @@ class OperatorRuntime(Runtime):
 
         A transient failure while a signed step is unresolved is held and asked again:
         giving up there would leave a sent transaction without its outcome over one
-        failed read.
+        failed read. So is a consumed-nonce proof the gateway cannot give yet, for
+        `proof_wait` seconds per signed step: the step's own transaction, mined but not
+        yet served by every node of the endpoint, looks the same as another transaction
+        at its nonce, and the next tick reads its receipt first.
         """
         state = self.journal.load()
         if state.decision is None and not self.retained(state):
@@ -236,10 +245,34 @@ class OperatorRuntime(Runtime):
         before = len(state.outcomes)
         while True:
             interrupt()
-            if self.held_tick():
+            try:
+                done = self.held_tick()
+            except DataError as exc:
+                if not self.awaits_proof(exc):
+                    raise
+                done = False
+            if done:
                 break
             self.wait(self.journal.load())
         return self.journal.load().outcomes[before:]
+
+    def awaits_proof(self, exc: DataError) -> bool:
+        """Whether an unproven consumed-nonce answer is asked again instead of ending.
+
+        Only the answers the gateway marks as open to waiting, only while the signed
+        step is still recorded, and only within `proof_wait` of the first such answer
+        for that step. Nothing is dropped, planned or sent on the way: the step stays
+        recorded until its receipt or the full proof resolves it.
+        """
+        if exc.kind != "nonce_conflict" or not (exc.details or {}).get("ask_again"):
+            return False
+        pending = self.journal.load().pending
+        if pending is None:
+            return False
+        now = time.monotonic()
+        if self.proof_asked is None or self.proof_asked[0] != pending.tx_hash:
+            self.proof_asked = (pending.tx_hash, now)
+        return now - self.proof_asked[1] < self.proof_wait
 
     def held_tick(self) -> bool:
         """One tick; a passing failure while a signed step waits is not an ending."""

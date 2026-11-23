@@ -8,6 +8,17 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Fixed
+- A direct action run with `--execute` no longer ends with `nonce_conflict` over its
+  own step that was just mined. When the endpoint served neither the receipt nor the
+  transaction of that step in one check, the command took the wallet's advanced count
+  for another transaction at the step's nonce, asked for the consumed-nonce proof, and
+  ended with exit 1 and the record kept although every step was mined, until
+  `ax recover` resolved it. The command now reads the receipt again while the proof
+  answers that nothing final took the nonce, for 60 seconds per step, and ends as
+  before after that. `ax recover` is unchanged, and nothing is dropped without the
+  full proof (#35).
+
 ## [3.3.1] - 2026-11-21
 
 ### Fixed

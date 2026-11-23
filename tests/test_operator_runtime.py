@@ -434,6 +434,103 @@ def test_a_nonce_that_is_only_occupied_keeps_the_signed_step(desk):
     assert (state.pending, state.superseded, asked) == (pending, (), [pending])
 
 
+def not_final(pending):
+    from almanak.gateway.consumed_nonce import refused
+
+    raise refused("not consumed at the finalized block", ask_again=True)
+
+
+def test_recovery_does_not_wait_for_a_proof_that_is_not_final_yet(desk):
+    """One recovery asks once: the refusal the gateway marks as open to waiting ends it
+    as any other does, and the caller asks again when it chooses to."""
+    pending, asked = nonce_taken(desk, not_final)
+    with pytest.raises(DataError, match="not consumed at the finalized block") as refusal:
+        desk.runtime().recover()
+    state = desk.store.load()
+    assert refusal.value.kind == "nonce_conflict"
+    assert (state.pending, state.superseded, asked) == (pending, (), [pending])
+
+
+def lagging_reads(desk, misses):
+    """Serve each mined step's receipt and transaction only after `misses` ticks.
+
+    The account's count already includes the step, as on an endpoint whose nodes do not
+    all hold a block that was just mined, so asking for the broadcast again answers
+    `nonce_conflict` and the proof that the nonce is not consumed at the finalized block.
+    """
+    receipt, broadcast, missed, asked = desk.gateway.receipt, desk.gateway.broadcast, {}, []
+
+    def lagging_receipt(pending):
+        if pending.tx_hash not in desk.gateway.confirmed:
+            return None
+        missed[pending.tx_hash] = missed.get(pending.tx_hash, 0) + 1
+        return receipt(pending) if missed[pending.tx_hash] > misses else None
+
+    def lagging_broadcast(pending):
+        if pending.tx_hash not in desk.gateway.confirmed:
+            return broadcast(pending)
+        raise DataError("nonce_conflict", "unknown execution occupies the recorded nonce")
+
+    def superseded(pending):
+        asked.append(pending.tx_hash)
+        not_final(pending)
+
+    desk.gateway.receipt, desk.gateway.broadcast = lagging_receipt, lagging_broadcast
+    desk.gateway.superseded = superseded
+    return asked
+
+
+def test_execution_waits_for_a_mined_step_the_endpoint_does_not_serve_yet(desk):
+    asked = lagging_reads(desk, misses=3)
+    runtime = desk.runtime()
+    runtime.submit(desk.intent("supply"), REQUEST)
+    outcomes = runtime.execute()
+    # Both steps end with their outcomes, each sent once, and nothing is dropped.
+    assert [item.operation.kind for item in outcomes] == ["approve", "supply"]
+    sent = [item.tx_hash for item in outcomes]
+    assert desk.gateway.broadcasts == sent and asked == [hash_ for hash_ in sent for _ in "123"]
+    state = desk.store.load()
+    assert (state.pending, state.decision, state.superseded) == (None, None, ())
+    assert runtime.refused is None
+
+
+def test_execution_stops_waiting_for_a_proof_after_its_bound(desk, monkeypatch):
+    """A nonce another transaction holds without becoming final ends the command as
+    before: `nonce_conflict`, with the signed step still recorded."""
+    from almanak import operator_runtime
+
+    seconds = [0.0]
+
+    def slow_and_not_final(pending):
+        seconds[0] += 25
+        not_final(pending)
+
+    pending, asked = nonce_taken(desk, slow_and_not_final)
+    monkeypatch.setattr(operator_runtime.time, "monotonic", lambda: seconds[0])
+    runtime = desk.runtime()
+    assert runtime.proof_wait == 60.0
+    with pytest.raises(DataError, match="not consumed at the finalized block") as refusal:
+        runtime.execute()
+    state = desk.store.load()
+    assert refusal.value.kind == "nonce_conflict"
+    # Held at 0, 25 and 50 seconds after the first answer, and ended at 75.
+    assert (state.pending, state.superseded, asked) == (pending, (), [pending] * 4)
+    assert desk.gateway.broadcasts == []
+
+
+@pytest.mark.parametrize(
+    "message", ["states no finality margin", "holds no single transaction of submitter"]
+)
+def test_execution_does_not_wait_for_a_proof_that_waiting_cannot_change(desk, message):
+    def unproven(pending):
+        raise DataError("nonce_conflict", message)
+
+    pending, asked = nonce_taken(desk, unproven)
+    with pytest.raises(DataError, match=message):
+        desk.runtime().execute()
+    assert (desk.store.load().pending, asked) == (pending, [pending])
+
+
 def test_a_proof_that_names_another_step_is_refused(desk):
     def other(pending):
         return superseded_evidence(pending).model_copy(update={"transaction": "0x" + "cd" * 32})

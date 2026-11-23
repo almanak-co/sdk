@@ -165,6 +165,8 @@ def test_a_nonce_that_is_not_consumed_at_the_finalized_block_is_refused(finalize
     with pytest.raises(DataError, match="not consumed at the finalized block") as refusal:
         consumed_nonce.prove(backend(reader), attempt())
     assert refusal.value.kind == "nonce_conflict"
+    # Waiting alone can change this answer, so a coordinator may ask again.
+    assert refusal.value.details == {"ask_again": True}
     assert not reader.read("eth_getBlockByNumber")
 
 
@@ -177,7 +179,7 @@ def test_a_finalized_tag_is_not_enough_within_the_networks_margin(behind, releas
         return
     with pytest.raises(DataError, match=f"counts as final {MARGIN}s behind it") as refusal:
         consumed_nonce.prove(backend(reader), attempt())
-    assert refusal.value.kind == "nonce_conflict"
+    assert (refusal.value.kind, refusal.value.details) == ("nonce_conflict", {"ask_again": True})
 
 
 def test_a_network_without_a_stated_margin_releases_nothing(margin, monkeypatch):
@@ -186,6 +188,7 @@ def test_a_network_without_a_stated_margin_releases_nothing(margin, monkeypatch)
     with pytest.raises(DataError, match="states no finality margin") as refusal:
         consumed_nonce.prove(backend(reader), attempt())
     assert (refusal.value.kind, reader.calls) == ("nonce_conflict", [])
+    assert refusal.value.details is None
 
     # A network the SDK does not define states none either.
     assert chains.finality_margin(ChainId("eip155:31337")) is None
@@ -233,12 +236,14 @@ def test_every_network_states_its_margin_or_none():
 
 def test_a_mined_family_or_venue_attempt_is_never_proven_superseded():
     reader = Chained(finalized=5000, used=200)
-    with pytest.raises(DataError, match="recorded outcome"):
+    with pytest.raises(DataError, match="recorded outcome") as mined:
         consumed_nonce.prove(backend(reader, receipt={"status": "0x1"}), attempt())
+    # The receipt a coordinator reads next resolves the step, so it may ask again.
+    assert mined.value.details == {"ask_again": True}
     for other in (attempt(family=object()), attempt(nonce=None)):
         with pytest.raises(DataError, match="single signed transaction") as refusal:
             consumed_nonce.prove(backend(reader), other)
-        assert refusal.value.kind == "nonce_conflict"
+        assert (refusal.value.kind, refusal.value.details) == ("nonce_conflict", None)
     assert reader.calls == []
 
 
@@ -307,7 +312,7 @@ def test_a_nonce_consumed_without_a_transaction_of_the_submitter_is_not_identifi
     reader.transactions = reader.transactions[:1]
     with pytest.raises(DataError, match="is not identified") as refusal:
         consumed_nonce.prove(backend(reader), attempt())
-    assert refusal.value.kind == "nonce_conflict"
+    assert (refusal.value.kind, refusal.value.details) == ("nonce_conflict", None)
 
 
 def test_two_transactions_of_the_submitter_at_the_nonce_identify_none():
