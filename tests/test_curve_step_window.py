@@ -196,6 +196,7 @@ def deciding(chain, intent, outcomes):
         decision=state.decision,
         outcomes=outcomes,
         mode="running",
+        operator=state.operator,
     )
 
 
@@ -222,6 +223,27 @@ def test_only_a_mined_approval_of_the_retained_request_restarts_the_window():
     assert end(reverted) == end(other) == end(swapped) == intent.deadline
     # Only the latest outcome counts.
     assert end(approval, other) == intent.deadline
+
+
+def test_a_strategy_deployment_keeps_the_requests_window_after_its_approval():
+    """A strategy decides again on fresh observations after a refusal, so its pool call
+    is never given a window of its own."""
+    chain = SlowChain(MARKET, **SLOW)
+    _, intent, _ = chain.swap()
+    approval, swap = chain.journal.load().outcomes
+    assert swap.before.block.timestamp > intent.deadline
+    states = []
+    for operator in (True, False):
+        state = deciding(chain, intent, (approval,))
+        state.decision, state.owned, state.operator = swap.decision, (swap.before.owned,), operator
+        states.append(state)
+    operator, strategy = states
+    assert planning.operation(chain.config, operator, intent, swap.before) == swap.operation
+    planned = planning.operation(chain.config, strategy, intent, swap.before)
+    assert planned == swap.operation.model_copy(update={"deadline": intent.deadline})
+    with pytest.raises(DataError, match=f"window that ends at {intent.deadline}") as refusal:
+        validate_operation(None, strategy, planned, swap.before)
+    assert refusal.value.kind == "stale_plan"
 
 
 def test_a_pool_call_carries_its_own_deadline_or_the_requests_and_no_other():
@@ -264,6 +286,7 @@ def test_a_deposit_follows_its_last_mined_approval_and_keeps_its_minimum_shares(
     stated, config, state, seen = liquidity.adopted(MARKET, "open-liquidity")
     intent = curve_direct.intent(config, (seen,), stated)
     deciding, step = liquidity.planning(config, state, intent, seen)
+    deciding.operator = state.operator
     wanted, owned = liquidity.deposit(MARKET), state.owned[0]
 
     def observed(seconds, granted):

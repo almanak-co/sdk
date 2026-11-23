@@ -85,15 +85,21 @@ def preceding_approval(state):
 def step_deadline(config, state, intent):
     """When the pool call of a swap or an addition may last be planned and signed.
 
-    It is the intent's own deadline until an approval of the same request is mined. The
-    pool call that follows one is given `deadline_seconds` from the block that mined
-    it, so the time the approval took to be mined is not charged to the pool call, and
-    never more than `deadline_seconds` past the intent's deadline, so a request is
-    never signed later than two windows after it was observed. An approval is always
-    held to the intent's deadline. The minimum output or minimum shares the pool call
-    carries are unchanged, and no Curve call carries the deadline itself.
+    It is the intent's own deadline until an approval of the same operator request is
+    mined. The pool call that follows one is given `deadline_seconds` from the block
+    that mined it, so the time the approval took to be mined is not charged to the pool
+    call, and never more than `deadline_seconds` past the intent's deadline, so a
+    request is never signed later than two windows after it was observed. An approval
+    is always held to the intent's deadline. The minimum output or minimum shares the
+    pool call carries are unchanged, and no Curve call carries the deadline itself.
+
+    A strategy deployment always keeps the intent's deadline: a refused step there is
+    followed by a new decision on fresh observations, where an operator's stated
+    request would end.
     """
-    mined = preceding_approval(state)
+    from almanak.operator_deployment import is_operator
+
+    mined = preceding_approval(state) if is_operator(state) else None
     if mined is None:
         return intent.deadline
     window = config.allocation(intent.target.allocation).deadline_seconds

@@ -60,14 +60,16 @@ its changelog is on the `v2` branch.
   taken`. When the renewal thread meets it first, the command's error carries it too:
   `gateway coordinator heartbeat failed: coordinator lease is superseded: ...`, instead
   of a fixed message that said to resume, which a direct command cannot.
-- A Curve swap or deposit is no longer refused `stale_plan` because its own approval
-  was slow to be mined. `deadline_seconds` was one window from the observed block for
-  every step of a request, so on a slow endpoint `ax swap --connector curve --execute`
-  mined its approval, refused the swap and left the approval standing. The pool call
-  that follows a mined approval of the same request may now be planned and signed for
-  `deadline_seconds` after the block that mined the approval, and never later than
-  twice that after the observed block. Approvals are still held to the first window.
-  The minimum output and minimum LP shares are unchanged. Past the first window a swap
+- An `ax` Curve swap or deposit is no longer refused `stale_plan` because its own
+  approval was slow to be mined. `deadline_seconds` was one window from the observed
+  block for every step of a request, so on a slow endpoint
+  `ax swap --connector curve --execute` mined its approval, refused the swap and left
+  the approval standing. In an operator deployment, the pool call that follows a mined
+  approval of the same request may now be planned and signed for `deadline_seconds`
+  after the block that mined the approval, and never later than twice that after the
+  observed block. Approvals are still held to the first window. A strategy deployment
+  keeps the one window for every step and decides again after a refusal. The minimum
+  output and minimum LP shares are unchanged. Past the first window a swap
   is signed only while the pool still quotes at least the request's minimum output. No
   Curve call carries a deadline, so this is the gateway's bound, not the chain's (#41).
 - A Curve `stale_plan` refusal names the block, its time, the window and when it
