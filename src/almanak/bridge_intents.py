@@ -7,6 +7,7 @@ from pydantic import Field, model_validator
 
 from almanak.caip import AssetType
 from almanak.models import Account, AssetAmount, Model
+from almanak.transfers import same_environment
 
 Name = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
 
@@ -38,7 +39,7 @@ class BridgeTarget(Model, ABC):
             raise ValueError("bridge target destination asset has a different fund chain")
         if self.fund.chain.chain_id == self.destination_fund.chain.chain_id:
             raise ValueError("a bridge requires two different chains")
-        if self.fund.chain.environment != self.destination_fund.chain.environment:
+        if not same_environment(self.fund.chain, self.destination_fund.chain):
             raise ValueError("a bridge stays within one environment")
         if self.account == self.destination_account:
             raise ValueError("a bridge requires two different named accounts")

@@ -252,3 +252,16 @@ def test_a_chain_appends_and_refunds_in_one_change():
     first, second = transfer("deposit-1"), transfer("deposit-2")
     changed = (*resolved((first,), first.identity, REFUNDED), second)
     assert merged((first,), changed, ORIGIN) == changed
+
+
+def test_two_fork_nodes_are_one_environment():
+    here = ORIGIN.model_copy(update={"environment": "anvil:aaaa"})
+    there = DESTINATION.model_copy(update={"environment": "anvil:bbbb"})
+    source, destination = transfer().source, transfer().destination
+    forked = transfer(
+        source=source.model_copy(update={"chain": here}),
+        destination=destination.model_copy(update={"chain": there}),
+    )
+    assert forked.open
+    with pytest.raises(ValidationError, match="one environment"):
+        transfer(destination=destination.model_copy(update={"chain": there}))

@@ -15,6 +15,7 @@ from almanak.models import AssetAmount, Chain, Model
 from almanak.triggers import UtcInstant
 
 Reference = Annotated[str, Field(min_length=1, max_length=512, pattern=r"^\S+$")]
+FORK = "anvil:"
 # Connector, source chain and the connector's reference: unique within a checkpoint.
 type Identity = tuple[ConnectorId, Chain, str]
 
@@ -51,7 +52,7 @@ class Transfer(Model):
         if self.source.chain.chain_id == self.destination.chain.chain_id:
             raise ValueError("a transfer requires two different chains")
         # A fork never sends to production, nor production to a fork.
-        if self.source.chain.environment != self.destination.chain.environment:
+        if not same_environment(self.source.chain, self.destination.chain):
             raise ValueError("a transfer stays within one environment")
         if self.source.account == self.destination.account:
             raise ValueError("a transfer requires two different named accounts")
@@ -69,6 +70,12 @@ class Transfer(Model):
     @property
     def open(self) -> bool:
         return self.resolution is None
+
+
+def same_environment(source: Chain, destination: Chain) -> bool:
+    """Each fork node names its own environment, so two forks are one environment."""
+    environments = source.environment, destination.environment
+    return environments[0] == environments[1] or all(e.startswith(FORK) for e in environments)
 
 
 def validate_resolution(transfer: Transfer) -> None:
