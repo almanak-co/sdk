@@ -41,6 +41,8 @@ ALCHEMY_NETWORKS = {
 # so a listed endpoint can still refuse a read. A shared provider is absent from a chain
 # where its keyless tier refused one of those reads in those runs, and a chain
 # operator's own endpoint is listed under the operator's name. HyperEVM has no entry.
+# BNB Chain's own endpoint is not listed: it keeps less than a minute of state, and a
+# direct action reads at blocks older than that when it reconciles a mined step.
 # Removing a pair strands no kept action record: `ax recover` takes a named transport
 # when the record's own endpoint is no longer listed.
 PUBLIC_RPC: dict[str, dict[ChainId, str]] = {
@@ -55,9 +57,9 @@ PUBLIC_RPC: dict[str, dict[ChainId, str]] = {
         ChainId("eip155:137"): "https://polygon.drpc.org",
         ChainId("eip155:4663"): "https://robinhood.drpc.org",
     },
+    "blastapi": {ChainId("eip155:56"): "https://bsc-mainnet.public.blastapi.io"},
     "base": {ChainId("eip155:8453"): "https://mainnet.base.org"},
     "arbitrum": {ChainId("eip155:42161"): "https://arb1.arbitrum.io/rpc"},
-    "bnbchain": {ChainId("eip155:56"): "https://bsc-dataseed.bnbchain.org"},
     "optimism": {ChainId("eip155:10"): "https://mainnet.optimism.io"},
 }
 

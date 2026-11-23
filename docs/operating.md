@@ -1338,16 +1338,18 @@ it:
 | --- | --- | --- |
 | `publicnode` | Allnodes PublicNode | `eip155:1`, `eip155:43114` |
 | `drpc` | dRPC | `eip155:1`, `eip155:8453`, `eip155:10`, `eip155:137`, `eip155:4663` |
+| `blastapi` | Blast API | `eip155:56` |
 | `base` | Base, the chain's own endpoint | `eip155:8453` |
 | `arbitrum` | Arbitrum, the chain's own endpoint | `eip155:42161` |
-| `bnbchain` | BNB Chain, the chain's own endpoint | `eip155:56` |
 | `optimism` | Optimism, the chain's own endpoint | `eip155:10` |
 
 Ethereum, Base and Optimism have two endpoints. Avalanche (`eip155:43114`),
 Arbitrum (`eip155:42161`), BNB (`eip155:56`), Polygon (`eip155:137`) and Robinhood
 (`eip155:4663`) have one, so there is no second endpoint to name when it fails.
 HyperEVM (`eip155:999`) has none and needs a provider key. A name that does not
-serve the command's chain is refused with the names that do.
+serve the command's chain is refused with the names that do. BNB Chain's own
+endpoint is not listed: it keeps less than a minute of state, and a direct action
+reads at blocks older than that when it reconciles a mined step.
 
 An endpoint for a chain does not make an action available there. A direct action
 runs only for a connector and chain that declare it, which `almanak support` lists
@@ -1406,8 +1408,9 @@ the commands below, each through the listed pairs named. Nothing else is claimed
 
 An event history is asked for from block zero in one request. Every endpoint such
 a listing was run through refused it: `publicnode` on Ethereum and Avalanche, `drpc`
-on Ethereum, Base and Optimism, and `base`, `arbitrum`, `optimism` and `bnbchain`. No
-listing sends that request on Polygon or Robinhood, so nothing is known there. The
+on Ethereum, Base and Optimism, and `base`, `arbitrum` and `optimism`. It was not
+run through `blastapi` on BNB Chain, and no listing sends that request on Polygon or
+Robinhood, so nothing is known there. The
 refusal is `eth_getLogs: the provider refused <contract>'s event history in one
 request`, or `eth_getLogs: HTTP 429` or `eth_getLogs: RPC rejected the requested
 read (JSON-RPC -32005)` where the endpoint answers with its rate-limit code and the
