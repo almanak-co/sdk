@@ -163,6 +163,18 @@ def test_output_the_check_cannot_read_fails():
     assert verdict.status == "fail" and "not shaped" in verdict.detail
 
 
+def test_a_reported_value_no_call_can_encode_fails_instead_of_stopping_the_run():
+    """A null account reaches the ABI encoder of a real direct client, before any request."""
+    output = {
+        "resolution": {"selection": {"spoke": "0x" + "33" * 20, "reserve_id": 0}},
+        "observation": {"reserve": {"block": BLOCK}, "account": {"address": None}},
+    }
+    arguments = ("lending-position",)
+    case = reads.ReadCase("lending-position", "eip155:1", arguments, checks.aave_v4_position)
+    verdict = reads.judge(case, succeeded(output), Rpc(None))
+    assert verdict.status == "fail" and "EncodingTypeError" in verdict.detail
+
+
 @pytest.mark.parametrize("error", sorted(reads.TRANSIENT_ERRORS))
 def test_an_endpoint_refusal_is_transient(error):
     assert reads.judge(CASE, refused(error, "HTTP 429"), FakeRpc()).status == "transient"

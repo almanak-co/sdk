@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from eth_abi.exceptions import EncodingError
+
 from scripts.live_qa.checks import Check
 from scripts.live_qa.cli import Invocation, Run
 from scripts.live_qa.rpc import Rpc, RpcReverted, RpcUnavailable
@@ -167,7 +169,8 @@ def judge_output(case: ReadCase, output: dict[str, Any], rpc: Rpc) -> Verdict:
         return Verdict("fail", f"a direct read of what the command reported reverted: {exc}")
     except RpcUnavailable as exc:
         return Verdict("transient", f"cross-check blocked: {exc}")
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
+    except (KeyError, IndexError, TypeError, ValueError, EncodingError) as exc:
+        # EncodingError: a reported value, such as a null address, cannot be a call argument.
         return Verdict("fail", f"output is not shaped as the check reads it: {exc!r}")
     if mismatches:
         return Verdict("fail", "; ".join(mismatches), tuple(mismatches))
