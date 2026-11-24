@@ -106,6 +106,11 @@ class ResolvedRoute(Model):
     def assets(self) -> tuple[Asset, ...]:
         return (self.asset,)
 
+    @property
+    def destination_assets(self) -> tuple[Asset, ...]:
+        """The received asset, verified on the destination chain; empty until completed."""
+        return () if self.destination is None else (self.destination,)
+
     def summary(self) -> dict:
         """Resolved identities for previews; evidence bodies never appear."""
         return {

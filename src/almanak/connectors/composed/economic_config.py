@@ -9,6 +9,7 @@ from almanak.backtest.config import ExcludedCosts
 from almanak.backtest.inventory import InventoryConfig
 from almanak.backtest.strategy_prices import StrategyPriceData
 from almanak.connectors.aave_v3 import economic_config as lending
+from almanak.connectors.across import economic_config as across
 from almanak.connectors.aerodrome import economic_config as aerodrome
 from almanak.connectors.aerodrome_slipstream import economic_config as slipstream
 from almanak.connectors.composed.aave_v4_economic import Policy as AaveV4Policy
@@ -100,6 +101,13 @@ class GmxPolicy(Model):
     position_model: Literal["prepared_position_accounting"] | None
 
 
+class AcrossPolicy(Model):
+    # The stated arrival latency; the bridge model reads no history.
+    data: across.BridgePolicy
+    costs: Annotated[ExcludedCosts | across.Costs, Field(discriminator="kind")]
+    bridge_model: across.BridgeModel
+
+
 class EconomicConfig(InventoryConfig):
     market_model: Literal["economic"]
     models: dict[
@@ -115,7 +123,8 @@ class EconomicConfig(InventoryConfig):
         | MorphoPolicy
         | CompoundPolicy
         | CurvePolicy
-        | GmxPolicy,
+        | GmxPolicy
+        | AcrossPolicy,
     ]
     # The strategy's declared series, folded in at resolution; absent when it declares none.
     data: StrategyPriceData = Field(
@@ -141,6 +150,7 @@ class EconomicConfig(InventoryConfig):
             "compound_v3": CompoundPolicy,
             "curve": CurvePolicy,
             "gmx_v2": GmxPolicy,
+            "across": AcrossPolicy,
         }
         # Excluded-cost exchange policies have identical shapes. Connector identity
         # selects their concrete type before the union can erase that distinction.
@@ -173,6 +183,7 @@ class EconomicConfig(InventoryConfig):
             ConnectorId("compound_v3"): CompoundPolicy,
             ConnectorId("curve"): CurvePolicy,
             ConnectorId("gmx_v2"): GmxPolicy,
+            ConnectorId("across"): AcrossPolicy,
         }
         if any(
             type(policy) is not expected.get(identity) for identity, policy in self.models.items()
@@ -189,6 +200,12 @@ class EconomicConfig(InventoryConfig):
     def component(self, identity, parameters):
         policy = self.models[identity]
         accounts = {a.account for a in parameters.positions}
+        # A bridge also binds the account that receives it, on another chain.
+        accounts |= {
+            a.destination_account
+            for a in parameters.positions
+            if getattr(a, "destination_account", None) is not None
+        }
         funds = tuple(f for f in self.funds if f.name in accounts)
         payers = {f.profile.submitter for f in funds if f.profile.submitter != f.fund}
         chains = {a.chain for a in parameters.positions}
@@ -205,6 +222,7 @@ class EconomicConfig(InventoryConfig):
             CompoundPolicy: compound.EconomicConfig,
             CurvePolicy: curve.EconomicConfig,
             GmxPolicy: gmx.EconomicConfig,
+            AcrossPolicy: across.EconomicConfig,
         }[type(policy)]
         return cls(
             schedule=self.schedule,

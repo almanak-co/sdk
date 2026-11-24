@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from almanak.connectors.aave_v3.economic_reporting import report as lending_report
+from almanak.connectors.across.economic_reporting import report as across_report
 from almanak.connectors.aerodrome.economic_reporting import report as aerodrome_report
 from almanak.connectors.aerodrome_slipstream.economic_reporting import (
     report as slipstream_report,
@@ -76,6 +77,7 @@ def report(state, model):
             ConnectorId("compound_v3"): compound_report,
             ConnectorId("curve"): curve_report,
             ConnectorId("gmx_v2"): gmx_report,
+            ConnectorId("across"): across_report,
         }[connector]
         native = native_report(component_state(state, connector), driver)
         # Component slices share one cash ledger, so a per-component quote equity

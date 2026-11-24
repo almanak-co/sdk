@@ -16,7 +16,15 @@ def seconds(value):
     return int(match[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[match[2]]
 
 
-def duration_fields(values, names=("sample_seconds", "rate_sample_seconds", "max_age_seconds")):
+DURATION_FIELDS = (
+    "sample_seconds",
+    "rate_sample_seconds",
+    "max_age_seconds",
+    "arrival_latency_seconds",
+)
+
+
+def duration_fields(values, names=DURATION_FIELDS):
     result = dict(values)
     for name in names:
         if name in result:

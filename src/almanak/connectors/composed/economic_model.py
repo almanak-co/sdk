@@ -6,6 +6,8 @@ from almanak.connectors.aave_v3.economic_events import EconomicDriver as Lending
 from almanak.connectors.aave_v3.economic_state import Position as LendingPosition
 from almanak.connectors.aave_v3.observations import Ownership as LendingOwnership
 from almanak.connectors.aave_v4.models import Ownership as AaveV4Ownership
+from almanak.connectors.across.economic_model import EconomicDriver as AcrossDriver
+from almanak.connectors.across.economic_state import Position as AcrossPosition
 from almanak.connectors.aerodrome.economic_model import EconomicModel as AerodromeDriver
 from almanak.connectors.aerodrome_slipstream.economic_model import (
     EconomicModel as SlipstreamDriver,
@@ -68,6 +70,7 @@ def component_state(state, identity):
     }
     from almanak.backtest.economic_state import EconomicState as AaveV4State
     from almanak.connectors.aave_v3.economic_state import State as LendingState
+    from almanak.connectors.across.economic_state import State as AcrossState
     from almanak.connectors.aerodrome.economic_state import State as AerodromeState
     from almanak.connectors.aerodrome_slipstream.economic_state import State as SlipstreamState
     from almanak.connectors.compound_v3.economic_state import State as CompoundState
@@ -92,7 +95,8 @@ def component_state(state, identity):
         | type[MorphoState]
         | type[CompoundState]
         | type[CurveState]
-        | type[GmxState],
+        | type[GmxState]
+        | type[AcrossState],
     ] = {
         ConnectorId("aave_v3"): LendingState,
         ConnectorId("aave_v4"): AaveV4State,
@@ -106,6 +110,7 @@ def component_state(state, identity):
         ConnectorId("compound_v3"): CompoundState,
         ConnectorId("curve"): CurveState,
         ConnectorId("gmx_v2"): GmxState,
+        ConnectorId("across"): AcrossState,
     }
     return factories[identity].model_validate(
         {name: getattr(state, name) for name in type(state).model_fields} | values
@@ -135,7 +140,18 @@ def component_events(events, identity):
 
 
 # Event kinds that only move accounting state; the author hook sees them as observations.
-ACCOUNTING_EVENTS = frozenset({"accounting", "perpetual_liquidations"})
+# A bridge arrival is delivered to `on_outcome` instead of the event hook.
+ACCOUNTING_EVENTS = frozenset({"accounting", "perpetual_liquidations", "bridge_arrivals"})
+
+
+def arrivals(event):
+    """The modeled bridge arrivals one composed event carries, in order."""
+    return tuple(
+        arrived
+        for component in event.components
+        if component.connector == ConnectorId("across")
+        for arrived in component.transition.result.arrivals
+    )
 
 
 def local_pending(pending, identity):
@@ -177,7 +193,17 @@ def ownership(state):
             result.append(cls(**{name: getattr(payload, name) for name in cls.model_fields}))
         else:
             result.append(payload.owned)
-    return project_cash(tuple(result), state.portfolio.balances)
+    return project_cash(tuple(result), state.portfolio.balances, modeled_transfers(state))
+
+
+def modeled_transfers(state):
+    """Every modeled bridge transfer of the run; the decision view keeps the open ones."""
+    return tuple(
+        flight.transfer
+        for held in state.portfolio.positions
+        if isinstance(held.payload, AcrossPosition)
+        for flight in held.payload.flights
+    )
 
 
 def availability(state, observations):
@@ -223,7 +249,8 @@ class EconomicDriver:
             | type[MorphoDriver]
             | type[CompoundDriver]
             | type[CurveDriver]
-            | type[GmxDriver],
+            | type[GmxDriver]
+            | type[AcrossDriver],
         ] = {
             ConnectorId("aave_v3"): LendingDriver,
             ConnectorId("aave_v4"): AaveV4Driver,
@@ -237,6 +264,7 @@ class EconomicDriver:
             ConnectorId("compound_v3"): CompoundDriver,
             ConnectorId("curve"): CurveDriver,
             ConnectorId("gmx_v2"): GmxDriver,
+            ConnectorId("across"): AcrossDriver,
         }
         self.components: dict[
             ConnectorId,
@@ -251,7 +279,8 @@ class EconomicDriver:
             | MorphoDriver
             | CompoundDriver
             | CurveDriver
-            | GmxDriver,
+            | GmxDriver
+            | AcrossDriver,
         ] = {
             identity: factories[identity](
                 parameters,
@@ -347,10 +376,14 @@ class EconomicDriver:
         return external_event(self, state, time)
 
     def deliver_event(self, state, result):
+        # A modeled bridge arrival reaches `on_outcome`, as a measured one does live.
+        memory = state.memory
+        for arrived in arrivals(result):
+            memory = self.deliver(state.model_copy(update={"memory": memory}), arrived)
         # Pure accounting events, including GMX liquidation batches, never reach the hook.
         if all(c.transition.result.kind in ACCOUNTING_EVENTS for c in result.components):
-            return state.memory
-        context = EventInput(config=self.config, memory=state.memory, event=result)
+            return memory
+        context = EventInput(config=self.config, memory=memory, event=result)
         return Memory.model_validate_json(
             strategy_worker(EventRequest(strategy=self.strategy, context=context))
         )

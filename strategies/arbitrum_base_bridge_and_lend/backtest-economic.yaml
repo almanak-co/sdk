@@ -1,0 +1,50 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+# The bridge is modeled: it pays the market's whole max_fee_bps and arrives after the
+# latency stated under data.connectors.across. The lending side reads Comet history.
+mode: economic
+window:
+  start: '2026-09-07T15:00:00Z'
+  end: '2026-09-07T15:01:30Z'
+  end_policy: teardown
+  cleanup: 60s
+inventory:
+  funds:
+    arbitrum_fund:
+      balances:
+      - asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+        quantity: '100'
+      - asset: eip155:42161/slip44:60
+        quantity: '1'
+    # The receiving account starts with nothing to lend; the arrival credits it.
+    base_fund:
+      balances:
+      - asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+        quantity: '0'
+      - asset: eip155:8453/slip44:60
+        quantity: '1'
+execution:
+  latency: 1s
+  models:
+    across:
+      bridge_model: full_fee_ceiling_fixed_latency
+    compound_v3:
+      liquidation_model: immediate_comet_absorb
+data:
+  connectors:
+    across:
+      # Seconds from the modeled deposit to the modeled arrival. Required.
+      arrival_latency_seconds: 30s
+    compound_v3:
+      source: compound_v3_archive
+      risk_model: comet_oracle_each_block
+      sample_seconds: 30s
+      max_age_seconds: 60s
+      max_accounting_samples: 10
+      max_risk_blocks: 128
+      max_risk_samples: 128
+      max_liquidations_per_event: 8
+costs:
+  across:
+    kind: excluded
+  compound_v3:
+    kind: excluded

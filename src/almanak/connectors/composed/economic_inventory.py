@@ -9,6 +9,9 @@ from almanak.connectors.aave_v3.economic_state import Position as LendingPositio
 from almanak.connectors.aave_v3.observations import Ownership as LendingOwnership
 from almanak.connectors.aave_v4.backtest import position_key as aave_v4_key
 from almanak.connectors.aave_v4.models import Ownership as AaveV4Ownership
+from almanak.connectors.across.economic_model import position_key as across_key
+from almanak.connectors.across.economic_state import Position as AcrossPosition
+from almanak.connectors.across.observations import Ownership as AcrossOwnership
 from almanak.connectors.aerodrome.economic_parameters import position_key as aerodrome_key
 from almanak.connectors.aerodrome.economic_state import EconomicPosition as AerodromePosition
 from almanak.connectors.aerodrome.positions import Ownership as AerodromeOwnership
@@ -83,6 +86,10 @@ def held_position(owned, config=None):
     if isinstance(owned, AaveV4Ownership):
         return HeldPosition[Position](
             key=aave_v4_key(owned.target), payload=AaveV4Position(target=owned.target)
+        )
+    if isinstance(owned, AcrossOwnership):
+        return HeldPosition[Position](
+            key=across_key(owned.target), payload=AcrossPosition(target=owned.target)
         )
     if isinstance(owned, V4Ownership):
         return HeldPosition[Position](

@@ -5,12 +5,30 @@ without one names the connector's scope and admits no run that sends from it; it
 still be the destination of a route from a declared chain.
 """
 
+from datetime import UTC, datetime
+from typing import Literal
+
 from almanak.caip import ChainId
 from almanak.connectors.across.domain import SPOKE_POOLS
-from almanak.connectors.support import ConnectorChainSupport, EconomicAction, RunMode
+from almanak.connectors.support import (
+    ConnectorChainSupport,
+    EconomicAction,
+    HistoricalSupport,
+    RunMode,
+)
 
 # Chains a reference lifecycle has left from, on identified forks.
 FORK_SOURCES = (ChainId("eip155:42161"),)
+# The bridge model of economic backtests. It reads no history: it charges the author's
+# whole fee ceiling and credits the arrival after a latency the backtest file states.
+BACKTEST_MODEL: Literal["across-full-fee-ceiling-fixed-latency-v1"] = (
+    "across-full-fee-ceiling-fixed-latency-v1"
+)
+# The first whole day after the pinned SpokePool implementation was installed on the
+# source chain (14 August 2026, 18:24 UTC on Arbitrum, read from the proxy's
+# implementation slot). A backtest resolves the route at its window start and refuses
+# another implementation, so no earlier window resolves.
+BACKTEST_STARTS = {ChainId("eip155:42161"): datetime(2026, 8, 15, tzinfo=UTC)}
 
 
 SCOPE = (
@@ -21,11 +39,15 @@ SCOPE = (
     "once the destination chain has proven the transfer unfilled",
 )
 FORK_SCOPE = (
-    "fork runs only, as the source of a route to eip155:8453; no production run and no backtest",
+    "fork runs and economic backtests only, as the source of a route to eip155:8453; "
+    "no production run",
     "a fork run asks no venue: the fork gateway constructs the quote from a stated fee "
     "and the fork's block time and retains it as across_fork_constructed; it is no "
     "evidence of a venue quote",
     "a fork refund is a fork-constructed bundle, never Fork Qualification evidence",
+    "a backtest models the bridge and reads no history: it charges the market's whole "
+    "max_fee_bps, credits the arrival after the latency the backtest file states, fills "
+    "every transfer and models no refund; it keeps no approval, so it serves no revoke_bridge",
 )
 UNPROVEN = (
     "no run mode: no reference lifecycle sends from this chain; it is the proven "
@@ -33,14 +55,36 @@ UNPROVEN = (
 )
 
 
+def historical(chain: ChainId) -> tuple[HistoricalSupport, ...]:
+    start = BACKTEST_STARTS.get(chain)
+    if start is None:
+        return ()
+    return (
+        HistoricalSupport(
+            model=BACKTEST_MODEL,
+            mode="economic",
+            # The model keeps no approval, so a revocation never arises in it.
+            actions=(EconomicAction.BRIDGE,),
+            backtest_start_at=start,
+        ),
+    )
+
+
+def modes(chain: ChainId) -> tuple[RunMode, ...]:
+    if chain not in FORK_SOURCES:
+        return ()
+    return (RunMode.FORK, RunMode.BACKTEST) if chain in BACKTEST_STARTS else (RunMode.FORK,)
+
+
 def candidate_support():
     return tuple(
         ConnectorChainSupport(
             chain=chain,
-            modes=(RunMode.FORK,) if chain in FORK_SOURCES else (),
+            modes=modes(chain),
             actions=(EconomicAction.BRIDGE, EconomicAction.REVOKE_BRIDGE),
             account_profiles=("eoa",),
             restrictions=SCOPE + (FORK_SCOPE if chain in FORK_SOURCES else UNPROVEN),
+            historical=historical(chain) if chain in FORK_SOURCES else (),
         )
         for chain in SPOKE_POOLS
     )

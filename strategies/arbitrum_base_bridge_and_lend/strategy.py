@@ -84,12 +84,16 @@ def validate_config(config) -> None:
 
 
 def decide(context):
+    """A fork or live run evaluates each chain on its own turn and shows one of the two
+    allocations. A backtest shows both at once, so the destination's step follows when
+    the source's turn asks for nothing."""
     memory = state(context)
+    decision = None
     if context.observation(BRIDGE) is not None:
-        return source_tick(context, memory)
-    if context.observation(EARN) is not None:
-        return destination_tick(context, memory)
-    return context.decision(reason=progress(memory))
+        decision = source_tick(context, memory)
+    if (decision is None or decision.intent is None) and context.observation(EARN) is not None:
+        decision = destination_tick(context, memory)
+    return decision or context.decision(reason=progress(memory))
 
 
 def source_tick(context, memory: State):

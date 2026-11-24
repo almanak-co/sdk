@@ -217,7 +217,8 @@ def resolved_metadata(document, markets, symbols=None):
     symbols = symbols or {}
     metadata: dict[AssetType, AssetMetadata] = {}
     for market in markets.values():
-        for asset in market.assets:
+        # A two-chain market also verified its received asset, on its destination chain.
+        for asset in (*market.assets, *getattr(market, "destination_assets", ())):
             previous = metadata.setdefault(
                 asset.identifier,
                 AssetMetadata(decimals=asset.decimals, symbol=symbols.get(asset.identifier)),

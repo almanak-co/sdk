@@ -100,9 +100,11 @@ class Parameters(AuthorGas):
         source = self.profile(allocation.account)
         recipient = self.profile(allocation.destination_account)
         # The Roles grants of a bridge are not built yet; without them a Safe cannot deposit.
-        if source.kind != "eoa":
+        # A backtest's hypothetical account signs nothing and stands for an EOA.
+        if source.kind not in ("eoa", "simulation"):
             raise ValueError("Across deposits are supported from an EOA account only")
-        refuse_native_output(allocation.route, recipient.kind)
+        recipient_kind = "eoa" if recipient.kind == "simulation" else recipient.kind
+        refuse_native_output(allocation.route, recipient_kind)
 
     def bridge(self, name: str, amount: int) -> BridgeIntent[Target]:
         """Send `amount` base units of the allocation's asset to its destination account.
