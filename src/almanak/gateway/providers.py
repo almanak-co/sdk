@@ -44,6 +44,11 @@ ALCHEMY_NETWORKS = {
 # is absent from a chain where its keyless tier refused one of those reads in those
 # runs, and a chain operator's own endpoint is listed under the operator's name.
 # HyperEVM has no entry.
+#
+# One listed pair does not meet the 360 seconds: `publicnode` on Avalanche answered
+# state reads 64 blocks behind its head and left reads 128 blocks (106 seconds) and
+# older unanswered, passing that check in one of three runs. It stays listed because
+# no other keyless Avalanche endpoint qualified.
 # BNB Chain's own endpoint is not listed: it keeps less than a minute of state, and a
 # direct action reads at blocks older than that when it reconciles a mined step.
 # Removing a pair strands no kept action record: `ax recover` takes a named transport

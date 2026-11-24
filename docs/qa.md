@@ -344,7 +344,9 @@ Without arguments it checks every listed pair, one after another with a pause.
 `--candidate NAME CHAIN URL` checks an endpoint that is not listed, and is not
 combined with `--name` or `--chain`. It prints one JSON report that names hosts
 only and exits 1 when any checked endpoint fails; a wrong command line exits 2
-before any endpoint is opened. The checks drive the SDK's own readers through a
+before any endpoint is opened. A run over the whole list is expected to exit 1 on
+one pair: `publicnode` on Avalanche fails `reads_at_age` in most runs and stays
+listed, as the operating guide states. The checks drive the SDK's own readers through a
 sample of the reads an observation and a direct action make. They do not cover
 every method a connector calls, and the state they ask for is a floor, not the
 oldest state a command can read:

@@ -1410,6 +1410,18 @@ an observation may age plus 240 seconds allowed for one step. That is the floor
 the qualification checks, not a promise: a slower step, or an `ax recover` run
 later, reads older state, and the endpoint can refuse it.
 
+One listed pair does not meet that floor: `publicnode` on Avalanche. On 23
+November 2026 it answered state reads 32 and 64 blocks behind its head and left
+reads 128 blocks (106 seconds) and older unanswered for 12 to 20 seconds, and it
+passed the 360-second check in one of three runs. A read it leaves unanswered is
+refused as `transport failed`. Reads at `latest` and `finalized` and an action
+whose step is mined and reconciled within about 100 seconds are served; a slower
+step, or an `ax recover` run later, can be refused, and the signed step then
+needs `ax recover` through a provider key (`--env-file`). It stays listed because
+no other keyless Avalanche endpoint qualified: the chain's own endpoint answered
+every check and then refused all requests from the caller for about an hour after
+one three-row `ax lending-markets` listing.
+
 An endpoint for a chain does not make an action available there. A direct action
 runs only for a connector and chain that declare it, which `almanak support` lists
 as `direct_actions` and [Operator actions](#operator-actions) describes; it runs

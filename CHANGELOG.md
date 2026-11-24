@@ -23,7 +23,9 @@ its changelog is on the `v2` branch.
   signed, mined and reconciled. The read 64 blocks behind the head stays, but 64 blocks
   are about 29 seconds on BNB Chain, so an endpoint that keeps a minute of state passed
   every check. The 360 seconds are a floor the tool checks: a slower step or a later
-  `ax recover` reads older state (#42).
+  `ax recover` reads older state. One listed pair does not meet it and stays listed
+  with the limit stated in the operating guide: `publicnode` on Avalanche leaves
+  state reads older than about 100 seconds unanswered (#42).
 
 ### Fixed
 - A direct action run with `--execute` no longer ends over one failed read between two
