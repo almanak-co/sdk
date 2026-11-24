@@ -383,6 +383,12 @@ class EconomicDriver:
         # Pure accounting events, including GMX liquidation batches, never reach the hook.
         if all(c.transition.result.kind in ACCOUNTING_EVENTS for c in result.components):
             return memory
+        if memory is not state.memory:
+            # An arrival was delivered above; the hook sees the rest of a mixed event.
+            rest = tuple(
+                c for c in result.components if c.transition.result.kind != "bridge_arrivals"
+            )
+            result = result.model_copy(update={"components": rest})
         context = EventInput(config=self.config, memory=memory, event=result)
         return Memory.model_validate_json(
             strategy_worker(EventRequest(strategy=self.strategy, context=context))

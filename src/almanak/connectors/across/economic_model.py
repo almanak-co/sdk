@@ -17,6 +17,7 @@ from almanak.backtest.types import UnixTime
 from almanak.bridge_intents import BridgeIntent, arrival_wallet
 from almanak.connectors.across.authority import admit
 from almanak.connectors.across.authority import validate as validate_capabilities
+from almanak.connectors.across.economic_config import FILL_WINDOW_SECONDS
 from almanak.connectors.across.economic_state import (
     ActionResult,
     ArrivalEvent,
@@ -54,15 +55,34 @@ ASSUMPTIONS = (
     "full fee ceiling charged: every bridge pays the market's whole max_fee_bps, a model "
     "assumption, not a measured fee; the venue was not asked and no historical quote is read",
     "the fee ceiling stands in for every relayer cost; no destination gas is charged",
+    "every deposit is admitted: a ceiling below the venue's real fee would not bridge in a "
+    "live run, and no history of the venue's fee is read to tell; a ceiling of zero is refused",
     "arrival is credited at the deposit's second plus the stated arrival latency, a model "
     "assumption, not a measured fill time",
     "every transfer arrives: no refund, no unfilled transfer and no slow fill is modeled",
     "a transfer in flight is in neither wallet's balance and states no received amount",
-    "the modeled fill deadline of a transfer is its modeled arrival time",
+    "the fill deadline of a modeled transfer is its deposit's second plus one hour, as the "
+    "fork's constructed quote states it; it is a deadline, not a forecast of the arrival",
     "approvals, transaction inclusion and fee-market mechanics are excluded; the model keeps "
     "no approval, so it never produces a revoke",
     "hypothetical deposits do not change later venue liquidity, fees or fill times",
 )
+
+
+def require_modeled_routes(config):
+    """Refuse a route the model cannot charge: a zero ceiling makes its fee vanish.
+
+    The model admits every deposit and charges the whole ceiling. A live run admits a
+    deposit only when the venue's fee is within the ceiling, which a ceiling of zero
+    never is, so a zero ceiling would model a free bridge that cannot happen.
+    """
+    for allocation in config.positions:
+        if config.target(allocation.name).route.max_fee_bps == 0:
+            raise ValueError(
+                f"allocation {allocation.name}: a backtest refuses max_fee_bps 0; the bridge "
+                "model charges the whole ceiling and admits every deposit, so a zero ceiling "
+                "would model a free bridge that no live run admits"
+            )
 
 
 def parameters(author, settings, interval):
@@ -151,7 +171,7 @@ def evidence(identity):
     return SimulationEvidence(execution_id=identity, model=MODEL, inputs=())
 
 
-def modeled_transfer(target, amount: int, max_fee_bps: int, reference: str, arrives_at) -> Transfer:
+def modeled_transfer(target, amount: int, max_fee_bps: int, reference: str, sent_at) -> Transfer:
     """The transfer a modeled deposit opens. Its offer is the amount less the whole ceiling."""
     received = amount - fee_ceiling(amount, max_fee_bps)
     if received <= 0:
@@ -164,7 +184,7 @@ def modeled_transfer(target, amount: int, max_fee_bps: int, reference: str, arri
         destination=arrival_wallet(target),
         offered=AssetAmount(asset=target.destination_asset, amount=received),
         reference=reference,
-        fill_deadline=instant(arrives_at),
+        fill_deadline=instant(sent_at + FILL_WINDOW_SECONDS),
     )
 
 
@@ -216,6 +236,7 @@ class EconomicModel:
         )
         self.authority = strategy_capabilities(strategy, config) if authority is None else authority
         validate_capabilities(config, self.authority)
+        require_modeled_routes(config)
 
     @property
     def latency(self) -> int:
@@ -326,7 +347,11 @@ class EconomicModel:
         held = next(p for p in state.portfolio.positions if p.payload.target == target)
         arrives_at = UnixTime(pending.eligible_at + self.latency)
         transfer = modeled_transfer(
-            target, amount, target.route.max_fee_bps, f"modeled:{pending.identity}", arrives_at
+            target,
+            amount,
+            target.route.max_fee_bps,
+            f"modeled:{pending.identity}",
+            pending.eligible_at,
         )
         flight = Flight(transfer=transfer, sent_at=pending.eligible_at, arrives_at=arrives_at)
         after = Position(target=target, flights=(*held.payload.flights, flight))

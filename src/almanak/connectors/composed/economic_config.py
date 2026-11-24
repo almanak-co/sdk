@@ -3,7 +3,7 @@
 import json
 from typing import Annotated, Literal
 
-from pydantic import Field, ValidationInfo, field_validator, model_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from almanak.backtest.config import ExcludedCosts
 from almanak.backtest.inventory import InventoryConfig
@@ -24,6 +24,25 @@ from almanak.connectors.sparklend import economic_config as spark
 from almanak.connectors.uniswap_v3 import economic_config as exchange
 from almanak.connectors.uniswap_v4 import economic_config as v4
 from almanak.models import Model
+
+
+class PolicyRefused(ValueError):
+    """One connector's policy refused, with the path of the refused field inside it."""
+
+    def __init__(self, connector: str, error: ValidationError):
+        detail = error.errors()[0]
+        self.location = (connector, *(str(part) for part in detail["loc"]))
+        self.reason = detail["msg"].removeprefix("Value error, ")
+        super().__init__(f"{'.'.join(self.location)}: {self.reason}")
+
+
+def decode_policy(policy, connector: str, value, wire: bool):
+    try:
+        return (
+            policy.model_validate_json(json.dumps(value)) if wire else policy.model_validate(value)
+        )
+    except ValidationError as error:
+        raise PolicyRefused(connector, error) from error
 
 
 class LendingPolicy(Model):
@@ -107,6 +126,11 @@ class AcrossPolicy(Model):
     costs: Annotated[ExcludedCosts | across.Costs, Field(discriminator="kind")]
     bridge_model: across.BridgeModel
 
+    @model_validator(mode="before")
+    @classmethod
+    def stated(cls, values):
+        return across.stated_policy(values)
+
 
 class EconomicConfig(InventoryConfig):
     market_model: Literal["economic"]
@@ -158,11 +182,7 @@ class EconomicConfig(InventoryConfig):
         for key, value in values.items():
             policy = classes.get(str(key))
             if policy is not None:
-                value = (
-                    policy.model_validate_json(json.dumps(value))
-                    if info.mode == "json"
-                    else policy.model_validate(value)
-                )
+                value = decode_policy(policy, str(key), value, info.mode == "json")
             decoded[key] = value
         return decoded
 

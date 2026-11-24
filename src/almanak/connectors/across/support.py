@@ -25,8 +25,10 @@ BACKTEST_MODEL: Literal["across-full-fee-ceiling-fixed-latency-v1"] = (
     "across-full-fee-ceiling-fixed-latency-v1"
 )
 # The first whole day after the pinned SpokePool implementation was installed on the
-# source chain (14 August 2026, 18:24 UTC on Arbitrum, read from the proxy's
-# implementation slot). A backtest resolves the route at its window start and refuses
+# source chain. Read on 24 November 2026 by a binary search over `eth_getStorageAt` of
+# the proxy's EIP-1967 implementation slot on an archive node: Arbitrum block
+# 494538558, 14 August 2026 18:24:47 UTC, is the first whose slot holds the pinned
+# implementation. A backtest resolves the route at its window start and refuses
 # another implementation, so no earlier window resolves.
 BACKTEST_STARTS = {ChainId("eip155:42161"): datetime(2026, 8, 15, tzinfo=UTC)}
 

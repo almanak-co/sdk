@@ -14,7 +14,12 @@ from typing import Literal
 from almanak.backtest.cli import write_json
 from almanak.backtest.dataset import Digest, file_digest
 from almanak.backtest.prepared import PROVISIONAL, acquisition_request, require_private_directory
-from almanak.connectors.across.economic_model import MODEL, identity, parameters
+from almanak.connectors.across.economic_model import (
+    MODEL,
+    identity,
+    parameters,
+    require_modeled_routes,
+)
 from almanak.connectors.across.settlement_types import CONNECTOR
 from almanak.models import Model
 from almanak.triggers import IntervalSelection
@@ -56,6 +61,7 @@ def validate_sources(args, author, settings):
     from almanak.connectors.support import historical_capability
 
     config = selected_parameters(author, settings)
+    require_modeled_routes(config)
     connector = connector_for(config)
     if strategy_bindings(settings):
         raise ValueError("the bridge model delivers no strategy price series")

@@ -36,21 +36,26 @@ def transfer_report(flight):
 def position_report(state, model, position):
     target = position.target
     flights = [transfer_report(f) for f in position.flights]
-    return {
+    arrived = [f for f in position.flights if not f.transfer.open]
+    report = {
         "target": target.model_dump(mode="json"),
         "max_fee_bps": target.route.max_fee_bps,
         "transfers": flights,
-        "in_flight": sum(1 for f in flights if f["state"] == "in_flight"),
+        "in_flight": len(position.in_flight),
+        "arrived": len(arrived),
         "sent": quantity(target.asset, sum(f.transfer.sent.amount for f in position.flights)),
-        "received": quantity(
-            target.destination_asset,
-            sum(f.transfer.offered.amount for f in position.flights if not f.transfer.open),
-        ),
         "in_flight_sent": quantity(
             target.asset, sum(f.transfer.sent.amount for f in position.in_flight)
         ),
         "measurement_status": "modeled",
     }
+    if arrived:
+        # A sum over arrived transfers only. It is absent while nothing has arrived: an
+        # open transfer has no received amount, and a zero here would read as one.
+        report["received_by_arrived_transfers"] = quantity(
+            target.destination_asset, sum(f.transfer.offered.amount for f in arrived)
+        )
+    return report
 
 
 def payer_reports(state, model):

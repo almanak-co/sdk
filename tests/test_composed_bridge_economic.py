@@ -255,3 +255,47 @@ def test_the_bridge_policy_is_decoded_by_its_connector_and_names_its_latency():
     del wire["models"]["across"]["data"]
     with pytest.raises(ValueError):
         EconomicConfig.model_validate_json(json.dumps(wire))
+
+
+class MixedEvent:
+    """A stand-in composed event: components, and a copy with some of them."""
+
+    def __init__(self, components):
+        self.components = components
+
+    def model_copy(self, update):
+        return MixedEvent(update["components"])
+
+
+def test_an_arrival_in_a_mixed_event_reaches_on_outcome_once_and_not_the_event_hook(monkeypatch):
+    from almanak.connectors.composed import economic_model
+    from almanak.strategy_api import Memory
+
+    def component(kind, **facts):
+        result = SimpleNamespace(kind=kind, **facts)
+        return SimpleNamespace(transition=SimpleNamespace(result=result))
+
+    hooked, outcomes = [], []
+
+    def hook(request):
+        hooked.append([c.transition.result.kind for c in request["context"]["event"].components])
+        return Memory(values={"stage": "hooked"}).model_dump_json()
+
+    monkeypatch.setattr(economic_model, "strategy_worker", hook)
+    monkeypatch.setattr(economic_model, "EventRequest", lambda **kwargs: kwargs)
+    monkeypatch.setattr(economic_model, "EventInput", lambda **kwargs: kwargs)
+
+    def deliver(state, result):
+        outcomes.append(result)
+        return Memory(values={"stage": "arrived"})
+
+    driver = SimpleNamespace(config=None, strategy=None, deliver=deliver)
+    state = SimpleNamespace(memory=Memory(), model_copy=lambda update: SimpleNamespace(**update))
+    arrival = component("bridge_arrivals", arrivals=("arrival",))
+    mixed = MixedEvent((arrival, component("liquidation")))
+    assert EconomicDriver.deliver_event(driver, state, mixed).values == {"stage": "hooked"}
+    assert outcomes == ["arrival"] and hooked == [["liquidation"]]
+    # An arrival alone never reaches the event hook.
+    alone = MixedEvent((arrival,))
+    assert EconomicDriver.deliver_event(driver, state, alone).values == {"stage": "arrived"}
+    assert outcomes == ["arrival", "arrival"] and len(hooked) == 1

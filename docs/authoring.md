@@ -573,8 +573,16 @@ for nothing, as the composed bridge reference does.
 - An `ActionResult` for the strategy's own steps. A completed `bridge` carries
   the opened `transfer` and `sent`, what left the source account. The received
   amount is not known yet.
-- An `ArrivalResult` when a relayer filled the transfer. `received` is measured
-  on the destination chain and `offered` is what the deposit asked for.
+- An `ArrivalResult` when the transfer arrived. `received` is what the
+  destination account was credited and `offered` is what the deposit asked
+  for. In a fork or live run it is a `MeasuredArrival`: a relayer filled the
+  transfer, `received` is measured on the destination chain, and the result
+  also carries `identity`, `fill_type`, `block`, `tx_hash` and
+  `accounting_issues`. In a backtest it is a `ModeledArrival`: `received` is
+  modeled and equals `offered`, the result carries `sent`, `modeled_fee` and
+  `measurement_status: modeled`, and the measured fields do not exist. Test
+  `isinstance(result, ArrivalResult)` and read only `received`, `offered` and
+  `transfer` in code that must run in both.
 - A `RefundResult` when nobody filled it. `returned` is measured on the source
   chain. A refund is read only after the destination chain has shown that no
   fill can follow, which is after the quote's fill deadline.

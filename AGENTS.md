@@ -477,41 +477,54 @@ independently.
   does not bridge back.
 - Proposed, not accepted: the backtest model charges the author's full fee
   ceiling and delays arrival by a latency stated in the backtest configuration,
-  both reported as model assumptions.
-- Current contract: the model is built under the rule above, whose status this
-  does not change. It is `across-full-fee-ceiling-fixed-latency-v1`, declared
-  for `bridge` on Arbitrum from 15 August 2026, the first whole day after the
-  pinned SpokePool implementation was installed there. It reads no history and
-  asks no venue: its dataset is the frozen statement of the routes, the window
-  and the latency, prepared with no provider call. The backtest file states
-  `arrival_latency_seconds` and `bridge_model`; neither has a default, and both
-  are frozen across resume.
-- Current contract: a modeled deposit debits the source wallet when it
-  executes. The received amount is the amount sent less
-  `amount * max_fee_bps // 10000`, the gateway's own ceiling computation, and
-  the offer equals it. The arrival is credited at the deposit's second plus the
-  latency and reaches `on_outcome` as an `ArrivalResult`. Every transfer
-  arrives: no refund, unfilled transfer or slow fill is modeled. A transfer in
-  flight is in neither balance, is shown as a live run shows it and states no
-  received amount. A run that ends with one reports it in flight; the end
-  boundary invents no arrival, and a teardown whose cleanup ends before the
-  arrival fails as unresolved.
-- Current contract: the model keeps no approval, so `revoke_bridge` never
-  arises in a backtest and the historical declaration does not list it.
-- Current contract: a modeled bridge charges gas on its source chain only,
-  excluded or a fixed native amount per bridge stated in the backtest file. The
-  fee ceiling stands in for every relayer cost. `connectors/gas_references.json`
-  holds no Across entry, because no retained supervised run measured one, so
-  `backtest recent` refuses a strategy that bridges with `unmeasured_gas`.
-- Current contract: every amount of a modeled bridge is labeled modeled in
-  reports, with the quote source `modeled_full_fee_ceiling`, and the report
-  lists the assumptions. A modeled amount is never evidence of what the venue
-  would quote or when a relayer would fill.
-- Current contract: in a composed backtest the bridge debits and credits the
-  one shared cash ledger, so the arrival becomes spendable by another
-  allocation only when it is recorded. The economic model has no analogue of
-  the full-repay hold: it has no wallet beyond inventory and no operator
-  top-up, so nothing can absorb an arrival twice.
+  both reported as model assumptions. It admits every deposit; a ceiling below
+  the venue's real fee would not bridge in a live run, and no history of the
+  venue's fee exists to tell, so this too is reported as an assumption.
+- Built under the proposed rule above, which this does not accept: the model
+  `across-full-fee-ceiling-fixed-latency-v1` is declared for `bridge` on
+  Arbitrum from 15 August 2026, the first whole day after the pinned SpokePool
+  implementation was installed there. It reads no history and asks no venue.
+  Its dataset is the frozen statement of the routes, the window and the
+  latency, prepared with no provider call. The backtest file states
+  `data.arrival_latency_seconds` and `execution.models.bridge_model`; neither
+  has a default, a missing one is refused by that path, and both are frozen
+  across resume.
+- As built: a modeled deposit debits the source wallet when it executes. The
+  received amount is the amount sent less `amount * max_fee_bps // 10000`, the
+  gateway's own ceiling computation, and the offer equals it. A backtest
+  refuses `max_fee_bps: 0`, the one ceiling no live run admits and the one that
+  makes the modeled fee vanish. The arrival is credited at the deposit's second
+  plus the latency and reaches `on_outcome` as a `ModeledArrival`, an
+  `ArrivalResult` without the measured identity, fill type, block and
+  transaction.
+- As built: every modeled transfer arrives; no refund, unfilled transfer or
+  slow fill is modeled. Its fill deadline is the deposit's second plus one
+  hour, as the fork's constructed quote states it, and is never a forecast of
+  the arrival. A latency of one hour or more is refused, because the model has
+  no refund. A transfer in flight is in neither balance, is shown as a live run
+  shows it and states no received amount. A run that ends with one reports it
+  in flight; the end boundary invents no arrival, a position's received total
+  is absent until a transfer has arrived, and a teardown whose cleanup ends
+  before the arrival fails as unresolved.
+- As built: the model keeps no approval, so the historical declaration lists
+  `bridge` only. A strategy that decides `revoke` in a backtest stops the run
+  with an availability error, as the engine does for every action a model does
+  not declare.
+- As built: a modeled bridge charges gas on its source chain only, excluded or
+  a fixed native amount per bridge stated in the backtest file. The fee ceiling
+  stands in for every relayer cost. `connectors/gas_references.json` holds no
+  Across entry, because no retained supervised run measured one, and
+  `backtest recent` refuses a strategy that bridges with
+  `unsupported_connector`.
+- As built: every amount of a modeled bridge is labeled modeled in reports,
+  with the quote source `modeled_full_fee_ceiling`, and the report lists the
+  assumptions. A modeled amount is never evidence of what the venue would quote
+  or when a relayer would fill.
+- As built: in a composed backtest the bridge debits and credits the one shared
+  cash ledger, so the arrival becomes spendable by another allocation only when
+  it is recorded. The economic model has no analogue of the full-repay hold: it
+  has no wallet beyond inventory and no operator top-up, so nothing can absorb
+  an arrival twice.
 - Current contract: a backtest evaluates `decide` once with every chain's
   observations, where a fork or live run evaluates each chain on its own turn.
   A strategy that picks its step from which allocation it sees must fall
@@ -667,10 +680,10 @@ independently.
 - Current contract: the composed reference is
   `strategies/arbitrum_base_bridge_and_lend`: Across from Arbitrum to Base,
   then a Compound V3 supply of exactly the measured arrival, EOA accounts,
-  fork runs only. Its supervised fork proofs cover the lifecycle with a pause
+  fork runs and an economic backtest. Its supervised fork proofs cover the lifecycle with a pause
   and resume, each stage with owned inventory asserted, and the refund with
-  nothing supplied. Its economic backtest models the bridge and reads Comet
-  history for the supply. It stays out of the production rehearsal because
+  nothing supplied. Its economic backtest models the bridge under the proposed
+  model rule and reads Comet history for the supply. It stays out of the production rehearsal because
   Across declares no production support.
 - Current contract: a runtime process killed around the arrival commit is
   proven on the composed reference with real processes and fork nodes

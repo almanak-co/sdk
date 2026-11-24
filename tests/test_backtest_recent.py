@@ -91,6 +91,8 @@ def test_swap_only_uniswap_v3_example_moves_with_measured_gas_and_a_payer(tmp_pa
         ("curve_arbitrum_stable_lp", "unvalued"),
         ("uniswap_v4_arbitrum_lp", "unvalued"),
         ("pancakeswap_v3_bnb_trading", "unmeasured_gas"),
+        # A recent window is built only for the connectors it knows how to rewrite.
+        ("across_usdc_arbitrum_base_bridge", "unsupported_connector"),
     ],
 )
 def test_examples_without_a_recent_window_are_refused_with_a_reason(name, code):
