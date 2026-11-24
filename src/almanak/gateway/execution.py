@@ -64,15 +64,25 @@ class VenueAnswers:
         self.lock = threading.Lock()
 
     def once(self, key, ask):
+        """The retained answer for `key`, asking only when none is retained.
+
+        Only an answer is retained. A transport failure or an unreadable body raises out
+        of `ask` and leaves nothing behind, so the next preparation asks again. An
+        answer that admission then refuses is retained like any other: it is what the
+        venue said for this decision at this block, the refusal follows from it and
+        that block alone, and the next block is another question.
+        """
         with self.lock:
             if key in self.answers:
                 return self.answers[key]
         answer = ask()
         with self.lock:
-            self.answers[key] = answer
+            # Two overlapping preparations may both have asked: the first answer kept is
+            # the one both plan from, so both arrive at the same plan.
+            retained = self.answers.setdefault(key, answer)
             while len(self.answers) > self.limit:
                 self.answers.pop(next(iter(self.answers)))
-        return answer
+            return retained
 
 
 def plan_operation(gateway, state, intent, before):

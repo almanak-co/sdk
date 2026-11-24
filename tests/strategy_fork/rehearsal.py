@@ -32,6 +32,11 @@ ROOT = Path(__file__).parents[2]
 UNREHEARSED: frozenset[str] = frozenset(
     {
         "aave_v3_base_sma_borrow",
+        # Their connector declares no production support. Both passed the rehearsal
+        # locally with the declaration set by hand, which retains nothing: they stay
+        # here until a hosted Fork Qualification run has rehearsed them.
+        "across_usdc_arbitrum_base_bridge",
+        "arbitrum_base_bridge_and_lend",
         "uniswap_v3_base_atr_breakout",
         "uniswap_v3_base_rsi",
         "uniswap_v3_base_rsi_lp",

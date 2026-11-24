@@ -79,7 +79,11 @@ def validate_entry(state, operation, before):
         raise DataError(
             "entry_unavailable", "a new bridge requires running mode and reconciled accounting"
         )
-    require_pinned(before.pool, before.target.route.chain.chain_id)
+    route = before.target.route
+    # The source pool as the chain has it now, and the destination pool as resolution
+    # retained it: no destination read, so a destination outage refuses nothing here.
+    require_pinned(before.pool, route.chain.chain_id)
+    require_pinned(route.destination_pool, route.destination_chain)
     if before.pool.deposits_paused:
         raise DataError("deposits_paused", "the Across SpokePool has paused deposits")
     allocation = state.config.allocation(operation.allocation)

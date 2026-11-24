@@ -12,7 +12,7 @@ from typing import Literal
 from pydantic import model_validator
 
 from almanak.caip import AssetType, ChainId
-from almanak.connectors.across.domain import FeeBps, Route, spoke_pool
+from almanak.connectors.across.domain import FeeBps, Route, SpokePoolPin, spoke_pool
 from almanak.connectors.across.observations import PoolState, read_pool, require_pinned
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm import erc20_address
@@ -44,7 +44,8 @@ class MarketSelection(Model):
 
 
 class ResolvedRoute(Model):
-    resolver: Literal["across-route-resolution-v1"] = "across-route-resolution-v1"
+    # v2 retains the destination SpokePool; a route resolved under v1 is resolved again.
+    resolver: Literal["across-route-resolution-v2"] = "across-route-resolution-v2"
     selection: MarketSelection
     block: Block
     asset: Asset
@@ -53,9 +54,8 @@ class ResolvedRoute(Model):
     # until the market is completed there; a route is built only from a completed market.
     destination: Asset | None = None
     destination_block: Block | None = None
-    # The SpokePool that fills on the destination chain, read at the same anchor. It is
-    # held to its pin when the market is completed, not when retained facts are loaded:
-    # a later pin must never make a running deployment's parameters unreadable.
+    # The SpokePool that fills on the destination chain, read at the same anchor. Neither
+    # pool is held to its pin when retained facts are loaded or replayed; see `admit_route`.
     destination_pool: PoolState | None = None
 
     @model_validator(mode="after")
@@ -90,8 +90,9 @@ class ResolvedRoute(Model):
 
     @property
     def route(self) -> Route:
-        if self.destination is None:
+        if self.destination is None or self.destination_pool is None:
             raise ValueError("the received asset of an Across route is not verified on its chain")
+        filling = self.destination_pool
         selection, source = self.selection, self.block.chain
         return Route(
             chain=source,
@@ -100,6 +101,11 @@ class ResolvedRoute(Model):
             destination_asset=selection.destination_asset,
             decimals=self.asset.decimals,
             spoke_pool=self.pool.address,
+            destination_pool=SpokePoolPin(
+                address=filling.address,
+                implementation=filling.implementation,
+                implementation_code_hash=filling.implementation_code_hash,
+            ),
             max_fee_bps=selection.max_fee_bps,
             quote=selection.quote,
         )
@@ -130,7 +136,7 @@ class ResolvedRoute(Model):
 
 def require_anchor(reader, block: Block) -> None:
     if reader.pin_block(block.number) != block:
-        raise DataError("block_mismatch", "Across resolution anchor is no longer canonical")
+        raise DataError("block_mismatch", "an Across resolution anchor is no longer canonical")
 
 
 def resolve_market(reader, selection: MarketSelection, block: Block) -> ResolvedRoute:
@@ -139,31 +145,22 @@ def resolve_market(reader, selection: MarketSelection, block: Block) -> Resolved
     # The reader answers calls only at the block it pinned last.
     require_anchor(reader, block)
     pool = read_pool(reader, spoke_pool(selection.chain).address, block)
-    require_pinned(pool, selection.chain)
     asset = reader.asset(selection.asset, block)
     require_anchor(reader, block)
     return ResolvedRoute(selection=selection, block=block, asset=asset, pool=pool)
 
 
 def complete_market(reader, resolved: ResolvedRoute, block: Block) -> ResolvedRoute:
-    """Verify the received asset and the filling SpokePool at the destination's anchor.
-
-    The source chain cannot read the destination, so this is where the destination pin
-    is held: a route whose destination SpokePool runs another implementation than the
-    reviewed one does not resolve, and no deployment is created over it.
-    """
+    """Read the received asset and the filling SpokePool at the destination's anchor."""
     selection = resolved.selection
     if selection.destination_chain != block.chain.chain_id or reader.chain != block.chain:
         raise DataError(
             "chain_mismatch", "Across completion requires its destination chain and anchor"
         )
-    if reader.pin_block(block.number) != block:
-        raise DataError("block_mismatch", "Across destination anchor is no longer canonical")
+    require_anchor(reader, block)
     pool = read_pool(reader, spoke_pool(selection.destination_chain).address, block)
-    require_pinned(pool, selection.destination_chain)
     destination = reader.asset(selection.destination_asset, block)
-    if reader.pin_block(block.number) != block:
-        raise DataError("block_mismatch", "Across destination anchor is no longer canonical")
+    require_anchor(reader, block)
     return ResolvedRoute(
         **{
             **dict(resolved),
@@ -172,3 +169,18 @@ def complete_market(reader, resolved: ResolvedRoute, block: Block) -> ResolvedRo
             "destination_pool": pool,
         }
     )
+
+
+def admit_route(resolved: ResolvedRoute) -> None:
+    """Hold a freshly resolved route's SpokePools to the reviewed pins.
+
+    First resolution only. `resolve_market` and `complete_market` also replay a running
+    deployment's retained reads, where they verify that the facts follow from the reads
+    and nothing else: held there, a reviewed pin change would refuse the restart of a
+    deployment with a transfer in flight or a standing approval, and trap both. After
+    such a change an existing deployment still restarts, reconciles arrivals and
+    refunds, revokes and closes, and `validate_entry` refuses its new deposits.
+    """
+    require_pinned(resolved.pool, resolved.selection.chain)
+    if resolved.destination_pool is not None:
+        require_pinned(resolved.destination_pool, resolved.selection.destination_chain)

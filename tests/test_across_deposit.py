@@ -358,6 +358,52 @@ def test_a_refused_answer_is_not_asked_again_at_the_same_block(monkeypatch):
     assert len(asked) == 1
 
 
+def test_two_overlapping_preparations_plan_from_one_answer():
+    """Both ask, because neither finds an answer; both get the one retained first."""
+    import threading
+
+    answers, both_asked, given = VenueAnswers(), threading.Barrier(2, timeout=10), []
+
+    def ask():
+        both_asked.wait()
+        given.append(object())
+        return given[-1]
+
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(answers.once("key", ask))) for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert len(given) == 2 and len(results) == 2
+    assert results[0] is results[1] and answers.once("key", ask) is results[0]
+
+
+def test_a_venue_failure_is_never_retained_as_an_answer(monkeypatch):
+    """A transport error or an unreadable body leaves nothing: the next call asks again."""
+    asked = []
+
+    def fetch(target, amount, transport, block_timestamp):
+        asked.append(block_timestamp)
+        if len(asked) == 1:
+            raise DataError("quote_unavailable", "the venue did not answer")
+        if len(asked) == 2:
+            raise DataError("malformed", "the venue's answer is not a quote")
+        return quote()
+
+    monkeypatch.setattr(venue, "fetch", fetch)
+    gateway, funded = backend(), snapshot(allowance=AMOUNT)
+    for kind in ("quote_unavailable", "malformed"):
+        with pytest.raises(DataError) as error:
+            execution.quoted_operation(gateway, state(), INTENT, funded)
+        assert error.value.kind == kind
+    assert execution.quoted_operation(gateway, state(), INTENT, funded) == deposit()
+    assert execution.quoted_operation(gateway, state(), INTENT, funded) == deposit()
+    assert len(asked) == 3
+
+
 def test_the_gateway_retains_a_bounded_number_of_venue_answers():
     answers, asked = VenueAnswers(limit=2), []
 

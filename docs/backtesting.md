@@ -207,8 +207,10 @@ providers for both chains. On each chain this verifies the SpokePool's
 proxy, implementation and code hash against the pin: the source SpokePool with
 the sent asset, and the destination SpokePool with the received asset. A
 destination SpokePool that runs another implementation refuses the route.
-Across declares the model on Arbitrum from 15 August 2026, when that pinned
-implementation was in place, and an earlier window is refused. Preparation after resolution makes no provider
+Across declares the model on Arbitrum from 15 August 2026: the first whole day
+after both pinned implementations were in place, Arbitrum's at 18:24 UTC and
+Base's at 18:32 UTC on 14 August 2026. An earlier window is refused.
+Preparation after resolution makes no provider
 call, and the dataset holds only the frozen statement of the routes, the window
 and the latency: a resumed run cannot change them.
 

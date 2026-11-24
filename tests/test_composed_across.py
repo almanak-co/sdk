@@ -688,27 +688,61 @@ def test_the_composed_bridge_reference_stays_out_of_the_production_rehearsal():
     assert "arbitrum_base_bridge_and_lend" not in production_references()
 
 
-def test_both_bridge_references_are_selected_by_the_declaration_alone(monkeypatch):
-    """Nothing but the source chain's declaration keeps the bridge references out of the
-    production rehearsal and the weekly hosted qualification, and nothing else adds them."""
+def test_the_declaration_and_a_qualifying_run_select_the_bridge_references(monkeypatch):
+    """Two edits put a bridge reference into the production rehearsal: the source chain's
+    declaration, and leaving UNREHEARSED after a hosted run rehearsed it. The switch
+    alone selects neither for the default rehearsal; the hosted qualification names
+    them as its own subjects."""
     from almanak.connectors.across import support
+    from almanak.connectors.support import RunMode
     from scripts.ci import fork_qualification_matrix as matrix
-    from tests.strategy_fork.rehearsal import UNREHEARSED, production_references
+    from tests.strategy_fork import rehearsal
 
     bridges = {"across_usdc_arbitrum_base_bridge", "arbitrum_base_bridge_and_lend"}
     cell = ("across", "eip155:42161")
-    assert not bridges & UNREHEARSED
-    monkeypatch.setattr(support, "PRODUCTION_SOURCES", ())
-    assert not bridges & set(production_references())
+    assert bridges <= rehearsal.UNREHEARSED and support.PRODUCTION_SOURCES == ()
+    assert not bridges & set(rehearsal.production_references())
     assert cell not in matrix.production_references()
+    with pytest.raises(ValueError, match="no production EOA support declared"):
+        rehearsal.production_references(frozenset(bridges))
+
     monkeypatch.setattr(support, "PRODUCTION_SOURCES", support.FORK_SOURCES)
-    assert bridges <= set(production_references())
+    # The switch alone: declared, and still not in the default rehearsal selection.
+    assert all(rehearsal.declares_production(name) for name in bridges)
+    assert not bridges & set(rehearsal.production_references())
+    assert bridges <= set(rehearsal.production_references(frozenset(bridges)))
     weekly = matrix.production_references()
     assert set(weekly[cell]) == bridges
     # The destination chain declares nothing, so it is no cell and owes no reference.
     assert ("across", "eip155:8453") not in weekly
     entries = matrix.matrix(sorted(bridges), rehearsal=True, lifecycle=False)
-    assert all(entry["rehearsal"] and entry["nodes"] for entry in entries)
+    assert all(entry["rehearsal"] and entry["qualify"] and entry["nodes"] for entry in entries)
+
+    # The printed support row is coherent with the modes it now declares.
+    source, destination = support.candidate_support()
+    assert source.modes == (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST)
+    text = " | ".join(source.restrictions)
+    assert "fork runs, production runs and economic backtests only" in text
+    assert "no production run" not in text and "backtests only, as" in text
+    assert "a production run signs the venue's own quote" in text
+    assert "a fork run asks no venue" in text
+    assert destination.modes == () and "no run mode" in " | ".join(destination.restrictions)
+    # Once rehearsed and removed from the list, the default selection holds both.
+    monkeypatch.setattr(rehearsal, "UNREHEARSED", rehearsal.UNREHEARSED - bridges)
+    assert bridges <= set(rehearsal.production_references())
+
+
+def test_the_support_row_states_the_modes_it_declares_and_no_other(monkeypatch):
+    from almanak.connectors.across import support
+
+    source, _ = support.candidate_support()
+    text = " | ".join(source.restrictions)
+    assert "fork runs and economic backtests only" in text and "no production run" in text
+    assert "a production run" not in text
+    monkeypatch.setattr(support, "BACKTEST_STARTS", {})
+    alone = " | ".join(support.candidate_support()[0].restrictions)
+    assert "fork runs only, as the source of a route to eip155:8453; no production run" in alone
+    assert "a backtest models" not in alone
 
 
 def test_the_composed_fork_keeper_settles_transfers_through_the_bridge_component(

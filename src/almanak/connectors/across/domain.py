@@ -61,6 +61,10 @@ class Route(Model):
     # assets, so the received asset must have the same decimals; the quote is held to it.
     decimals: Decimals
     spoke_pool: Address
+    # The destination SpokePool as resolution read it at the destination's anchor. A new
+    # deposit compares it with the pin in code and reads nothing on the destination
+    # chain, so the source keeps working while the destination is unavailable.
+    destination_pool: SpokePoolPin
     # The author's ceiling on the whole bridge fee, in basis points of the amount sent.
     max_fee_bps: FeeBps
     # The one source of the output amount: the venue's own quote. Nothing substitutes it.
@@ -74,7 +78,8 @@ class Route(Model):
             raise ValueError("an Across route requires two different chains")
         if self.spoke_pool != spoke_pool(self.chain.chain_id).address:
             raise ValueError("Across route names another SpokePool than the pinned one")
-        spoke_pool(self.destination_chain)
+        if self.destination_pool.address != spoke_pool(self.destination_chain).address:
+            raise ValueError("Across route names another destination SpokePool than the pinned one")
         if self.asset == evm_network(self.chain.chain_id).wrapped_native:
             # A wrapped native deposit refunds as the wrapped token but can arrive as the
             # native asset, which this scope does not record.

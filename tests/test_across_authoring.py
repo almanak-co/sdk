@@ -12,6 +12,7 @@ from almanak.connectors.across.domain import SPOKE_POOLS
 from almanak.connectors.across.observations import IMPLEMENTATION_SLOT, snapshot
 from almanak.connectors.across.resolution import (
     MarketSelection,
+    admit_route,
     complete_market,
     resolve_market,
 )
@@ -140,9 +141,11 @@ def test_the_snapshot_reads_the_fund_and_the_spoke_pool_at_the_pinned_block():
     assert (USDC.reference, "allowance(address,address)", (SENDER, PIN.address)) in reader.calls
 
 
-def test_resolution_refuses_an_implementation_that_was_not_reviewed():
-    with pytest.raises(DataError) as error:
-        resolve_market(Reader(), selection(), BLOCK)
+def test_a_new_resolution_refuses_an_implementation_that_was_not_reviewed():
+    # The reads resolve, as they must on replay; first resolution holds them to the pin.
+    resolved = resolve_market(Reader(), selection(), BLOCK)
+    with pytest.raises(DataError, match="eip155:42161 runs another implementation") as error:
+        admit_route(resolved)
     assert error.value.kind == "deployment_changed"
 
 
@@ -167,14 +170,43 @@ def test_a_resolved_route_becomes_an_allocation_between_two_accounts(monkeypatch
 def test_a_destination_spoke_pool_that_was_not_reviewed_does_not_resolve(monkeypatch):
     review(monkeypatch)
     unverified = resolve_market(Reader(), selection(), BLOCK)
+    admit_route(unverified)
     for changed in ({"implementation": "0x" + "77" * 20}, {"code": "0x6081"}):
+        read = completed(unverified, **changed)
         with pytest.raises(DataError, match="eip155:8453 runs another implementation") as error:
-            completed(unverified, **changed)
+            admit_route(read)
         assert error.value.kind == "deployment_changed"
     # A route cannot be retained as completed without the pool it was held to.
     resolved = completed(unverified)
+    admit_route(resolved)
+    assert resolved.route.destination_pool == BASE_PIN.model_copy(
+        update={"implementation_code_hash": resolved.destination_pool.implementation_code_hash}
+    )
     with pytest.raises(ValueError, match="destination anchor and pool"):
         type(resolved)(**{**dict(resolved), "destination_pool": None})
+
+
+class Moving(DestinationReader):
+    """A destination whose anchor stops being canonical at its `at`-th pin."""
+
+    def __init__(self, block, at):
+        super().__init__(block)
+        self.at, self.pinned = at, 0
+
+    def pin_block(self, number):
+        self.pinned += 1
+        return self.block if self.pinned != self.at else BLOCK
+
+
+@pytest.mark.parametrize("at", [1, 2])
+def test_a_destination_anchor_is_held_before_and_after_its_reads(monkeypatch, at):
+    review(monkeypatch)
+    unverified = resolve_market(Reader(), selection(), BLOCK)
+    anchor = BLOCK.model_copy(update={"chain": BASE, "number": 30_000_000})
+    with pytest.raises(DataError, match="no longer canonical") as error:
+        complete_market(Moving(anchor, at), unverified, anchor)
+    assert error.value.kind == "block_mismatch"
+    assert complete_market(Moving(anchor, 3), unverified, anchor).destination_block == anchor
 
 
 @pytest.mark.parametrize(

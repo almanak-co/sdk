@@ -10,6 +10,7 @@ reader or encoder over real bytes instead of bytes a fixture constructed.
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from eth_abi import decode
@@ -29,6 +30,7 @@ from almanak.connectors.across.receipts import movement, opened_transfer
 from almanak.connectors.across.relay import parse_reference, relay_hash
 from almanak.gateway.ethereum import DataError
 from almanak.models import AssetAmount, StrategyAccounts
+from tests.across_mainnet_replay import Recorded, backend, deployment
 from tests.across_support import ARBITRUM, BASE, BASE_USDC, USDC, allocation, eoa, parameters
 
 CAPTURES = json.loads(
@@ -47,6 +49,17 @@ def target_for(sender: str, recipient: str, amount: int, **route):
     if route:
         changes["route"] = allocation().route.model_copy(update=route)
     return parameters(allocation(**changes), accounts=accounts).target("move")
+
+
+def config_for(target):
+    """The deployment configuration whose one route `target` is."""
+    accounts = StrategyAccounts(
+        bindings=(
+            eoa("arb", ARBITRUM, target.fund.address),
+            eoa("base", BASE, target.destination_fund.address),
+        )
+    )
+    return parameters(allocation(route=target.route), accounts=accounts)
 
 
 def address(word: bytes) -> str:
@@ -281,3 +294,169 @@ def test_the_signed_arguments_are_the_relay_the_destination_hashes():
     assert (depositor, recipient, sent_token, received_token, sent, offered) == signed[:6]
     assert (relayer, relay[9]) == (signed[7], signed[9])
     assert relay[7] == 42161 and relay[11] == b""
+
+
+# The settlement pages over the reads mainnet really gave.
+
+
+def refund_case(payee: str, total: int, mined_at: int):
+    """A deployment whose source fund is a payee of the real refund execution, holding one
+    transfer of exactly what that execution paid it, proven unfilled and past its fill
+    deadline. The logs, the receipt and every read are real; the transfer is constructed,
+    because the real payee is a relayer and no real deposit of ours was ever refunded."""
+    target = target_for(payee, "0x" + "22" * 20, total)
+    quote = real_deposit().quote.model_copy(
+        update={
+            "input_amount": total,
+            "output_amount": total - 1,
+            "timestamp": mined_at - 7300,
+            "fill_deadline": mined_at - 100,
+        }
+    )
+    operation = DepositOperation(
+        target=target,
+        amount=AssetAmount(asset=USDC, amount=total),
+        quote=quote,
+        quote_time_buffer=3600,
+    )
+    mined = {"deposit_id": 1, "exclusivity_deadline": mined_at - 7290}
+    transfer = opened_transfer(operation, mined).model_copy(update={"unfilled": True})
+    return SimpleNamespace(config=config_for(target), target=target, transfer=transfer)
+
+
+PAGES = CAPTURES["pages"]
+
+
+def same(read, retained) -> bool:
+    """Whether a page's own read states what the earlier, trimmed capture retained."""
+    if isinstance(retained, dict):
+        return all(same(read[name], value) for name, value in retained.items())
+    if isinstance(retained, list):
+        return len(read) == len(retained) and all(map(same, read, retained))
+    return read == retained
+
+
+def real_transfer():
+    operation = real_deposit()
+    _, deposit = movement(DEPOSIT["receipt"], operation, DEPOSIT["block_timestamp"])
+    return operation, opened_transfer(operation, deposit)
+
+
+def test_the_relay_hash_is_the_key_the_base_spoke_pool_holds_as_filled():
+    """A known answer of the contract itself: `fillStatuses` of the hash this connector
+    computes from the deposit, read on Base one block before the fill and after it."""
+    _, transfer = real_transfer()
+    computed = parse_reference(transfer.reference).relay_hash
+    reads = PAGES["fill_status"]
+    reader = Recorded(BASE, reads)
+    fill_block = int(FILL["log"]["blockNumber"], 16)
+    assert (reads["before"], reads["after"]) == (fill_block - 1, fill_block + 10)
+    before = chain.fill_status(
+        reader, POOL_THERE.address, computed, reader.pin_block(reads["before"])
+    )
+    after = chain.fill_status(
+        reader, POOL_THERE.address, computed, reader.pin_block(reads["after"])
+    )
+    assert (before, after) == (0, chain.FILLED)
+    # Another hash is another key: the capture holds no answer for it.
+    with pytest.raises(AssertionError, match="the capture does not hold"):
+        chain.fill_status(
+            reader, POOL_THERE.address, "0x" + "00" * 32, reader.pin_block(reads["after"])
+        )
+
+
+def test_the_arrival_page_finds_and_measures_the_real_fill_through_reconciliation():
+    """The production entry point over Base's own answers: the page starts at the last
+    block not after the quote, filters `FilledRelay` by origin and deposit identifier,
+    ends at the fill, measures the payment and cross-checks the pool's fill status."""
+    operation, transfer = real_transfer()
+    config = config_for(operation.target)
+    reader = Recorded(BASE, PAGES["arrival"])
+    page = settlement.reconcile(backend(config, reader), deployment(config, transfer))
+    reference = parse_reference(transfer.reference)
+    assert page.side == "arrival" and page.transfer == transfer.reference
+    assert page.start.timestamp <= reference.quoted_at
+    assert reader.pin_block(page.start.number + 1).timestamp > reference.quoted_at
+    assert page.end.number == int(FILL["log"]["blockNumber"], 16)
+    assert [same(row, FILL["log"]) for row in page.events] == [True] and not page.expired
+    arrival = page.outcome
+    assert (arrival.fill_type, arrival.tx_hash) == ("fast", FILL["receipt"]["transactionHash"])
+    assert arrival.received.amount == operation.quote.output_amount
+    assert arrival.received.asset == BASE_USDC and same(arrival.receipt, FILL["receipt"])
+    # The log query carried the topic filter, and the status was read at the page's end.
+    kinds = [kind for kind, _ in reader.asked]
+    queries = [json.loads(name) for kind, name in reader.asked if kind == "rpc"]
+    logs = [params[0] for method, params in queries if method == "eth_getLogs"]
+    assert logs and all(
+        query["address"] == POOL_THERE.address
+        and query["topics"]
+        == [chain.FILLED_RELAY_TOPIC, chain.uint_topic(42161), chain.uint_topic(4832241)]
+        for query in logs
+    )
+    status = [json.loads(name) for kind, name in reader.asked if kind == "calls"]
+    assert kinds.count("calls") == 1
+    assert status[0][:3] == [POOL_THERE.address, "fillStatuses(bytes32)", page.end.number]
+    assert status[0][3] == [reference.relay_hash]
+    # The gateway's own re-derivation of the committed page reads the same chain.
+    again = Recorded(BASE, PAGES["arrival"])
+    state = deployment(config, transfer)
+    assert settlement.reconcile(backend(config, again), state, reference=page) == page
+
+
+def test_the_arrival_page_of_another_deposit_finds_nothing_in_the_same_blocks():
+    """With another relay hash the real fill is another relay's and the status differs."""
+    operation, transfer = real_transfer()
+    reference = parse_reference(transfer.reference)
+    forged = transfer.model_copy(
+        update={"reference": f"{reference.deposit_id}:0x{'11' * 32}:{reference.quoted_at}"}
+    )
+    config = config_for(operation.target)
+    reader = Recorded(BASE, PAGES["arrival"])
+    with pytest.raises(AssertionError, match="the capture does not hold: calls"):
+        settlement.reconcile(backend(config, reader), deployment(config, forged))
+
+
+def test_the_refund_page_attributes_a_real_refund_execution_through_reconciliation():
+    """The production entry point over Arbitrum's own answers. The payment, its refund
+    leaf and every read are real. The transfer it is attributed to is constructed."""
+    reads = PAGES["refund"]
+    case = refund_case(reads["payee"], reads["total"], reads["mined_at"])
+    reader = Recorded(ARBITRUM, reads)
+    state = deployment(case.config, case.transfer)
+    page = settlement.reconcile(backend(case.config, reader), state)
+    refund_block = int(REFUND["receipt"]["blockNumber"], 16)
+    assert page.side == "refund" and page.end.number == refund_block
+    assert page.start.timestamp <= reads["mined_at"] - 100 and page.unsolicited is None
+    refund = page.outcome
+    assert refund.transfers == (case.transfer.reference,)
+    assert (refund.returned.asset, refund.returned.amount) == (USDC, reads["total"])
+    assert refund.tx_hash == REFUND["receipt"]["transactionHash"]
+    assert same(refund.receipt, REFUND["receipt"])
+    queries = [json.loads(name) for kind, name in reader.asked if kind == "rpc"]
+    logs = [params[0] for method, params in queries if method == "eth_getLogs"]
+    assert logs and all(
+        query["address"] == USDC.reference
+        and query["topics"][1:]
+        == [chain.address_topic(POOL_HERE.address), chain.address_topic(reads["payee"])]
+        for query in logs
+    )
+    # The deferred-refund read closes the page: the pool holds nothing back for the fund.
+    held = [json.loads(name) for kind, name in reader.asked if kind == "calls"]
+    assert [call[1:3] for call in held] == [["getRelayerRefund(address,address)", refund_block]]
+    again = Recorded(ARBITRUM, reads)
+    assert settlement.reconcile(backend(case.config, again), state, reference=page) == page
+
+
+def test_a_real_refund_of_another_amount_is_retained_as_unattributed():
+    """The same execution, with a transfer of one base unit more: nothing sums to the
+    payment, so it is no outcome and is kept as an unattributed refund payment."""
+    reads = PAGES["refund"]
+    case = refund_case(reads["payee"], reads["total"], reads["mined_at"])
+    other = case.transfer.model_copy(
+        update={"sent": case.transfer.sent.model_copy(update={"amount": reads["total"] + 1})}
+    )
+    reader = Recorded(ARBITRUM, reads)
+    page = settlement.reconcile(backend(case.config, reader), deployment(case.config, other))
+    assert page.outcome is None
+    assert page.unsolicited.amount.amount == reads["total"]
+    assert page.unsolicited.tx_hash == REFUND["receipt"]["transactionHash"]

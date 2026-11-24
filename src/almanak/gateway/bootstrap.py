@@ -229,7 +229,7 @@ def resolve_named_market(reader, market, block, cache) -> MarketFacts:
     key = content_digest(target)
     if key not in cache:
         start = len(reader.evidence)
-        resolved = binding.resolve(reader, target, block)
+        resolved = admitted(binding, binding.resolve(reader, target, block))
         assets = cast(ResolvedMarketFacts, resolved).assets
         symbols = asset_symbols(reader, assets, block)
         cache[key] = (resolved, tuple(reader.evidence[start:]), symbols)
@@ -246,13 +246,20 @@ def resolve_named_market(reader, market, block, cache) -> MarketFacts:
     )
 
 
+def admitted(binding, resolved):
+    """Freshly resolved facts, held to the connector's reviewed code where it states any."""
+    if binding.admit is not None:
+        binding.admit(resolved)
+    return resolved
+
+
 def complete_named_market(reader, facts: MarketFacts, block) -> MarketFacts:
     """Complete a two-chain market on its second chain and retain those reads apart."""
     binding = binding_for(facts.resolved.selection.connector)
     if binding.complete is None:
         raise ValueError("market names a destination chain its connector does not resolve")
     start = len(reader.evidence)
-    resolved = binding.complete(reader, facts.resolved, block)
+    resolved = admitted(binding, binding.complete(reader, facts.resolved, block))
     symbols = asset_symbols(reader, (cast(Any, resolved).destination,), block)
     return MarketFacts(
         name=facts.name,

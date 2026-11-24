@@ -61,6 +61,11 @@ class AuthorBinding:
     # own reader and anchor: `complete(reader, resolved, block)`. The selection names the
     # chain as `destination_chain` and the completed facts retain `destination_block`.
     complete: Callable[..., Model] | None = None
+    # A check of freshly resolved facts against reviewed code, such as a pinned
+    # implementation: `admit(resolved)`. It runs when a market is first resolved or
+    # completed and never on the replay of retained reads, so a later change of the
+    # reviewed code cannot refuse the restart of a running deployment.
+    admit: Callable[[Any], None] | None = None
 
 
 BINDINGS: tuple[AuthorBinding, ...] = (
@@ -163,6 +168,7 @@ BINDINGS: tuple[AuthorBinding, ...] = (
         resolve=across_resolution.resolve_market,
         allocation=across_inputs.AllocationInput,
         complete=across_resolution.complete_market,
+        admit=across_resolution.admit_route,
     ),
 )
 

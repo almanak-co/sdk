@@ -5,7 +5,7 @@ quote. A production rehearsal runs the production gateway against the same kind 
 node under the origin's chain identity. That gateway declares the venue's own API as
 its quote transport, so the rehearsed deposit signs a quote the venue answered, under
 the source `across_api`. The venue times its quotes in the present, so the rehearsal
-moves the forks' clocks there first. In both, no relayer runs: the fill is the
+moves the forks' clocks just ahead of it first. In both, no relayer runs: the fill is the
 scenario's own call of the destination SpokePool.
 """
 
@@ -51,11 +51,23 @@ def settler(node, journal, state=None) -> Settler:
     return kind(Nodes(node), Path(journal.path).parent / "keepers")
 
 
+# How far ahead of the present a rehearsal's forks run. The venue stamps a quote with a
+# recent L1 block's time, some seconds to minutes behind the present, and the gateway
+# refuses a quote stamped after the block it pinned. A fork mines only when the run
+# sends a transaction, so a head set to the present falls behind the venue's clock while
+# the run starts up, and the first quote is then refused as ahead of the pinned block.
+# With this lead the pinned block stays ahead of every quote unless no block is mined
+# for longer than the lead. It is far inside the SpokePool's one-hour quote buffer and
+# leaves the quote's two-hour fill deadline more than the required ten minutes away.
+CLOCK_LEAD_SECONDS = 600
+
+
 def prepare_rehearsal(nodes) -> None:
-    """Move every fork's clock to the present, where the venue times its quotes."""
-    now = int(time.time())
+    """Move every fork's clock to just ahead of the present, where the venue times its
+    quotes. Later blocks keep the lead: the node times them from this one."""
+    ahead = int(time.time()) + CLOCK_LEAD_SECONDS
     for node in nodes.nodes.values():
-        node.rpc("evm_setNextBlockTimestamp", [now])
+        node.rpc("evm_setNextBlockTimestamp", [ahead])
         node.rpc("evm_mine", [])
 
 

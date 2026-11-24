@@ -21,6 +21,7 @@ from tests.test_across_records import (  # noqa: F401
     checkpoint,
     config,
     deposit,
+    mined,
     observed,
     pending,
 )
@@ -89,23 +90,62 @@ def test_a_deposit_past_its_quote_deadline_is_released_on_its_source_chain(confi
     assert Checkpoint.model_validate_json(saved.model_dump_json()) == saved
 
 
-@pytest.mark.parametrize(
-    ("answers", "refusal"),
-    [
-        ({"eth_getTransactionReceipt": {"status": "0x1"}}, "resolved only by its recorded"),
-        ({"eth_getTransactionByHash": {}}, "provider still holds"),
-    ],
-)
-def test_an_expired_deposit_the_chain_may_still_hold_is_not_released(
-    config,  # noqa: F811
-    answers,
-    refusal,
-):
+def test_an_expired_deposit_that_was_mined_is_resolved_by_its_receipt_only(config):  # noqa: F811
+    """The receipt fact is the gateway's own read: the canonical receipt of these bytes."""
     state, attempt = signed(config)
-    late = gateway(config, attempt, attempt.operation.deadline + 1, **answers)
-    late.receipt = lambda p: answers.get("eth_getTransactionReceipt")
-    with pytest.raises(ValueError, match=refusal):
+    head = attempt.operation.deadline + 1
+    receipt = mined(attempt.operation, blockHash=FORK_BLOCK.hash)
+    late = gateway(config, attempt, head, eth_getTransactionReceipt=receipt)
+    assert late.receipt(attempt) == receipt
+    with pytest.raises(ValueError, match="resolved only by its recorded outcome"):
         late.require_releasable(attempt)
+    # A receipt in a block that is not canonical is no receipt, and releases.
+    orphaned = gateway(
+        config, attempt, head, eth_getTransactionReceipt={**receipt, "blockHash": "0x" + "ee" * 32}
+    )
+    assert orphaned.receipt(attempt) is None
+    orphaned.require_releasable(attempt)
+
+
+def test_an_expired_deposit_the_provider_still_holds_is_not_released(config):  # noqa: F811
+    state, attempt = signed(config)
+    held = gateway(config, attempt, attempt.operation.deadline + 1, eth_getTransactionByHash={})
+    with pytest.raises(ValueError, match="provider still holds"):
+        held.require_releasable(attempt)
+
+
+def test_the_gateway_admits_a_release_only_as_the_release_it_proves(config):  # noqa: F811
+    state, attempt = signed(config)
+    local = project(state, FORK_ARB)
+    released = release_pending(local)
+    late = gateway(config, attempt, attempt.operation.deadline + 1)
+    service = gateway_service(local, late)
+    service.validate_pending_resolution(local, released)
+    service.validate_released_record(local, released)
+
+    # A release that keeps its decision would sign the same decision again.
+    kept = released.model_copy(update={"decision": local.decision})
+    with pytest.raises(ValueError, match="released only with its decision"):
+        service.validate_pending_resolution(local, kept)
+    # Before the deadline, or while the nonce is taken, the gateway's own proof refuses.
+    early = gateway_service(local, gateway(config, attempt, attempt.operation.deadline))
+    with pytest.raises(ValueError, match="never sent or past its protocol deadline"):
+        early.validate_pending_resolution(local, released)
+    taken = gateway(config, attempt, attempt.operation.deadline + 1, eth_getTransactionCount=hex(4))
+    with pytest.raises(DataError) as conflict:
+        gateway_service(local, taken).validate_pending_resolution(local, released)
+    assert conflict.value.kind == "nonce_conflict"
+    # A sent attempt stays in `released` until its nonce settles: dropping it is refused,
+    # and so is a record that names another attempt.
+    dropped = released.model_copy(update={"released": ()})
+    with pytest.raises(ValueError, match="retained until an attempt at their nonce settles"):
+        service.validate_released_record(local, dropped)
+    other = attempt.model_copy(update={"nonce": attempt.nonce + 1})
+    with pytest.raises(ValueError, match="retained until an attempt at their nonce settles"):
+        service.validate_released_record(local, released.model_copy(update={"released": (other,)}))
+    # With nothing pending, the record does not change.
+    with pytest.raises(ValueError, match="retained until an attempt at their nonce settles"):
+        service.validate_released_record(released, dropped)
 
 
 def test_a_deposit_whose_nonce_was_taken_stops_with_a_conflict(config):  # noqa: F811

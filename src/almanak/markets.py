@@ -100,6 +100,8 @@ def resolution(binding, reader, head, market) -> dict:
     """The market as its connector resolves it: the config entry is its market selection."""
     selection = binding.selection.model_validate_json(json.dumps(market))
     resolved = binding.resolve(reader, selection, head)
+    if binding.admit is not None:
+        binding.admit(resolved)
     return resolved.summary() if hasattr(resolved, "summary") else resolved.model_dump(mode="json")
 
 
