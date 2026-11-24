@@ -138,6 +138,59 @@ calculator as other swaps. Recentring is bounded by the allocation's inventory,
 as in live execution. `historical_path` backtests and composed
 strategies refuse band allocations.
 
+### Bridges
+
+A bridge is modeled, not replayed. The model reads no history and asks no
+venue, so a backtest of a bridge needs no bridge data and every amount it
+reports is labeled `modeled`.
+
+```yaml
+execution:
+  latency: 1s
+  models:
+    bridge_model: full_fee_ceiling_fixed_latency
+data:
+  arrival_latency_seconds: 30s
+costs:
+  kind: excluded
+```
+
+Both settings are required and nothing defaults them. In a composed backtest
+they sit under the connector's name: `execution.models.across`,
+`data.connectors.across` and `costs.across`.
+
+- **Fee.** Every bridge pays the market's whole `max_fee_bps`: the amount
+  received is the amount sent less `amount * max_fee_bps // 10000`. This is the
+  most a live bridge may cost, not a measured fee. It stands in for every
+  relayer cost, and no destination gas is charged.
+- **Arrival.** The deposit debits the source account when it executes, under
+  the usual `execution.latency`. The destination account is credited
+  `arrival_latency_seconds` later, and `on_outcome` receives an
+  `ArrivalResult` then. The latency is a stated assumption, not a measured
+  fill time.
+- **In flight.** Between the two the value is in neither balance and cannot be
+  spent. The decision input shows the transfer with what was sent and offered
+  and no received amount, as a live run does.
+- **No refund.** Every transfer arrives. Unfilled transfers, refunds and slow
+  fills are not modeled, so a strategy's refund path is not exercised.
+- **End of the window.** A run that ends with a transfer in flight reports it
+  as in flight, with its sent amount and no received amount. With
+  `end_policy: teardown` the run waits for the arrival and sends nothing new;
+  if `cleanup` ends first the run fails as unresolved, so make `cleanup` longer
+  than the latency.
+- **Gas.** `costs` is `excluded`, or `fixed_native` with a `bridge` amount
+  charged on the source chain for each bridge. `backtest recent` has no
+  measured gas reference for Across and refuses a strategy that bridges with
+  `unmeasured_gas`.
+- **Approvals.** The model keeps none, so a backtest never serves `revoke`.
+
+The route is still resolved at the window start through the operator's
+providers for both chains, which verifies the pinned SpokePool and both assets.
+Across declares the model on Arbitrum from 15 August 2026, when that pinned
+implementation was in place. Preparation after resolution makes no provider
+call, and the dataset holds only the frozen statement of the routes, the window
+and the latency: a resumed run cannot change them.
+
 ### Results in the funding asset
 
 An economic Uniswap V3, PancakeSwap V3 or Aerodrome Slipstream run whose

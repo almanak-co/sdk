@@ -74,6 +74,7 @@ AERODROME_VARIANTS = {
     for style in ("trading", "lp")
 }
 MODELS = {
+    (ConnectorId("across"), "economic"): "across-full-fee-ceiling-fixed-latency-v1",
     (ConnectorId("aerodrome"), "economic"): "aerodrome-economic-integer-fixed-indices-v1",
     (
         ConnectorId("aerodrome_slipstream"),
@@ -195,7 +196,7 @@ REFERENCES = {
     "uniswap_v4_ethereum_native_trading": (SWAP, ("economic",)),
     "uniswap_v4_robinhood_lp": (LP, ("economic",)),
     "uniswap_v4_robinhood_lp_band": (BAND_LP, ()),
-    "across_usdc_arbitrum_base_bridge": (BRIDGE, ()),
+    "across_usdc_arbitrum_base_bridge": (BRIDGE, ("economic",)),
 }
 # Candidate references remain in the bench denominator. They cannot satisfy a
 # declared obligation or turn a full run green before promotion and proof mapping.
@@ -446,6 +447,9 @@ def history_cases(common, actions, mode, backtest_file=""):
         and mode == "economic"
     ):
         selected = tuple(a for a in actions if a != "revoke_exchange")
+    # The bridge model keeps no approval, so a backtest never serves a revoke.
+    if common["connector"] == ConnectorId("across"):
+        selected = tuple(a for a in actions if a != "revoke_bridge")
     for policy in ("pinned", "fresh", "native"):
         suffix = "/vendor" if backtest_file else ""
         yield Case(

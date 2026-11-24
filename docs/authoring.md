@@ -558,9 +558,15 @@ ask it: no relayer quotes a fork. A fork gateway constructs the quote instead,
 from a stated fee of one basis point and the fork's own block time, and the
 same checks admit it. Reports and dashboards show its source as
 `across_fork_constructed` beside each transfer. Such a quote says nothing about
-what the venue would have quoted. Across declares fork runs only today, so
-every run an author can start signs a constructed quote; no production run
-and no backtest is declared.
+what the venue would have quoted. Across declares fork runs and economic
+backtests today, and no production run, so every transaction an author can
+sign carries a constructed quote. A backtest asks no venue either: it
+[models the bridge](backtesting.md#bridges).
+
+A backtest calls `decide` once with the observations of every chain, where a
+fork or live run calls it once per chain. A strategy that chooses its step from
+the allocation it sees should try the destination's step when the source's asks
+for nothing, as the composed bridge reference does.
 
 `on_outcome` receives three kinds of result for a bridge:
 
@@ -618,6 +624,7 @@ def on_outcome(ctx):
     if isinstance(ctx.result, ArrivalResult):
         return state(ctx).updated(received=ctx.result.received.amount)
     ...
+
 
 def decide(ctx):
     memory = state(ctx)

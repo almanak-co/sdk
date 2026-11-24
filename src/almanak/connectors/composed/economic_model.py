@@ -149,7 +149,7 @@ def arrivals(event):
     return tuple(
         arrived
         for component in event.components
-        if component.connector == ConnectorId("across")
+        if component.transition.result.kind == "bridge_arrivals"
         for arrived in component.transition.result.arrivals
     )
 

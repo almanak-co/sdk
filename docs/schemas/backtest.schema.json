@@ -46,6 +46,9 @@
     },
     {
       "$ref": "hyperliquid-economic.schema.json"
+    },
+    {
+      "$ref": "across-economic.schema.json"
     }
   ]
 }
