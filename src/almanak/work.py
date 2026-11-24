@@ -73,6 +73,7 @@ def project(state, chain):
             **request_fields(state, chain),
             **scoped_fields(state, chain),
             **transfer_fields(state, chain),
+            **inbound_fields(state, chain),
             "work": (),
             "scheduler_cursor": 0,
             "initialized": work.initialized,
@@ -132,6 +133,27 @@ def transfer_fields(state, chain, changed=None):
     if changed is None:
         return {"transfers": visible(state.transfers, chain)}
     return {"transfers": merged(state.transfers, changed.transfers, chain)}
+
+
+def inbound_fields(state, chain):
+    """Wallet assets of this chain that another chain's unrecorded bridge work delivers into.
+
+    A deposit another chain has planned or signed can be mined, and filled here, before
+    its outcome opens the transfer. Until then this chain's wallet may hold tokens no
+    record names yet. The field exists only in a chain's view and is never retained.
+    """
+    if "inbound" not in type(state).model_fields:
+        return {}
+    from almanak.bridge_intents import arrival_wallet
+
+    keys = (
+        arrival_wallet(getattr(getattr(attempt, "operation", None), "target", None))
+        for work in state.work
+        if work.chain != chain
+        for attempt in (work.plan, work.pending)
+        if attempt is not None
+    )
+    return {"inbound": tuple(dict.fromkeys(k for k in keys if k and k.chain == chain))}
 
 
 def reopened(works, transfers):

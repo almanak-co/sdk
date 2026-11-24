@@ -3,7 +3,7 @@
 from almanak.connectors.composed.codec import codec
 from almanak.connectors.composed.execution import ComposedExecution
 from almanak.connectors.composed.fork import ComposedFork
-from almanak.connectors.composed.lifecycle import ComposedLifecycle
+from almanak.connectors.composed.lifecycle import ComposedLifecycle, outcome_target
 from almanak.connectors.composed.permissions import ComposedPermissions
 from almanak.connectors.composed.requests import ComposedExternalEffects, ComposedRequests
 from almanak.connectors.interfaces import Connector
@@ -11,7 +11,7 @@ from almanak.connectors.target_routing import connector_for_target
 
 
 def effects(outcome):
-    binding = connector_for_target(outcome.after.target)
+    binding = connector_for_target(outcome_target(outcome))
     if binding.execution_effects is None:
         raise ValueError("connector has no verified execution cash effects")
     return binding.execution_effects(outcome)

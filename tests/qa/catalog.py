@@ -485,6 +485,8 @@ def catalog(root=ROOT):
                 "tests/strategy_fork/test_multichain_outages.py",
                 "tests/strategy_fork/test_production_rehearsals.py",
                 *(f"{ACROSS_PROOFS}::{name}" for name in ACROSS_FAULT_PROOFS),
+                # The composed bridge reference stage by stage, and its refund.
+                COMPOSED_BRIDGE_PROOFS,
             ),
         ),
         Case(id="offline/support-refusals", lane="pytest", nodes=("tests/qa/test_support.py",)),
@@ -854,6 +856,7 @@ def curve_robinhood_model_cases():
 
 
 ACROSS_PROOFS = "tests/strategy_fork/test_across_bridge.py"
+COMPOSED_BRIDGE_PROOFS = "tests/strategy_fork/test_composed_bridge.py"
 # The supervised proofs that claim no action of their own: a refund, a restart and an outage.
 ACROSS_FAULT_PROOFS = (
     "test_an_unfilled_transfer_is_refunded_only_after_the_destination_proves_it",

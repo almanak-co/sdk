@@ -260,7 +260,7 @@ def test_composed_caller_forwards_the_snapshot_to_inventory_validation(monkeypat
 
     _, before, operation = full_repayment()
     inventory = (SimpleNamespace(key=wallet_key(operation.target, LOAN), amount=119_950),)
-    state = SimpleNamespace(inventory=inventory, outcomes=(), owned=())
+    state = SimpleNamespace(inventory=inventory, outcomes=(), owned=(), transfers=(), inbound=())
     # The composed caller builds a fresh connector per call, so patch the adapter class.
     adapter = type(composed.connector_for_target(operation.target).execution)
     forwarded = {}
@@ -278,6 +278,8 @@ def test_composed_caller_forwards_the_snapshot_to_inventory_validation(monkeypat
         inventory=(SimpleNamespace(key=inventory[0].key, amount=100_000),),
         outcomes=(),
         owned=(),
+        transfers=(),
+        inbound=(),
     )
     composed.ComposedExecution.validate_operation(None, short, operation, before)
     _, unfunded, _ = full_repayment(wallet=100_000)

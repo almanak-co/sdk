@@ -3,12 +3,14 @@
 from datetime import UTC, datetime
 
 from eth_utils import keccak
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from almanak.connectors.across.domain import Target, Uint32, Uint256, spoke_pool
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm import native_asset
+from almanak.lending_intents import OwnedCash
 from almanak.models import Account, Address, AssetAmount, Block, Hash32, Model, address
+from almanak.transfers import Transfer
 
 # EIP-1967: keccak("eip1967.proxy.implementation") - 1.
 IMPLEMENTATION_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
@@ -56,6 +58,12 @@ class Ownership(Model):
     """A bridge allocation holds nothing in the venue: value in flight is a transfer."""
 
     target: Target
+    # The source fund's owned cash of the sent asset, and the allocation's transfers not
+    # yet arrived or refunded. Only composed decision input carries them; retained
+    # records leave them absent. Value in flight is in neither wallet's cash, and a
+    # transfer states no received amount before its arrival is measured.
+    inventory: OwnedCash = None
+    in_flight: tuple[Transfer, ...] = Field(default=(), exclude_if=lambda value: not value)
 
     @property
     def empty(self):

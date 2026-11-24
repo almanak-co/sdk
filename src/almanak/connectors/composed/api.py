@@ -67,6 +67,15 @@ class Actions:
         """
         return self.component(name).set_collateral(name, enabled)
 
+    def bridge(self, name, amount):
+        """Route `bridge` to the component connector that owns allocation `name`.
+
+        Component: across. The amount leaves owned cash of the source account when the
+        deposit is mined, and is owned cash of the destination account only once its
+        arrival is measured there.
+        """
+        return self.component(name).bridge(name, amount)
+
     def swap(self, name, *, exit=False):
         """Route `swap` to the component connector that owns allocation `name`.
 
@@ -119,7 +128,8 @@ class Actions:
     def revoke(self, name):
         """Route `revoke` to the component connector that owns allocation `name`.
 
-        Components: uniswap_v3, pancakeswap_v3, aerodrome, aerodrome_slipstream, curve and gmx_v2.
+        Components: uniswap_v3, pancakeswap_v3, aerodrome, aerodrome_slipstream, curve, gmx_v2
+        and across.
         """
         return self.component(name).revoke(name)
 

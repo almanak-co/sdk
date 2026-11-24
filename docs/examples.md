@@ -47,6 +47,7 @@ it; the listing never loads or runs a strategy and does not establish support.
 | [Aave V3 health-factor-managed borrow](https://github.com/almanak-co/sdk/tree/main/strategies/aave_v3_arbitrum_managed_borrow) | Arbitrum | Repay or borrow to a target health factor inside a band whose repay trigger sits above the gateway floor | Intermediate |
 | [GMX V2 price stop](https://github.com/almanak-co/sdk/tree/main/strategies/gmx_v2_arbitrum_price_stop) | Arbitrum | One perpetual position closed at a stop-loss or take-profit from one-minute pool closes | Intermediate |
 | [Across USDC bridge](https://github.com/almanak-co/sdk/tree/main/strategies/across_usdc_arbitrum_base_bridge) | Arbitrum to Base | Two accounts on two chains, one bridge, a decision per chain, and arrival or refund recorded from `on_outcome`; fork runs only | Intermediate |
+| [Across bridge, then Compound V3 supply](https://github.com/almanak-co/sdk/tree/main/strategies/arbitrum_base_bridge_and_lend) | Arbitrum to Base | Composed bridge and lending over two accounts: owned inventory of both accounts, value in flight in neither, and a supply of exactly the measured arrival; fork runs only | Advanced |
 
 Start with the Uniswap trading reference when learning the hook contract. It has
 one account, market and allocation, and its durable state is a single purchase

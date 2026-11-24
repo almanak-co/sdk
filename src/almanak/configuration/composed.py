@@ -12,6 +12,7 @@ from almanak.configuration.parameter_codec import AuthorBase
 from almanak.connectors.aave_v3.models import Allocation as LendingAllocation
 from almanak.connectors.aave_v4.models import Allocation as AaveV4Allocation
 from almanak.connectors.aave_v4.models import DebtAllocation as AaveV4Debt
+from almanak.connectors.across.models import Allocation as AcrossAllocation
 from almanak.connectors.aerodrome.models import Allocation as AerodromeAllocation
 from almanak.connectors.aerodrome_slipstream.models import Allocation as SlipstreamAllocation
 from almanak.connectors.compound_v3.models import Allocation as CompoundAllocation
@@ -49,6 +50,7 @@ Allocation = (
     | GmxAllocation
     | GmxSwapAllocation
     | GmxLiquidityAllocation
+    | AcrossAllocation
 )
 
 
@@ -111,7 +113,7 @@ class Parameters(AuthorGas):
             parameter_type,
         )
 
-        accounts = {a.account for a in items}
+        accounts = named_accounts(items)
         return parameter_type(identity).model_validate(
             {
                 "decision_trigger": self.decision_trigger,
@@ -128,7 +130,7 @@ class Parameters(AuthorGas):
         names = [item.name for item in self.allocations]
         if len(set(names)) != len(names):
             raise ValueError("allocation names must be unique across connectors")
-        if {a.account for a in self.allocations} != {b.name for b in self.accounts.bindings}:
+        if named_accounts(self.allocations) != {b.name for b in self.accounts.bindings}:
             raise ValueError("configured markets must identify every named fund")
         # A composed configuration is a strategy's or a backtest's, never a direct action's.
         refuse_adoption(self.allocations)
@@ -136,3 +138,9 @@ class Parameters(AuthorGas):
         # never separately persisted or passed to additional strategy hooks.
         _ = self.parameter_components
         return self
+
+
+def named_accounts(allocations) -> set[str]:
+    """Every fund an allocation names: its own, and the one a bridge sends to."""
+    names = {a.account for a in allocations}
+    return names | {a.destination_account for a in allocations if hasattr(a, "destination_account")}

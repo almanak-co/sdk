@@ -1,0 +1,56 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Author choices only. Providers, account bindings and the fork fixture are
+# operator inputs: examples/operators/arbitrum_base_bridge_and_lend.fork.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the strategy bridges, once, in USDC.
+    bridge_quantity: '100'
+  allocations:
+    move:
+      market: usdc_to_base
+      # The account that sends, on the market's chain.
+      account: arbitrum_fund
+      # The account that receives, on the market's destination chain.
+      destination_account: base_fund
+      capital: '100'
+      minimum_native_balance: '0.0001'
+    earn:
+      market: earn
+      # The receiving account lends what arrived; it starts with nothing to supply.
+      account: base_fund
+      minimum_native_balance: '0'
+markets:
+  # One direction. Bridging back is another market.
+  usdc_to_base:
+    connector: across
+    chain: eip155:42161
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+    destination_chain: eip155:8453
+    destination_asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+    # The most the whole bridge may cost, in basis points of the amount sent.
+    max_fee_bps: 10
+    # Where the received amount comes from: Across's own quote. Nothing substitutes it.
+    quote: across_api
+  earn:
+    connector: compound_v3
+    chain: eip155:8453
+    comet: '0xb125e6687d4313864e53df431d5425969c15eb2f'
+    asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+accounts:
+  arbitrum_fund:
+    chain: eip155:42161
+  base_fund:
+    chain: eip155:8453
+# Owned cash of each account. The bridged amount is in neither entry while it is in
+# flight: it leaves the first when the deposit is mined and joins the second only when
+# the arrival is measured.
+inventory:
+- account: arbitrum_fund
+  balance:
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+    quantity: '100'
+- account: base_fund
+  balance:
+    asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+    quantity: '0'

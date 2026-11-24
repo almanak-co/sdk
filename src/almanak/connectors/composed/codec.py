@@ -8,6 +8,7 @@ from pydantic import TypeAdapter
 from almanak.configuration.composed import Parameters
 from almanak.connectors.aave_v3.observations import Snapshot as LendingSnapshot
 from almanak.connectors.aave_v4.models import LendingSnapshot as AaveV4Snapshot
+from almanak.connectors.across.observations import Snapshot as AcrossSnapshot
 from almanak.connectors.aerodrome.observations import Snapshot as AerodromeSnapshot
 from almanak.connectors.aerodrome_slipstream.observations import Snapshot as SlipstreamSnapshot
 from almanak.connectors.composed import state
@@ -59,6 +60,7 @@ def codec():
             | CompoundSnapshot
             | CurveSnapshot
             | GmxSnapshot
+            | AcrossSnapshot
         ),
         intent=state.Intent,
         decision=state.Decision,

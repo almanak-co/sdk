@@ -6,6 +6,7 @@ from almanak.capabilities import CapabilityCodec, CapabilitySet
 from almanak.configuration.composed import Parameters
 from almanak.connectors.aave_v3.authority import ReserveCapability
 from almanak.connectors.aave_v4.models import AaveCapability
+from almanak.connectors.across.authority import RouteCapability as AcrossCapability
 from almanak.connectors.aerodrome.models import Capability as AerodromeCapability
 from almanak.connectors.aerodrome_slipstream.models import Capability as SlipstreamCapability
 from almanak.connectors.composed.models import Config, OwnedParameters
@@ -39,6 +40,7 @@ Capabilities = CapabilitySet[
     | GmxCapability
     | GmxExchangeCapability
     | GmxLiquidityCapability
+    | AcrossCapability
 ]
 
 
