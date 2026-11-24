@@ -39,9 +39,40 @@ from almanak.transaction_family import (
 
 # Attempts awaiting revalidation are few; older readings fall back to a fresh read.
 NODE_READINGS = 16
+# Venue answers awaiting the verification of their plan; older ones are asked again.
+VENUE_ANSWERS = 16
 # Signing needs at least 1/DEADLINE_MARGIN_DIVISOR of the allocation's `deadline_seconds`
 # left on a deadline-bound operation, so inclusion latency cannot outlast the deadline.
 DEADLINE_MARGIN_DIVISOR = 2
+
+
+class VenueAnswers:
+    """A gateway's own answers of a venue, each asked once while it is retained.
+
+    A venue's answer is not block-addressable: asking again gives another. The
+    verification of a reserved plan prepares the same decision at the same block again
+    and must arrive at the same plan, so it reuses this gateway's own answer. A caller
+    never supplies one. An answer no longer retained, as after a gateway restart between
+    a preparation and its reservation, is asked again: the submitted plan then differs
+    and is refused before anything is signed, and a later preparation makes a new plan.
+    The answer is not authority: admission runs on every preparation, retained or not.
+    """
+
+    def __init__(self, limit: int = VENUE_ANSWERS):
+        self.limit = limit
+        self.answers: dict[object, object] = {}
+        self.lock = threading.Lock()
+
+    def once(self, key, ask):
+        with self.lock:
+            if key in self.answers:
+                return self.answers[key]
+        answer = ask()
+        with self.lock:
+            self.answers[key] = answer
+            while len(self.answers) > self.limit:
+                self.answers.pop(next(iter(self.answers)))
+        return answer
 
 
 def plan_operation(gateway, state, intent, before):
@@ -75,6 +106,7 @@ class EvmGateway:
         # this gateway's own reading; a caller never supplies it.
         self.node_readings: dict[tuple[str, str], int] = {}
         self.node_readings_lock = threading.Lock()
+        self.venue_answers = VenueAnswers()
         self.authority_reads: dict[tuple[str, str], ReadPlan] = {}
         # A provider's transient read failure, such as a just-mined receipt block that a
         # lagging backend does not yet serve, is re-sent within a short budget. A local fork

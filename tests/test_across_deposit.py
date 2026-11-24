@@ -28,6 +28,7 @@ from almanak.connectors.across.receipts import (
     opened_transfer,
 )
 from almanak.gateway.ethereum import DataError
+from almanak.gateway.execution import VenueAnswers
 from tests.across_support import (
     AMOUNT,
     BASE,
@@ -274,9 +275,12 @@ def test_an_approval_receipt_names_the_exact_spender_and_bound():
         movement(granted, RevokeOperation(target=TARGET, final=True), MINED_AT)
 
 
-def backend():
+def backend(answers=None):
     return SimpleNamespace(
-        config=CONFIG, guard=lambda: None, venue_transports=execution.venue_transports()
+        config=CONFIG,
+        guard=lambda: None,
+        venue_transports=execution.venue_transports(),
+        venue_answers=answers or VenueAnswers(),
     )
 
 
@@ -296,6 +300,77 @@ def test_the_gateway_asks_the_venue_only_for_the_deposit(monkeypatch):
     assert planned == deposit() and asked == [(TARGET, AMOUNT, NOW)] * 2
     stale = execution.quoted_operation(backend(), state(), INTENT, snapshot(allowance=1))
     assert stale == RevokeOperation(target=TARGET, final=False) and len(asked) == 2
+
+
+def changing_venue(monkeypatch):
+    """A venue that answers each request differently, as the real one does."""
+    asked = []
+
+    def fetch(target, amount, transport, block_timestamp):
+        asked.append(block_timestamp)
+        return quote(outputAmount=str(999_897_038 - len(asked)))
+
+    monkeypatch.setattr(venue, "fetch", fetch)
+    return asked
+
+
+def test_a_plan_prepared_again_at_its_block_reads_the_gateways_own_answer(monkeypatch):
+    """The gateway verifies a reserved plan by preparing it again. A second answer of
+    the venue would differ and refuse every deposit, so the first one is reused."""
+    asked = changing_venue(monkeypatch)
+    gateway = backend()
+    funded = snapshot(allowance=AMOUNT)
+    planned = execution.quoted_operation(gateway, state(), INTENT, funded)
+    assert execution.quoted_operation(gateway, state(), INTENT, funded) == planned
+    assert len(asked) == 1
+    # Another block, another decision and another amount are other questions.
+    later = funded.model_copy(
+        update={"block": funded.block.model_copy(update={"hash": "0x" + "cd" * 32})}
+    )
+    assert execution.quoted_operation(gateway, state(), INTENT, later) != planned
+    other = SimpleNamespace(intent=INTENT, identity="1" * 32)
+    assert execution.quoted_operation(gateway, state(decision=other), INTENT, funded) != planned
+    assert len(asked) == 3
+
+
+def test_a_gateway_without_the_answer_asks_again_and_arrives_at_another_plan(monkeypatch):
+    """After a gateway restart the reserved plan no longer verifies: it is refused, and
+    the next preparation makes a new one. The caller never supplies the answer."""
+    asked = changing_venue(monkeypatch)
+    funded = snapshot(allowance=AMOUNT)
+    planned = execution.quoted_operation(backend(), state(), INTENT, funded)
+    assert execution.quoted_operation(backend(), state(), INTENT, funded) != planned
+    assert len(asked) == 2
+
+
+def test_a_refused_answer_is_not_asked_again_at_the_same_block(monkeypatch):
+    asked = []
+
+    def fetch(target, amount, transport, block_timestamp):
+        asked.append(block_timestamp)
+        return quote(outputAmount="1")
+
+    monkeypatch.setattr(venue, "fetch", fetch)
+    gateway = backend()
+    for _ in range(2):
+        with pytest.raises(DataError, match="exceeds the ceiling"):
+            execution.quoted_operation(gateway, state(), INTENT, snapshot())
+    assert len(asked) == 1
+
+
+def test_the_gateway_retains_a_bounded_number_of_venue_answers():
+    answers, asked = VenueAnswers(limit=2), []
+
+    def ask(name):
+        asked.append(name)
+        return name.upper()
+
+    assert [answers.once(k, lambda k=k: ask(k)) for k in "abab"] == ["A", "B", "A", "B"]
+    assert asked == ["a", "b"]
+    # A third key drops the oldest, which is then asked again.
+    assert answers.once("c", lambda: ask("c")) == "C"
+    assert answers.once("a", lambda: ask("a")) == "A"
+    assert asked == ["a", "b", "c", "a"]
 
 
 def test_a_quote_above_the_ceiling_is_refused_before_anything_is_planned(monkeypatch):
@@ -539,6 +614,7 @@ def test_the_gateway_plans_through_the_quote_hook_only_where_one_exists(monkeypa
         config=CONFIG,
         guard=lambda: None,
         venue_transports=execution.venue_transports(),
+        venue_answers=VenueAnswers(),
     )
     planned = plan_operation(quoting, state(), INTENT, snapshot(allowance=AMOUNT))
     assert planned == deposit()

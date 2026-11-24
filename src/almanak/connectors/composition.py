@@ -78,9 +78,10 @@ def connector_for(config):
 
         return hyperliquid()
 
+    from almanak.connectors.across.fork import ForkConfig as AcrossForkConfig
     from almanak.connectors.across.models import Parameters as AcrossParameters
 
-    if isinstance(config, AcrossParameters):
+    if isinstance(config, (AcrossParameters, AcrossForkConfig)):
         from almanak.connectors.across.connector import connector as across
 
         return across()
@@ -237,6 +238,10 @@ def author_configuration_from_json(value):
         from almanak.connectors.compound_v3.fork import ForkConfig as CompoundForkConfig
 
         return CompoundForkConfig.model_validate_json(value)
+    if kind == "across":
+        from almanak.connectors.across.fork import ForkConfig as AcrossForkConfig
+
+        return AcrossForkConfig.model_validate_json(value)
     if kind == "aerodrome":
         from almanak.connectors.aerodrome.fork import ForkConfig as AerodromeForkConfig
 

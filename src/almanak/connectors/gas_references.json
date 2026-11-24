@@ -87,6 +87,48 @@
       }
     },
     {
+      "connector": "across",
+      "chain": "eip155:42161",
+      "profile": "eoa",
+      "action": "approve",
+      "gas_used": 55437,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "across-rehearsal",
+        "transaction": "0xe6e3234d4e9101764fda6d8052a464c37d20186c0c534178662a58eb30a9cd14",
+        "block": 526777553,
+        "block_timestamp": 1795509045
+      }
+    },
+    {
+      "connector": "across",
+      "chain": "eip155:42161",
+      "profile": "eoa",
+      "action": "deposit",
+      "gas_used": 73585,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "across-rehearsal",
+        "transaction": "0x01c7a8552997d77360d56d08381995155b03f0385f7cb5dc1f0f0df837acc171",
+        "block": 526777554,
+        "block_timestamp": 1795509056
+      }
+    },
+    {
+      "connector": "across",
+      "chain": "eip155:42161",
+      "profile": "eoa",
+      "action": "revoke",
+      "gas_used": 33501,
+      "source": {
+        "kind": "fork_receipt",
+        "run": "across-revoke",
+        "transaction": "0x65b516e17eae9073a49820ab6dc93da29527aede183e7ad6e7ba262388f9a98b",
+        "block": 526777552,
+        "block_timestamp": 1795429432
+      }
+    },
+    {
       "connector": "gmx_v2",
       "chain": "eip155:42161",
       "profile": "safe_roles",

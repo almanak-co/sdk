@@ -688,6 +688,29 @@ def test_the_composed_bridge_reference_stays_out_of_the_production_rehearsal():
     assert "arbitrum_base_bridge_and_lend" not in production_references()
 
 
+def test_both_bridge_references_are_selected_by_the_declaration_alone(monkeypatch):
+    """Nothing but the source chain's declaration keeps the bridge references out of the
+    production rehearsal and the weekly hosted qualification, and nothing else adds them."""
+    from almanak.connectors.across import support
+    from scripts.ci import fork_qualification_matrix as matrix
+    from tests.strategy_fork.rehearsal import UNREHEARSED, production_references
+
+    bridges = {"across_usdc_arbitrum_base_bridge", "arbitrum_base_bridge_and_lend"}
+    cell = ("across", "eip155:42161")
+    assert not bridges & UNREHEARSED
+    monkeypatch.setattr(support, "PRODUCTION_SOURCES", ())
+    assert not bridges & set(production_references())
+    assert cell not in matrix.production_references()
+    monkeypatch.setattr(support, "PRODUCTION_SOURCES", support.FORK_SOURCES)
+    assert bridges <= set(production_references())
+    weekly = matrix.production_references()
+    assert set(weekly[cell]) == bridges
+    # The destination chain declares nothing, so it is no cell and owes no reference.
+    assert ("across", "eip155:8453") not in weekly
+    entries = matrix.matrix(sorted(bridges), rehearsal=True, lifecycle=False)
+    assert all(entry["rehearsal"] and entry["nodes"] for entry in entries)
+
+
 def test_the_composed_fork_keeper_settles_transfers_through_the_bridge_component(
     monkeypatch,
     config,  # noqa: F811

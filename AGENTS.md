@@ -425,6 +425,11 @@ independently.
   `destination_account` on the destination chain.
 - The SpokePool is pinned per chain by proxy address, implementation address
   and implementation code hash. Another implementation refuses new deposits.
+  Resolution reads and holds both pools to their pins: the source pool at the
+  source anchor and the destination pool at the destination anchor, where
+  another implementation refuses the route. The destination pool's read is
+  retained with the completed route. A later change of the pin in code does
+  not make retained parameters unreadable.
 - The deposit's quote timestamp is its calldata deadline: the SpokePool reverts
   a deposit mined later than that timestamp plus its own quote buffer, which is
   read at the planning block. Expired signed deposits are released under the
@@ -701,6 +706,47 @@ independently.
 - Proposed, not accepted: the composed fork keeper used by `almanak test` runs
   settles a composed deployment's transfers in flight beside GMX requests. It
   is covered at component level only; no fork run exercises it.
+- Proposed, not accepted: the venue answer rule. A venue's answer is not
+  block-addressable: asked twice, the venue names another relayer, amount or
+  time. The gateway verifies a reserved plan by preparing it again, so it keeps
+  its own answer in memory, by venue, decision, pinned block, target and
+  amount, and reads that for the same question. A caller never supplies an
+  answer. Admission runs on every preparation, retained answer or not. An
+  answer lost with the gateway process is asked again, the submitted plan then
+  differs and is refused before anything is signed, the coordinator stops with
+  `invalid_request`, and a resumed run plans afresh. Without this rule no
+  deposit quoted by the venue's API can be recorded. The answer is not
+  authority and is never durable state.
+- Current contract: the readers are held to known answers from Arbitrum and
+  Base mainnet, captured read-only on 24 November 2026 and kept in
+  `tests/fixtures/across-mainnet-captures.json`: a venue answer parsed and
+  admitted at its own block, a plain `deposit` whose calldata the planner
+  reproduces up to the sender's trailing integrator tag, its receipt, its fast
+  fill matched by the whole relay hash, and one transaction that executes
+  three refund roots. No slow fill was found in the Base blocks searched, so a
+  slow fill is proven against constructed logs only.
+- Current contract: the production EOA rehearsal has an in-process fixture
+  for a standalone bridge: one fork per chain of the route and one funded EOA
+  per named account. Both bridge references pass the rehearsal locally with
+  the source chain's declaration set by hand, which is never committed. Their
+  selection for the rehearsal and for the weekly hosted Fork Qualification
+  follows from `PRODUCTION_SOURCES` in the connector's support declaration
+  alone, which is empty.
+- Proposed, not accepted: a rehearsed bridge asks the venue's live API, as the
+  production gateway does, with the fixture's public test addresses. The
+  forks' clocks are moved to the present first, because the venue's quote
+  carries its own time. The fill is the fixture relayer's, and a refund is not
+  rehearsed. A hosted rehearsal then depends on the venue's API answering.
+- Current contract: `connectors/gas_references.json` holds Across's approve,
+  deposit and revoke on Arbitrum for EOA accounts, from fork receipts. They
+  are the file's only rows outside Safe/Roles, so `almanak check` compares no
+  gas limit with them. A real plain deposit on Arbitrum used 78,889 gas, above
+  the fork receipt's 73,585.
+- Not built, and required before Across declares production: a recent-window
+  rule, without which `backtest recent` refuses a bridge with
+  `unsupported_connector`; a claim for a deferred refund; and the cell's
+  evidence package. Every rule above marked proposed is one the declaration
+  would rest on.
 
 ## Hyperliquid
 

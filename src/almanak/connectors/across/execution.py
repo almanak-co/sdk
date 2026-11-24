@@ -31,16 +31,22 @@ def expired(operation, block) -> bool:
     return isinstance(operation, DepositOperation) and block.timestamp > operation.deadline
 
 
-def quoted(backend, intent, before):
+def quoted(backend, state, intent, before):
     """The deposit's quote through the one transport the gateway declares for it.
 
     Which transport that is belongs to the gateway's environment, not to this code: a
-    gateway that declares none is refused, and nothing is substituted.
+    gateway that declares none is refused, and nothing is substituted. The venue is
+    asked once for a decision's amount at a pinned block: preparing that step again, as
+    the verification of its reserved plan does, reads this gateway's own answer.
     """
     transport = backend.venue_transports.get(venue.QUOTE_VENUE)
     if transport is None:
         raise DataError("quote_unavailable", "this gateway declares no Across quote transport")
-    return venue.fetch(intent.target, intent.amount.amount, transport, before.block.timestamp)
+    target, amount = intent.target, intent.amount.amount
+    key = (venue.QUOTE_VENUE, state.decision.identity, before.block.hash, target, amount)
+    return backend.venue_answers.once(
+        key, lambda: venue.fetch(target, amount, transport, before.block.timestamp)
+    )
 
 
 def venue_transports(config=None) -> dict:
@@ -59,7 +65,7 @@ def quoted_operation(backend, state, intent, before):
     if kind not in ("approve", "deposit"):
         return planning.operation(backend.config, state, intent, before)
     backend.guard()
-    quote = quoted(backend, intent, before)
+    quote = quoted(backend, state, intent, before)
     venue.admit(quote, intent.target, intent.amount.amount, before.pool, before.block.timestamp)
     return planning.operation(
         backend.config, state, intent, before, quote=quote if kind == "deposit" else None

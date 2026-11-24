@@ -1,8 +1,9 @@
 """Resolve an authored Across route through trusted canonical reads on both its chains.
 
 The sent asset and the SpokePool are read at the source chain's anchor. The received
-asset is then read at the destination chain's anchor, with that chain's own reader:
-a market resolves on its source chain first and is completed on its destination.
+asset and the destination SpokePool are then read at the destination chain's anchor,
+with that chain's own reader: a market resolves on its source chain first and is
+completed on its destination. Each SpokePool must run its reviewed implementation.
 """
 
 import hashlib
@@ -52,11 +53,16 @@ class ResolvedRoute(Model):
     # until the market is completed there; a route is built only from a completed market.
     destination: Asset | None = None
     destination_block: Block | None = None
+    # The SpokePool that fills on the destination chain, read at the same anchor. It is
+    # held to its pin when the market is completed, not when retained facts are loaded:
+    # a later pin must never make a running deployment's parameters unreadable.
+    destination_pool: PoolState | None = None
 
     @model_validator(mode="after")
     def scope(self):
-        if (self.destination is None) != (self.destination_block is None):
-            raise ValueError("a completed Across route retains its destination anchor")
+        completed = (self.destination, self.destination_block, self.destination_pool)
+        if len({part is None for part in completed}) != 1:
+            raise ValueError("a completed Across route retains its destination anchor and pool")
         if self.destination is not None and self.destination_block is not None:
             self.destination_scope(self.destination, self.destination_block)
         if (
@@ -140,7 +146,12 @@ def resolve_market(reader, selection: MarketSelection, block: Block) -> Resolved
 
 
 def complete_market(reader, resolved: ResolvedRoute, block: Block) -> ResolvedRoute:
-    """Verify the received asset on the destination chain, at that chain's anchor."""
+    """Verify the received asset and the filling SpokePool at the destination's anchor.
+
+    The source chain cannot read the destination, so this is where the destination pin
+    is held: a route whose destination SpokePool runs another implementation than the
+    reviewed one does not resolve, and no deployment is created over it.
+    """
     selection = resolved.selection
     if selection.destination_chain != block.chain.chain_id or reader.chain != block.chain:
         raise DataError(
@@ -148,7 +159,16 @@ def complete_market(reader, resolved: ResolvedRoute, block: Block) -> ResolvedRo
         )
     if reader.pin_block(block.number) != block:
         raise DataError("block_mismatch", "Across destination anchor is no longer canonical")
+    pool = read_pool(reader, spoke_pool(selection.destination_chain).address, block)
+    require_pinned(pool, selection.destination_chain)
     destination = reader.asset(selection.destination_asset, block)
+    if reader.pin_block(block.number) != block:
+        raise DataError("block_mismatch", "Across destination anchor is no longer canonical")
     return ResolvedRoute(
-        **{**dict(resolved), "destination": destination, "destination_block": block}
+        **{
+            **dict(resolved),
+            "destination": destination,
+            "destination_block": block,
+            "destination_pool": pool,
+        }
     )

@@ -19,6 +19,11 @@ from almanak.connectors.support import (
 
 # Chains a reference lifecycle has left from, on identified forks.
 FORK_SOURCES = (ChainId("eip155:42161"),)
+# Chains declared for production as the source of a route. None is: the declaration is
+# the maintainer's, and it waits for the rules it would rest on to be accepted and for
+# the cell's evidence package. The production EOA rehearsal and the hosted Fork
+# Qualification select a bridge reference from this declaration alone.
+PRODUCTION_SOURCES: tuple[ChainId, ...] = ()
 # The bridge model of economic backtests. It reads no history: it charges the author's
 # whole fee ceiling and credits the arrival after a latency the backtest file states.
 BACKTEST_MODEL: Literal["across-full-fee-ceiling-fixed-latency-v1"] = (
@@ -75,7 +80,12 @@ def historical(chain: ChainId) -> tuple[HistoricalSupport, ...]:
 def modes(chain: ChainId) -> tuple[RunMode, ...]:
     if chain not in FORK_SOURCES:
         return ()
-    return (RunMode.FORK, RunMode.BACKTEST) if chain in BACKTEST_STARTS else (RunMode.FORK,)
+    declared = {
+        RunMode.FORK: True,
+        RunMode.PRODUCTION: chain in PRODUCTION_SOURCES,
+        RunMode.BACKTEST: chain in BACKTEST_STARTS,
+    }
+    return tuple(mode for mode, held in declared.items() if held)
 
 
 def candidate_support():
