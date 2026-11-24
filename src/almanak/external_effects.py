@@ -69,14 +69,11 @@ def commit(current, before, page):
         ):
             raise ValueError("external economic identity has already been committed")
         outcomes = (*outcomes, page.outcome)
-    ownership = connector_for(current.config).lifecycle.ownership(current, page.outcome)
-    return current.model_copy(
-        update={
-            **ownership,
-            "external_scans": (*current.external_scans, page),
-            "outcomes": outcomes,
-        }
-    )
+    # Ownership sees the page it is recorded with: a page can change what is owned
+    # without an outcome, as a scan that proves a bridge transfer unfilled does.
+    staged = current.model_copy(update={"external_scans": (*current.external_scans, page)})
+    ownership = connector_for(current.config).lifecycle.ownership(staged, page.outcome)
+    return staged.model_copy(update={**ownership, "outcomes": outcomes})
 
 
 def progress(runtime, state):

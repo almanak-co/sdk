@@ -26,6 +26,7 @@ from almanak.connectors.uniswap_v3.reporting import (
 )
 from almanak.connectors.uniswap_v3.reporting import position_report as exchange_position
 from almanak.connectors.uniswap_v4.reporting import allocation_report as v4_position
+from almanak.external_effects import ExternalEffect
 
 
 def position_report(state, owned):
@@ -37,6 +38,12 @@ def position_report(state, owned):
             "inventory_scope": (
                 "View of shared fund cash; do not sum these amounts across positions."
             ),
+        }
+    if identity == ConnectorId("across"):
+        # A bridge holds no position. Its value in flight is listed under `transfers`.
+        return {
+            **owned.model_dump(mode="json"),
+            "position_scope": "A bridge holds nothing in the venue; see transfers.",
         }
     project = {
         ConnectorId("aave_v3"): lending_position,
@@ -74,10 +81,31 @@ def submitted_state(state):
             "outcomes": tuple(
                 outcome
                 for outcome in state.outcomes
-                if not isinstance(outcome, (RequestOutcome, LiquidationOutcome))
+                if not isinstance(outcome, (RequestOutcome, LiquidationOutcome, ExternalEffect))
             )
         }
     )
+
+
+def transfer_evidence(state):
+    """Value in flight between the deployment's chains, listed apart from `inventory`:
+    an open transfer is in no wallet, and it has no received amount until one is
+    measured. Absent for a deployment without a bridge."""
+    identity = ConnectorId("across")
+    if identity not in state.config.parameter_components:
+        return {}
+    from almanak.connectors.across.connector import AcrossProjection
+
+    bridge = AcrossProjection.report(component_state(state, identity))
+    return {
+        "transfers": bridge["transfers"],
+        "unattributed_refund_payments": bridge["unattributed_refund_payments"],
+        "transfer_scope": (
+            "Open transfers are owned value in flight. They are in no inventory balance "
+            "and must not be added to one; received and returned amounts are absent "
+            "until measured."
+        ),
+    }
 
 
 def payer_reports(state):
@@ -129,6 +157,7 @@ def report(state):
         "requests": [request.model_dump(mode="json") for request in state.requests],
         "unresolved_requests": sum(request.unresolved for request in state.requests),
         "external_scans": [page.model_dump(mode="json") for page in state.external_scans],
+        **transfer_evidence(state),
         "closure": [o.model_dump(mode="json") for o in state.closure],
         "valuation": "Asset quantities only; no common-currency valuation or gas conversion.",
     }

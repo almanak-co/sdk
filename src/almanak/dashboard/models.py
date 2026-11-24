@@ -9,6 +9,7 @@ from almanak.configuration.composed import Parameters as ComposedParameters
 from almanak.connectors.aave_v3.domain import Target as AaveV3Target
 from almanak.connectors.aave_v3.models import Parameters as AaveV3Parameters
 from almanak.connectors.aave_v4.models import LendingConfig, SupplyTarget
+from almanak.connectors.across.models import Parameters as AcrossParameters
 from almanak.connectors.aerodrome.models import Parameters as AerodromeParameters
 from almanak.connectors.aerodrome.models import Target as AerodromeTarget
 from almanak.connectors.aerodrome_slipstream.models import Parameters as SlipstreamParameters
@@ -612,6 +613,7 @@ class Context(Model):
         | CurveParameters
         | GMXParameters
         | HyperliquidParameters
+        | AcrossParameters
         | V3ExchangeParameters
         | ComposedParameters
     )

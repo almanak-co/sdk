@@ -318,14 +318,15 @@ def test_a_keeper_row_names_how_the_request_settled(logs, fields):
 
 def composed(reference):
     _, parameters = resolved_parameters(reference)
-    return Mock(config=parameters, outcomes=(), requests=())
+    return Mock(config=parameters, outcomes=(), requests=(), transfers=())
 
 
 def test_a_composed_deployment_settles_its_gmx_component(monkeypatch):
     monkeypatch.setattr(composed_requests, "component_state", lambda state, gmx: "gmx state")
     settled = composed_requests.ComposedRequests.fork_keeper(None, Path("."))
-    assert settled.project(composed("arbitrum_aave_borrow_and_trade_gmx")) == "gmx state"
-    assert settled.project(composed("arbitrum_aave_borrow_and_trade")) is None
+    parts = list(settled.parts(composed("arbitrum_aave_borrow_and_trade_gmx")))
+    assert parts == [(settled.gmx, "gmx state")]
+    assert list(settled.parts(composed("arbitrum_aave_borrow_and_trade"))) == []
     assert Requests.fork_keeper(None, Path(".")).project("state") == "state"
 
 
@@ -340,7 +341,7 @@ def test_a_composed_deployment_without_gmx_keeps_the_requested_fork_time(tmp_pat
     wire = {"config": {"connector": None}}
     assert keepers.step(wire, 30) == 30
     keepers.settle(wire)
-    assert keepers.keeper.settle(composed("arbitrum_aave_borrow_and_trade")) == ()
+    assert tuple(keepers.keeper.settle(composed("arbitrum_aave_borrow_and_trade"))) == ()
     assert keepers.failures == [] and keepers.rows == [] and shifted == []
 
 
@@ -478,3 +479,28 @@ def test_a_report_source_reads_any_reviewed_handler_execution():
     assert vectors == {TOKEN: (PROVIDER, PAYLOAD)}
     relay = {"to": "0x" + "51" * 20, "input": data}
     assert report_source.transaction_vectors(relay, (order, deposit, withdrawal)) is None
+
+
+def test_a_failing_second_component_keeps_the_rows_and_clock_of_the_first(tmp_path, monkeypatch):
+    """The GMX keeper mined its executions before the bridge settler failed: its rows
+    are recorded and the fork clock is shifted by them, and the failure still surfaces."""
+    shifted = []
+    monkeypatch.setattr(testflow, "shift_clock", lambda root, seconds: shifted.append(seconds))
+
+    class Mined:
+        def settle(self, view):
+            return ({"advanced_seconds": 7, "component": view},)
+
+    class Failing:
+        def settle(self, view):
+            raise RuntimeError("the settler could not fill")
+
+    settled = object.__new__(composed_requests.ForkKeepers)
+    settled.parts = lambda state: iter(((Mined(), "gmx"), (Failing(), "across")))
+    binding = type("Binding", (), {"fork_unsettled": staticmethod(lambda state: True)})()
+    keepers = object.__new__(Keepers)
+    keepers.root, keepers.keeper, keepers.rows = tmp_path, settled, []
+    keepers.binding = lambda wire: (binding, "state")
+    with pytest.raises(RuntimeError, match="could not fill"):
+        keepers.settle({})
+    assert keepers.rows == [{"advanced_seconds": 7, "component": "gmx"}] and shifted == [7]

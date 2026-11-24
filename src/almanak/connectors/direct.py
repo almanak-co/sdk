@@ -124,6 +124,8 @@ NOT_DIRECT: dict[str, str] = {
     "ends with its last receipt",
     "hyperliquid": "HyperCore custody is Safe/Roles only, and a direct action runs "
     "for a plain account",
+    "across": "a bridge arrives after its deposit is mined, on another chain; a direct "
+    "command is one process that ends with its last receipt",
 }
 
 

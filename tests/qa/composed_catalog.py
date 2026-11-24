@@ -5,8 +5,15 @@ from dataclasses import replace
 from almanak.configuration.unresolved import read_inputs
 from almanak.connectors.composed.economic_book import MODEL
 from almanak.connectors.identifiers import ConnectorId, ProtocolVariant
-from almanak.connectors.support import EconomicAction
-from tests.qa.catalog import Case, ProofScope, fork_cases, reference_model
+from almanak.connectors.support import EconomicAction, RunMode
+from tests.qa.catalog import (
+    Case,
+    ProofScope,
+    declared_profiles,
+    fork_cases,
+    installed_connectors,
+    reference_model,
+)
 
 COMPOSED_REFERENCES = {
     "arbitrum_aave_lending_short": (
@@ -192,8 +199,13 @@ COMPOSED_REFERENCES = {
         (ConnectorId("morpho_blue"), ("supply", "borrow", "repay", "withdraw")),
         (ConnectorId("uniswap_v3"), ("swap_exact_input", "exit_exchange")),
     ),
+    # The bridge clears its own approval inside a clean bridge; the standalone Across
+    # cleanup case proves revoke_bridge.
+    "arbitrum_base_bridge_and_lend": (
+        (ConnectorId("across"), ("bridge",)),
+        (ConnectorId("compound_v3"), ("supply", "withdraw")),
+    ),
 }
-
 
 COMPOSED_VARIANTS = {
     "base_aave_aerodrome_stable_borrow_and_trade": {
@@ -227,7 +239,18 @@ def composed_cases(source):
         chains=tuple(sorted({chain for scope in scopes for chain in scope.chains}, key=str)),
         scopes=scopes,
     )
-    yield from fork_cases(common, ())
+    # A composed reference proves only the account profiles every component declares
+    # on its chains: a bridge that declares EOA accounts alone has no Safe/Roles case.
+    profiles = set.intersection(
+        *(declared_profiles(scope.connector, scope.chains) for scope in scopes)
+    )
+    if not profiles:
+        raise ValueError(f"{source.name}: its components declare no common account profile")
+    yield from (case for case in fork_cases(common, ()) if case.profile in profiles)
+    if not all(declares_backtest(scope) for scope in scopes):
+        # A component that declares no backtest on its chain leaves the reference
+        # without a backtest configuration and without a backtest case.
+        return
     if not source.config.with_name("backtest-economic.yaml").is_file():
         raise ValueError(f"{source.name}: missing backtest-economic.yaml")
     for policy in ("pinned", "fresh", "native"):
@@ -251,6 +274,14 @@ def composed_cases(source):
                 ),
             },
         )
+
+
+def declares_backtest(scope) -> bool:
+    """Whether the scope's connector declares backtest mode on every chain it uses here."""
+    declared = {
+        s.chain: s.modes for s in dict(installed_connectors())[scope.connector].chain_support
+    }
+    return all(RunMode.BACKTEST in declared.get(chain, ()) for chain in scope.chains)
 
 
 def proof_scope(reference, author, connector, actions):

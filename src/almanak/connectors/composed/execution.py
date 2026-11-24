@@ -5,6 +5,7 @@ from copy import copy
 from almanak.connectors.aave_v3.operations import RepayOperation, SupplyOperation
 from almanak.connectors.aave_v4.operations import RepayOperation as AaveV4Repay
 from almanak.connectors.aave_v4.operations import SupplyOperation as AaveV4Supply
+from almanak.connectors.across.operations import FundedOperation as AcrossFunded
 from almanak.connectors.aerodrome.operations import Addition as AerodromeAddition
 from almanak.connectors.aerodrome.operations import Swap as AerodromeSwap
 from almanak.connectors.aerodrome_slipstream.operations import Addition as SlipstreamAddition
@@ -12,8 +13,10 @@ from almanak.connectors.aerodrome_slipstream.operations import Swap as Slipstrea
 from almanak.connectors.composed.inventory import cash_evidence
 from almanak.connectors.composed.lifecycle import component_state, local
 from almanak.connectors.composed.models import (
+    arrival_key,
     component_for_allocation,
     components_for_account,
+    configured_targets,
     wallet_key,
 )
 from almanak.connectors.composition import connector_for
@@ -81,6 +84,9 @@ def spending(operation):
             SlipstreamSwap,
             V4Swap,
             CurveSwap,
+            # A bridge approval spends nothing, but one beyond owned cash could only
+            # precede a deposit that is refused.
+            AcrossFunded,
         ),
     ):
         return (operation.amount,)
@@ -111,6 +117,69 @@ def projected_debt(operation, before) -> int:
     return before.position.total_debt
 
 
+def held_wallets(state) -> set:
+    """Wallet assets that may hold tokens of a bridge transfer no record credits yet.
+
+    An arrival or a refund is mined before its page records it. An open transfer names
+    the two wallets it can pay, and `inbound` names the wallets a deposit another chain
+    has planned or signed can pay before its outcome opens the transfer.
+    """
+    keys = set(state.inbound)
+    for transfer in state.transfers:
+        if transfer.open:
+            keys |= {transfer.source, transfer.destination}
+    return keys
+
+
+def retained_amount(state, key) -> int:
+    return next((balance.amount for balance in state.inventory if balance.key == key), 0)
+
+
+def held_snapshot(state, target, before):
+    """The snapshot a lending component plans and validates from while its wallet is held.
+
+    Its wallet balance is cut to the retained inventory, so a full repay approves and
+    spends no more than that, and tokens of a transfer are never absorbed as a top-up.
+    """
+    from almanak.lending_intents import LendingTarget
+
+    balance = getattr(before, "wallet_balance", None)
+    if not isinstance(target, LendingTarget) or balance is None:
+        return before
+    key = wallet_key(target, target.asset)
+    if key not in held_wallets(state):
+        return before
+    retained = retained_amount(state, key)
+    if balance <= retained:
+        return before
+    return before.model_copy(update={"wallet_balance": retained})
+
+
+def held_repayment(error, target):
+    """The shortfall of a held full repay: a top-up does not count until the transfer
+    that holds the wallet is recorded, so the usual remedy would mislead."""
+    if error.kind != "repayment_funding":
+        return error
+    return DataError(
+        "repayment_funding",
+        f"{target.allocation}: the full repayment of {target.asset} exceeds the fund's "
+        "retained inventory, and loan asset sent to the fund is not counted while a "
+        "bridge transfer naming this wallet asset is unrecorded; it continues once the "
+        "transfer is recorded as arrived or refunded, with no restart",
+    )
+
+
+def planned(state, target, before, plan):
+    """Plan from the held snapshot when the wallet is held, else from the snapshot."""
+    held = held_snapshot(state, target, before)
+    if held is before:
+        return plan(before)
+    try:
+        return plan(held)
+    except DataError as error:
+        raise held_repayment(error, target) from error
+
+
 def validate_inventory(state, operation, before=None):
     amounts = {balance.key: balance.amount for balance in state.inventory}
     if full_repayment(operation):
@@ -119,9 +188,28 @@ def validate_inventory(state, operation, before=None):
         # A full repay may also spend loan asset sent to the fund beyond the retained
         # inventory, so a top-up clears a shortfall without a restart. That surplus is
         # no component's inventory, and the repay's ownership absorbs what it spent.
+        # While the wallet is held, the surplus may be a transfer's tokens: the repay
+        # and its approved upper bound stay within the retained inventory.
         target = operation.target
-        debt = projected_debt(operation, before)
-        require_repayment_funding(target.allocation, target.asset, debt, before.wallet_balance)
+        key = wallet_key(target, target.asset)
+        held = key in held_wallets(state)
+        available = min(before.wallet_balance, amounts.get(key, 0)) if held else None
+        try:
+            require_repayment_funding(
+                target.allocation,
+                target.asset,
+                projected_debt(operation, before),
+                before.wallet_balance if available is None else available,
+            )
+        except DataError as error:
+            raise (held_repayment(error, target) if held else error) from error
+        if held and operation.amount.amount > amounts.get(key, 0):
+            raise DataError(
+                "repayment_funding",
+                f"{target.allocation}: the standing repay approval exceeds the fund's "
+                "retained inventory while a bridge transfer naming this wallet asset is "
+                "unrecorded; the repayment continues once the transfer is recorded",
+            )
         return
     for value in spending(operation):
         key = wallet_key(operation.target, value.asset)
@@ -191,9 +279,41 @@ class ComposedExecution:
     @staticmethod
     def operation(config, state, intent, before):
         identity = target_connector(intent.target)
-        return connector_for_target(intent.target).execution.operation(
-            config.component(identity), component_state(state, identity), intent, before
+        execution = connector_for_target(intent.target).execution
+        view = component_state(state, identity)
+        return planned(
+            state,
+            intent.target,
+            before,
+            lambda seen: execution.operation(config.component(identity), view, intent, seen),
         )
+
+    @staticmethod
+    def quoted_operation(backend, state, intent, before):
+        """Plan through the component's own venue quote where it asks one. The quote is
+        read through this gateway's declared transport, never another's."""
+        identity = target_connector(intent.target)
+        execution = connector_for_target(intent.target).execution
+        view = component_state(state, identity)
+        quoted = getattr(execution, "quoted_operation", None)
+        if quoted is None:
+            component = backend.config.component(identity)
+            return planned(
+                state,
+                intent.target,
+                before,
+                lambda seen: execution.operation(component, view, intent, seen),
+            )
+        return quoted(backend_view(backend, intent.target), view, intent, before)
+
+    @staticmethod
+    def venue_transports(config):
+        """What a production gateway asks for this deployment's components: each
+        venue's own API, and none for a venue no component uses."""
+        from almanak.connectors.across.execution import venue_transports
+
+        bridged = any(arrival_key(target) for target in configured_targets(config))
+        return venue_transports(config) if bridged else {}
 
     @staticmethod
     def call(config, operation):
@@ -210,8 +330,12 @@ class ComposedExecution:
         ):
             raise DataError("entry_unavailable", "new exposure requires reconciled fund accounting")
         validate_inventory(state, operation, before)
-        execution.validate_operation(
-            view, component_state(state, target_connector(operation.target)), operation, before
+        component = component_state(state, target_connector(operation.target))
+        planned(
+            state,
+            operation.target,
+            before,
+            lambda seen: execution.validate_operation(view, component, operation, seen),
         )
 
     @staticmethod

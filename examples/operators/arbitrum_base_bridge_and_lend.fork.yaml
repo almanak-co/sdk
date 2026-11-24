@@ -1,0 +1,61 @@
+# Operator execution context for a fork run of strategies/arbitrum_base_bridge_and_lend.
+# Provider credentials stay in the selected --env-file. The account bindings are
+# placeholders: fork provisioning generates the actual fixture accounts, plain
+# EOAs on both chains, because Across deposits are supported from an EOA only.
+# No venue is asked on a fork: the fork gateway constructs each quote from a
+# stated fee and the fork's own block time, and retains it under the source
+# across_fork_constructed.
+schema_version: operator-gateway-config-v1
+modes:
+- fork
+networks:
+- chain: eip155:42161
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+- chain: eip155:8453
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: arbitrum_fund
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:42161
+          environment: mainnet
+        address: '0x0000000000000000000000000000000000000001'
+  - name: base_fund
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:8453
+          environment: mainnet
+        address: '0x0000000000000000000000000000000000000002'
+fork:
+  anchors:
+  - chain: eip155:42161
+    height: 526777549
+    reference: '0xe4468f8649dd41a95979e2fe4f80e9a284ce6056de080997458812778057dcb1'
+  - chain: eip155:8453
+    height: 61195118
+    reference: '0xfe61417cb3f1aeb04cfb0cf3b443f8caba200faf13bce6e654bc10c83ca51284'
+  funds:
+  - kind: eoa
+    account: arbitrum_fund
+    native_balance:
+      asset: eip155:42161/slip44:60
+      amount: 1000000000000000000
+    assets:
+    - asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+      amount: 100000000
+  - kind: eoa
+    account: base_fund
+    native_balance:
+      asset: eip155:8453/slip44:60
+      amount: 1000000000000000000
+    assets: []
+  operators: []

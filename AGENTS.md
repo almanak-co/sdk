@@ -376,8 +376,81 @@ independently.
 
 - A bridge is an economic intent between two named fund accounts of one
   strategy on different chains. It is planned, signed and routed on the chain
-  it leaves. Across is the first connector; the intent and the transfer record
-  are in place, and no connector declares bridge support yet.
+  it leaves. Across is the first connector. It plans, signs and reconciles the
+  deposit on the source chain and opens the transfer, and reconciles its arrival
+  on the destination chain and its refund on the source chain.
+- Current contract: Across declares fork mode on Arbitrum only, for EOA
+  accounts, as the source of a route to Base. Base declares no run mode: no
+  reference lifecycle sends from it and no fork refund is defined there, so it
+  is a destination only. No chain declares production or backtest. The
+  declaration follows the chain a bridge leaves; the destination chain needs
+  only its pinned SpokePool and a bound account.
+- Current contract: the reference is
+  `strategies/across_usdc_arbitrum_base_bridge`. Its supervised fork proofs
+  cover the arrival with a pause and resume, the refund after the destination
+  proved the transfer unfilled, a coordinator killed between the mined deposit
+  and the arrival, a destination outage while the source bridges, and a
+  teardown that revokes an approval whose deposit was never signed. A crash
+  between arrival evidence and its commit is covered at component level only:
+  the runtime's own `external_evidence` and `external_commit` fault points
+  around the real commit and the connector's reader over a fake chain record
+  the arrival once, with the same page. It is unproven at the supervised level,
+  where the commands expose no fault point and no process is killed there.
+- Proposed, not accepted: the fork quote. A gateway declares, by venue name,
+  the transports its environment lets a connector ask a venue through. The
+  production gateway declares what the connector states for production, which
+  for Across is the venue's API, and takes no other. A fork gateway declares
+  only what its chain's fork route names, and Across's fork binding names a
+  constructed quote for the source chain: a stated fee of one basis point, the
+  pinned block's own timestamp, a fill deadline one hour later, no exclusivity
+  and the pinned SpokePools. The fork transport returns that as an answer
+  body, which takes the same fetch, size cap, canonical form, parser and
+  admission as the venue's answer. Protocol code does not branch on the
+  environment, except that admission accepts the quote source
+  `across_fork_constructed` on an identified fork only and refuses it on any
+  other chain. A gateway that declares no transport refuses the deposit with
+  `quote_unavailable`, so a fork never asks the venue. The source is retained
+  with the quote and shown beside each transfer in reports and dashboards. The
+  author's `quote: across_api` is unchanged. A constructed quote is never
+  evidence of what the venue would quote.
+- Current contract: a generated fork operator file provisions plain EOA
+  accounts, with no fixture operator, for the accounts of a connector that
+  supports only EOAs on its chain, the receiving account of a bridge included.
+  A fork fixture chain is one a position acts on or the chain of an account a
+  position names as its `destination_account`; another bound account adds
+  none. The fork key file names the receiving account too, which signs nothing.
+- A bridge market is one direction: the sent asset on its chain, the received
+  asset on the destination chain, the author's fee ceiling `max_fee_bps` and
+  the named quote source. Its allocation names a source account and a
+  `destination_account` on the destination chain.
+- The SpokePool is pinned per chain by proxy address, implementation address
+  and implementation code hash. Another implementation refuses new deposits.
+- The deposit's quote timestamp is its calldata deadline: the SpokePool reverts
+  a deposit mined later than that timestamp plus its own quote buffer, which is
+  read at the planning block. Expired signed deposits are released under the
+  rule in "Execution and recovery".
+- The gateway also refuses a quote whose SpokePool differs from the pin on
+  either chain, whose tokens are not the route's, whose timestamp is ahead of
+  the pinned block or older than the quote buffer, whose fill deadline is
+  beyond the SpokePool's deadline buffer or less than ten minutes away, or
+  whose exclusivity ends after the fill deadline.
+- The fee ceiling compares base units of the sent and the received asset, so a
+  route needs both to have the same decimals. The gateway holds the quote's
+  decimals to the sent asset's on-chain decimals and refuses a difference.
+- The gateway asks for and admits a quote before it plans the approval, and
+  again for the deposit, which signs its own. A quote refused before the
+  approval is signed leaves no approval behind. A deposit quote refused after
+  the approval is mined leaves that approval standing until a later bridge or
+  `revoke` clears it.
+- The retained quote is its typed fields and the venue's answer as canonical
+  JSON text of at most 16 kB. A larger answer or a non-finite number refuses.
+- The author states no approval or revocation inside a bridge. An approval an
+  earlier decision left standing, because its deposit was never mined, is
+  revoked before the next bridge's own. The `revoke` action clears such an
+  approval and increases no exposure, so teardown admits it and can then close.
+- A route names its destination by CAIP-2 chain only. The destination's
+  environment is that of the bound destination account. Two identified fork
+  nodes are one environment; a fork never pairs with anything else.
 - A transfer in flight is owned state, not pending work. It is neither a
   balance nor a measured zero: an open transfer carries no received amount.
 - Arrival and refund are reconciled as external effects, arrival on the
@@ -400,12 +473,182 @@ independently.
   deposit itself. Only the gateway enforces the fee ceiling. Never describe the
   ceiling as on-chain enforcement.
 - A transfer and its two accounts stay within one environment.
-- Proposed, not accepted: teardown waits for open transfers and does not bridge
-  back.
+- Proposed, not accepted: teardown waits for open transfers on both chains and
+  does not bridge back.
 - Proposed, not accepted: the backtest model charges the author's full fee
   ceiling and delays arrival by a latency stated in the backtest configuration,
   both reported as model assumptions.
-- Proposed, not accepted: the first scope is same-token ERC-20 routes.
+- Proposed, not accepted: the first scope is same-token ERC-20 routes. The
+  connector refuses the wrapped native asset as the sent asset, and as the
+  received asset when the recipient is an EOA, which Across pays in the native
+  asset.
+- Proposed, not accepted: the quote comes from Across's keyless
+  `suggested-fees` endpoint, which the vendor labels legacy. An optional
+  operator key is read from `ALMANAK_ACROSS_API_KEY` in the gateway's
+  environment. If the vendor retires the endpoint, deposits refuse until the
+  quote reader is rebuilt on its successor.
+- Current contract: a two-chain market is resolved on its source chain and
+  completed on its destination chain at that chain's own anchor. The received
+  asset is verified there by its on-chain `decimals()` and `symbol()`, with
+  those reads retained and replayed separately. A route that was not completed
+  forms no allocation.
+- Current contract: the transfer's reference keeps the deposit identifier, the
+  relay hash and the quote's timestamp, because the destination chain sees no
+  source outcome.
+- Proposed, not accepted: a relay is hashed under the chain number each
+  SpokePool reads from its own node, so on identified forks both sides use the
+  isolated signing chain. The production hash is held to a known answer from a
+  real deposit and its fill.
+- Current contract: an arrival is a `FilledRelay` whose whole relay hashes to
+  the retained hash, never a matching deposit identifier alone. It must pay
+  the destination fund. The received amount is the value of the token transfer
+  to the fund that follows the event in the fill transaction, required to
+  equal the event's amount; a difference stops with an accounting cause. A
+  slow fill must be paid by the SpokePool. A fast fill's payer is whoever
+  called the SpokePool, which the event does not name, so it is not checked.
+  An arrival below the offer is a measurement.
+- Current contract: `fillStatuses` is a cross-check only. A fill needs a
+  filled status, and a filled status with no fill in the scanned pages halts.
+- Proposed, not accepted: the page rule. An arrival scan starts at the last
+  destination block not after the quote's timestamp, and a refund scan at the
+  last source block not after the earliest fill deadline among the transfers
+  proven unfilled. Nothing is read before the head has passed that time. Later
+  pages continue at the block after the last one and span at most 2,000
+  blocks. A page is committed when it starts its scan, is full, holds an
+  outcome or an unattributed payment, or ends an arrival scan past the fill
+  deadline; a shorter empty page is read again. The gateway re-derives every
+  page before it is recorded.
+- Proposed, not accepted: the unfilled proof. A refund alone does not show
+  that a transfer was not delivered. The destination chain proves a transfer
+  unfilled when its arrival scan has committed contiguous pages past the fill
+  deadline with no fill, and records that on the transfer; only the
+  destination chain may. A transfer proven unfilled is still open and owned
+  value in flight until its refund is measured. A transfer goes from open to
+  unfilled or to arrived on the destination chain and from unfilled to
+  refunded on the source chain, and never otherwise.
+- Proposed, not accepted: a refund is read only for transfers proven unfilled
+  and never inferred from time. With the destination chain unavailable refunds
+  wait, and the source chain keeps working. The refund scan also waits while
+  its page would pass the fill deadline of a transfer of the same allocation
+  that is in flight and not yet proven unfilled.
+- Proposed, not accepted: the refund attribution and tie rule. A payment of
+  the sent asset from the SpokePool to the fund counts only in a transaction
+  whose `ExecutedRelayerRefundRoot` leaves name the fund for that asset with
+  the same amounts. Its total is attributed to a set of the allocation's
+  transfers proven unfilled, past their fill deadline at that block, whose
+  sent amounts sum to it exactly. Sets of equal sum are interchangeable, so
+  the one with the oldest fill deadlines is taken, then the lowest references.
+  Consequence: a foreign payment of an equal amount can resolve a transfer,
+  and that transfer's own later refund is then the unattributed one. The
+  totals stay right.
+- Proposed, not accepted: unsolicited inflow. Anyone can deposit naming the
+  fund as depositor and let it expire. A refund-leaf payment that matches no
+  set is retained in its committed page with its transaction and amount,
+  listed in the report as an unattributed refund payment, never attributed,
+  and the scan continues. It is no outcome and raises no accounting issue of
+  one, because such an issue stops new exposure on the chain and a stranger's
+  dust would then freeze a strategy.
+- Proposed, not accepted: attribution considers the 12 oldest transfers proven
+  unfilled of an allocation.
+- Proposed, not accepted: two refund payments to one fund in one block stop
+  the source chain with an ordering cause.
+- Current contract: an allocation is the only Across allocation of its source
+  fund and sent asset. A second one is refused at configuration.
+- Current contract: a refund the SpokePool deferred because its transfer
+  failed is detected by `getRelayerRefund` and stops the source chain as
+  unresolved. Claiming it is not built.
+- Current contract: a transfer is resolved at most once, and a deployment
+  closes only when every transfer is arrived or refunded and no allowance
+  stands. A fill found for a transfer marked unfilled or refunded halts the
+  destination chain with both named.
+- Proposed, not accepted: a transfer opened towards a chain that had already
+  closed reopens that chain.
+- Current contract: the destination chain's tick runs `decide` with no
+  observation of the allocation and owns nothing there. A bridge decided on
+  that tick is refused as routed to another chain.
+- Proposed, not accepted: fork settlement. A fill is the destination
+  SpokePool's own `fillRelay` by a relayer the fixture funds. A refund is a
+  fork-constructed bundle: the impersonated admin relays a root of one leaf
+  the fixture wrote, executed through the real contract code, and the fixture
+  moves the destination fork past the fill deadline. Label it so wherever it
+  is reported; it is never promotion or Fork Qualification evidence. It is
+  defined for an Arbitrum source only.
+- Current contract: a bridge allocation composes with allocations of other
+  connectors. Its deposit debits the source account's owned inventory of the
+  sent asset. A transfer in flight is in no wallet's inventory. The measured
+  arrival credits the destination account's inventory of the received asset,
+  and the measured refund credits the source account's. Nothing spends the
+  offered amount: the gateway checks every spend except a full repay against
+  retained inventory, which holds the amount only after its arrival is
+  measured. A full repay follows the rule below.
+- Proposed, not accepted: a full repay in a composed deployment may spend loan
+  asset sent to the fund beyond retained inventory, the operator top-up of
+  "Lending exits". While a wallet asset may hold tokens of a bridge transfer
+  that no record credits yet, a full repay of that wallet asset is held to
+  retained inventory: its funding check, its approval and its approved upper
+  bound all stay within it, so an arrival or a refund is never absorbed as a
+  top-up and credited again. A wallet asset is held while an open transfer
+  names it as source or destination, and, in a chain's view, while another
+  chain has planned or signed bridge work that delivers into it. The view's
+  `inbound` field is derived by the gateway from durable state and never
+  retained. Consequences: during the hold a full repay that retained inventory
+  covers proceeds, one it does not cover refuses with `repayment_funding`
+  naming the hold, a top-up counts only once the transfer is recorded as
+  arrived or refunded, with no restart, and a repay approval larger than
+  retained inventory that was standing before the hold refuses the repay until
+  then. The hold is not an author amount bound: it is derived from the
+  checkpoint and ends by evidence. It is a gateway check, not on-chain
+  enforcement. It is proven at component level only.
+- Current contract: composed `inventory` covers the sent asset on the source
+  account and the received asset on the destination account, and another
+  allocation on the destination account must hold the received asset, because
+  only its observation measures that wallet. A configuration without either is
+  refused, before resolution where the author file already names the assets
+  and at the resolved configuration otherwise. Accepted consequence: a composed bridge cannot deliver to an account
+  that holds no other allocation.
+- Current contract: the composed checkpoint retains `transfers`, omitted while
+  there are none, and its `external_scans` hold GMX liquidation pages and
+  Across settlement pages, each decoded by its own kind. Each component sees
+  only its own pages, outcomes, requests and transfers. Composed external
+  effects read, verify and audit a page through the component that owns it,
+  starting after the connector of the last committed page. Composed requests
+  stay GMX only.
+- Current contract: on the source chain's tick a composed bridge allocation's
+  owned record reports the source account's owned cash and its transfers in
+  flight, with sent, offered, fill deadline and the unfilled mark, and no
+  received amount. Retained records carry neither. The destination tick has no
+  bridge record; arrival and refund reach `on_outcome` there and on the source
+  chain as in a single-connector deployment.
+- Current contract: an open transfer holds closure of both of its chains in a
+  composed deployment too, including a chain where the bridge has no record.
+  Composed teardown unwinds the other allocations, revokes a standing bridge
+  approval and does not bridge back.
+- Current contract: composed reports and dashboards list transfers with their
+  quote source, and unattributed refund payments, apart from fund cash. Value
+  in flight is never added to a balance and never shown as zero.
+- Current contract: the composed reference is
+  `strategies/arbitrum_base_bridge_and_lend`: Across from Arbitrum to Base,
+  then a Compound V3 supply of exactly the measured arrival, EOA accounts,
+  fork runs only. Its supervised fork proofs cover the lifecycle with a pause
+  and resume, each stage with owned inventory asserted, and the refund with
+  nothing supplied. It has no backtest configuration, and it stays out of the
+  production rehearsal because Across declares no production support.
+- Current contract: a runtime process killed around the arrival commit is
+  proven on the composed reference with real processes and fork nodes
+  (`tests/fork/test_composed_bridge_fault.py`): killed at the runtime's
+  `external_evidence` and `external_commit` fault points, a new runtime
+  records the arrival once, credits the destination inventory once and
+  supplies exactly that amount. The proof drives the runtime and gateway
+  processes directly, not the supervised commands, which expose no fault
+  point.
+- Current contract: the in-process fork workspace provisions an account that
+  only receives a bridge on its own chain's node.
+- Current contract: a composed fork route names the constructed quote on the
+  bridge's source chain only, under the fork quote rule above, whose status
+  this does not change.
+- Proposed, not accepted: the composed fork keeper used by `almanak test` runs
+  settles a composed deployment's transfers in flight beside GMX requests. It
+  is covered at component level only; no fork run exercises it.
 
 ## Hyperliquid
 
@@ -453,6 +696,14 @@ independently.
   and reconciliation path, with the gateway service in the same process. The
   deployment adopts the position the wallet holds at the start. Without
   `--execute` nothing is signed.
+- Accepted: once a step of a direct command's request is mined, a transient
+  provider or storage failure before the next step is sent is held and the
+  check repeated, for at most 60 seconds per request. A failure met at signing
+  may leave a signature the record does not hold, so the repeat can sign the
+  same recorded plan again: the same transaction at the same nonce, of which
+  only the recorded one is sent and only one can be mined. Before any step is
+  mined such a failure ends the command. Never describe the hold as on-chain
+  enforcement.
 - A direct command is not resumed. A signed step left unresolved keeps its
   record and the wallet's claim, which refuses later actions for that wallet.
   `ax recover` resolves the signed step from its receipt or by sending the

@@ -2,6 +2,7 @@
 
 from almanak.connectors.aave_v3.observations import Snapshot as LendingSnapshot
 from almanak.connectors.aave_v4.observations import LendingSnapshot as AaveV4Snapshot
+from almanak.connectors.across.observations import Snapshot as AcrossSnapshot
 from almanak.connectors.aerodrome.observations import Snapshot as AerodromeSnapshot
 from almanak.connectors.aerodrome_slipstream.observations import Snapshot as SlipstreamSnapshot
 from almanak.connectors.compound_v3.observations import Snapshot as CompoundSnapshot
@@ -32,4 +33,5 @@ Observation = (
     | GmxExchangeSnapshot
     | GmxPositionSnapshot
     | HyperliquidSnapshot
+    | AcrossSnapshot
 )

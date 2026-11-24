@@ -9,6 +9,7 @@ from almanak.connectors.identifiers import ConnectorId
 def allocation_connector(allocation) -> ConnectorId:
     from almanak.connectors.aave_v3.models import Allocation as AaveV3
     from almanak.connectors.aave_v4.models import Position as AaveV4
+    from almanak.connectors.across.models import Allocation as Across
     from almanak.connectors.aerodrome.models import Allocation as Aerodrome
     from almanak.connectors.aerodrome_slipstream.models import Allocation as Slipstream
     from almanak.connectors.compound_v3.models import Allocation as Compound
@@ -28,6 +29,7 @@ def allocation_connector(allocation) -> ConnectorId:
         (
             (AaveV3, "aave_v3"),
             (AaveV4, "aave_v4"),
+            (Across, "across"),
             (Aerodrome, "aerodrome"),
             (Compound, "compound_v3"),
             (Morpho, "morpho_blue"),
@@ -53,6 +55,7 @@ def target_connector(target) -> ConnectorId:
 def target_bindings():
     from almanak.connectors.aave_v3.domain import Target as AaveV3
     from almanak.connectors.aave_v4.models import SupplyTarget as AaveV4
+    from almanak.connectors.across.domain import Target as Across
     from almanak.connectors.aerodrome.models import Target as Aerodrome
     from almanak.connectors.aerodrome_slipstream.models import Target as Slipstream
     from almanak.connectors.compound_v3.domain import Target as Compound
@@ -69,6 +72,7 @@ def target_bindings():
     return (
         (AaveV3, "aave_v3"),
         (AaveV4, "aave_v4"),
+        (Across, "across"),
         (Aerodrome, "aerodrome"),
         (Compound, "compound_v3"),
         (Morpho, "morpho_blue"),

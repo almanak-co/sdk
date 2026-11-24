@@ -3,6 +3,10 @@
 A transfer opens when its source-chain effect is reconciled and stays open until a
 measured arrival on the destination chain or a measured refund on the source chain.
 An open transfer carries no received amount: a missing outcome is not a measured zero.
+
+A refund alone does not show that a transfer was not delivered, so the destination
+chain first proves it unfilled. Only then may the source chain record its refund. An
+unfilled transfer is still open: it is owned value in flight until the refund is measured.
 """
 
 from typing import Annotated, Literal, Self
@@ -11,6 +15,7 @@ from pydantic import Field, model_validator
 
 from almanak.connectors.identifiers import ConnectorId, Name
 from almanak.effects import WalletAsset
+from almanak.gateway.environments import same_environment
 from almanak.models import AssetAmount, Chain, Model
 from almanak.triggers import UtcInstant
 
@@ -44,6 +49,8 @@ class Transfer(Model):
     # Opaque here. The connector's adapter owns its meaning and its chain-native form.
     reference: Reference
     fill_deadline: UtcInstant
+    # Set by the destination chain alone, once its own evidence shows no arrival can follow.
+    unfilled: bool = False
     resolution: Resolution | None = None
 
     @model_validator(mode="after")
@@ -51,7 +58,7 @@ class Transfer(Model):
         if self.source.chain.chain_id == self.destination.chain.chain_id:
             raise ValueError("a transfer requires two different chains")
         # A fork never sends to production, nor production to a fork.
-        if self.source.chain.environment != self.destination.chain.environment:
+        if not same_environment(self.source.chain, self.destination.chain):
             raise ValueError("a transfer stays within one environment")
         if self.source.account == self.destination.account:
             raise ValueError("a transfer requires two different named accounts")
@@ -75,6 +82,10 @@ def validate_resolution(transfer: Transfer) -> None:
     resolution = transfer.resolution
     if resolution is None:
         return
+    if isinstance(resolution, Refunded) != transfer.unfilled:
+        raise ValueError(
+            "a refund needs a transfer proven unfilled, and an arrival one that is not"
+        )
     measured, wallet = (
         (resolution.received, transfer.destination)
         if isinstance(resolution, Arrived)
@@ -104,7 +115,7 @@ def validate_transfers(transfers: tuple[Transfer, ...]) -> None:
 
 
 def opened(transfers: tuple[Transfer, ...], transfer: Transfer) -> tuple[Transfer, ...]:
-    if not transfer.open:
+    if not transfer.open or transfer.unfilled:
         raise ValueError("a transfer opens without a resolution")
     changed = (*transfers, transfer)
     validate_transfers(changed)
@@ -119,9 +130,21 @@ def resolved(
         raise ValueError("a resolution requires exactly one retained transfer")
     if not matches[0].open:
         raise ValueError("a resolved transfer cannot be resolved again")
+    return replaced(transfers, matches[0], {"resolution": resolution})
+
+
+def proven_unfilled(transfers: tuple[Transfer, ...], identity: Identity) -> tuple[Transfer, ...]:
+    """Mark the transfer as one no arrival can follow. Its refund is still to be measured."""
+    matches = [transfer for transfer in transfers if transfer.identity == identity]
+    if len(matches) != 1 or not matches[0].open:
+        raise ValueError("only one retained open transfer can be proven unfilled")
+    return replaced(transfers, matches[0], {"unfilled": True})
+
+
+def replaced(transfers, prior: Transfer, changes: dict) -> tuple[Transfer, ...]:
     # Revalidated, so a resolution in the wrong asset or of zero is refused here.
-    closed = Transfer(**{**dict(matches[0]), "resolution": resolution})
-    return tuple(closed if transfer.identity == identity else transfer for transfer in transfers)
+    changed = Transfer(**{**dict(prior), **changes})
+    return tuple(changed if transfer is prior else transfer for transfer in transfers)
 
 
 def touches(transfer: Transfer, chain: Chain) -> bool:
@@ -133,19 +156,30 @@ def visible(transfers: tuple[Transfer, ...], chain: Chain) -> tuple[Transfer, ..
 
 
 def validate_retained(before: Transfer, after: Transfer, chain: Chain) -> None:
+    """One step of one transfer, each allowed only on the chain whose evidence shows it:
+    open to unfilled and open to arrived on the destination, unfilled to refunded on the
+    source. Nothing else: never unfilled to arrived, never open to refunded."""
     if after == before:
         return
-    if not before.open or after.model_copy(update={"resolution": None}) != before:
+    same = after.model_copy(update={"resolution": None, "unfilled": False})
+    if not before.open or same != before.model_copy(update={"unfilled": False}):
         raise ValueError("a scoped change cannot alter or reopen a retained transfer")
-    if resolution_chain(after) != chain:
-        raise ValueError("a transfer resolves only on the chain that measured its outcome")
+    if before.unfilled and not after.unfilled:
+        raise ValueError("a transfer proven unfilled stays so")
+    measured_here = chain == (
+        after.source.chain if isinstance(after.resolution, Refunded) else after.destination.chain
+    )
+    if not measured_here:
+        raise ValueError("a transfer changes only on the chain that measured its outcome")
+    if after.unfilled and not before.unfilled and after.resolution is not None:
+        raise ValueError("a transfer is proven unfilled and refunded in separate steps")
 
 
 def validate_appended(appended: tuple[Transfer, ...], chain: Chain) -> None:
     for transfer in appended:
         if transfer.source.chain != chain:
             raise ValueError("a transfer opens only on its source chain")
-        if not transfer.open:
+        if not transfer.open or transfer.unfilled:
             raise ValueError("a transfer opens without a resolution")
 
 

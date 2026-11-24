@@ -6,6 +6,7 @@ from typing import Annotated, Literal, Self
 from pydantic import Field, model_validator
 
 from almanak.caip import AssetType
+from almanak.gateway.environments import same_environment
 from almanak.models import Account, AssetAmount, Model
 
 Name = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
@@ -38,10 +39,26 @@ class BridgeTarget(Model, ABC):
             raise ValueError("bridge target destination asset has a different fund chain")
         if self.fund.chain.chain_id == self.destination_fund.chain.chain_id:
             raise ValueError("a bridge requires two different chains")
-        if self.fund.chain.environment != self.destination_fund.chain.environment:
+        if not same_environment(self.fund.chain, self.destination_fund.chain):
             raise ValueError("a bridge stays within one environment")
         if self.account == self.destination_account:
             raise ValueError("a bridge requires two different named accounts")
+        return self
+
+
+class RevokeBridgeIntent[Target: BridgeTarget](Model):
+    """Request closure of the bridge's spending authority; the connector chooses calls.
+
+    It sends nothing and never increases exposure, so teardown admits it.
+    """
+
+    kind: Literal["revoke_bridge"] = "revoke_bridge"
+    target: Target
+
+    @model_validator(mode="after")
+    def concrete_target(self) -> Self:
+        if type(self.target) is not type(self).model_fields["target"].annotation:
+            raise ValueError("bridge intents require their exact concrete target type")
         return self
 
 
@@ -65,3 +82,16 @@ class BridgeIntent[Target: BridgeTarget](Model):
         if self.amount.asset != self.target.asset:
             raise ValueError("bridge amount must identify the target's sent asset")
         return self
+
+
+def arrival_wallet(target):
+    """The wallet asset a bridge target's transfers arrive in; None for any other target."""
+    from almanak.effects import WalletAsset
+
+    if not isinstance(target, BridgeTarget):
+        return None
+    return WalletAsset(
+        account=target.destination_account,
+        chain=target.destination_fund.chain,
+        asset=target.destination_asset,
+    )

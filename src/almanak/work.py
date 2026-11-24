@@ -73,6 +73,7 @@ def project(state, chain):
             **request_fields(state, chain),
             **scoped_fields(state, chain),
             **transfer_fields(state, chain),
+            **inbound_fields(state, chain),
             "work": (),
             "scheduler_cursor": 0,
             "initialized": work.initialized,
@@ -134,6 +135,40 @@ def transfer_fields(state, chain, changed=None):
     return {"transfers": merged(state.transfers, changed.transfers, chain)}
 
 
+def inbound_fields(state, chain):
+    """Wallet assets of this chain that another chain's unrecorded bridge work delivers into.
+
+    A deposit another chain has planned or signed can be mined, and filled here, before
+    its outcome opens the transfer. Until then this chain's wallet may hold tokens no
+    record names yet. The field exists only in a chain's view and is never retained.
+    """
+    if "inbound" not in type(state).model_fields:
+        return {}
+    from almanak.bridge_intents import arrival_wallet
+
+    keys = (
+        arrival_wallet(getattr(getattr(attempt, "operation", None), "target", None))
+        for work in state.work
+        if work.chain != chain
+        for attempt in (work.plan, work.pending)
+        if attempt is not None
+    )
+    return {"inbound": tuple(dict.fromkeys(k for k in keys if k and k.chain == chain))}
+
+
+def reopened(works, transfers):
+    """A chain an open transfer touches is not closed: it still owes the arrival or the refund.
+
+    A chain with nothing left can close before another chain's signed work opens a
+    transfer towards it. Opening the transfer reopens that chain.
+    """
+    waiting = {c for t in transfers if t.open for c in (t.source.chain, t.destination.chain)}
+    return tuple(
+        work.model_copy(update={"closed": False}) if work.closed and work.chain in waiting else work
+        for work in works
+    )
+
+
 def merge(state, chain, changed):
     from almanak.external_effects import scoped_fields
 
@@ -152,13 +187,17 @@ def merge(state, chain, changed):
             "closed": changed.mode == "closed",
         }
     )
-    works = tuple(work if item.chain == chain else item for item in state.work)
+    transfers = transfer_fields(state, chain, changed)
+    works = reopened(
+        tuple(work if item.chain == chain else item for item in state.work),
+        transfers.get("transfers", ()),
+    )
     return state.model_copy(
         update={
             **merge_inventory(state, changed, chain),
             **request_fields(state, chain, changed),
             **scoped_fields(state, chain, changed),
-            **transfer_fields(state, chain, changed),
+            **transfers,
             "work": works,
             "memory": changed.memory,
             "schedule": changed.schedule,

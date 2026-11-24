@@ -13,10 +13,12 @@ from almanak.gateway.execution import EvmGateway
 
 
 class ForkGateway(EvmGateway):
-    def __init__(self, config, endpoint: str, key_file: Path, *, chain=None):
+    def __init__(self, config, endpoint: str, key_file: Path, *, chain=None, venue_transports=None):
         validate_endpoint(endpoint)
         chain = chain or config.accounts.bindings[0].profile.fund.chain
         validate_fork_scope(config, chain)
+        # Set before the node is reached, so a gateway is never without its declaration.
+        self.route_transports: dict[str, object] = {}
         super().__init__(
             config,
             endpoint,
@@ -24,6 +26,12 @@ class ForkGateway(EvmGateway):
             chain=chain,
             local_transport=True,
         )
+        self.route_transports = dict(venue_transports or {})
+
+    @property
+    def venue_transports(self) -> dict[str, object]:
+        # Only what this chain's fork route names: a fork never asks a venue's live API.
+        return self.route_transports
 
     def guard(self):
         metadata = self.reader._rpc("anvil_metadata", [])
@@ -76,7 +84,13 @@ def load_signers(config, chain, key_file):
 
 
 def validate_signer_keys(config, keys):
-    if not isinstance(keys, dict) or set(keys) != {a.account for a in config.allocations}:
+    # An account that only receives a bridge is allocated too; it signs nothing.
+    allocated = {a.account for a in config.allocations} | {
+        a.destination_account
+        for a in config.allocations
+        if getattr(a, "destination_account", None) is not None
+    }
+    if not isinstance(keys, dict) or set(keys) != allocated:
         raise ValueError("fork key file must match the explicitly allocated account names")
 
 

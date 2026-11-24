@@ -44,6 +44,20 @@ NODE_READINGS = 16
 DEADLINE_MARGIN_DIVISOR = 2
 
 
+def plan_operation(gateway, state, intent, before):
+    """The next operation of the retained decision.
+
+    A connector whose step needs a venue quote plans through `quoted_operation`: only
+    this trusted side reads the venue, and the connector's own `validate_operation`
+    re-checks the quoted terms against the pinned snapshot on every later validation.
+    """
+    adapter = gateway.connector.execution
+    quoted = getattr(adapter, "quoted_operation", None)
+    if quoted is not None:
+        return quoted(gateway, state, intent, before)
+    return adapter.operation(gateway.config, state, intent, before)
+
+
 class EvmGateway:
     def __init__(
         self, config, endpoint: str, signers: dict, *, chain=None, clock=None, local_transport=False
@@ -80,6 +94,13 @@ class EvmGateway:
     @property
     def connector(self):
         return connector_for(self.config)
+
+    @property
+    def venue_transports(self) -> dict[str, object]:
+        """The transports this gateway's environment lets a connector ask a venue
+        through, by venue name. Each environment's gateway states its own; a connector
+        that finds none for its venue refuses, so none inherits another's transport."""
+        return {}
 
     def close(self):
         self.reader.__exit__()
@@ -294,7 +315,7 @@ class EvmGateway:
 
     def prepare(self, state, intent, before, attempt_id):
         self.require_preparation(state, intent, before)
-        operation = self.connector.execution.operation(self.config, state, intent, before)
+        operation = plan_operation(self, state, intent, before)
         return self.prepare_operation(state, operation, before, attempt_id)
 
     def require_preparation(self, state, intent, before):

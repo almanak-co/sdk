@@ -37,6 +37,12 @@ class ProductionGateway(EvmGateway):
             self.close()
             raise
 
+    @property
+    def venue_transports(self) -> dict[str, object]:
+        # Production asks each venue what its connector declares, and takes no other.
+        declared = getattr(self.connector.execution, "venue_transports", None)
+        return dict(declared(self.config)) if declared else {}
+
     def guard(self):
         # Verify in every privileged request; a provider switch must not reuse an earlier
         # request's result. Checks within one request share its single verification.

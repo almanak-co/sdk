@@ -296,10 +296,27 @@ def validate_references(inputs: AuthorInputs):
             raise ConfigurationError(
                 "gas accounts must exist on the policy chain", field=f"strategy.gas.{name}.accounts"
             )
+    require_destination_accounts(inputs)
     validate_inventory(inputs)
     require_one_allocation_per_fund(inputs)
     require_composed_inventory(inputs)
     require_chain_support(inputs)
+
+
+def require_destination_accounts(inputs: AuthorInputs):
+    """A bridge allocation names a second account, on its market's destination chain."""
+    for name, value in inputs.strategy.allocations.items():
+        destination = getattr(value, "destination_account", None)
+        if destination is None:
+            continue
+        field = f"strategy.allocations.{name}.destination_account"
+        if destination not in inputs.accounts:
+            raise unknown_reference("account", destination, inputs.accounts, field)
+        expected = getattr(inputs.markets[value.market], "destination_chain", None)
+        if inputs.accounts[destination].chain != expected:
+            raise ConfigurationError(
+                "destination account and the market's destination chain differ", field=field
+            )
 
 
 def require_one_allocation_per_fund(inputs: AuthorInputs):
@@ -338,6 +355,7 @@ def require_composed_inventory(inputs: AuthorInputs):
     if len({str(inputs.markets[p.market].connector) for p in positions.values()}) < 2:
         return
     declared = {(item.account, item.balance.asset) for item in inputs.inventory}
+    require_arrival_inventory(inputs, positions, declared)
     for name, value in positions.items():
         for asset in known_assets(inputs, value):
             if (value.account, asset) not in declared:
@@ -351,6 +369,52 @@ def require_composed_inventory(inputs: AuthorInputs):
                         "with quantity '0' when the strategy starts without it."
                     ),
                 )
+
+
+def require_arrival_inventory(inputs: AuthorInputs, positions, declared):
+    """A composed bridge delivers into owned inventory of its destination account."""
+    for name, value in positions.items():
+        destination = getattr(value, "destination_account", None)
+        asset = getattr(inputs.markets[value.market], "destination_asset", None)
+        if destination is None:
+            continue
+        if (destination, asset) not in declared:
+            raise ConfigurationError(
+                f"composed inventory must cover what a bridge delivers; {name!r} delivers "
+                f"{asset} to fund {destination!r}",
+                field="inventory",
+                code="composed_inventory_incomplete",
+                remedy=(
+                    f"Add an inventory entry for {asset} on account {destination!r}, with "
+                    "quantity '0' when the strategy starts without it, and an allocation on "
+                    "that account that holds the asset."
+                ),
+            )
+        if arrival_unheld(inputs, positions, destination, asset):
+            raise ConfigurationError(
+                f"a composed bridge must arrive in an asset that another allocation on the "
+                f"destination account holds; {name!r} delivers {asset} to fund "
+                f"{destination!r}, where no allocation holds it",
+                field=f"strategy.allocations.{name}.destination_account",
+                code="composed_arrival_unheld",
+                remedy=(
+                    f"Add an allocation on account {destination!r} that holds {asset}, or "
+                    "deliver to an account that has one."
+                ),
+            )
+
+
+def arrival_unheld(inputs: AuthorInputs, positions, account, asset) -> bool:
+    """Whether no position on the account can hold the asset.
+
+    Only that position's observation measures the wallet an arrival is credited to. A
+    pool position names its coins only after resolution, so one on the account leaves
+    the question to the resolved configuration.
+    """
+    holders = [value for value in positions.values() if value.account == account]
+    if any(asset in known_assets(inputs, value) for value in holders):
+        return False
+    return all(hasattr(inputs.markets[value.market], "asset") for value in holders)
 
 
 def require_chain_support(inputs: AuthorInputs):

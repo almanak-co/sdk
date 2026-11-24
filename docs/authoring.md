@@ -526,6 +526,118 @@ the prepared ticks, offers no `entry_quote`. The observation records why as
 `entry_quote_error`, and its exit and rebalance quotes are unaffected. Exit
 observations and teardown in backtests measure no entry quote.
 
+### Bridging between accounts
+
+A bridge allocation moves one asset from one named account to another on a
+different chain. `ctx.actions.bridge(name, amount)` sends `amount` base units of
+the market's asset from the allocation's `account` to its `destination_account`.
+The connector owns the steps: an exact approval, the quoted deposit and the
+revocation of any residue. `ctx.actions.revoke(name)` clears an approval whose
+deposit was never mined. It increases no exposure, so teardown admits it.
+
+A strategy with accounts on two chains is evaluated once per chain. The bridge
+allocation is observed on its source chain only, so on the destination chain's
+turn `ctx.observation(name)` is `None` and the strategy requests nothing:
+
+```python
+observed = ctx.observation("move")
+if observed is None:
+    return ctx.decision()
+if state(ctx).sent is None:
+    return ctx.decision(intent=ctx.actions.bridge("move", amount))
+return ctx.decision()
+```
+
+The amount received is what the deposit's quote states, never above the amount
+sent and never below it by more than the market's `max_fee_bps`. The gateway
+refuses a quote above that ceiling before the approval is signed. This is a
+gateway check, not on-chain enforcement.
+
+The market's `quote` names the venue's own quote API, and a fork run does not
+ask it: no relayer quotes a fork. A fork gateway constructs the quote instead,
+from a stated fee of one basis point and the fork's own block time, and the
+same checks admit it. Reports and dashboards show its source as
+`across_fork_constructed` beside each transfer. Such a quote says nothing about
+what the venue would have quoted. Across declares fork runs only today, so
+every run an author can start signs a constructed quote; no production run
+and no backtest is declared.
+
+`on_outcome` receives three kinds of result for a bridge:
+
+- An `ActionResult` for the strategy's own steps. A completed `bridge` carries
+  the opened `transfer` and `sent`, what left the source account. The received
+  amount is not known yet.
+- An `ArrivalResult` when a relayer filled the transfer. `received` is measured
+  on the destination chain and `offered` is what the deposit asked for.
+- A `RefundResult` when nobody filled it. `returned` is measured on the source
+  chain. A refund is read only after the destination chain has shown that no
+  fill can follow, which is after the quote's fill deadline.
+
+Between the deposit and one of the last two, the source account holds a transfer
+in flight. It is not a balance on either chain, and a missing outcome never
+sends the deposit again. Teardown waits for every open transfer to arrive or be
+refunded and does not bridge back.
+
+#### Bridged cash in a composed strategy
+
+A bridge allocation can share a strategy with allocations of other connectors.
+The bridged amount then moves between the two accounts'
+[owned inventory](#wallet-balance-and-owned-inventory):
+
+- `inventory` states the sent asset on the source account and the received
+  asset on the `destination_account`, with quantity `'0'` when the account
+  starts without it. Another allocation on the destination account must hold
+  the received asset, because that allocation's observation measures the
+  arrival. A configuration without either is refused.
+- A mined deposit takes the sent amount out of the source account's owned
+  inventory. While the transfer is in flight the amount is in neither
+  account's inventory. The gateway refuses a supply, swap, liquidity or bridge
+  action on the destination account sized from the bridge's offer, with
+  `inventory_unavailable`.
+- A full repayment is the one action that may spend loan asset sent to the
+  fund beyond its owned inventory. While a transfer that has neither arrived
+  nor been refunded names a wallet asset as its source or destination, or
+  another chain has planned or signed a bridge that delivers into it, a full
+  repayment of that asset spends owned inventory only. One the inventory does
+  not cover is refused with `repayment_funding`, and continues without a
+  restart once the transfer is recorded as arrived or refunded.
+- The measured arrival adds `received` to the destination account's owned
+  inventory, and another allocation there can spend it from its next decision.
+  A measured refund adds `returned` back to the source account's.
+- On the source chain's turn, `ctx.position(name)` of the bridge allocation
+  reports `inventory`, the source account's owned cash of the sent asset, and
+  `in_flight`, the allocation's transfers that have neither arrived nor been
+  refunded. Each states `sent`, `offered`, `fill_deadline` and `unfilled`, and
+  no received amount. On the destination chain's turn the bridge allocation has
+  no position and no observation; size a spend there from the `ArrivalResult`
+  recorded in `on_outcome`, or from the spending allocation's own
+  `owned.inventory`.
+
+```python
+def on_outcome(ctx):
+    if isinstance(ctx.result, ArrivalResult):
+        return state(ctx).updated(received=ctx.result.received.amount)
+    ...
+
+def decide(ctx):
+    memory = state(ctx)
+    if ctx.observation("earn") is not None and memory.received and memory.supplied is None:
+        return ctx.decision(intent=ctx.actions.supply("earn", memory.received))
+    ...
+```
+
+Teardown unwinds the other allocations as usual, waits for every open transfer
+and does not bridge back: funds that arrived stay on the destination account.
+Reports and dashboards list transfers apart from fund cash, and an open
+transfer has no received amount there, never a zero. See the
+[bridge and lend reference](https://github.com/almanak-co/sdk/tree/main/strategies/arbitrum_base_bridge_and_lend).
+
+Across is the first bridge connector. Its source account is an EOA, the sent
+asset is an ERC-20 other than the wrapped native asset, and both assets have the
+same decimals. See [Supported connectors](support.md) for the chains and run
+modes it declares, and the
+[Across USDC bridge reference](https://github.com/almanak-co/sdk/tree/main/strategies/across_usdc_arbitrum_base_bridge).
+
 ## Typed memory
 
 Define `State` as a subclass of `StrategyState` when a strategy needs durable

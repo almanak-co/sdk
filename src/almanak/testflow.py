@@ -526,9 +526,9 @@ def evaluated(wire) -> str | None:
 
 
 def settled(wire) -> bool:
-    if any(wire.get(name) for name in ("pending", "plan", "decision")):
-        return False
-    return not any(item.get("pending") for item in wire.get("work") or ())
+    # A multi-chain checkpoint keeps each chain's decision, plan and attempt in its work.
+    scopes = (wire, *(wire.get("work") or ()))
+    return not any(scope.get(name) for scope in scopes for name in ("pending", "plan", "decision"))
 
 
 def require_coordinator(root, since=None) -> None:

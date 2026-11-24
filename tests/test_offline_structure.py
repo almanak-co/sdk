@@ -22,6 +22,7 @@ from almanak.connectors.support import (
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSED = ROOT / "strategies/arbitrum_aave_borrow_and_trade"
 WETH = "eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
+BASE_WETH = "eip155:8453/erc20:0x4200000000000000000000000000000000000006"
 SECOND_POOL = "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443"
 
 
@@ -37,8 +38,8 @@ def parsed(raw):
     return parse_inputs(parse(dumped(raw), file="config.yaml"))
 
 
-def checked_offline(tmp_path, raw):
-    (tmp_path / "strategy.py").write_bytes((COMPOSED / "strategy.py").read_bytes())
+def checked_offline(tmp_path, raw, reference=COMPOSED):
+    (tmp_path / "strategy.py").write_bytes((reference / "strategy.py").read_bytes())
     (tmp_path / "config.yaml").write_text(dumped(raw))
     return check(SimpleNamespace(directory=tmp_path, config=None, strategy=None))
 
@@ -80,6 +81,29 @@ def test_each_dex_connector_takes_one_allocation_per_fund(connector):
         require_one_allocation_per_fund(inputs)
     inputs.strategy.allocations["b"] = SimpleNamespace(market="pool", account="other")
     require_one_allocation_per_fund(inputs)
+
+
+def test_offline_check_refuses_a_bridge_into_an_asset_no_allocation_holds(tmp_path):
+    reference = ROOT / "strategies/arbitrum_base_bridge_and_lend"
+    raw = json.loads(json.dumps(load(reference / "config.yaml").value))
+    assert checked_offline(tmp_path, raw, reference)["valid"]
+    # The receiving account's only other allocation now holds WETH. The inventory
+    # still names the delivered USDC, which nothing on that account measures.
+    raw["markets"]["earn"]["asset"] = BASE_WETH
+    raw["inventory"].append(
+        {"account": "base_fund", "balance": {"asset": BASE_WETH, "quantity": "0"}}
+    )
+    with pytest.raises(CheckFailure) as failure:
+        checked_offline(tmp_path, raw, reference)
+    detail = failure.value.diagnostic()
+    assert detail["code"] == "composed_arrival_unheld"
+    assert detail["field"] == "strategy.allocations.move.destination_account"
+    assert "'move' delivers" in detail["message"] and "no allocation holds it" in detail["message"]
+    # Without the inventory entry the missing entry is the cause reported.
+    raw["inventory"] = [item for item in raw["inventory"] if "0x8335" not in str(item)]
+    with pytest.raises(CheckFailure) as failure:
+        checked_offline(tmp_path, raw, reference)
+    assert failure.value.diagnostic()["code"] == "composed_inventory_incomplete"
 
 
 def test_lending_allocations_may_share_a_fund():

@@ -27,7 +27,15 @@ def test_declared_matrix_and_new_chain_cannot_silently_lose_coverage():
     assert len(expected) > 0
     # Every reference proves EOA beside Safe/Roles, unless its connector declares only
     # Safe/Roles: HyperCore's Safe owns the account (blueprint 30).
-    assert {c.reference for c in cases if c.profile == "eoa"} == {
+    # Across declares only EOA accounts: the Roles grants of a bridge are not built.
+    # A composed reference that bridges proves EOA accounts alone for the same reason.
+    eoa_only = {
+        c.reference
+        for c in cases
+        if any(check.connector == ConnectorId("across") for check in c.checks())
+    }
+    assert eoa_only == {"across_usdc_arbitrum_base_bridge", "arbitrum_base_bridge_and_lend"}
+    assert {c.reference for c in cases if c.profile == "eoa"} - eoa_only == {
         c.reference
         for c in cases
         if c.profile == "safe_roles" and c.connector != ConnectorId("hyperliquid")
@@ -50,6 +58,32 @@ def test_declared_matrix_and_new_chain_cannot_silently_lose_coverage():
         validate([c for c in cases if c.profile != "eoa"])
     with pytest.raises(ValueError, match="duplicate"):
         validate([*cases, cases[0]])
+
+
+def test_the_across_revoke_is_claimed_by_its_own_proof_and_by_no_clean_lifecycle():
+    import ast
+
+    from tests.qa.catalog import ACROSS_PROOFS, ROOT
+
+    cases = catalog()
+    across = [c for c in cases if c.connector == ConnectorId("across")]
+    revoke = [c for c in across if EconomicAction.REVOKE_BRIDGE in c.actions]
+    assert [c.id for c in revoke] == ["cleanup/across_usdc_arbitrum_base_bridge/eoa"]
+    clean = [c for c in across if c.lane == "fork"]
+    assert clean and all(c.actions == (EconomicAction.BRIDGE,) for c in clean)
+    # Without the revoke proof the declared action has no proof, under either policy.
+    with pytest.raises(ValueError, match="coverage gaps.*revoke_bridge"):
+        validate([c for c in cases if c not in revoke])
+    # Every supervised Across proof is listed by a bench case, each exactly once.
+    faults = next(c for c in cases if c.id == "fork/faults")
+    listed = [n for n in (*faults.nodes, *revoke[0].nodes) if n.startswith(ACROSS_PROOFS)]
+    module = ast.parse((ROOT / ACROSS_PROOFS).read_text())
+    proofs = [
+        f"{ACROSS_PROOFS}::{node.name}"
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+    ]
+    assert sorted(listed) == sorted(proofs) and len(proofs) == 4
 
 
 def test_unsupported_action_claim_is_not_a_proof():
@@ -655,3 +689,52 @@ def test_offline_worker_keeps_full_test_scope_without_fail_fast(tmp_path, monkey
     assert command[2:4] == list(nodes)
     assert command[command.index("-n") + 1] == "auto"
     assert "--maxfail=1" not in command
+
+
+def test_a_composed_reference_is_fork_only_exactly_when_a_component_declares_no_backtest(
+    monkeypatch, tmp_path
+):
+    from tests.qa import composed_catalog
+    from tests.qa.catalog import ROOT, discover
+
+    sources = {
+        source.name: source
+        for source in discover(ROOT / "strategies", ROOT / "tests/strategy_fork/scenarios")
+        if source.name in composed_catalog.COMPOSED_REFERENCES
+    }
+    produced = {name: list(composed_catalog.composed_cases(s)) for name, s in sources.items()}
+    fork_only = {
+        name for name, found in produced.items() if not any(c.lane == "backtest" for c in found)
+    }
+    # Across declares fork mode alone; every other composed reference keeps its backtest.
+    assert fork_only == {"arbitrum_base_bridge_and_lend"}
+    assert all(any(c.lane != "backtest" for c in found) for found in produced.values())
+    # Deriving the category skips no obligation. The bridge is proven by this reference
+    # and by the standalone one; without both the catalog has a coverage gap.
+    cases = catalog()
+    bridge = [
+        c
+        for c in cases
+        if any(
+            check.connector == ConnectorId("across") and EconomicAction.BRIDGE in check.actions
+            for check in c.checks()
+        )
+    ]
+    assert {c.reference for c in bridge} == {
+        "across_usdc_arbitrum_base_bridge",
+        "arbitrum_base_bridge_and_lend",
+    }
+    with pytest.raises(ValueError, match="coverage gaps"):
+        validate([c for c in cases if c not in bridge])
+    # A reference whose components all declare backtest still owes its configuration.
+    other = next(s for name, s in sources.items() if name not in fork_only)
+    moved = tmp_path / "config.yaml"
+    moved.write_bytes(other.config.read_bytes())
+    with pytest.raises(ValueError, match="missing backtest-economic.yaml"):
+        list(composed_catalog.composed_cases(replace(other, config=moved)))
+    # Components that share no account profile leave no fork case; that is refused.
+    source = sources["arbitrum_base_bridge_and_lend"]
+    profiles = iter(({"eoa"}, {"safe_roles"}))
+    monkeypatch.setattr(composed_catalog, "declared_profiles", lambda *scope: next(profiles))
+    with pytest.raises(ValueError, match="no common account profile"):
+        list(composed_catalog.composed_cases(source))

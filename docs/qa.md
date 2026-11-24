@@ -195,8 +195,10 @@ Selection. `scripts/ci/cell_qa_matrix.py` selects every catalog case whose
 obligations name the connector on the chain, which are the cases the proof
 ledger maps to the cell. The `fork` and `backtest` lanes run by default and the
 `pytest` lane can be added. The `offline`, `faults` and `blocked` lanes are
-refused: the offline gate needs the retained evidence tree, `fork/faults` runs
-every connector's fault suite, and a candidate blocker cannot pass. A selected
+refused: the offline gate needs the retained evidence tree, the `faults` cases
+run through the local bench (`fork/faults` is every connector's fault suite, and
+a cell's own fault case, such as the Across revoke proof, is dispatched with the
+`nodes` input instead), and a candidate blocker cannot pass. A selected
 cell case outside the chosen lanes stays listed as not run. The reverse-fault
 entries are the reversal tests in `tests/fork/test_*reversal*.py` that are
 parametrized by one of the cell's references, or whose module declares it as

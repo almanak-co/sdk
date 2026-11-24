@@ -5,6 +5,23 @@ from pydantic import model_validator
 from almanak.caip import ChainId
 from almanak.models import Block, Chain, Hash32, Model
 
+FORK_ENVIRONMENT = "anvil:"
+
+
+def is_fork(chain: Chain) -> bool:
+    """Whether the chain is one identified fork node: the prefix alone names none."""
+    environment = chain.environment
+    return environment.startswith(FORK_ENVIRONMENT) and len(environment) > len(FORK_ENVIRONMENT)
+
+
+def same_environment(first: Chain, second: Chain) -> bool:
+    """Each fork node names its own environment, so two identified forks are one
+    environment. A fork never pairs with anything else."""
+    chains = (first, second)
+    if any(chain.environment.startswith(FORK_ENVIRONMENT) for chain in chains):
+        return all(is_fork(chain) for chain in chains)
+    return first.environment == second.environment
+
 
 class ForkBinding(Model):
     chain: Chain
@@ -14,7 +31,7 @@ class ForkBinding(Model):
 
     @model_validator(mode="after")
     def scope(self):
-        if self.chain.environment != "anvil:" + self.instance:
+        if self.chain.environment != FORK_ENVIRONMENT + self.instance:
             raise ValueError("fork scope must identify its exact Anvil instance")
         if self.chain.chain_id not in (self.origin.chain.chain_id, ChainId("eip155:31337")):
             raise ValueError("fork logical chain differs from its origin")

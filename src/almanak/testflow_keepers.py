@@ -2,7 +2,8 @@
 
 Some protocols execute an accepted request only when their own keeper acts, and a fork
 runs none. A connector whose request binding offers a fork keeper settles each accepted
-request once; this module gives it each chain's fork RPC, origin block and origin-chain
+request once, and one whose external effects offer one settles what it left open, such
+as a bridge transfer; this module gives it each chain's fork RPC, origin block and origin-chain
 reader, and the venue processes the workspace runs beside its nodes, keeps the
 coordinator clock with the fork time the keeper moved, and retains what each settlement
 used.
@@ -81,8 +82,10 @@ class Keepers:
 
         if wire is None:
             return None, None
-        binding = connector_from_wire(wire["config"]).requests
-        if binding is None or not hasattr(binding, "fork_keeper"):
+        connector = connector_from_wire(wire["config"])
+        offered = (connector.requests, getattr(connector, "external_effects", None))
+        binding = next((b for b in offered if hasattr(b, "fork_keeper")), None)
+        if binding is None:
             return None, None
         if self.keeper is None:
             self.keeper = binding.fork_keeper(self.forks, self.root / "keepers")
@@ -114,7 +117,11 @@ class Keepers:
         from almanak.testflow import shift_clock
 
         binding, state = self.binding(wire)
-        if binding is None or not binding.unresolved(state):
+        # A composed deployment also owes the settlement of its transfers in flight.
+        if binding is None:
+            return
+        owed = getattr(type(binding), "fork_unsettled", None) or binding.unresolved
+        if not owed(state):
             return
         for row in self.keeper.settle(state):
             self.rows.append(row)
