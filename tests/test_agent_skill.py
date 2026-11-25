@@ -683,6 +683,25 @@ def test_the_result_fields_are_the_ones_the_action_module_writes():
     assert "failed on chain" in table["outcomes"]
 
 
+def test_the_skill_says_what_a_position_read_at_finalized_can_miss():
+    """A position read names the selector that chose its block, and the skill tells an
+    agent what an empty position or a missing NFT at the finalized block means."""
+    from almanak import ax
+
+    text = " ".join(SKILL.read_text().split())
+    pinned = SimpleNamespace(number=9, timestamp=ax.now())
+    stated = ax.read_at(SimpleNamespace(block="finalized"), pinned)["read_at"]
+    assert (stated["block"], stated["number"]) == ("finalized", 9)
+    assert set(stated) == {"block", "number", "timestamp", "age_seconds"}
+    assert "`read_at.block` names the selector that chose its block" in text
+    assert "a position just opened shows as empty with no error" in text
+    assert "A read refused with `holds no NFT <token id> at block <number>`" in text
+    assert "read a position just opened with `--block latest`" in text
+    assert "--block latest" in ax.FINALIZED_HINT
+    # A follow-up read can name the block a step was mined in.
+    assert "with its `transaction` hash and the `block` it was mined in" in text
+
+
 def pool_position() -> dict:
     """What a tick-range liquidity action reports as its position, from stand-in state."""
     from almanak.connectors import v3_pool_direct
@@ -1796,7 +1815,7 @@ def test_a_read_after_an_action_or_an_arrival_asks_for_the_latest_block():
     for statement in (
         "A read without `--block` is the chain's finalized block, on every transport",
         "trails the newest one by minutes on most chains",
-        "says which block it is under `block_read`",
+        "says which block it is under `read_at`: `block` is the selector that chose it",
         "`age_seconds` how old that block was when the command ran",
     ):
         assert statement in stated, statement

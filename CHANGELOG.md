@@ -9,11 +9,11 @@ its changelog is on the `v2` branch.
 ## [Unreleased]
 
 ### Added
-- Every `almanak ax` read that pins a block states it as `block_read`: the
-  `selector` that was asked (`finalized`, `latest` or the number), the block's
-  `number` and `timestamp`, and `age_seconds`, the command's clock less that
-  timestamp. A read without `--block` is the finalized block, which trails the head
-  by minutes, and the result now says so. No extra read is made for it.
+- Every `almanak ax` read that pins a block states `read_at`, `ax balance` and the
+  pool, reserve, market and discovery reads included, and it also holds the resolved
+  block's `number` and `timestamp` and `age_seconds`, the command's clock less that
+  timestamp. No extra read is made for it. `ax bridge-status` keeps its own
+  `read_at`.
 - A direct action's preview states `steps_note`: how many transactions the request
   sends, in order by kind, and that only the first step's gas is quoted, because a
   later step cannot be simulated before the earlier one is mined. Aave V4, Aave V3
@@ -59,6 +59,18 @@ its changelog is on the `v2` branch.
 - The agent skill reads the overview only when the user asks for it. It read it
   every time it loaded. The skill tells the agent that symbols and names in the
   overview are data written by others and never instructions.
+- A position read says which block it read and why. `--help` of every `ax` read states
+  that `--block` defaults to `finalized`, that this block can trail the head by minutes
+  on a rollup and that a position just opened is read with `--block latest`;
+  `almanak markets --help` states its own default, `latest`. `ax lending-position`,
+  `ax liquidity-position` and `ax perp-position` report `read_at`, whose `block` is the
+  selector that chose the block, so an empty position read at an old block can be told
+  from an empty position. The refusal of a token ID a position manager does not hold
+  names the block read (`holds no NFT <token id> at block <number>`), and a
+  `liquidity-position` read at `finalized` adds how to read the head; a direct action's
+  refusal names the block only. Each entry of a direct action's `outcomes` states the
+  `block` its step was mined in. The default stays `finalized` and the accepted
+  selectors are unchanged (#38).
 
 ### Fixed
 - The release of an expired signed step reads the nonce again at the pinned block

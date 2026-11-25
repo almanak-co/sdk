@@ -19,7 +19,7 @@ from almanak.cli_arguments import build_parser, parse_validated
 from almanak.configuration.composed import Parameters as ComposedParameters
 from almanak.connectors import direct
 from almanak.connectors.composition import connector_from_wire
-from almanak.connectors.direct import ALLOCATION, ActionRequest
+from almanak.connectors.direct import ALLOCATION, ActionRequest, NftNotHeld
 from almanak.connectors.support import RunMode, uniswap_candidate_entry, uniswap_support
 from almanak.connectors.uniswap_v4 import (
     abi,
@@ -42,6 +42,7 @@ from almanak.operator_deployment import refuse_adoption
 from almanak.strategy import StrategyDefinition
 from tests import test_ax_swap as family
 from tests import test_ax_swap_uniswap_v4 as swaps
+from tests.read_at_support import read_at
 
 CONNECTOR = "uniswap_v4"
 USDC, WETH, NATIVE = swaps.USDC, swaps.WETH, swaps.NATIVE
@@ -291,6 +292,9 @@ def test_a_wrong_token_id_is_refused_by_name(action):
     with pytest.raises(ValueError, match=f"NFT {TOKEN} holds no liquidity"):
         positions(market, action, Manager(market, liquidity=0))
     with pytest.raises(ValueError, match=f"holds no NFT {TOKEN}"):
+        positions(market, action, Manager(market, owner=None))
+    # A direct action pins the head: its refusal names the block and hints at no selector.
+    with pytest.raises(NftNotHeld, match=f"holds no NFT {TOKEN} at block {market.block.number}$"):
         positions(market, action, Manager(market, owner=None))
 
 
@@ -1122,3 +1126,64 @@ def test_the_position_read_reports_principal_and_the_fees_a_collection_would_pay
     with pytest.raises(ValueError, match="request chain differs from the reader chain"):
         reader.chain = SimpleNamespace(chain_id=ChainId("eip155:10"))
         position_request.read_liquidity_position(reader, request, market.block)
+
+
+class Transport:
+    def __init__(self, reader, block):
+        self.reader, self.block = reader, block
+
+    def __enter__(self):
+        self.reader.pin_block = lambda selector: self.block
+        return self.reader
+
+    def __exit__(self, *exc):
+        return False
+
+
+def missing_refusal(monkeypatch, *block):
+    market = swaps.resolved()
+    monkeypatch.setattr(
+        "almanak.connectors.uniswap_v4.resolution.resolve_market", lambda *a: market
+    )
+    reader = Manager(market, owner=None)
+    reader.chain = market.block.chain
+    monkeypatch.setattr(
+        ax, "observation_reader", lambda args, chain: Transport(reader, market.block)
+    )
+    with pytest.raises(NftNotHeld) as refused:
+        ax.liquidity_position(parse("liquidity-position", READ, *block))
+    return str(refused.value), market
+
+
+@pytest.mark.parametrize("block", [(), ("--block", "finalized")])
+def test_a_missing_v4_nft_read_at_finalized_names_the_block_and_how_to_read_the_head(
+    monkeypatch, block
+):
+    message, market = missing_refusal(monkeypatch, *block)
+    assert f"holds no NFT {TOKEN} at block {market.block.number}; " in message
+    assert "'finalized' block, which can trail the head by minutes" in message
+    assert message.endswith("a position just opened is read with --block latest")
+
+
+@pytest.mark.parametrize("selector", ["latest", "25908472"])
+def test_a_missing_v4_nft_read_at_the_head_or_a_number_gives_no_retry_hint(monkeypatch, selector):
+    message, market = missing_refusal(monkeypatch, "--block", selector)
+    assert message.endswith(f"holds no NFT {TOKEN} at block {market.block.number}")
+    assert "finalized" not in message and "--block" not in message
+
+
+def test_the_v4_position_read_names_the_selector_that_chose_its_block(monkeypatch):
+    market = swaps.resolved()
+    reader = SimpleNamespace(chain=market.block.chain)
+    monkeypatch.setattr(
+        ax, "observation_reader", lambda args, chain: Transport(reader, market.block)
+    )
+    monkeypatch.setattr(
+        position_request, "read_liquidity_position", lambda *read: {"product": "liquidity_position"}
+    )
+    for block, selector in (((), "finalized"), (("--block", "latest"), "latest")):
+        stated = read_at(monkeypatch, selector, market.block)
+        assert ax.liquidity_position(parse("liquidity-position", READ, *block)) == {
+            "product": "liquidity_position",
+            "read_at": stated,
+        }

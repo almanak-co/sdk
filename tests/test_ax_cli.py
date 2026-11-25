@@ -358,11 +358,29 @@ def test_every_ax_block_refuses_other_forms_naming_the_accepted_ones(tmp_path, v
         )
 
 
-def test_ax_help_names_the_block_forms(capsys):
-    for subcommand in [*CONNECTORS, "balance"]:
-        with pytest.raises(SystemExit):
-            parse(["ax", subcommand, "--help"])
-        assert "'finalized' or 'latest'" in " ".join(capsys.readouterr().out.split())
+def help_text(capsys, *command):
+    with pytest.raises(SystemExit):
+        parse([*command, "--help"])
+    return " ".join(capsys.readouterr().out.split())
+
+
+def test_ax_help_names_the_block_forms_and_the_finalized_default(capsys):
+    for subcommand in [*CONNECTORS, "liquidity-position", "balance"]:
+        text = help_text(capsys, "ax", subcommand)
+        assert "'finalized' or 'latest'" in text
+        assert "default 'finalized'" in text
+        # The default trails the head, so the help says how a fresh position is read.
+        assert "trail the head by minutes on a rollup" in text
+        assert "a position just opened is read with --block latest" in text
+        assert "default 'latest'" not in text
+
+
+def test_markets_help_names_its_own_latest_default(capsys):
+    text = help_text(capsys, "markets")
+    assert "'finalized' or 'latest'" in text
+    assert "default 'latest'" in text
+    assert "default 'finalized'" not in text
+    assert parse(["markets", "--env-file", "operator.env"]).block == "latest"
 
 
 POOL = "0x69bfaf19c9f377bb306a89aed9f6b07e2c1a8d9a"

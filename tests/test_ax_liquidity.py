@@ -39,7 +39,7 @@ from almanak.connectors.concentrated_math import (
     liquidity_for,
     sqrt_at_tick,
 )
-from almanak.connectors.direct import ALLOCATION, ActionRequest
+from almanak.connectors.direct import ALLOCATION, ActionRequest, NftNotHeld
 from almanak.connectors.v3_pool_position_request import PositionRequest, read_liquidity_position
 from almanak.connectors.v3_pool_positions import Position
 from almanak.connectors.v3_pool_reader import position_key
@@ -60,6 +60,7 @@ from almanak.models import ZERO_ADDRESS, AssetAmount
 from almanak.operator_deployment import refuse_adoption
 from almanak.state import Journal
 from almanak.strategy import StrategyDefinition
+from tests.read_at_support import read_at
 from tests.test_ax_swap import (
     CONNECTORS,
     OBSERVED,
@@ -427,6 +428,7 @@ def test_the_token_id_is_refused_by_name_when_it_is_not_the_wallets_position_her
 
     refused(f"{action} requires --token-id", {}, token_id=None)
     refused(f"position manager {market.contracts.position_manager} holds no NFT {TOKEN}", {})
+    refused(f"holds no NFT {TOKEN} at block {market.block.number}$", {})
     refused(
         f"NFT {TOKEN} belongs to {STRANGER}, not to the wallet {WALLET.address}",
         {TOKEN: held(market, owner=STRANGER)},
@@ -1208,6 +1210,9 @@ def test_the_position_read_refuses_a_missing_nft_another_pool_and_another_chain(
     reader = manager(connector, market, {OTHER_TOKEN: elsewhere})
     with pytest.raises(ValueError, match=f"holds no NFT {TOKEN}"):
         read_liquidity_position(reader, connector, stated, market.block)
+    # The read itself knows no selector: it names the block and gives no retry hint.
+    with pytest.raises(NftNotHeld, match=f"holds no NFT {TOKEN} at block {market.block.number}$"):
+        read_liquidity_position(reader, connector, stated, market.block)
     with pytest.raises(ValueError, match=f"NFT {OTHER_TOKEN} is a position of another pool"):
         read_liquidity_position(reader, connector, replace_token(stated, OTHER_TOKEN), market.block)
     other = "eip155:1" if str(chain) != "eip155:1" else "eip155:8453"
@@ -1238,7 +1243,8 @@ def test_the_read_command_pins_its_block_and_passes_the_request_on(connector, mo
     monkeypatch.setattr(ax, "observation_reader", lambda args, chain: Reader())
     monkeypatch.setattr(ax, "read_liquidity_position", read)
     args = position_arguments(connector, "--block", "latest")
-    assert ax.liquidity_position(args) == {"product": "liquidity_position"}
+    stated = read_at(monkeypatch, "latest", market.block)
+    assert ax.liquidity_position(args) == {"product": "liquidity_position", "read_at": stated}
     assert (seen["selector"], seen["connector"], seen["block"]) == (
         "latest",
         connector,
@@ -1857,6 +1863,10 @@ def test_a_missing_nft_is_refused_by_name_through_the_read_gateway(connector, re
         missing = stated.model_copy(update={"token_id": OTHER_TOKEN})
         with pytest.raises(ValueError, match=f"holds no NFT {OTHER_TOKEN}"):
             read_liquidity_position(reader, connector, missing, block)
+        with pytest.raises(
+            NftNotHeld, match=f"holds no NFT {OTHER_TOKEN} at block {block.number}$"
+        ):
+            read_liquidity_position(reader, connector, missing, block)
         manager_address = market.contracts.position_manager
         with pytest.raises(Reverted) as revert:
             reader.call(
@@ -1868,3 +1878,90 @@ def test_a_missing_nft_is_refused_by_name_through_the_read_gateway(connector, re
                 outputs=("address",),
             )
         assert (revert.value.kind, revert.value.reverted, revert.value.data) == ("rpc", True, None)
+
+
+class Session:
+    """The transport of a read: a reader that pins the stated block for any selector."""
+
+    def __init__(self, reader, block, seen):
+        self.reader, self.block, self.seen = reader, block, seen
+
+    def __enter__(self):
+        self.reader.pin_block = self.pin_block
+        return self.reader
+
+    def __exit__(self, *exc):
+        return False
+
+    def pin_block(self, selector):
+        self.seen.append(selector)
+        return self.block
+
+
+def where(market):
+    """The flags that name the retained market's own chain and pool."""
+    return "--chain", str(market.pool.chain.chain_id), "--pool", market.pool.pool
+
+
+def missing_refusal(connector, monkeypatch, *block):
+    """The read's refusal of a token ID the position manager does not hold."""
+    market = resolved(connector)
+    seen: list = []
+    session = Session(manager(connector, market, {}), market.block, seen)
+    monkeypatch.setattr(ax, "observation_reader", lambda args, chain: session)
+    with pytest.raises(NftNotHeld) as refused:
+        ax.liquidity_position(position_arguments(connector, *where(market), *block))
+    return str(refused.value), seen, market
+
+
+@pytest.mark.parametrize("block", [(), ("--block", "finalized")])
+def test_a_missing_nft_read_at_finalized_names_the_block_and_how_to_read_the_head(
+    connector, monkeypatch, block
+):
+    message, seen, market = missing_refusal(connector, monkeypatch, *block)
+    # The selector the caller stated is the first pin; the reader pins its number after.
+    assert seen[0] == "finalized"
+    assert f"holds no NFT {TOKEN} at block {market.block.number}; " in message
+    assert "'finalized' block, which can trail the head by minutes" in message
+    assert message.endswith("a position just opened is read with --block latest")
+
+
+@pytest.mark.parametrize("selector", ["latest", "25908472"])
+def test_a_missing_nft_read_at_the_head_or_a_number_gives_no_retry_hint(
+    connector, monkeypatch, selector
+):
+    message, seen, market = missing_refusal(connector, monkeypatch, "--block", selector)
+    assert str(seen[0]) == selector
+    assert message.endswith(f"holds no NFT {TOKEN} at block {market.block.number}")
+    assert "finalized" not in message and "--block" not in message
+
+
+@pytest.mark.parametrize("action", liquidity.NFT_ACTIONS)
+def test_a_direct_action_refusing_a_missing_nft_never_names_a_selector(connector, action):
+    market = resolved(connector)
+    with pytest.raises(NftNotHeld) as refused:
+        deployed(connector, market, naming(action), {})
+    message = str(refused.value)
+    assert message.endswith(f"holds no NFT {TOKEN} at block {market.block.number}")
+    assert "finalized" not in message and "latest" not in message and "--block" not in message
+
+
+def test_a_missing_nft_stays_an_invalid_input_refusal():
+    from almanak import cli
+
+    assert issubclass(NftNotHeld, ValueError)
+    assert cli.error_document(NftNotHeld("holds no NFT 1 at block 2")) == {
+        "error": "invalid_input",
+        "message": "holds no NFT 1 at block 2",
+    }
+
+
+def test_another_pools_nft_read_at_finalized_gives_no_retry_hint(connector, monkeypatch):
+    market = resolved(connector)
+    elsewhere = held(market, key=position_key(market.pool)[1] + 1)
+    session = Session(manager(connector, market, {TOKEN: elsewhere}), market.block, [])
+    monkeypatch.setattr(ax, "observation_reader", lambda args, chain: session)
+    with pytest.raises(ValueError, match=f"NFT {TOKEN} is a position of another pool") as refused:
+        ax.liquidity_position(position_arguments(connector, *where(market)))
+    assert not isinstance(refused.value, NftNotHeld)
+    assert "--block latest" not in str(refused.value)

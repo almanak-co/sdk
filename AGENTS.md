@@ -1083,11 +1083,12 @@ independently.
   authenticated loopback. The execution gateway's token is never reused for
   reads. Without a transport flag, `ax` uses `ALMANAK_AX_GATEWAY_URL` and
   `ALMANAK_AX_GATEWAY_AUTH_FILE`. `--block` defaults to `finalized`.
-- Current contract: every `ax` read that pins a block states it as `block_read`:
-  the `selector` asked, the block's `number` and `timestamp`, and `age_seconds`,
-  the command's clock less that timestamp. It is added by the calling process
-  on every transport and reads no head. `ax bridge-status` names its own blocks
-  under `read_at` and carries none.
+- Current contract: every `ax` read that pins a block states `read_at`: `block`,
+  the selector that chose the block, the resolved block's `number` and
+  `timestamp`, and `age_seconds`, the command's clock less that timestamp. It
+  is added by the calling process on every transport and reads no head.
+  `ax bridge-status` keeps its own `read_at`, the tag and a block of each
+  chain, with no age.
 - Current contract: a direct action's preview states `steps_note`, and `steps`
   where the connector declares them: the kinds of the transactions the request
   sends, in order. A connector declares `steps` in its `direct.py` only where

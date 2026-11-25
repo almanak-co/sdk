@@ -23,6 +23,7 @@ from almanak.connectors.aerodrome.position_request import (
     PositionRequest as AerodromePositionRequest,
 )
 from almanak.connectors.curve.position_request import PositionRequest as CurvePositionRequest
+from almanak.connectors.direct import NftNotHeld
 from almanak.connectors.discovery import pool_connectors
 from almanak.connectors.gmx_v2.market_request import GmxMarketRequest, read_gmx_market
 from almanak.connectors.gmx_v2.position_request import GmxPositionRequest, read_gmx_position
@@ -95,48 +96,15 @@ def command(args) -> int:
         "ax-portfolio": portfolio,
         "ax-bridge-status": ax_bridge.status,
     }
-    result = handlers[args.product](args)
-    print(json.dumps(with_block_read(result, args), indent=2))
+    print(json.dumps(handlers[args.product](args), indent=2))
     return 0
-
-
-def pin(reader, args) -> Block:
-    """Pin the read's block and keep it with the arguments, for `block_read`."""
-    args.pinned_block = reader.pin_block(args.block)
-    return args.pinned_block
-
-
-def with_block_read(result, args):
-    """The result with the block its values were read at, as `block_read`.
-
-    `selector` is what `--block` asked for: `finalized`, `latest` or a number.
-    `age_seconds` is this command's clock less the block's own timestamp, so a reader
-    sees how far behind the present the values are. It is negative when the clock is
-    behind the block's. No head is read for it. A read that pins no block, or one that
-    reports its own blocks, carries none.
-    """
-    block = getattr(args, "pinned_block", None)
-    if block is None or not isinstance(result, dict):
-        return result
-    stated = {
-        "selector": str(args.block),
-        "number": block.number,
-        "timestamp": block.timestamp,
-        "age_seconds": now() - block.timestamp,
-    }
-    return {**result, "block_read": stated}
-
-
-def now() -> int:
-    """The command's clock, in whole seconds since the epoch."""
-    return int(time.time())
 
 
 def pool_price(args):
     request = parse_request(args)
     chain = live_chain(request.source.chain)
     with observation_reader(args, chain.chain_id) as reader:
-        block = pin(reader, args)
+        block = reader.pin_block(args.block)
         pool = read_pool(reader, request.source, block)
         price = pool.spot_price(request)
         return {
@@ -148,14 +116,16 @@ def pool_price(args):
             },
             "observation": pool.model_dump(mode="json"),
             **describe(reader, request.source, block),
+            **read_at(args, block),
         }
 
 
 def lending_reserve(args):
     request = lending_request(args)
     with observation_reader(args, request.chain) as reader:
-        block = pin(reader, args)
-        return read_lending_reserve(reader, request, block, risk_query(args))
+        block = reader.pin_block(args.block)
+        reserve = read_lending_reserve(reader, request, block, risk_query(args))
+        return {**reserve, **read_at(args, block)}
 
 
 def risk_query(args) -> RiskQuery:
@@ -166,7 +136,38 @@ def lending_position(args):
     request = lending_request(args)
     account = Account(chain=live_chain(mainnet(request.chain)), address=args.account)
     with observation_reader(args, request.chain) as reader:
-        return read_lending_position(reader, request, account, pin(reader, args))
+        block = reader.pin_block(args.block)
+        return {**read_lending_position(reader, request, account, block), **read_at(args, block)}
+
+
+FINALIZED_HINT = (
+    "; that is the 'finalized' block, which can trail the head by minutes on a rollup,"
+    " so a position just opened is read with --block latest"
+)
+
+
+def read_at(args, block: Block) -> dict:
+    """The selector that chose a read's block, with the block it resolved to and its age.
+
+    An empty position at an old block is a valid answer with no error; the selector is
+    what tells it apart from an empty position at the head. `age_seconds` is this
+    command's clock less the block's own timestamp, so a reader sees how far behind the
+    present the values are. It is negative when the clock is behind the block's. No
+    head is read for it.
+    """
+    return {
+        "read_at": {
+            "block": args.block,
+            "number": block.number,
+            "timestamp": block.timestamp,
+            "age_seconds": now() - block.timestamp,
+        }
+    }
+
+
+def now() -> int:
+    """The command's clock, in whole seconds since the epoch."""
+    return int(time.time())
 
 
 def lending_request(args):
@@ -188,7 +189,7 @@ def balance(args):
     with observation_reader(args, asset.chain) as reader:
         # Pin once so every account is read at the same block, not the head
         # each read would otherwise resolve for a `latest` selector.
-        block = pin(reader, args)
+        block = reader.pin_block(args.block)
         observations = [
             read_balance(reader, asset, account, block.number) for _, account in requests
         ]
@@ -197,6 +198,7 @@ def balance(args):
     return {
         "product": args.product,
         "observations": [observation.model_dump(mode="json") for observation in observations],
+        **read_at(args, block),
     }
 
 
@@ -205,16 +207,16 @@ def perp_position(args):
     chain = live_chain(request.market.chain)
     account = Account(chain=chain, address=args.account)
     with observation_reader(args, chain.chain_id) as reader:
-        block = pin(reader, args)
-        return read_gmx_position(reader, request, account, block)
+        block = reader.pin_block(args.block)
+        return {**read_gmx_position(reader, request, account, block), **read_at(args, block)}
 
 
 def perp_markets(args):
     request = parse_request(args)
     chain = live_chain(mainnet(request.chain))
     with observation_reader(args, chain.chain_id) as reader:
-        block = pin(reader, args)
-        return read_gmx_market(reader, request, block)
+        block = reader.pin_block(args.block)
+        return {**read_gmx_market(reader, request, block), **read_at(args, block)}
 
 
 def pool(args):
@@ -225,10 +227,12 @@ def pool(args):
     if resolved_only and args.depth_bps is not None:
         raise ValueError("--depth-bps is available for V3-style concentrated-liquidity pools")
     with observation_reader(args, chain.chain_id) as reader:
-        block = pin(reader, args)
+        block = reader.pin_block(args.block)
         if resolved_only:
-            return read_resolved_pool(reader, args.connector, request, block)
-        return read_pool_state(reader, args.connector, request, block, args.depth_bps)
+            state = read_resolved_pool(reader, args.connector, request, block)
+        else:
+            state = read_pool_state(reader, args.connector, request, block, args.depth_bps)
+        return {**state, **read_at(args, block)}
 
 
 def liquidity_position(args):
@@ -236,10 +240,19 @@ def liquidity_position(args):
     chain = live_chain(mainnet(request.chain))
     support_level(args.connector, request.chain)
     with observation_reader(args, chain.chain_id) as reader:
-        block = pin(reader, args)
-        if not isinstance(request, PositionRequest):
-            return account_position_read(args.connector)(reader, request, block)
-        return read_liquidity_position(reader, args.connector, request, block)
+        block = reader.pin_block(args.block)
+        try:
+            if not isinstance(request, PositionRequest):
+                position = account_position_read(args.connector)(reader, request, block)
+            else:
+                position = read_liquidity_position(reader, args.connector, request, block)
+        except NftNotHeld as exc:
+            # Only this read knows the selector; a direct action pins the head and
+            # shares the connector's refusal, which therefore carries no hint.
+            if args.block != "finalized":
+                raise
+            raise NftNotHeld(f"{exc}{FINALIZED_HINT}") from None
+        return {**position, **read_at(args, block)}
 
 
 def account_position_read(connector: str):
@@ -253,8 +266,9 @@ def account_position_read(connector: str):
 def token_resolve(args):
     chain = live_chain(mainnet(ChainId(args.chain))).chain_id
     with lookup_source(args) as lookups, observation_reader(args, chain) as reader:
-        block = pin(reader, args)
-        return ax_discovery.resolve(lookups, reader, block, args.query, args.limit)
+        block = reader.pin_block(args.block)
+        found = ax_discovery.resolve(lookups, reader, block, args.query, args.limit)
+        return {**found, **read_at(args, block)}
 
 
 def pool_discovery(args):
@@ -268,8 +282,8 @@ def pool_discovery(args):
         offset=args.offset,
     )
     with lookup_source(args) as lookups, observation_reader(args, chain) as reader:
-        block = pin(reader, args)
-        return ax_discovery.dex_pools(lookups, reader, block, query)
+        block = reader.pin_block(args.block)
+        return {**ax_discovery.dex_pools(lookups, reader, block, query), **read_at(args, block)}
 
 
 def lending_markets(args):
@@ -285,8 +299,9 @@ def lending_markets(args):
         include_unlisted=args.include_unlisted,
     )
     with lookup_source(args) as lookups, observation_reader(args, chain) as reader:
-        block = pin(reader, args)
-        return ax_lending_markets.lending_markets(reader, lookups, block, query)
+        block = reader.pin_block(args.block)
+        markets = ax_lending_markets.lending_markets(reader, lookups, block, query)
+        return {**markets, **read_at(args, block)}
 
 
 def hypercore_markets(args):

@@ -17,6 +17,7 @@ from almanak.connectors.gmx_v2.domain import Contracts, Market
 from almanak.connectors.gmx_v2.position_request import GmxPositionRequest
 from almanak.connectors.lending_risk import RiskQuery
 from almanak.models import Account, Block, Chain
+from tests.read_at_support import read_at
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES = ROOT / "examples" / "ethereum"
@@ -105,7 +106,8 @@ def test_lending_reserve_builds_the_selection_from_inline_flags(live_reader, mon
         borrow_fraction=[Decimal("0.3"), Decimal("0.5")],
         health_floor=Decimal("1.6"),
     )
-    assert ax.lending_reserve(invocation) == {"product": "lending_reserve"}
+    stated = read_at(monkeypatch, 25908472, BLOCK)
+    assert ax.lending_reserve(invocation) == {"product": "lending_reserve", "read_at": stated}
     assert seen["request"].connector == "aave_v3"
     assert str(seen["request"].asset) == asset
     assert seen["request"].pool is None
@@ -131,10 +133,44 @@ def test_lending_position_reads_a_file_selection_for_the_account(
     monkeypatch.setattr(ax, "read_lending_position", read)
     live_reader(Pinned())
     invocation = lending_args("ax-lending-position", "aave_v4", config, account=OWNER)
-    assert ax.lending_position(invocation) == {"product": "lending_position"}
+    stated = read_at(monkeypatch, 25908472, BLOCK)
+    assert ax.lending_position(invocation) == {"product": "lending_position", "read_at": stated}
     assert (seen["request"].spoke, seen["request"].reserve_id) == (selection["spoke"], 7)
     assert seen["account"] == Account(chain=CHAIN, address=OWNER)
     assert seen["block"] == BLOCK
+
+
+class Selected(Pinned):
+    def pin_block(self, selector):
+        return BLOCK
+
+
+@pytest.mark.parametrize("selector", ["finalized", "latest", 25908472])
+def test_an_empty_lending_position_names_the_selector_that_chose_its_block(
+    live_reader, monkeypatch, selector
+):
+    # A position opened after the pinned block reads as empty, with exit 0 and no error.
+    empty = {"product": "lending_position", "observation": {"supplied": "0", "borrowed": "0"}}
+    monkeypatch.setattr(ax, "read_lending_position", lambda *read: dict(empty))
+    live_reader(Selected())
+    invocation = lending_args("ax-lending-position", "aave_v3", chain="eip155:1", account=OWNER)
+    invocation.asset = "eip155:1/erc20:" + "0x" + "a0" * 20
+    invocation.block = selector
+    stated = read_at(monkeypatch, selector, BLOCK, age=900)
+    assert ax.lending_position(invocation) == {**empty, "read_at": stated}
+
+
+@pytest.mark.parametrize("selector", ["finalized", "latest"])
+def test_a_perp_position_names_the_selector_that_chose_its_block(monkeypatch, tmp_path, selector):
+    config = tmp_path / "position.json"
+    config.write_text(gmx_request_json())
+    read = {"product": "gmx_perp_position", "observation": {"size": "0"}}
+    monkeypatch.setattr(ax, "read_gmx_position", lambda *stated: dict(read))
+    monkeypatch.setattr(ax, "verified_reader", lambda chain, env_file: Selected())
+    invocation = args("ax-perp-position", "gmx_v2", config, account="0x" + "55" * 20)
+    invocation.block = selector
+    stated = read_at(monkeypatch, selector, BLOCK)
+    assert ax.perp_position(invocation) == {**read, "read_at": stated}
 
 
 def test_lending_selection_naming_another_connector_is_refused(tmp_path):
@@ -237,8 +273,8 @@ def test_a_balance_read_states_the_block_it_asked_for_and_its_age(
     assert ax.command(invocation) == 0
     output = json.loads(capsys.readouterr().out)
     assert reader.asked == selector
-    assert output["block_read"] == {
-        "selector": selector,
+    assert output["read_at"] == {
+        "block": selector,
         "number": BLOCK.number,
         "timestamp": BLOCK.timestamp,
         "age_seconds": 780,
@@ -247,14 +283,46 @@ def test_a_balance_read_states_the_block_it_asked_for_and_its_age(
     assert output["observations"][0]["block"]["number"] == BLOCK.number
 
 
-def test_a_numbered_read_states_its_number_and_a_read_without_a_block_states_none(monkeypatch):
+def test_a_numbered_read_states_its_number_and_a_clock_behind_the_block_is_not_zero(monkeypatch):
     monkeypatch.setattr(ax, "now", lambda: BLOCK.timestamp - 3)
-    numbered = SimpleNamespace(block=BLOCK.number, pinned_block=BLOCK)
-    stated = ax.with_block_read({"product": "x"}, numbered)["block_read"]
-    # A clock behind the block's is shown as it is, never as zero.
-    assert (stated["selector"], stated["age_seconds"]) == (str(BLOCK.number), -3)
-    unpinned = SimpleNamespace(block="finalized")
-    assert ax.with_block_read({"product": "x"}, unpinned) == {"product": "x"}
+    stated = ax.read_at(SimpleNamespace(block=BLOCK.number), BLOCK)["read_at"]
+    # A stated number is reported as given, and a negative age as it is.
+    assert stated == {
+        "block": BLOCK.number,
+        "number": BLOCK.number,
+        "timestamp": BLOCK.timestamp,
+        "age_seconds": -3,
+    }
+
+
+class Named(Pinned):
+    def pin_block(self, selector):
+        return BLOCK
+
+
+@pytest.mark.parametrize(
+    ("handler", "read", "product"),
+    [
+        (ax.lending_reserve, "read_lending_reserve", "ax-lending-reserve"),
+        (ax.perp_markets, "read_gmx_market", "ax-perp-markets"),
+    ],
+)
+def test_reads_that_hold_no_position_state_the_same_read_at(
+    live_reader, monkeypatch, handler, read, product
+):
+    monkeypatch.setattr(ax, read, lambda *stated: {"product": product})
+    monkeypatch.setattr(ax, "lending_request", lambda args: SimpleNamespace(chain=CHAIN.chain_id))
+    monkeypatch.setattr(ax, "parse_request", lambda args: SimpleNamespace(chain=CHAIN.chain_id))
+    live_reader(Named())
+    invocation = SimpleNamespace(
+        product=product,
+        block="finalized",
+        env_file=Path("operator.env"),
+        borrow_fraction=None,
+        health_floor=None,
+    )
+    stated = read_at(monkeypatch, "finalized", BLOCK, age=780)
+    assert handler(invocation) == {"product": product, "read_at": stated}
 
 
 def test_the_command_clock_is_whole_seconds(monkeypatch):
@@ -309,8 +377,9 @@ def test_perp_position_passes_request_account_and_block_through(live_reader, mon
 
     monkeypatch.setattr(ax, "read_gmx_position", read)
     monkeypatch.setattr(ax, "verified_reader", lambda chain, env_file: Reader())
+    stated = read_at(monkeypatch, 25908472, block)
     result = ax.perp_position(args("ax-perp-position", "gmx_v2", config, account="0x" + "55" * 20))
-    assert result == {"product": "gmx_perp_position"}
+    assert result == {"product": "gmx_perp_position", "read_at": stated}
     assert seen["selector"] == 25908472
     assert seen["pinned"] == block
     assert seen["account"].address == "0x" + "55" * 20
@@ -344,6 +413,16 @@ class Seam:
         pass
 
 
+# What a stand-in discovery read returns, and the block every such read states.
+LISTED = {"product": "listed"}
+DISCOVERED_AT = {
+    "block": "finalized",
+    "number": 36_000_000,
+    "timestamp": 1_790_000_000,
+    "age_seconds": 7,
+}
+
+
 @pytest.fixture
 def discovery_seams(monkeypatch):
     block = Block(
@@ -353,18 +432,23 @@ def discovery_seams(monkeypatch):
         timestamp=1_790_000_000,
     )
     seen = {}
+    assert read_at(monkeypatch, "finalized", block) == DISCOVERED_AT
     monkeypatch.setattr(ax, "lookup_source", lambda args: Seam(None))
     monkeypatch.setattr(ax, "observation_reader", lambda args, chain: Seam(block))
     monkeypatch.setattr(
-        ax.ax_discovery, "resolve", lambda *call: seen.setdefault("resolve", call[2:]) and "ok"
+        ax.ax_discovery,
+        "resolve",
+        lambda *call: seen.setdefault("resolve", call[2:]) and dict(LISTED),
     )
     monkeypatch.setattr(
-        ax.ax_discovery, "dex_pools", lambda *call: seen.setdefault("pools", call[2:]) and "ok"
+        ax.ax_discovery,
+        "dex_pools",
+        lambda *call: seen.setdefault("pools", call[2:]) and dict(LISTED),
     )
     monkeypatch.setattr(
         ax.ax_lending_markets,
         "lending_markets",
-        lambda *call: seen.__setitem__("markets", call[1:]) or "ok",
+        lambda *call: seen.__setitem__("markets", call[1:]) or dict(LISTED),
     )
     return block, seen
 
@@ -375,12 +459,12 @@ def discovery_args(**values):
 
 def test_discovery_handlers_pin_one_block_and_pass_the_validated_query(discovery_seams):
     block, seen = discovery_seams
-    assert ax.token_resolve(discovery_args(query="cbBTC")) == "ok"
+    assert ax.token_resolve(discovery_args(query="cbBTC")) == {**LISTED, "read_at": DISCOVERED_AT}
     assert seen["resolve"] == (block, "cbBTC", 10)
     pools = discovery_args(
         token=BASE_WETH, quote=BASE_USDC, connector_filter=None, depth_bps=None, offset=20
     )
-    assert ax.pool_discovery(pools) == "ok"
+    assert ax.pool_discovery(pools) == {**LISTED, "read_at": DISCOVERED_AT}
     pinned, query = seen["pools"]
     assert pinned == block
     assert (str(query.token), str(query.quote), query.offset) == (BASE_WETH, BASE_USDC, 20)
@@ -395,7 +479,7 @@ def test_lending_markets_pin_one_block_and_refuse_other_chains(discovery_seams):
         offset=10,
         include_unlisted=True,
     )
-    assert ax.lending_markets(markets) == "ok"
+    assert ax.lending_markets(markets) == {**LISTED, "read_at": DISCOVERED_AT}
     lookups, pinned, query = seen["markets"]
     # The lookup transport is opened beside the reader, as for the other discovery reads.
     assert pinned == block and isinstance(lookups, Seam) and lookups.block is None
@@ -409,7 +493,7 @@ def test_lending_markets_pin_one_block_and_refuse_other_chains(discovery_seams):
     listing = discovery_args(
         connector="aave_v3", asset=None, collateral=None, offset=0, include_unlisted=False
     )
-    assert ax.lending_markets(listing) == "ok"
+    assert ax.lending_markets(listing) == {**LISTED, "read_at": DISCOVERED_AT}
     assert seen["markets"][2].asset is None
     other = discovery_args(
         connector="aave_v3",
@@ -453,7 +537,7 @@ def test_discovery_asks_for_the_wrapped_token_of_the_native_coin(discovery_seams
         args = discovery_args(
             token=token, quote=quote, connector_filter=None, depth_bps=None, offset=0
         )
-        assert ax.pool_discovery(args) == "ok"
+        assert ax.pool_discovery(args) == {**LISTED, "read_at": DISCOVERED_AT}
         _, query = seen.pop("pools")
         asked = query.token if quote is None else query.quote
         assert str(asked) == BASE_WETH

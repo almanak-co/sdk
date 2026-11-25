@@ -33,6 +33,7 @@ from almanak.connectors.direct import ALLOCATION, ActionRequest
 from almanak.dex_intents import SwapExactInput
 from almanak.gateway.ethereum import DataError
 from almanak.models import AssetAmount
+from tests.read_at_support import read_at
 from tests.test_ax_swap_curve import (
     MARKETS,
     WALLET,
@@ -881,8 +882,10 @@ def test_the_read_command_pins_its_block_and_reads_the_curve_position(monkeypatc
 
     monkeypatch.setattr(ax, "observation_reader", lambda args, chain: Reader())
     monkeypatch.setattr(position_request, "read_liquidity_position", read)
+    stated = read_at(monkeypatch, "latest", block)
     assert ax.liquidity_position(position_arguments("--block", "latest")) == {
-        "product": "liquidity_position"
+        "product": "liquidity_position",
+        "read_at": stated,
     }
     assert (seen["selector"], seen["block"], seen["request"].account) == (
         "latest",
