@@ -669,7 +669,8 @@ def test_the_result_fields_are_the_ones_the_action_module_writes():
     ]
     assert "completed" in dropped
     assert "A recover result has `resolved` instead and no `completed`" in table["completed"]
-    assert "It did not happen and the wallet is free" in table["released_expired"]
+    assert "The step was released and the wallet is free" in table["released_expired"]
+    assert "the step may have been mined" in table["released_expired"]
     assert "`ax recover` exits 1 for it although `resolved` is true" in table["released_expired"]
     taken = table["released_consumed_nonce"]
     assert "The step was released and the wallet is free" in taken
