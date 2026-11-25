@@ -14,8 +14,18 @@ there is not seen.
 A value the vendor omits stays absent. A total is stated only when every row it
 sums has a value and every chain to read was read, so a missing price on a chain
 read never counts as zero.
+
+The vendor's text is written by others: a token's symbol and name are whatever its
+deployer chose, and anyone can send a token to an account. A report is read by
+agents, so no string of the vendor's leaves it unbounded. A symbol, a name and a
+label are short runs of letters, digits and a few marks, and an identifier is
+ASCII; a value that is not is absent, never shortened or rewritten. The vendor's
+link fields are not reported, and no symbol, name or label can hold a URL: none
+takes a colon or two slashes in a row. A bare domain name is still a short name.
 """
 
+import string
+import unicodedata
 from decimal import Context, Decimal, InvalidOperation
 
 from almanak.caip import AssetType
@@ -35,6 +45,14 @@ CENT = Decimal("0.01")
 # price or a time; it is read as absent. Arithmetic keeps every digit of what is left.
 MAX_EXPONENT = 60
 HEX = "0123456789abcdefABCDEF"
+# The bounds of the vendor's text, in characters. A symbol has no space. The bounds
+# are chosen, not measured from the vendor: a longer or stranger value is absent.
+MAX_SYMBOL = 24
+MAX_NAME = 48
+MAX_IDENTIFIER = 128
+SYMBOL_MARKS = "._-+/$*"
+NAME_MARKS = SYMBOL_MARKS + " ()&',#"
+IDENTIFIER = frozenset(string.ascii_letters + string.digits + "._-:")
 EXACT = Context(prec=4 * MAX_EXPONENT)
 TOKEN_LIST = "_token_list"
 
@@ -104,7 +122,7 @@ def funded(chain_rows: list[dict]) -> list[tuple[str, Decimal | None]]:
     so it is kept, after the valued ones."""
     valued: dict[str, Decimal | None] = {}
     for row in chain_rows:
-        label, value = text(row.get("id")), decimal(row.get("usd_value"))
+        label, value = identifier(row.get("id")), decimal(row.get("usd_value"))
         if label is None or label in valued:
             raise DataError("malformed", f"{SOURCE}: a chain row names no chain or repeats one")
         valued[label] = value
@@ -123,8 +141,8 @@ def token_report(row: dict) -> dict:
     price = positive(decimal(row.get("price")))
     return {
         **identity(row),
-        "symbol": text(row.get("optimized_symbol")) or text(row.get("symbol")),
-        "name": text(row.get("name")),
+        "symbol": symbol(row.get("optimized_symbol")) or symbol(row.get("symbol")),
+        "name": name(row.get("name")),
         "decimals": row.get("decimals") if type(row.get("decimals")) is int else None,
         "amount": plain(amount),
         # Base units, where the vendor states them; a position leg carries none.
@@ -146,7 +164,7 @@ def identity(row: dict) -> dict:
     The references are derived from the vendor's answer, not verified on chain. A
     chain without a verified network definition has neither.
     """
-    label, token = text(row.get("chain")), text(row.get("id"))
+    label, token = identifier(row.get("chain")), identifier(row.get("id"))
     if label is None or token is None:
         raise DataError("malformed", f"{SOURCE}: a token row names no chain or no token")
     chain = CHAINS.get(label)
@@ -203,21 +221,20 @@ def items(protocol: dict) -> list[dict]:
 
 
 def position_report(protocol: dict, item: dict) -> dict:
-    label = text(protocol.get("chain"))
-    if label is None or text(protocol.get("id")) is None:
+    label, vendor_id = identifier(protocol.get("chain")), identifier(protocol.get("id"))
+    if label is None or vendor_id is None:
         raise DataError("malformed", f"{SOURCE}: a protocol row names no chain or no protocol")
     detail, stats, pool = (mapping(item.get(name)) for name in ("detail", "stats", "pool"))
     return {
         "chain": caip(CHAINS.get(label)),
         "vendor_chain": label,
         "protocol": {
-            "vendor_id": text(protocol.get("id")),
-            "name": text(protocol.get("name")),
-            "site_url": text(protocol.get("site_url")),
+            "vendor_id": vendor_id,
+            "name": name(protocol.get("name")),
         },
         # The vendor's own label for the position, such as Lending or Rewards.
-        "kind": text(item.get("name")),
-        "vendor_pool": text(pool.get("id")),
+        "kind": name(item.get("name")),
+        "vendor_pool": identifier(pool.get("id")),
         "asset_usd": cents(decimal(stats.get("asset_usd_value"))),
         "debt_usd": cents(decimal(stats.get("debt_usd_value"))),
         "net_usd": cents(decimal(stats.get("net_usd_value"))),
@@ -235,9 +252,12 @@ def legs(detail: dict) -> dict:
     for key, value in detail.items():
         if not key.endswith(TOKEN_LIST) or not isinstance(value, list):
             continue
+        leg = identifier(key.removesuffix(TOKEN_LIST))
+        if leg is None:
+            raise DataError("malformed", f"{SOURCE}: a position leg has no readable name")
         if not all(isinstance(row, dict) for row in value):
             raise DataError("malformed", f"{SOURCE}: a position leg is not a token row")
-        found[key.removesuffix(TOKEN_LIST)] = [token_report(row) for row in value]
+        found[leg] = [token_report(row) for row in value]
     return found
 
 
@@ -292,5 +312,36 @@ def caip(reference: object) -> str | None:
     return None if reference is None else str(reference)
 
 
-def text(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
+def symbol(value: object) -> str | None:
+    return display(value, MAX_SYMBOL, SYMBOL_MARKS)
+
+
+def name(value: object) -> str | None:
+    return display(value, MAX_NAME, NAME_MARKS)
+
+
+def display(value: object, limit: int, marks: str) -> str | None:
+    """The vendor's symbol, name or label, or absent when it is not a short one.
+
+    Letters, digits and currency signs of any script are kept, with the marks named.
+    Control and format characters, line breaks and every other sign make the value
+    absent, and so does a length past the limit: a cut sentence is still a sentence.
+    """
+    if not isinstance(value, str) or not 0 < len(value) <= limit or value != value.strip():
+        return None
+    # A pair such as USDC/WETH keeps its slash; two in a row begin an address.
+    if "//" in value:
+        return None
+    return value if all(shown(character, marks) for character in value) else None
+
+
+def shown(character: str, marks: str) -> bool:
+    category = unicodedata.category(character)
+    return character in marks or category[0] in "LN" or category == "Sc"
+
+
+def identifier(value: object) -> str | None:
+    """The vendor's own ID of a chain, a token, a protocol or a pool, or absent."""
+    if not isinstance(value, str) or not 0 < len(value) <= MAX_IDENTIFIER:
+        return None
+    return value if set(value) <= IDENTIFIER else None
