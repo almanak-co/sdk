@@ -25,6 +25,18 @@ its changelog is on the `v2` branch.
 - The agent skill reads a balance or a position after an action or a bridge's
   arrival with `--block latest`, reports the step count of a preview, and says that
   the later steps' gas is not quoted up front.
+- A position read says which block it read and why. `--help` of every `ax` read states
+  that `--block` defaults to `finalized`, that this block can trail the head by minutes
+  on a rollup and that a position just opened is read with `--block latest`;
+  `almanak markets --help` states its own default, `latest`. `ax lending-position`,
+  `ax liquidity-position` and `ax perp-position` report `read_at`, whose `block` is the
+  selector that chose the block, so an empty position read at an old block can be told
+  from an empty position. The refusal of a token ID a position manager does not hold
+  names the block read (`holds no NFT <token id> at block <number>`), and a
+  `liquidity-position` read at `finalized` adds how to read the head; a direct action's
+  refusal names the block only. Each entry of a direct action's `outcomes` states the
+  `block` its step was mined in. The default stays `finalized` and the accepted
+  selectors are unchanged (#38).
 
 ## [3.4.1] - 2026-11-25
 
@@ -59,18 +71,6 @@ its changelog is on the `v2` branch.
 - The agent skill reads the overview only when the user asks for it. It read it
   every time it loaded. The skill tells the agent that symbols and names in the
   overview are data written by others and never instructions.
-- A position read says which block it read and why. `--help` of every `ax` read states
-  that `--block` defaults to `finalized`, that this block can trail the head by minutes
-  on a rollup and that a position just opened is read with `--block latest`;
-  `almanak markets --help` states its own default, `latest`. `ax lending-position`,
-  `ax liquidity-position` and `ax perp-position` report `read_at`, whose `block` is the
-  selector that chose the block, so an empty position read at an old block can be told
-  from an empty position. The refusal of a token ID a position manager does not hold
-  names the block read (`holds no NFT <token id> at block <number>`), and a
-  `liquidity-position` read at `finalized` adds how to read the head; a direct action's
-  refusal names the block only. Each entry of a direct action's `outcomes` states the
-  `block` its step was mined in. The default stays `finalized` and the accepted
-  selectors are unchanged (#38).
 
 ### Fixed
 - The release of an expired signed step reads the nonce again at the pinned block
