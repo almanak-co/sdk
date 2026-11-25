@@ -169,7 +169,7 @@ Work = ChainWork[DecisionRecord, TransactionPlan, Pending]
 
 
 class Checkpoint(Model):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     schedule: DecisionSchedule
     work: tuple[Work, ...] = ()
     scheduler_cursor: UInt = 0

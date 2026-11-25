@@ -467,6 +467,10 @@ What a report and a dashboard show for a transfer:
 - Arrived: the amount measured on the destination chain.
 - Proven unfilled: the destination chain has read past the fill deadline with no
   fill. The transfer is still open and is listed under `awaiting_refund`.
+  The dashboard's Refund column shows it as awaiting. When an unattributed
+  payment of the same bridge was paid after its fill deadline, the report also
+  names it under `awaiting_refund_after_unattributed_payment` with a note, and
+  the dashboard says so in that column: the payment may have been its refund.
 - Refunded: the amount measured on the source chain. Several refunds mined in one
   block are recorded as one refund outcome.
 - `unattributed_refund_payments`: a refund-leaf payment to the fund that was

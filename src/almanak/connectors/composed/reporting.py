@@ -87,7 +87,11 @@ def submitted_state(state):
     )
 
 
-AWAITING = ("awaiting_refund", "awaiting_refund_note")
+AWAITING = (
+    "awaiting_refund",
+    "awaiting_refund_after_unattributed_payment",
+    "awaiting_refund_note",
+)
 
 
 def transfer_evidence(state):

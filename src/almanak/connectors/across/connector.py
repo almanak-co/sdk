@@ -11,6 +11,7 @@ from almanak.connectors.across.models import Config, Intent, Parameters
 from almanak.connectors.across.observations import Snapshot
 from almanak.connectors.across.permissions import AcrossPermissions
 from almanak.connectors.across.settlement import ExternalEffects
+from almanak.connectors.across.settlement_types import AWAITING_NOTE, followed_by_unattributed
 from almanak.connectors.across.state import (
     Checkpoint,
     Decision,
@@ -78,7 +79,7 @@ class AcrossProjection:
                 for t in state.transfers
             ],
             "unattributed_refund_payments": unattributed,
-            **awaiting_refund(state, unattributed),
+            **awaiting_refund(state),
         }
 
 
@@ -92,19 +93,18 @@ def unattributed_payments(state) -> list[dict]:
     ]
 
 
-def awaiting_refund(state, unattributed) -> dict:
+def awaiting_refund(state) -> dict:
     """Transfers proven unfilled whose refund is not recorded. Each holds its deployment
-    open. Beside an unattributed payment the report says that none is ever applied."""
-    waiting = [t.reference for t in state.transfers if t.open and t.unfilled]
+    open. Those an unattributed payment followed are named apart: the payment may have
+    been their refund, and it is never applied."""
+    waiting = [t for t in state.transfers if t.open and t.unfilled]
     if not waiting:
         return {}
-    listed: dict = {"awaiting_refund": waiting}
-    if unattributed:
-        listed["awaiting_refund_note"] = (
-            "An unattributed refund payment is never applied to a transfer. A transfer "
-            "listed here stays open, and its deployment unclosed, until a refund of "
-            "exactly its sent amount is read."
-        )
+    listed: dict = {"awaiting_refund": [t.reference for t in waiting]}
+    followed = [t.reference for t in waiting if followed_by_unattributed(state, t)]
+    if followed:
+        listed["awaiting_refund_after_unattributed_payment"] = followed
+        listed["awaiting_refund_note"] = AWAITING_NOTE
     return listed
 
 
@@ -127,7 +127,9 @@ def connector():
             pending=Pending,
             outcome=Outcome,
             capability=capability_codec(),
-            schema_version=1,
+            schema_version=2,
+            # Version 1 retained one unattributed payment per refund page, not a tuple.
+            legacy_schemas={1: True},
             actions=lambda context: context.config,
         ),
         lifecycle=AcrossLifecycle(),

@@ -53,7 +53,7 @@ production:
       amount: 150000000000000
     total_budget:
       asset: eip155:42161/slip44:60
-      amount: 600000000000000
+      amount: 1200000000000000
     allow_replacement: false
   - accounts:
     - base_fund
