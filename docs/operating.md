@@ -1404,7 +1404,23 @@ Arbitrum (`eip155:42161`), BNB (`eip155:56`), Polygon (`eip155:137`) and Robinho
 HyperEVM (`eip155:999`) has none and needs a provider key. A name that does not
 serve the command's chain is refused with the names that do. BNB Chain's own
 endpoint is not listed: it keeps less than a minute of state, and a direct action
-reads at blocks older than that when it reconciles a mined step.
+reads at blocks older than that when it reconciles a mined step. A listed pair
+served state 360 seconds behind its head when it was qualified: the 120 seconds
+an observation may age plus 240 seconds allowed for one step. That is the floor
+the qualification checks, not a promise: a slower step, or an `ax recover` run
+later, reads older state, and the endpoint can refuse it.
+
+One listed pair does not meet that floor: `publicnode` on Avalanche. On 23
+November 2026 it answered state reads 32 and 64 blocks behind its head and left
+reads 128 blocks (106 seconds) and older unanswered for 12 to 20 seconds, and it
+passed the 360-second check in one of three runs. A read it leaves unanswered is
+refused as `transport failed`. Reads at `latest` and `finalized` and an action
+whose step is mined and reconciled within about 100 seconds are served; a slower
+step, or an `ax recover` run later, can be refused, and the signed step then
+needs `ax recover` through a provider key (`--env-file`). It stays listed because
+no other keyless Avalanche endpoint qualified: the chain's own endpoint answered
+every check and then refused all requests from the caller for about an hour after
+one three-row `ax lending-markets` listing.
 
 An endpoint for a chain does not make an action available there. A direct action
 runs only for a connector and chain that declare it, which `almanak support` lists
@@ -1436,7 +1452,9 @@ given instead. Strategy runs, forks, checks and backtests do not accept a public
 endpoint and need a provider key or an operator RPC URL.
 
 A pair is listed only after it passed every check of the
-[qualification tool](qa.md#public-endpoint-qualification) in repeated full runs.
+[qualification tool](qa.md#public-endpoint-qualification) in repeated full runs,
+except `publicnode` on Avalanche, which does not meet the state-age check as
+stated above.
 The tool samples the reads an observation and a direct action make: the identity
 proof, pinned state, the fee quote and the receipt reads. It sends nothing, so it
 proves neither every method a connector calls nor that an endpoint accepts a

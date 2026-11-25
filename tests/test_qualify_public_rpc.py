@@ -6,6 +6,7 @@ live endpoints.
 
 import json
 import re
+from collections.abc import Callable
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
@@ -144,6 +145,181 @@ def test_a_read_the_provider_runs_at_another_block_is_refused():
     with pytest.raises(DataError, match="invalid block context probe result") as short:
         tool.reads_at_latest(probe(Endpoint(eth_call="0x")))
     assert short.value.kind == "malformed"
+
+
+PACED_HEAD = 90_000_000
+PRUNED = (
+    "eth_getCode: RPC rejected the requested read"
+    " (JSON-RPC -32000: the endpoint does not serve state at that block)"
+)
+
+
+class Paced(Endpoint):
+    """A chain whose block `depth` behind the head is `age(depth)` seconds older.
+
+    With `kept`, it serves state only that many blocks behind the head and refuses an
+    older read as geth refuses pruned state. Block headers are served at any depth.
+    """
+
+    def __init__(self, age: Callable[[int], int], kept: int | None = None, **answers):
+        super().__init__(**answers)
+        self.age = age
+        self.kept = kept
+
+    def timestamp(self, number: int) -> int:
+        return NOW - self.age(PACED_HEAD - number)
+
+    def pin_block(self, selector):
+        self.pinned.append(selector)
+        number = PACED_HEAD if selector == "latest" else selector
+        return Block(
+            chain=self.chain,
+            number=number,
+            hash="0x" + number.to_bytes(32).hex(),
+            timestamp=self.timestamp(number),
+        )
+
+    def state(self, number: int) -> None:
+        if self.kept is not None and PACED_HEAD - number > self.kept:
+            raise DataError("rpc", PRUNED, code=-32000)
+
+    def asset(self, token, pinned):
+        self.state(pinned.number)
+        return super().asset(token, pinned)
+
+    def _rpc(self, method, params, *, allow_none=False):
+        self.state(int(params[-1]["blockHash"], 16))
+        return super()._rpc(method, params, allow_none=allow_none)
+
+    def eth_call(self, params):
+        number = int(params[1]["blockHash"], 16)
+        return "0x" + self.timestamp(number).to_bytes(32).hex() + "00" * 64
+
+
+def even(milliseconds: int) -> Callable[[int], int]:
+    """Whole-second timestamps of a chain with one block every `milliseconds`."""
+    return lambda depth: depth * milliseconds // 1000
+
+
+def bursts(depth: int) -> int:
+    """Blocks made on demand: the newest 64 came in two seconds, older ones one a second."""
+    return min(depth, 2) if depth <= 64 else depth - 62
+
+
+def test_the_required_state_age_is_the_observation_age_plus_one_step():
+    assert tool.STATE_AGE_SECONDS == (
+        ax_actions.MAX_OBSERVATION_AGE_SECONDS + tool.STEP_ALLOWANCE_SECONDS
+    )
+    # The allowance covers the slowest step measured, and the total is minutes.
+    assert tool.STEP_ALLOWANCE_SECONDS >= 190 and tool.STATE_AGE_SECONDS == 360
+
+
+@pytest.mark.parametrize(
+    ("age", "lookups"),
+    [
+        (even(250), 2),
+        (even(450), 2),
+        (even(1_000), 2),
+        (even(2_000), 2),
+        (even(12_000), 2),
+        (bursts, 3),
+    ],
+)
+def test_the_aged_read_is_at_a_block_old_enough_by_the_endpoints_own_timestamps(age, lookups):
+    reader = Paced(age)
+    result = tool.reads_at_age(probe(reader))
+    depth = PACED_HEAD - result["block"]
+    assert result == {
+        "block": PACED_HEAD - depth,
+        "burn_address_balance": 5,
+        "age_seconds": age(depth),
+        "required_age_seconds": tool.STATE_AGE_SECONDS,
+    }
+    required = tool.STATE_AGE_SECONDS
+    assert required <= age(depth) <= required + tool.STATE_AGE_SLACK_SECONDS
+    # The head, then a bounded number of headers; the reads run at the last block pinned.
+    assert reader.pinned[0] == "latest" and len(reader.pinned) == 1 + lookups
+    assert lookups <= tool.STATE_AGE_LOOKUPS
+    assert reader.pinned[-1] == result["block"]
+    pin = {"blockHash": "0x" + result["block"].to_bytes(32).hex(), "requireCanonical": True}
+    assert [params[-1] for _, params in reader.calls] == [pin] * 4
+
+
+def test_an_endpoint_that_keeps_only_recent_state_fails_the_aged_read():
+    """BNB Chain's own endpoint: 0.45 second blocks and state about 57 seconds back."""
+    pruned = Paced(even(450), kept=125)
+    assert tool.reads_at_number(probe(pruned))["block"] == PACED_HEAD - tool.NUMBER_DEPTH
+    result = tool.outcome("reads_at_age", tool.reads_at_age, probe(pruned))
+    block = pruned.pinned[-1]
+    assert result == {
+        "check": "reads_at_age",
+        "passed": False,
+        "error": "rpc",
+        "message": (
+            f"state {even(450)(PACED_HEAD - block)} seconds behind the head, "
+            f"at block {block}: {PRUNED}"
+        ),
+        "rate_limited": False,
+        "transient": False,
+    }
+    # The same endpoint passes once it keeps the state the check asks for.
+    kept = Paced(even(450), kept=PACED_HEAD - block)
+    assert tool.outcome("reads_at_age", tool.reads_at_age, probe(kept))["passed"]
+
+
+def test_a_failed_aged_read_keeps_the_readers_rate_limit_and_transient_marks():
+    busy = Paced(even(1_000), eth_getCode=ProviderBusy("eth_getCode", None))
+    result = tool.outcome("reads_at_age", tool.reads_at_age, probe(busy))
+    assert result["rate_limited"] and result["message"].endswith("eth_getCode: HTTP 429")
+    lost = DataError("http", "eth_getCode: no answer", transient=True)
+    dropped = Paced(even(1_000), eth_getCode=lost)
+    result = tool.outcome("reads_at_age", tool.reads_at_age, probe(dropped))
+    assert result["transient"] and not result["rate_limited"]
+
+
+def test_the_aged_read_refuses_a_block_the_provider_does_not_run_it_at():
+    elsewhere = Paced(even(1_000), eth_call="0x" + NOW.to_bytes(32).hex() + "00" * 64)
+    with pytest.raises(DataError, match=r"state 379 seconds behind the head.* ran at") as ran:
+        tool.reads_at_age(probe(elsewhere))
+    assert ran.value.kind == "inconsistent"
+
+
+def test_the_search_for_an_aged_block_is_bounded_and_takes_the_youngest_found():
+    # Timestamps that jump: no block is within the slack of the required age.
+    def jump(depth: int) -> int:
+        return 0 if depth < 500 else 1_000
+
+    reader = Paced(jump)
+    head = reader.pin_block("latest")
+    found = tool.aged_block(reader, head, tool.STATE_AGE_SECONDS)  # type: ignore[arg-type]
+    lookups = reader.pinned[1:]
+    assert len(lookups) == tool.STATE_AGE_LOOKUPS
+    old_enough = [number for number in lookups if PACED_HEAD - number >= 500]
+    assert found.number == max(old_enough) == reader.pinned[-1]
+    # A chain whose timestamps never reach the age ends the check as unavailable.
+    stalled = Paced(lambda depth: 0)
+    with pytest.raises(DataError, match="no block at least 360 seconds behind the head") as none:
+        tool.aged_block(stalled, stalled.pin_block("latest"), tool.STATE_AGE_SECONDS)  # type: ignore[arg-type]
+    assert none.value.kind == "unavailable"
+    assert len(stalled.pinned) == 1 + tool.STATE_AGE_LOOKUPS
+
+
+def test_the_block_the_reads_run_at_is_held_to_the_required_age(monkeypatch):
+    """A second pin of the chosen block may return another header; its age is checked."""
+    reader = Paced(even(1_000))
+    young = reader.pin_block(PACED_HEAD - 10)
+    monkeypatch.setattr(tool, "aged_block", lambda *arguments: young)
+    with pytest.raises(DataError, match="seconds behind the head, less than 360") as refused:
+        tool.reads_at_age(probe(reader))
+    assert refused.value.kind == "inconsistent"
+
+
+def test_a_chain_younger_than_the_required_age_has_no_aged_block():
+    young = Endpoint()
+    head = block(40)
+    with pytest.raises(DataError, match="no block at least 360 seconds"):
+        tool.aged_block(young, head, tool.STATE_AGE_SECONDS)  # type: ignore[arg-type]
+    assert young.pinned == [0]
 
 
 @pytest.mark.parametrize(
@@ -440,11 +616,14 @@ def test_the_qa_guide_describes_exactly_the_checks_the_tool_runs():
     assert described == [label for label, _ in tool.CHECKS]
     for field in ("`rate_limited`", "`transient`", "`malformed`"):
         assert field in section
+    # The guide states the ages in seconds; they follow the tool's constants.
+    assert f"at least {tool.STATE_AGE_SECONDS} seconds behind the head" in section
+    assert f"an allowance of {tool.STEP_ALLOWANCE_SECONDS} seconds" in section
 
 
 def test_the_checks_start_with_identity():
     labels = [label for label, _ in tool.CHECKS]
-    assert labels[0] == "identity" and len(set(labels)) == len(labels) == 9
+    assert labels[0] == "identity" and len(set(labels)) == len(labels) == 10
 
 
 def report(*checks: dict) -> dict:
