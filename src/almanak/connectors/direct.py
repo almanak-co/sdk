@@ -15,6 +15,15 @@ from functools import cache
 # The name every direct deployment gives its one requested position.
 ALLOCATION = "position"
 
+
+class NftNotHeld(ValueError):
+    """A position manager holds no NFT of the named token ID at the pinned block.
+
+    Raised by reads and direct actions alike, so its text names the block and never a
+    selector: only the caller knows whether the block was chosen by `finalized`.
+    """
+
+
 # The intent kinds each `ax` command can admit. A chain serves a command when its
 # support declares one of them as a direct action; the gateway admits only a declared
 # kind. A command with two kinds admits the first without an amount, the whole balance

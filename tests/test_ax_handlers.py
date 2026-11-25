@@ -131,10 +131,44 @@ def test_lending_position_reads_a_file_selection_for_the_account(
     monkeypatch.setattr(ax, "read_lending_position", read)
     live_reader(Pinned())
     invocation = lending_args("ax-lending-position", "aave_v4", config, account=OWNER)
-    assert ax.lending_position(invocation) == {"product": "lending_position"}
+    assert ax.lending_position(invocation) == {
+        "product": "lending_position",
+        "read_at": {"block": 25908472},
+    }
     assert (seen["request"].spoke, seen["request"].reserve_id) == (selection["spoke"], 7)
     assert seen["account"] == Account(chain=CHAIN, address=OWNER)
     assert seen["block"] == BLOCK
+
+
+class Selected(Pinned):
+    def pin_block(self, selector):
+        return BLOCK
+
+
+@pytest.mark.parametrize("selector", ["finalized", "latest", 25908472])
+def test_an_empty_lending_position_names_the_selector_that_chose_its_block(
+    live_reader, monkeypatch, selector
+):
+    # A position opened after the pinned block reads as empty, with exit 0 and no error.
+    empty = {"product": "lending_position", "observation": {"supplied": "0", "borrowed": "0"}}
+    monkeypatch.setattr(ax, "read_lending_position", lambda *read: dict(empty))
+    live_reader(Selected())
+    invocation = lending_args("ax-lending-position", "aave_v3", chain="eip155:1", account=OWNER)
+    invocation.asset = "eip155:1/erc20:" + "0x" + "a0" * 20
+    invocation.block = selector
+    assert ax.lending_position(invocation) == {**empty, "read_at": {"block": selector}}
+
+
+@pytest.mark.parametrize("selector", ["finalized", "latest"])
+def test_a_perp_position_names_the_selector_that_chose_its_block(monkeypatch, tmp_path, selector):
+    config = tmp_path / "position.json"
+    config.write_text(gmx_request_json())
+    read = {"product": "gmx_perp_position", "observation": {"size": "0"}}
+    monkeypatch.setattr(ax, "read_gmx_position", lambda *stated: dict(read))
+    monkeypatch.setattr(ax, "verified_reader", lambda chain, env_file: Selected())
+    invocation = args("ax-perp-position", "gmx_v2", config, account="0x" + "55" * 20)
+    invocation.block = selector
+    assert ax.perp_position(invocation) == {**read, "read_at": {"block": selector}}
 
 
 def test_lending_selection_naming_another_connector_is_refused(tmp_path):
@@ -252,7 +286,7 @@ def test_perp_position_passes_request_account_and_block_through(live_reader, mon
     monkeypatch.setattr(ax, "read_gmx_position", read)
     monkeypatch.setattr(ax, "verified_reader", lambda chain, env_file: Reader())
     result = ax.perp_position(args("ax-perp-position", "gmx_v2", config, account="0x" + "55" * 20))
-    assert result == {"product": "gmx_perp_position"}
+    assert result == {"product": "gmx_perp_position", "read_at": {"block": 25908472}}
     assert seen["selector"] == 25908472
     assert seen["pinned"] == block
     assert seen["account"].address == "0x" + "55" * 20

@@ -69,7 +69,7 @@ The heavy imports stay inside the functions: the command line imports each conne
 `direct` module to build its choices.
 """
 
-from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
+from almanak.connectors.direct import ALLOCATION, ActionRequest, NftNotHeld, Wallet
 
 # Commands that act on an existing position, named by its token ID.
 NFT_ACTIONS = ("collect-liquidity-fees", "close-liquidity")
@@ -196,7 +196,9 @@ def named_record(reader, block, resolved, token: int):
     try:
         (owner,) = read("ownerOf(uint256)", ("address",))
     except Reverted:
-        raise ValueError(f"the PositionManager {manager} holds no NFT {token}") from None
+        raise NftNotHeld(
+            f"the PositionManager {manager} holds no NFT {token} at block {block.number}"
+        ) from None
     key, info = read("getPoolAndPositionInfo(uint256)", (abi.POOL_KEY, "uint256"))
     if key != abi.pool_key(resolved.pool):
         raise ValueError(f"NFT {token} is a position of another pool key, not of the one named")

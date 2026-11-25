@@ -987,6 +987,11 @@ def outcome_summary(outcome) -> dict:
         "success": outcome.success,
         "transaction": outcome.tx_hash,
     }
+    mined = outcome.receipt.get("blockNumber")
+    if mined is not None:
+        # The block the step was mined in, so a read that follows can name it. The
+        # gateway reconciles at this block; a receipt that states none reports none.
+        summary["block"] = int(mined, 16)
     issues = getattr(outcome, "accounting_issues", ())
     if issues:
         # A wallet movement the step does not explain; nothing else would report it.

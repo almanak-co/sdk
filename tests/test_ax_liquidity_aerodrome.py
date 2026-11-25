@@ -1552,7 +1552,10 @@ def test_the_read_command_pins_its_block_and_passes_the_request_on(variant, monk
     monkeypatch.setattr(position_request, "read_liquidity_position", read)
     monkeypatch.setattr(ax, "read_liquidity_position", pytest.fail)
     args = position_arguments(variant, "--block", "latest")
-    assert ax.liquidity_position(args) == {"product": "liquidity_position"}
+    assert ax.liquidity_position(args) == {
+        "product": "liquidity_position",
+        "read_at": {"block": "latest"},
+    }
     assert (passed["selector"], passed["block"]) == ("latest", market.block)
     assert passed["request"].account == WALLET.address
     with pytest.raises(ValueError, match="aerodrome declares no support on eip155:31337"):
