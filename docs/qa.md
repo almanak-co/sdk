@@ -400,7 +400,7 @@ transaction is not checked, because the tool sends none.
 ## Opt-in live checks
 
 Two further levels run against live mainnet. Neither is part of default pytest,
-`make test`, `make check`, the QA bench or any pull request, `main` or release
+`make test`, `make check`, the QA bench or any pull request or release
 workflow, and neither may be added to them: public endpoints rate-limit and
 stall, so their result cannot gate a merge. Both live in `scripts/live_qa/` and
 run from a checkout.
@@ -553,7 +553,11 @@ these hold. Every unmet gate is named at once.
 4. `--market` is one of the reviewed markets below and `--amount` is at most its
    largest accepted size.
 5. Exactly one of `--public-rpc` and `--env-file` names the transport, and a
-   public endpoint serves the market's chain.
+   public endpoint serves the market's chain. On Avalanche the one listed
+   endpoint, `publicnode`, does not serve state as old as the
+   [floor](operating.md#public-endpoints) requires: a step not reconciled within
+   about 100 seconds can be refused, and its kept record then needs
+   `ax recover` through `--env-file`.
 6. Neither `CI` nor `GITHUB_ACTIONS` is set, to any value, an empty one included.
 7. `--output` is a new or empty directory that can be created. A report is never written over an
    earlier one, which may hold the only record of the transactions a run sent.

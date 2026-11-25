@@ -229,4 +229,6 @@ A second skill,
 is for maintainers. It runs the [opt-in live checks](qa.md#opt-in-live-checks) from
 a checkout of the repository: the free read checks on public endpoints, and the
 write check, which spends real funds from a wallet the person names and runs only
-after they confirm its preview. It is not needed to manage positions.
+after they confirm its preview. It is not needed to manage positions, so the
+`skills` installer hides it unless `INSTALL_INTERNAL_SKILLS` is set; copy
+`skills/almanak-qa` as above to install it.

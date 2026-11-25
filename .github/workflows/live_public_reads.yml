@@ -9,7 +9,7 @@ name: Live Public Reads (optional)
 #
 # This is not a merge gate and must not become one. Public endpoints rate-limit
 # and stall, so a red or blocked run says nothing certain about a change. It is
-# never called from pr.yml, main.yml or a release workflow.
+# never called from pr.yml or a release workflow.
 #
 # It has no schedule. To run it weekly, uncomment the schedule below; scheduled
 # runs use the default branch.

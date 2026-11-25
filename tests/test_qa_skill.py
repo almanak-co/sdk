@@ -43,9 +43,10 @@ def runner_arguments(line):
     return filled(line.removeprefix(SPEND).removeprefix(RUNNER))
 
 
-def test_the_skill_has_front_matter_beside_the_almanak_skill():
-    assert re.match(r"---\nname: almanak-qa\ndescription: .+\n---\n", SKILL.read_text())
-    assert (SKILL.parents[1] / "almanak/SKILL.md").is_file()
+def test_the_skill_has_front_matter_beside_the_almanak_defi_skill():
+    front = r"---\nname: almanak-qa\ndescription: .+\nmetadata:\n  internal: true\n---\n"
+    assert re.match(front, SKILL.read_text())
+    assert (SKILL.parents[1] / "almanak-defi/SKILL.md").is_file()
 
 
 @pytest.mark.parametrize("line", commands())

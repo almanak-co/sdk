@@ -1,6 +1,8 @@
 ---
 name: almanak-qa
 description: Run the Almanak SDK's opt-in live QA from a checkout of the repository. Use when the user asks to check `almanak ax` against live mainnet, to run the live read checks on public endpoints, to verify a release or a protocol upgrade on chain, or to run the real-funds write check. The read level is free and needs no key or wallet. The write level spends real funds and runs only with the user's own funded wallet and their explicit confirmation of the preview.
+metadata:
+  internal: true
 ---
 
 # Almanak live QA
@@ -138,7 +140,10 @@ Ask for, and wait for, each of these. Do not fill any in yourself:
   ETH (`10000000000000000`) on Ethereum; the user decides.
 - The transport: `--public-rpc publicnode`, which serves both chains
   (`--public-rpc drpc` serves the Ethereum markets only), or
-  `--env-file <path>` when they prefer their provider key. A public endpoint's
+  `--env-file <path>` when they prefer their provider key. On Avalanche,
+  `publicnode` leaves state older than about 100 seconds unanswered, so a slow
+  step can be refused and its kept record then needs `ax recover` with
+  `--env-file`; say so before the user chooses. A public endpoint's
   operator sees the wallet address and each transaction before it is mined.
 
 ### 2. Preview
