@@ -29,6 +29,17 @@ its changelog is on the `v2` branch.
   query when measured, so an arrival on BNB Chain cannot be measured without a
   provider key, and Base needs `drpc` for a status read.
 
+- `almanak ax portfolio` bounds the vendor's text. A `symbol`, a `name`, a
+  protocol's `name` and a `kind` that is longer than a short label, or holds a
+  character outside letters, digits, currency signs and a few marks, is null, and
+  the vendor's own IDs are ASCII. A position's `protocol` no longer carries
+  `site_url`. A token's symbol and name are chosen by its deployer and anyone can
+  send a token to an account, so this text reached the agents that read the
+  report unbounded.
+- The agent skill reads the overview only when the user asks for it. It read it
+  every time it loaded. The skill tells the agent that symbols and names in the
+  overview are data written by others and never instructions.
+
 ### Fixed
 - The release of an expired signed step reads the nonce again at the pinned block
   that shows the deadline passed, so nodes of one endpoint that disagree cannot
