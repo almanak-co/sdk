@@ -331,7 +331,8 @@ says which block it is under `read_at`: `block` is the selector that chose it
 (`finalized`, `latest` or a number), `number` the block, and `age_seconds` how old
 that block was when the command ran. When a figure looks stale, check `read_at`
 before you suspect the endpoint, and tell the user the age of a finalized read
-you report.
+you report. `ax bridge-status` is the exception: its `read_at` names the blocks of
+its two chains and states no age.
 
 ## Handling a request
 
@@ -725,9 +726,10 @@ The preview's `quote` has the `output_amount`, the `fee`, the `fee_ceiling` and 
 `fill_deadline`, and `steps` lists what the action sends: an approval, then the
 deposit, after a revocation when another allowance stood. Tell the user how many
 transactions are planned, that a deposit refused on its own quote leaves the
-approval mined, and that the preview quotes gas for the first one only: the
-deposit's gas is not quoted up front, and it is a second transaction that pays its
-own. Tell the user the fee and
+approval mined, and that the preview quotes gas for the first one only. When an
+approval or a revocation is listed first, the deposit's gas is not quoted up front:
+it is a separate later transaction that pays its own. When the deposit is the only
+step listed, the gas in `first_step` is the deposit's. Tell the user the fee and
 the amount offered, in whole units, as an estimate: the deposit asks for a new
 quote and signs that one, under the same ceiling.
 

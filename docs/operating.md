@@ -949,9 +949,12 @@ takes with `steps_note`, the `recipient` with `recipient_is_sender`, and `quote`
 says so when the recipient is not the sending wallet, and when it was stated in one
 case, which carries no checksum. The steps are the approval of exactly the amount to
 the SpokePool, then the deposit, which spends the approval whole. An allowance of
-another size the wallet already gave the SpokePool is set to zero first. The gas in
-`first_step` is the approval's alone: the deposit is a second transaction, and its
-gas is not quoted before the approval is mined. The deposit
+another size the wallet already gave the SpokePool is set to zero first, and an
+allowance of exactly the amount leaves the deposit as the only step. The gas in
+`first_step` is that of the first planned step alone: when an approval or a
+revocation comes first, the deposit is a separate later transaction whose gas is not
+quoted before the earlier ones are mined, and when the deposit is the only step its
+gas is the one quoted. The deposit
 asks the venue again and signs its own quote, held to the same ceiling, so the
 previewed terms are not a promise.
 
