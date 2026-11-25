@@ -975,7 +975,7 @@ independently.
   is the proxy address the pins name today, whatever implementation it runs. It
   takes no other spender, as `ax revoke-exchange` takes none: an allowance to a
   proxy address the pins no longer name is not cleared by this command.
-- Proposed, not accepted: the recipient checks of a direct bridge. The preview
+- Accepted: the recipient checks of a direct bridge. The preview
   and the result state `recipient` and `recipient_is_sender` beside the quote.
   The `note` says when the recipient is not the sending wallet, and when it was
   stated in one case, which carries no checksum. A recipient that is a contract
@@ -1005,7 +1005,7 @@ independently.
   payments the depositor received since and attributes none: a refund names the
   fund and the token, never a deposit. It never reports an unmeasured amount as
   zero.
-- Proposed, not accepted: the blocks of `ax bridge-status`. The deposit is found
+- Accepted: the blocks of `ax bridge-status`. The deposit is found
   at the source chain's latest block, because the operator holds its receipt and
   it decides no outcome. The outcome is read at the block `--block` names on each
   chain, `finalized` by default or `latest`; the command takes no block number,
@@ -1021,8 +1021,8 @@ independently.
   reverted with that error, and the same relay with its deadline at the block's
   time, or later, passed that check and failed further on for another cause. A
   block stamped with the deadline itself can still fill, so it reads as
-  `in_flight`. Unproven here: that a slow fill, `executeSlowRelayLeaf`, takes the
-  same check. It needs a proof against a relayed root and was not simulated; it
+  `in_flight`. Unproven here, and accepted as such: that a slow fill,
+  `executeSlowRelayLeaf`, takes the same check. It needs a proof against a relayed root and was not simulated; it
   rests on the published contract source, where both paths share one internal
   fill function. A read at `latest` is as good as that block: a replaced block
   can still bring a fill stamped before the deadline.
