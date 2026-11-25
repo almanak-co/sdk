@@ -4,8 +4,10 @@ A (name, chain) pair belongs in `almanak.gateway.providers.PUBLIC_RPC` only afte
 passed every check here in repeated full runs. The checks drive the SDK's own readers
 through a sample of the reads a public observation and a direct action make, so a pass
 means those calls were served, at the block they were pinned to, at the time of the
-run. It is a point-in-time result and no promise for later: a transient refusal fails
-a run as it would fail a command, and an endpoint can pass one run and fail the next.
+run. One of them reads state `STATE_AGE_SECONDS` behind the head, which is the floor
+this tool checks and not the oldest state a command can ask for. It is a point-in-time
+result and no promise for later: a transient refusal fails a run as it would fail a
+command, and an endpoint can pass one run and fail the next.
 
 This tool is live and explicit: it opens connections to the endpoints it is given, so
 no offline test runs it. It reads no env file and no provider key, and it signs and
@@ -66,6 +68,22 @@ UNKNOWN_TRANSACTION = "0x" + keccak(text="almanak public endpoint qualification"
 # Blocks behind the head for the read pinned by number. The head's timestamp differs
 # there on every listed chain, so a read the provider runs at its head is told apart.
 NUMBER_DEPTH = 64
+# Seconds allowed for one step of a direct action between its observation and the last
+# read at one of its blocks: planned, signed, mined and reconciled. A stated allowance,
+# not a property of any chain. Steps on BNB Chain over a slow link were measured at 144
+# to 190 seconds.
+STEP_ALLOWANCE_SECONDS = 240
+# Seconds behind the head at which pinned state must still be served. A direct action
+# accepts an observation up to `MAX_OBSERVATION_AGE_SECONDS` old, reads it again at its
+# own block when the step is admitted, and reconciles the mined step at the receipt's
+# block, so one step reads state up to that age plus the allowance behind the head. It
+# is a floor: a slower step, and an `ax recover` run later, read older state than this.
+STATE_AGE_SECONDS = MAX_OBSERVATION_AGE_SECONDS + STEP_ALLOWANCE_SECONDS
+# Seconds beyond `STATE_AGE_SECONDS` within which a block is taken without looking for a
+# younger one, so an endpoint is not held to much more than the floor.
+STATE_AGE_SLACK_SECONDS = 60
+# Block headers read at most while looking for that block, after the head.
+STATE_AGE_LOOKUPS = 6
 # How far back to look for a mined transaction whose receipt is read.
 RECEIPT_BLOCKS = 16
 RECEIPT_FIELDS = frozenset(
@@ -203,6 +221,93 @@ def reads_at_number(probe: Probe) -> dict:
     return pinned_reads(probe, probe.reads.pin_block(max(0, head.number - NUMBER_DEPTH)))
 
 
+def older_candidate(head: Block, near: Block, far: Block | None, seconds: int) -> int | None:
+    """The next block number to try for a block `seconds` behind the head.
+
+    `near` is the oldest block known to be younger than that and `far` the youngest
+    known to be old enough. The estimate is linear in the timestamps the endpoint
+    reported for them. None when no block is left between the two.
+    """
+    if far is None:
+        depth = head.number - near.number
+        elapsed = head.timestamp - near.timestamp
+        if elapsed <= 0:
+            back = depth * 4
+        else:
+            blocks = -(-seconds * depth // elapsed)
+            # One block in twenty more, so an even block time lands inside the slack.
+            back = blocks + blocks // 20 + 1
+        candidate = max(0, head.number - back)
+    else:
+        lacking = seconds - (head.timestamp - near.timestamp)
+        span = near.number - far.number
+        back = -(-lacking * span // (near.timestamp - far.timestamp))
+        candidate = max(far.number + 1, near.number - back)
+    return candidate if candidate < near.number else None
+
+
+def aged_block(reader: EthereumReader, head: Block, seconds: int) -> Block:
+    """The youngest block found whose timestamp is at least `seconds` behind the head's.
+
+    Block times come from the timestamps the endpoint itself reports, never from a
+    stated block time of the chain. The search stops at the first block within
+    `STATE_AGE_SLACK_SECONDS` of the age. The returned block is the reader's last pin,
+    which takes a header read of its own when the search did not end on it; with that
+    read, at most `STATE_AGE_LOOKUPS` headers are read. On a chain with very uneven
+    block times the block can be much older than the slack allows for.
+    """
+    near, far, last = head, None, head
+    candidate: int | None = max(0, head.number - NUMBER_DEPTH)
+    for lookup in range(STATE_AGE_LOOKUPS):
+        if candidate is None:
+            break
+        if far is not None and lookup == STATE_AGE_LOOKUPS - 1:
+            # The last read is kept for pinning the reader back to the block found.
+            break
+        last = reader.pin_block(candidate)
+        age = head.timestamp - last.timestamp
+        if age < seconds:
+            near = last
+        else:
+            far = last
+            if age <= seconds + STATE_AGE_SLACK_SECONDS:
+                break
+        candidate = older_candidate(head, near, far, seconds)
+    if far is None:
+        raise DataError(
+            "unavailable",
+            f"no block at least {seconds} seconds behind the head in at most "
+            f"{STATE_AGE_LOOKUPS} header reads",
+        )
+    return far if far is last else reader.pin_block(far.number)
+
+
+def reads_at_age(probe: Probe) -> dict:
+    """The state a direct action reads behind the head: its observation again at the
+    observation's block, and its mined step at the receipt's block. The block is at
+    least `STATE_AGE_SECONDS` older than the head by the endpoint's own timestamps."""
+    reader = probe.reads
+    head = reader.pin_block("latest")
+    block = aged_block(reader, head, STATE_AGE_SECONDS)
+    age = head.timestamp - block.timestamp
+    # The search may pin its block a second time; the header that pin returned is the
+    # one the reads run at, so its age is the one that counts.
+    require(
+        age >= STATE_AGE_SECONDS,
+        f"block {block.number} is {age} seconds behind the head, less than {STATE_AGE_SECONDS}",
+    )
+    try:
+        served = pinned_reads(probe, block)
+    except DataError as error:
+        raise DataError(
+            error.kind,
+            f"state {age} seconds behind the head, at block {block.number}: {error}",
+            code=error.code,
+            transient=error.transient,
+        ) from None
+    return {**served, "age_seconds": age, "required_age_seconds": STATE_AGE_SECONDS}
+
+
 def submitter_state(probe: Probe, clock: Callable[[], float] = time.time) -> dict:
     """`EvmGateway.observe`, `require_fresh` and `estimate_execution`: the head by its
     number, no older than an action accepts, and a nonce both tags agree on."""
@@ -297,6 +402,7 @@ CHECKS: tuple[tuple[str, Check], ...] = (
     ("reads_at_finalized", reads_at_finalized),
     ("reads_at_latest", reads_at_latest),
     ("reads_at_number", reads_at_number),
+    ("reads_at_age", reads_at_age),
     ("submitter_state", submitter_state),
     ("fee_quote", fee_quote),
     ("op_fees", op_fees),

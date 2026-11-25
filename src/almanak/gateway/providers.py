@@ -35,12 +35,20 @@ ALCHEMY_NETWORKS = {
 # signs what its reads resolve: that risk is the caller's when they name one.
 #
 # A pair is listed only after it passed every check of `scripts/qualify_public_rpc.py`
-# in repeated full runs: the pinned genesis, state at `finalized`, `latest` and a
-# numbered block, and the fee quote and receipt reads of a direct action. A pass is a
-# point-in-time result, and a transient refusal fails a run as it would fail a command,
-# so a listed endpoint can still refuse a read. A shared provider is absent from a chain
-# where its keyless tier refused one of those reads in those runs, and a chain
-# operator's own endpoint is listed under the operator's name. HyperEVM has no entry.
+# in repeated full runs, with the one exception stated below: the pinned genesis, state
+# at `finalized`, `latest`, a numbered block and a block at least 360 seconds behind the
+# head, and the fee quote and receipt reads of a direct action. Those seconds are the
+# floor the tool checks, the accepted observation age plus an allowance for one step,
+# not the oldest state a command can read. A pass is a point-in-time result, and a
+# transient refusal fails a run as it would fail a command, so a listed endpoint can
+# still refuse a read. A shared provider is absent from a chain where its keyless tier
+# refused one of those reads in those runs, and a chain operator's own endpoint is
+# listed under the operator's name. HyperEVM has no entry.
+#
+# One listed pair does not meet the 360 seconds: `publicnode` on Avalanche answered
+# state reads 64 blocks behind its head and left reads 128 blocks (106 seconds) and
+# older unanswered, passing that check in one of three runs. It stays listed because
+# no other keyless Avalanche endpoint qualified.
 # BNB Chain's own endpoint is not listed: it keeps less than a minute of state, and a
 # direct action reads at blocks older than that when it reconciles a mined step.
 # Removing a pair strands no kept action record: `ax recover` takes a named transport

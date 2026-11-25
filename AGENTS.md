@@ -288,6 +288,11 @@ independently.
   point-in-time result, and a transient refusal fails a run as it would fail a
   command. The tool samples the reads an observation and a direct action make
   and sends nothing. Never relax the genesis or head proof to admit an endpoint.
+- Accepted: `publicnode` stays listed for Avalanche although it does not meet
+  the tool's state-age check: it leaves state reads older than about 100
+  seconds unanswered. No other keyless Avalanche endpoint qualified. The
+  operating guide states the limit. This excepts no other pair and no other
+  check.
 - Accepted risk: a direct action executed through a public endpoint signs what
   that one endpoint's reads resolve, including the market's contract, and the
   endpoint's operator sees each transaction before it is mined. A false report
