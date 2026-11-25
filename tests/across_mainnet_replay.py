@@ -69,7 +69,8 @@ class Recording:
         return answer
 
     def call(self, to, signature, block, *, inputs=(), args=(), outputs=()):
-        self.reader.pin_block(block.number)
+        # Through this recorder, so the capture holds the block a replayed call checks.
+        assert self.pin_block(block.number) == block
         answer = self.reader.call(to, signature, block, inputs=inputs, args=args, outputs=outputs)
         self.reads["calls"][call_key(to, signature, block, args)] = list(answer)
         return answer

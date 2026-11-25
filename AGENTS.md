@@ -428,13 +428,17 @@ independently.
   The pins are held when a market is first resolved, on both chains, and
   whenever a deposit or its approval is planned, signed or sent: the source
   pool as read at the planning block, the destination pool as retained at
-  resolution, with no destination read. Loading or replaying retained
-  parameters verifies the retained reads for consistency only, never against
-  today's pins. A pool that differs from its pin refuses new deposits with the
-  cause and nothing else: arrival, refund, `revoke`, teardown and closure keep
-  working, so a changed pin never traps a transfer in flight or a standing
-  approval. Accepted limit: a destination SpokePool upgraded after resolution
-  is seen only at the next resolution.
+  resolution, with no destination read. A route retains the two pools it was
+  resolved on, and they stay the deployment's own whatever the pins name
+  later, a new proxy address included: replay asks the retained reads about
+  them, arrival and refund scans, `fillStatuses`, `getRelayerRefund` and the
+  revocation's spender use them, and loading holds them to no pin. Replay
+  verifies the retained reads for consistency only. A pool that differs from
+  its pin in proxy, implementation or code refuses new deposits with the
+  cause, before the venue is asked, and nothing else: arrival, refund,
+  `revoke`, teardown and closure keep working, so a changed pin never traps a
+  transfer in flight or a standing approval. Accepted limit: a destination
+  SpokePool upgraded after resolution is seen only at the next resolution.
 - The deposit's quote timestamp is its calldata deadline: the SpokePool reverts
   a deposit mined later than that timestamp plus its own quote buffer, which is
   read at the planning block. Expired signed deposits are released under the

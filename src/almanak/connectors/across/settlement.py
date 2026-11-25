@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from itertools import combinations
 
 from almanak.connectors.across import settlement_reader as chain
-from almanak.connectors.across.domain import spoke_pool
 from almanak.connectors.across.operations import word
 from almanak.connectors.across.relay import node_number, parse_reference, relay_hash
 from almanak.connectors.across.settlement_types import (
@@ -173,7 +172,8 @@ def arrival_page(backend, state, transfer, target, pages, reference=None):
     if interval is None:
         return None
     start, end, first = interval
-    pool = spoke_pool(target.route.destination_chain).address
+    # The pool the transfer was sent to, whatever the pin in code names today.
+    pool = target.route.destination_pool.address
     origin = node_number(target.fund.chain)
     events = chain.fill_logs(reader, pool, origin, deposit.deposit_id, start, end)
     found = matching_fill(events, deposit.relay_hash, node_number(target.destination_fund.chain))
@@ -420,7 +420,7 @@ def reread(reader, page):
         pool, token, fund = target.route.spoke_pool, target.asset.reference, target.fund.address
         return chain.refund_logs(reader, token, pool, fund, page.start, page.end)
     deposit = parse_reference(page.transfer)
-    pool = spoke_pool(target.route.destination_chain).address
+    pool = target.route.destination_pool.address
     origin = node_number(target.fund.chain)
     return chain.fill_logs(reader, pool, origin, deposit.deposit_id, page.start, page.end)
 

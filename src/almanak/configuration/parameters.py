@@ -45,16 +45,28 @@ def replayed_market(reader, market):
     """A market's facts and symbols again, from its retained reads alone."""
     selection, block = market.resolved.selection, market.resolved.block
     binding = binding_for(selection.connector)
-    observed: Any = binding.resolve(reader, selection, block)
+    observed: Any = replayed_source(binding, reader, market.resolved)
     symbols = asset_symbols(reader, observed.assets, block)
     if binding.complete is None:
         return observed, symbols
     # A two-chain market replays its second chain's reads against that chain's anchor.
     remote = market.resolved.destination_block
     with RetainedResolutionReader(remote.chain, market.destination_evidence) as destination:
-        observed = binding.complete(destination, observed, remote)
+        observed = replayed_completion(binding, destination, observed, market.resolved)
         symbols = {**symbols, **asset_symbols(destination, (observed.destination,), remote)}
     return observed, symbols
+
+
+def replayed_source(binding, reader, retained):
+    if binding.replay is not None:
+        return binding.replay(reader, retained)
+    return binding.resolve(reader, retained.selection, retained.block)
+
+
+def replayed_completion(binding, reader, observed, retained):
+    if binding.replay_complete is not None:
+        return binding.replay_complete(reader, observed, retained)
+    return binding.complete(reader, observed, retained.destination_block)
 
 
 def admit_new_positions(document: InputDocument, result):

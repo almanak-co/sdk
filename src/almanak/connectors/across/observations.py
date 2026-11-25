@@ -83,8 +83,13 @@ def require_pinned(pool, chain) -> None:
     running deployment able to restart, reconcile its transfers, revoke and close.
     """
     pin = spoke_pool(chain)
-    if (pool.address, pool.implementation, pool.implementation_code_hash) != (
-        pin.address,
+    if pool.address != pin.address:
+        raise DataError(
+            "deployment_changed",
+            f"the Across SpokePool this deployment uses on {chain} ({pool.address}) is not "
+            f"the reviewed one ({pin.address}); new deposits wait for its review",
+        )
+    if (pool.implementation, pool.implementation_code_hash) != (
         pin.implementation,
         pin.implementation_code_hash,
     ):

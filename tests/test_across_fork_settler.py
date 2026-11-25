@@ -81,7 +81,7 @@ def run(monkeypatch, config, tmp_path):  # noqa: F811
     forks.origin = lambda chain: SimpleNamespace(
         chain=ARBITRUM if chain == FORK_ARB.chain_id else BASE
     )
-    state = SimpleNamespace(outcomes=(outcome,), transfers=(outcome.transfer,))
+    state = SimpleNamespace(config=config, outcomes=(outcome,), transfers=(outcome.transfer,))
     settler = Settler(forks, tmp_path / "keepers")
     return SimpleNamespace(state=state, nodes=nodes, funded=funded, settler=settler)
 
@@ -123,7 +123,7 @@ def test_a_settler_started_again_reads_the_pool_and_fills_nothing_twice(run, tmp
     assert len(asked) == 3
     # A requested slow fill can still be filled; only a filled relay is skipped.
     destination.fill_status = 1
-    assert not restarted.filled(transfer)
+    assert not restarted.filled(run.state, transfer)
     reference = transfer.reference.split(":")[1]
     assert reference.startswith("0x") and len(reference) == 66
 

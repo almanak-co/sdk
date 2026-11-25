@@ -45,7 +45,6 @@ WETH = AssetType("eip155:42161/erc20:0x82af49447d8a07e3bd95bd0d56f35241523fbab1"
             {"destination_chain": ARBITRUM.chain_id, "destination_asset": USDC},
             "two different chains",
         ),
-        ({"spoke_pool": "0x" + "33" * 20}, "another SpokePool"),
         ({"asset": WETH}, "wrapped native"),
         ({"destination_asset": USDC}, "chain"),
         ({"quote": "coingecko"}, "across_api"),

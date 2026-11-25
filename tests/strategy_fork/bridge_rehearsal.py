@@ -85,5 +85,6 @@ def offered(state, deposit, sent: int, constructed: int) -> int:
     if not rehearsed(state):
         assert quote.output_amount == constructed
     ceiling = fee_ceiling(sent, deposit.operation.target.route.max_fee_bps)
-    assert 0 < sent - quote.output_amount <= ceiling
+    # Admission accepts a venue quote with no fee: zero is under any ceiling.
+    assert 0 <= sent - quote.output_amount <= ceiling
     return quote.output_amount

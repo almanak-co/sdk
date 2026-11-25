@@ -66,6 +66,12 @@ class AuthorBinding:
     # completed and never on the replay of retained reads, so a later change of the
     # reviewed code cannot refuse the restart of a running deployment.
     admit: Callable[[Any], None] | None = None
+    # Replay of retained reads where the first reads depended on reviewed code, such as
+    # a pinned address: `replay(reader, retained)` and, for a two-chain market,
+    # `replay_complete(reader, observed, retained)`. They ask the retained reads about
+    # what the retained facts name. Without them replay calls `resolve` and `complete`.
+    replay: Callable[..., Model] | None = None
+    replay_complete: Callable[..., Model] | None = None
 
 
 BINDINGS: tuple[AuthorBinding, ...] = (
@@ -169,6 +175,8 @@ BINDINGS: tuple[AuthorBinding, ...] = (
         allocation=across_inputs.AllocationInput,
         complete=across_resolution.complete_market,
         admit=across_resolution.admit_route,
+        replay=across_resolution.replay_market,
+        replay_complete=across_resolution.replay_completion,
     ),
 )
 

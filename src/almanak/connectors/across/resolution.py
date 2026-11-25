@@ -139,26 +139,38 @@ def require_anchor(reader, block: Block) -> None:
         raise DataError("block_mismatch", "an Across resolution anchor is no longer canonical")
 
 
-def resolve_market(reader, selection: MarketSelection, block: Block) -> ResolvedRoute:
+def resolve_market(
+    reader, selection: MarketSelection, block: Block, pool_address: str | None = None
+) -> ResolvedRoute:
+    """Read the sending SpokePool and the sent asset at the source anchor.
+
+    `pool_address` is the pool a retained route was resolved on, given on replay only.
+    """
     if selection.chain != block.chain.chain_id or reader.chain != block.chain:
         raise DataError("chain_mismatch", "Across resolution requires its source chain and anchor")
     # The reader answers calls only at the block it pinned last.
     require_anchor(reader, block)
-    pool = read_pool(reader, spoke_pool(selection.chain).address, block)
+    pool = read_pool(reader, pool_address or spoke_pool(selection.chain).address, block)
     asset = reader.asset(selection.asset, block)
     require_anchor(reader, block)
     return ResolvedRoute(selection=selection, block=block, asset=asset, pool=pool)
 
 
-def complete_market(reader, resolved: ResolvedRoute, block: Block) -> ResolvedRoute:
-    """Read the received asset and the filling SpokePool at the destination's anchor."""
+def complete_market(
+    reader, resolved: ResolvedRoute, block: Block, pool_address: str | None = None
+) -> ResolvedRoute:
+    """Read the received asset and the filling SpokePool at the destination's anchor.
+
+    `pool_address` is the pool a retained route was completed on, given on replay only.
+    """
     selection = resolved.selection
     if selection.destination_chain != block.chain.chain_id or reader.chain != block.chain:
         raise DataError(
             "chain_mismatch", "Across completion requires its destination chain and anchor"
         )
     require_anchor(reader, block)
-    pool = read_pool(reader, spoke_pool(selection.destination_chain).address, block)
+    address = pool_address or spoke_pool(selection.destination_chain).address
+    pool = read_pool(reader, address, block)
     destination = reader.asset(selection.destination_asset, block)
     require_anchor(reader, block)
     return ResolvedRoute(
@@ -169,6 +181,23 @@ def complete_market(reader, resolved: ResolvedRoute, block: Block) -> ResolvedRo
             "destination_pool": pool,
         }
     )
+
+
+def replay_market(reader, retained: ResolvedRoute) -> ResolvedRoute:
+    """The source reads again, at the pool the retained route names.
+
+    The pin in code may name another proxy by now. The deployment's transfers and its
+    approval live in the pool it was resolved on, so replay asks the retained reads about
+    that pool; reads of any other address are not in the evidence and refuse.
+    """
+    return resolve_market(reader, retained.selection, retained.block, retained.pool.address)
+
+
+def replay_completion(reader, observed: ResolvedRoute, retained: ResolvedRoute) -> ResolvedRoute:
+    filling = retained.destination_pool
+    if retained.destination_block is None or filling is None:
+        raise DataError("resolution_evidence", "a retained Across route was never completed")
+    return complete_market(reader, observed, retained.destination_block, filling.address)
 
 
 def admit_route(resolved: ResolvedRoute) -> None:
