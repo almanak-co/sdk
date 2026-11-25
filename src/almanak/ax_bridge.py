@@ -696,6 +696,9 @@ def status_reader(args, chain, public_rpc: str | None):
 
     if args.public_rpc is None:
         return ax.observation_reader(args, chain)
+    if public_rpc is None:
+        # Never the source endpoint's name for the destination chain.
+        raise ValueError(DESTINATION_REQUIRED)
     with proof_cause(public_rpc, chain):
         return ax.public_reader(chain, public_rpc)
 

@@ -1639,6 +1639,10 @@ def test_a_public_endpoint_that_fails_its_proof_is_named_with_its_chain(monkeypa
         ax_bridge.status(args)
     assert error.value.kind == "chain_mismatch"
     assert "the public endpoint base on eip155:8453 did not give the proof" in str(error.value)
+    # A missing destination name is never filled with the source endpoint's.
+    alone = SimpleNamespace(**{**vars(args), "destination_public_rpc": None})
+    with pytest.raises(ValueError, match="--destination-public-rpc"):
+        ax_bridge.status(alone)
     # A provider key's reader is not a public endpoint and is named as none.
     monkeypatch.setattr(ax, "observation_reader", lambda args, chain: stale(None))
     keyed = SimpleNamespace(**{**vars(args), "public_rpc": None, "destination_public_rpc": None})
