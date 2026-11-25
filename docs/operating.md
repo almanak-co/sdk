@@ -455,8 +455,10 @@ plain-wallet command.
 Only a bridge that leaves Arbitrum has been run: its reference has fork
 lifecycle, refund and production rehearsal proofs. Every other source chain is
 declared on read-only mainnet reads and offline tests alone, and `almanak
-support` says so on its row. Nobody has run a deposit, an arrival or a refund
-from those chains, on a fork or on mainnet. Treat a first bridge from one of
+support` says so on its row. No retained or reviewed run holds a deposit, an
+arrival or a refund from those chains, on a fork or on mainnet; one direct bridge
+from Ethereum is known by an operator's report only and proves nothing. Treat a
+first bridge from one of
 them as the first run of that path, and send a small amount first. On a fork, a
 refund is defined for a transfer sent from Arbitrum only, and a fork refuses
 authored gas ceilings on Base and OP Mainnet, so a fork run of a strategy with an
@@ -603,7 +605,8 @@ later step cannot be simulated before the earlier one is mined, so no gas is quo
 or estimated for it, and each step pays its own gas under the same ceilings. The
 list restates the connector's planner over the block the first step was planned
 on, and each later step is planned again once the earlier one is mined, so it is
-what the request sends when nothing is refused and nothing changes in between.
+what the request sends when nothing is refused and nothing changes in between, and
+`steps_note` says so. A later step that is refused leaves the earlier ones done.
 `steps` is stated by Across, Aave V4, Aave V3 and SparkLend, and only where that
 block decides every step: a full repayment states none, because the revocation
 after it depends on what the repayment leaves. A result without `steps` names the

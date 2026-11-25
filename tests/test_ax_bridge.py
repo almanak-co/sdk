@@ -481,9 +481,19 @@ def test_a_bridge_preview_lists_its_steps_and_quotes_gas_for_the_first_only():
     stated = ax_actions.stated_steps(across_direct.DIRECT, Kept(), "approve")
     assert stated["steps"] == ["approve", "deposit"]
     assert stated["steps_note"] == (
-        "This request sends 2 transactions, in order: approve, then deposit. "
-        + ax_actions.FIRST_GAS_ONLY
+        "This request plans 2 transactions, in order: approve, then deposit. "
+        "That is what it sends when nothing is refused and nothing changes in between: "
+        "each later step is planned again once the earlier one is mined, and a later step "
+        "that is refused leaves the earlier ones done. " + ax_actions.FIRST_GAS_ONLY
     )
+    # A revocation alone is one transaction and promises no more.
+    kept = SimpleNamespace(load=lambda: planned(operator_config(REVOKE), REVOKE, allowance=7))
+    alone = ax_actions.stated_steps(across_direct.DIRECT, kept, "revoke")
+    assert alone == {
+        "steps": ["revoke"],
+        "steps_note": "This request plans one transaction: revoke. "
+        "Its gas is quoted in `first_step`.",
+    }
     assert "cannot be simulated before the earlier one is mined" in ax_actions.FIRST_GAS_ONLY
 
 

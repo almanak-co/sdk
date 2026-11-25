@@ -85,7 +85,10 @@ def test_a_preview_lists_the_steps_of_a_supply_and_of_a_single_step_withdrawal(d
     preview = ax_actions.perform(desk.service, ActionRequest("supply", amount), execute=False)
     assert preview["steps"] == ["approve", "supply"]
     assert preview["steps_note"] == (
-        "This request sends 2 transactions, in order: approve, then supply. "
+        "This request plans 2 transactions, in order: approve, then supply. "
+        "That is what it sends when nothing is refused and nothing changes in between: "
+        "each later step is planned again once the earlier one is mined, and a later step "
+        "that is refused leaves the earlier ones done. "
         "Only the first step's gas is quoted, in `first_step`: a later step cannot be "
         "simulated before the earlier one is mined, so its gas is not known in a preview. "
         "Each step is its own transaction and pays its own gas."
@@ -99,7 +102,7 @@ def test_a_preview_lists_the_steps_of_a_supply_and_of_a_single_step_withdrawal(d
         "withdraw"
     )
     assert single["steps_note"] == (
-        "This request sends one transaction: withdraw. Its gas is quoted in `first_step`."
+        "This request plans one transaction: withdraw. Its gas is quoted in `first_step`."
     )
 
 
@@ -118,6 +121,23 @@ def test_a_request_whose_later_steps_are_not_decided_lists_none(desk):
     for kinds in (["supply"], None):
         declared = SimpleNamespace(steps=lambda state, kinds=kinds: kinds)
         assert "steps" not in ax_actions.stated_steps(declared, desk.store, "approve")
+
+
+def test_a_statement_that_disagrees_with_the_planned_step_is_left_out_of_the_preview(
+    desk, monkeypatch
+):
+    from dataclasses import replace
+
+    from almanak.connectors import direct
+
+    declared = direct.binding_for(desk.store.load().config)
+    wrong = replace(declared, steps=lambda state: ["supply", "revoke"])
+    monkeypatch.setattr(direct, "binding_for", lambda config: wrong)
+    amount = desk.intent("supply").amount.amount
+    preview = ax_actions.perform(desk.service, ActionRequest("supply", amount), execute=False)
+    # The gateway planned the approval, so the statement is held to that step.
+    assert preview["first_step"]["operation"]["kind"] == "approve" and "steps" not in preview
+    assert preview["steps_note"].startswith("The first step is `approve`.")
 
 
 def test_aave_v4_states_the_steps_its_planner_takes():

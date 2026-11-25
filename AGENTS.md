@@ -416,9 +416,13 @@ independently.
   equal to the chain, the pool's wrapped native token equal to the network
   definition's, and the installation block of the pinned implementation.
   `scripts/across_pins.py` produces these facts and sends nothing. Accepted
-  risk: such a cell's path has never been run by anyone, on a fork or on
-  mainnet, so a first bridge from it is that path's first run. `almanak
-  support` states this on each such row. The QA catalog and the hosted Fork
+  risk: such a cell's path has never been run in a retained or reviewed run,
+  on a fork or on mainnet, so a first bridge from it is treated as that path's
+  first run. One run is known by report only: the maintainer states that an
+  operator's agent ran a keyless direct bridge from Ethereum to Base on
+  mainnet, approval, deposit and arrival. It is not retained evidence and
+  proves no cell. `almanak support` states on each such row that no reference
+  lifecycle, refund proof or production rehearsal has run from the chain. The QA catalog and the hosted Fork
   Qualification selection leave these cells out by name, from the connector's
   own list, with the reason in the code; they never pass on an empty
   selection. This excepts no other connector, and no other rule than the
@@ -979,11 +983,8 @@ independently.
   them unenforced only when every policy is on an OP chain, so the standalone
   reference keeps its production gas policy in `config.production.yaml` and
   its fork runs are gasless; and no retained run or other evidence of this
-  repository holds a mainnet transaction of this connector. One is known by
-  report only: the maintainer states that an operator's agent ran a keyless
-  direct bridge from Ethereum to Base on mainnet, approval, deposit and
-  arrival, with the deposit using 68,743 gas by the agent's own account. It is
-  not retained evidence, proves no cell and is no gas reference.
+  repository holds a mainnet transaction of this connector, from this cell or
+  any other.
 - Open gates of the Safe/Roles profile on every Across cell, Arbitrum
   included, none of which may be described as complete: no Safe/Roles bridge
   has run on a fork or on mainnet; the generated grants were never installed

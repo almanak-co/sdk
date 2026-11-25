@@ -712,21 +712,27 @@ def stated_steps(binding, journal, first: str) -> dict:
 
     `steps` is the connector's own statement, from the observation the first step was
     planned on, and is present only where that decides every step and agrees with the
-    step the gateway planned. Elsewhere only the first step is known, and `steps_note`
-    says so. A later step is planned again once the earlier one is mined, and no gas
-    is estimated for it here.
+    step the gateway planned. It is the planned sequence, not a promise: a later step
+    can still be refused, which the note says. Elsewhere only the first step is known,
+    and `steps_note` says so. A later step is planned again once the earlier one is
+    mined, and no gas is estimated for it here.
     """
     kinds = None if binding.steps is None else binding.steps(journal.load())
     if not kinds or kinds[0] != first:
         return {"steps_note": f"The first step is `{first}`. {UNLISTED} {FIRST_GAS_ONLY}"}
     if len(kinds) == 1:
-        note = f"This request sends one transaction: {first}. Its gas is quoted in `first_step`."
+        note = f"This request plans one transaction: {first}. Its gas is quoted in `first_step`."
         return {"steps": list(kinds), "steps_note": note}
     listed = ", then ".join(kinds)
-    note = f"This request sends {len(kinds)} transactions, in order: {listed}. {FIRST_GAS_ONLY}"
-    return {"steps": list(kinds), "steps_note": note}
+    count = f"This request plans {len(kinds)} transactions, in order: {listed}."
+    return {"steps": list(kinds), "steps_note": f"{count} {AS_PLANNED} {FIRST_GAS_ONLY}"}
 
 
+AS_PLANNED = (
+    "That is what it sends when nothing is refused and nothing changes in between: each"
+    " later step is planned again once the earlier one is mined, and a later step that"
+    " is refused leaves the earlier ones done."
+)
 UNLISTED = (
     "The later steps of this request are not listed in a preview: more can follow, such"
     " as the action after an approval or a revocation after the action."

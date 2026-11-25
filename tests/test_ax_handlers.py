@@ -241,9 +241,14 @@ def test_balance_refuses_reads_that_leave_the_pinned_block(live_reader, monkeypa
 
 
 class Tagged(Pinned):
+    """The first pin is the read's block; a second pin would resolve a later one."""
+
+    pins = 0
+
     def pin_block(self, selector):
-        self.asked = selector
-        return BLOCK
+        self.asked, self.pins = selector, self.pins + 1
+        later = {"number": BLOCK.number + self.pins - 1, "timestamp": BLOCK.timestamp + 12}
+        return BLOCK if self.pins == 1 else BLOCK.model_copy(update=later)
 
 
 @pytest.mark.parametrize("selector", ["finalized", "latest"])
@@ -272,7 +277,8 @@ def test_a_balance_read_states_the_block_it_asked_for_and_its_age(
     )
     assert ax.command(invocation) == 0
     output = json.loads(capsys.readouterr().out)
-    assert reader.asked == selector
+    # The block stated is the one the values were read at, pinned once.
+    assert (reader.asked, reader.pins) == (selector, 1)
     assert output["read_at"] == {
         "block": selector,
         "number": BLOCK.number,

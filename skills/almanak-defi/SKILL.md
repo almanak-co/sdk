@@ -322,7 +322,8 @@ no public endpoint, tell the user it cannot be done without their own provider
 key, and leave it to them to offer one. Do not ask for the key.
 
 A read without `--block` is the chain's finalized block, on every transport. That
-block trails the newest one by minutes on most chains, so it does not show a
+block trails the newest one by minutes, on a rollup by a quarter of an hour or
+more, so it does not show a
 transaction mined a moment ago: a balance read there after an action or an
 arrival can still be the old one. Read with `--block latest` whenever you report
 what the chain shows now, as the commands in this skill do. Each read's result
@@ -478,9 +479,12 @@ position in the venue. Give it the time limit step 7 states.
 Nothing is signed. The result has `position_before` and `first_step`, the first
 transaction the action would send, often an approval. The preview plans only that
 step, so a later one can still be refused once the action runs. `steps` lists
-every transaction the action sends, in order by kind, such as `approve` then
-`supply`, and `steps_note` says the same in words. Report the step count from the
-preview. Only the first step's gas is quoted: a later step cannot be simulated
+the transactions the action plans to send, in order by kind, such as `approve`
+then `supply`, and `steps_note` says the same in words. Report the step count from
+the preview as the planned sequence, not a promise: it is what the action sends
+when nothing is refused and nothing changes in between, and a later step that is
+refused leaves the earlier ones done, such as an approval mined before a refused
+deposit. Only the first step's gas is quoted: a later step cannot be simulated
 before the earlier one is mined, so say that the later steps' gas is not quoted up
 front and never estimate it yourself. A result without `steps` is an action whose
 later steps are not listed in a preview: say that more transactions can follow
@@ -720,7 +724,8 @@ protection on chain: the bridge contract checks no price.
 The preview's `quote` has the `output_amount`, the `fee`, the `fee_ceiling` and the
 `fill_deadline`, and `steps` lists what the action sends: an approval, then the
 deposit, after a revocation when another allowance stood. Tell the user how many
-transactions that is, and that the preview quotes gas for the first one only: the
+transactions are planned, that a deposit refused on its own quote leaves the
+approval mined, and that the preview quotes gas for the first one only: the
 deposit's gas is not quoted up front, and it is a second transaction that pays its
 own. Tell the user the fee and
 the amount offered, in whole units, as an estimate: the deposit asks for a new

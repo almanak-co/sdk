@@ -1814,7 +1814,7 @@ def test_a_read_after_an_action_or_an_arrival_asks_for_the_latest_block():
     stated = " ".join(section("Public endpoints").split())
     for statement in (
         "A read without `--block` is the chain's finalized block, on every transport",
-        "trails the newest one by minutes on most chains",
+        "trails the newest one by minutes, on a rollup by a quarter of an hour or more",
         "says which block it is under `read_at`: `block` is the selector that chose it",
         "`age_seconds` how old that block was when the command ran",
     ):
@@ -1827,13 +1827,15 @@ def test_a_read_after_an_action_or_an_arrival_asks_for_the_latest_block():
 def test_the_skill_reports_the_step_count_and_that_later_gas_is_not_quoted():
     preview = " ".join(subsection("5. Preview").split())
     for statement in (
-        "`steps` lists every transaction the action sends, in order by kind",
-        "Report the step count from the preview",
+        "`steps` lists the transactions the action plans to send, in order by kind",
+        "Report the step count from the preview as the planned sequence, not a promise",
+        "a later step that is refused leaves the earlier ones done",
         "Only the first step's gas is quoted",
         "the later steps' gas is not quoted up front and never estimate it yourself",
         "A result without `steps` is an action whose later steps are not listed",
     ):
         assert statement in preview, statement
     bridge = " ".join(section("Bridges").split())
-    assert "Tell the user how many transactions that is" in bridge
+    assert "Tell the user how many transactions are planned" in bridge
+    assert "a deposit refused on its own quote leaves the approval mined" in bridge
     assert "the deposit's gas is not quoted up front" in bridge
