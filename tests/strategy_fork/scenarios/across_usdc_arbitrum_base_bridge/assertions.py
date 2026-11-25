@@ -1,44 +1,25 @@
 """Run the Across bridge reference: one deposit, a real fill, and a measured arrival.
 
 No relayer runs on a fork, so this scenario fills the open transfer through the
-destination SpokePool's own `fillRelay`. The quote the deposit signed is the fork
-gateway's constructed one, never the venue's.
+destination SpokePool's own `fillRelay`. On a fork run the quote the deposit signed is
+the fork gateway's constructed one, never the venue's. A production rehearsal signs the
+venue's own answer instead; `tests/strategy_fork/bridge_rehearsal.py` says how.
 """
 
 import time
-from pathlib import Path
 
 from eth_abi import encode
 from eth_utils import keccak
 
 from almanak.connectors.across.connector import AcrossProjection
-from almanak.connectors.across.fork_settler import Settler
 from almanak.transfers import Arrived, Refunded
+from tests.strategy_fork import bridge_rehearsal
+from tests.strategy_fork.bridge_rehearsal import prepare_rehearsal, settler  # noqa: F401
 
 SENT = 100_000_000
 # The constructed fork quote charges one basis point.
 OFFERED = SENT - SENT // 10_000
 WAIT_SECONDS = 600
-
-
-class Nodes:
-    """The run's fork nodes as a fork keeper addresses them: by the chain they fork."""
-
-    def __init__(self, handles):
-        self.handles = handles.handles
-
-    def handle(self, chain_id):
-        return next(h for h in self.handles if h.origin.chain.chain_id == chain_id)
-
-    def rpc(self, chain_id):
-        return self.handle(chain_id).rpc
-
-    def origin(self, chain_id):
-        return self.handle(chain_id).origin
-
-
-def settler(node, journal) -> Settler:
-    return Settler(Nodes(node), Path(journal.path).parent / "keepers")
 
 
 def awaited(journal, running, predicate):
@@ -61,7 +42,7 @@ def drive_external(node, journal, running):
     state = awaited(journal, running, lambda s: bool(s.transfers) or s.mode != "running")
     for transfer in state.transfers:
         if transfer.open:
-            settler(node, journal).fill(state, transfer)
+            settler(node, journal, state).fill(state, transfer)
 
 
 def deposits(state) -> list:
@@ -135,24 +116,31 @@ def remembered(state) -> tuple:
     return tuple(values.get(name) for name in ("sent", "received", "returned"))
 
 
+def offered(state) -> int:
+    (deposit,) = deposits(state)
+    return bridge_rehearsal.offered(state, deposit, SENT, OFFERED)
+
+
 def assert_one_deposit(state):
     (deposit,) = deposits(state)
-    quote = deposit.operation.quote
-    assert quote.source == "across_fork_constructed", "a fork deposit signs a constructed quote"
+    source = bridge_rehearsal.quote_source(state)
     report = AcrossProjection.report(state)
-    assert [t["quote_source"] for t in report["transfers"]] == ["across_fork_constructed"]
+    assert [t["quote_source"] for t in report["transfers"]] == [source]
     context, _ = AcrossProjection.dashboard(state)
     (row,) = context.datasets["transfers"].rows
-    assert row["quote_source"] == "across_fork_constructed"
-    assert (deposit.operation.amount.amount, quote.output_amount) == (SENT, OFFERED)
+    assert row["quote_source"] == source
+    assert (deposit.operation.amount.amount, deposit.operation.quote.output_amount) == (
+        SENT,
+        offered(state),
+    )
 
 
 def assert_holding(node, state):
     assert_one_deposit(state)
     (transfer,) = state.transfers
-    assert transfer.resolution.received.amount == OFFERED
-    assert balances(node, state) == (funded(state) - SENT, OFFERED, 0)
-    assert remembered(state) == (SENT, OFFERED, None)
+    assert transfer.resolution.received.amount == offered(state)
+    assert balances(node, state) == (funded(state) - SENT, offered(state), 0)
+    assert remembered(state) == (SENT, offered(state), None)
 
 
 def assert_closed(node, state):

@@ -464,3 +464,45 @@ def test_both_arrival_types_are_author_facing(tmp_path):
     assert issubclass(api.MeasuredArrival, api.ArrivalResult)
     measured_only = set(api.MeasuredArrival.model_fields) - set(api.ModeledArrival.model_fields)
     assert measured_only == {"identity", "fill_type", "block", "tx_hash", "accounting_issues"}
+
+
+def test_the_backtest_start_is_the_day_after_the_later_pinned_implementation(monkeypatch):
+    """A window resolves the route on both chains, so it starts only once both pinned
+    implementations were in place. The dates are archive reads of each proxy's slot."""
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    import yaml
+
+    from almanak.connectors.across import support
+    from tests.across_support import BASE
+
+    here, there = (support.PIN_INSTALLED[chain.chain_id] for chain in (ARBITRUM, BASE))
+    assert (here, there) == (
+        datetime(2026, 8, 14, 18, 24, 47, tzinfo=UTC),
+        datetime(2026, 8, 14, 18, 32, 3, tzinfo=UTC),
+    )
+    start = support.BACKTEST_STARTS[ARBITRUM.chain_id]
+    assert start == datetime(2026, 8, 15, tzinfo=UTC) > max(here, there)
+    assert support.candidate_support()[0].historical[0].backtest_start_at == start
+    # The later chain decides, whichever it is.
+    late = datetime(2026, 8, 20, 0, 0, 1, tzinfo=UTC)
+    for chain in (ARBITRUM, BASE):
+        monkeypatch.setitem(support.PIN_INSTALLED, chain.chain_id, late)
+        assert support.backtest_start(ARBITRUM.chain_id) == datetime(2026, 8, 21, tzinfo=UTC)
+        monkeypatch.undo()
+    # Every shipped reference window lies after the start.
+    root = Path(__file__).parent.parent / "strategies"
+    for name in ("across_usdc_arbitrum_base_bridge", "arbitrum_base_bridge_and_lend"):
+        window = yaml.safe_load((root / name / "backtest-economic.yaml").read_text())
+        found = [value for value in walk(window) if isinstance(value, dict) and "start" in value]
+        assert found and all(
+            datetime.fromisoformat(str(v["start"]).replace("Z", "+00:00")) >= start for v in found
+        )
+
+
+def walk(node):
+    yield node
+    for child in node.values() if isinstance(node, dict) else ():
+        if isinstance(child, dict):
+            yield from walk(child)

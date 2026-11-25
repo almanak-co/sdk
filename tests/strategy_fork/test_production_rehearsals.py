@@ -50,11 +50,10 @@ def eoa_funding(author):
     index = int(uuid4().hex[:7], 16)
     funds = []
     for offset, fund in enumerate(author.funds):
-        operator = next(o for o in author.operators if o.name == fund.operator)
         funds.append(
             ForkEoaFund(
                 account=fund.account,
-                native_balance=operator.native_balance,
+                native_balance=payer_balance(author, fund),
                 assets=fund.assets,
                 foundry_account_index=index + offset,
             )
@@ -63,6 +62,14 @@ def eoa_funding(author):
     return type(author).model_validate(
         {**author.model_dump(), "funds": tuple(funds), "operators": ()}
     )
+
+
+def payer_balance(author, fund):
+    """The gas a fund's payer starts with: its operator's, or its own when the
+    reference's fixture already funds it as an EOA."""
+    if isinstance(fund, ForkEoaFund):
+        return fund.native_balance
+    return next(o for o in author.operators if o.name == fund.operator).native_balance
 
 
 def rehearsal_policy(author):
@@ -163,6 +170,8 @@ def exercise(case, author, env_file, temporary, phases):
     with ForkSet(author, env_file) as nodes, processes(temporary) as launch:
         directory = temporary / "deployment"
         prepare(nodes, author, directory)
+        # A reference whose venue times its quotes in the present moves the forks there.
+        getattr(assertions, "prepare_rehearsal", unprepared)(nodes)
         node = next(iter(nodes.nodes.values())) if len(nodes.nodes) == 1 else nodes
         gateway, gateway_args, control = launch_gateway(directory, launch)
         journal = Journal(directory / "state.sqlite")
@@ -202,27 +211,52 @@ def exercise(case, author, env_file, temporary, phases):
         phases.append("canonical_receipts_and_zero_obligations")
 
 
+def unprepared(nodes) -> None:
+    """A reference that needs nothing of its forks before its rehearsal."""
+
+
+def retained_settlement(outcome, closed) -> bool:
+    """Whether an outcome no account sent settles something the deployment retains: a
+    keeper-settled request, or a bridge transfer that arrived or was refunded."""
+    if getattr(outcome, "request", None) in getattr(closed, "requests", ()):
+        return True
+    settled = (getattr(outcome, "transfer", None), *getattr(outcome, "transfers", ()))
+    return any(t.reference in settled for t in getattr(closed, "transfers", ()))
+
+
 def assert_production_payers(closed):
     """Every submitted transaction is paid under its account's production EOA policy.
 
-    A keeper settlement (a GMX request outcome) has no submitter charge. It must
-    settle a retained request in a transaction no bound account sent.
+    A settlement by another party (a GMX keeper, an Across relayer) has no submitter
+    charge. It must settle a retained request or transfer in a transaction no bound
+    account sent.
     """
-    submitted = [o for o in closed.outcomes if "gas_paid" in type(o).model_fields]
-    settled = [o for o in closed.outcomes if "gas_paid" not in type(o).model_fields]
+    submitted, settled = by_payer(closed.outcomes)
     assert submitted
-    assert all(
-        o.gas_paid.asset == closed.config.production.policy(o.operation.account).asset
-        for o in submitted
+    assert all(paid_by_policy(o, closed) for o in submitted)
+    assert all(settled_by_another(o, closed, submitted) for o in settled)
+
+
+def by_payer(outcomes):
+    """Outcomes a bound account submitted and paid for, and those another party settled."""
+    submitted = [o for o in outcomes if "gas_paid" in type(o).model_fields]
+    settled = [o for o in outcomes if "gas_paid" not in type(o).model_fields]
+    return submitted, settled
+
+
+def paid_by_policy(outcome, closed) -> bool:
+    policy = closed.config.production.policy(outcome.operation.account)
+    return outcome.gas_paid.asset == policy.asset and (
+        outcome.execution.binding.profile.kind == "eoa"
     )
-    assert all(o.execution.binding.profile.kind == "eoa" for o in submitted)
+
+
+def settled_by_another(outcome, closed, submitted) -> bool:
     accounts = {b.profile.fund.address.lower() for b in closed.config.accounts.bindings}
-    hashes = {o.tx_hash for o in submitted}
-    assert all(
-        getattr(o, "request", None) in closed.requests
-        and o.receipt["from"].lower() not in accounts
-        and o.tx_hash not in hashes
-        for o in settled
+    return (
+        retained_settlement(outcome, closed)
+        and outcome.receipt["from"].lower() not in accounts
+        and outcome.tx_hash not in {o.tx_hash for o in submitted}
     )
 
 

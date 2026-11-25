@@ -11,16 +11,21 @@ is never evidence of what the venue would have quoted.
 """
 
 import json
+from itertools import product
 from typing import Literal
 
 import httpx
+from pydantic import model_validator
 
 from almanak.connectors.across import quote as venue
 from almanak.connectors.across.domain import FeeBps, Target, Uint32, spoke_pool
+from almanak.connectors.across.models import Allocation, Config
 from almanak.connectors.across.quote import QUOTE_VENUE
+from almanak.connectors.support import RunMode
 from almanak.gateway.environments import is_fork
 from almanak.gateway.ethereum import DataError
-from almanak.models import ZERO_ADDRESS, Chain, Model
+from almanak.gateway.fork_config import ForkConfigBase, ForkEoaFund, require_unique
+from almanak.models import ZERO_ADDRESS, Chain, Model, StrategyAccounts
 
 # What a constructed quote charges, in basis points of the amount sent.
 FORK_FEE_BPS = 1
@@ -80,6 +85,73 @@ class ForkTransport:
         return httpx.Response(200, content=json.dumps(body).encode())
 
 
+class ForkConfig(ForkConfigBase[Allocation]):
+    """The in-process fixture of a bridge: one fork per chain a route leaves or reaches,
+    and one funded EOA per named account, the receiving one included."""
+
+    connector: Literal["across"] = "across"
+
+    @model_validator(mode="before")
+    @classmethod
+    def arrays(cls, value):
+        if not isinstance(value, dict):
+            return value
+        raw = dict(value)
+        for field in ("forks", "funds", "operators", "allocations"):
+            if isinstance(raw.get(field), list):
+                raw[field] = tuple(raw[field])
+        raw["funds"] = tuple(
+            {**fund, "assets": tuple(fund["assets"])}
+            if isinstance(fund, dict) and isinstance(fund.get("assets"), list)
+            else fund
+            for fund in raw.get("funds", ())
+        )
+        return raw
+
+    @model_validator(mode="after")
+    def scope(self):
+        require_unique([a.name for a in self.allocations], "allocation names")
+        named = {name for a in self.allocations for name in (a.account, a.destination_account)}
+        if named != {fund.account for fund in self.funds}:
+            raise ValueError("bridge allocations must identify exactly the funded accounts")
+        funds = {fund.account: fund for fund in self.funds if isinstance(fund, ForkEoaFund)}
+        if len(funds) != len(self.funds):
+            raise ValueError("Across fixtures fund EOA accounts only")
+        for allocation in self.allocations:
+            validate_funding(allocation, funds[allocation.account])
+        return self
+
+    def validate_support(self):
+        """A bridge's forks are its source and its destination chain. Only the source
+        chain declares a run mode: a route is planned and signed on the chain it leaves."""
+        from almanak.connectors.composition import connector_from_wire
+
+        if route_chains(self.allocations) != {target.chain.chain_id for target in self.forks}:
+            raise ValueError("fork targets must match each route's source and destination chain")
+        connector = connector_from_wire({"connector": "across"})
+        modes = (RunMode.FORK,) if self.production is None else (RunMode.FORK, RunMode.PRODUCTION)
+        for allocation, mode in product(self.allocations, modes):
+            connector.require_target(allocation.route.chain.chain_id, allocation, mode)
+        if self.production is not None and {t.chain for t in self.forks} != {
+            n.chain for n in self.production.networks
+        }:
+            raise ValueError("production and fork profiles must cover the same author chains")
+
+
+def validate_funding(allocation, fund: ForkEoaFund) -> None:
+    if fund.native_balance.asset != allocation.native_asset:
+        raise ValueError("a bridge's source fund pays gas on its source chain")
+    balances = {a.balance.asset: a.balance.amount for a in fund.assets}
+    if balances.get(allocation.route.asset, 0) < allocation.capital:
+        raise ValueError("fork funding must cover the allocation capital")
+
+
+def route_chains(allocations) -> set:
+    return {
+        chain for a in allocations for chain in (a.route.chain.chain_id, a.route.destination_chain)
+    }
+
+
 def fork_allocation(allocation, chain: Chain):
     """The allocation on its source chain's fork. The destination follows its account."""
     route = allocation.route.model_copy(update={"chain": chain})
@@ -102,6 +174,18 @@ def route_transports(venues) -> dict:
 
 
 class AcrossFork:
+    @staticmethod
+    def prepare_chains(config, bindings, scopes):
+        chains = {binding.origin.chain: binding.chain for binding in scopes}
+        return Config(
+            decision_trigger=config.decision_trigger,
+            asset_metadata=config.asset_metadata,
+            accounts=StrategyAccounts(bindings=tuple(bindings)),
+            allocations=tuple(fork_allocation(a, chains[a.chain]) for a in config.allocations),
+            parameters=config.parameters,
+            fork_bindings=scopes,
+        )
+
     @staticmethod
     def venues(deployment, host) -> dict[Chain, dict]:
         """Each source chain's route names its constructed quote; no process serves it."""

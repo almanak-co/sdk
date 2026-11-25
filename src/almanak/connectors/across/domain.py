@@ -61,6 +61,13 @@ class Route(Model):
     # assets, so the received asset must have the same decimals; the quote is held to it.
     decimals: Decimals
     spoke_pool: Address
+    # Both pools are the ones resolution read, and stay the deployment's own: its
+    # transfers in flight live in them, and its approval names the source pool, so every
+    # reader, the revocation and closure use these addresses whatever the pin in code
+    # says today. Only a new deposit compares them with the pin (`require_pinned`). The
+    # destination pool is compared as retained, with no destination read, so the source
+    # keeps working while the destination is unavailable.
+    destination_pool: SpokePoolPin
     # The author's ceiling on the whole bridge fee, in basis points of the amount sent.
     max_fee_bps: FeeBps
     # The one source of the output amount: the venue's own quote. Nothing substitutes it.
@@ -72,8 +79,8 @@ class Route(Model):
         erc20_address(self.destination_asset, self.destination_chain)
         if self.chain.chain_id == self.destination_chain:
             raise ValueError("an Across route requires two different chains")
-        if self.spoke_pool != spoke_pool(self.chain.chain_id).address:
-            raise ValueError("Across route names another SpokePool than the pinned one")
+        # A chain must still be one Across is pinned on; which pool it names is not held.
+        spoke_pool(self.chain.chain_id)
         spoke_pool(self.destination_chain)
         if self.asset == evm_network(self.chain.chain_id).wrapped_native:
             # A wrapped native deposit refunds as the wrapped token but can arrive as the

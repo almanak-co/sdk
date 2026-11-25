@@ -16,7 +16,6 @@ from eth_abi import encode
 from eth_utils import keccak, to_checksum_address
 
 from almanak.caip import ChainId
-from almanak.connectors.across.domain import spoke_pool
 from almanak.connectors.across.operations import DepositOperation, word
 from almanak.connectors.across.receipts import movement
 from almanak.connectors.across.relay import (
@@ -136,16 +135,17 @@ class Settler:
 
     def settle(self, state) -> tuple[dict, ...]:
         # A fill is mined before the run reads it; the transfer is still open until then.
-        waiting = [t for t in state.transfers if t.open and not self.filled(t)]
+        waiting = [t for t in state.transfers if t.open and not self.filled(state, t)]
         return tuple(self.fill(state, transfer) for transfer in waiting)
 
-    def filled(self, transfer) -> bool:
-        """Whether the destination SpokePool holds the transfer's relay as filled."""
+    def filled(self, state, transfer) -> bool:
+        """Whether the SpokePool the transfer was sent to holds its relay as filled."""
         chain = transfer.destination.chain
         rpc, _ = self.fork(chain)
+        pool = state.config.target(transfer.allocation).route.destination_pool.address
         relay = parse_reference(transfer.reference).relay_hash
         data = selector("fillStatuses(bytes32)") + bytes.fromhex(relay[2:])
-        call = {"to": spoke_pool(chain.chain_id).address, "data": "0x" + data.hex()}
+        call = {"to": pool, "data": "0x" + data.hex()}
         return int(rpc("eth_call", [call, "latest"]), 16) == FILLED
 
     def fork(self, chain):
@@ -160,7 +160,7 @@ class Settler:
         operation, relay = deposit_of(state, transfer)
         target = operation.target
         rpc, origin = self.fork(target.destination_fund.chain)
-        pool = spoke_pool(target.route.destination_chain).address
+        pool = target.route.destination_pool.address
         node, amount = SimpleNamespace(rpc=rpc, origin=origin), transfer.offered.amount
         funding = fund_erc20(node, RELAYER, target.destination_asset, amount)
         approve = selector("approve(address,uint256)") + encode(

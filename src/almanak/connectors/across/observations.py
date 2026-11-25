@@ -74,11 +74,22 @@ def owned(snapshot: Snapshot) -> Ownership:
     return Ownership(target=snapshot.target)
 
 
-def require_pinned(pool: PoolState, chain) -> None:
-    """Refuse new deposits through an implementation other than the reviewed one."""
+def require_pinned(pool, chain) -> None:
+    """Refuse new deposits through an implementation other than the reviewed one.
+
+    `pool` is a pool as read, or the pin a route retains of one. This is held when a
+    market is first resolved and when a deposit is planned, signed or sent. It is never
+    held when retained facts are loaded or replayed: a reviewed pin change must leave a
+    running deployment able to restart, reconcile its transfers, revoke and close.
+    """
     pin = spoke_pool(chain)
-    if (pool.address, pool.implementation, pool.implementation_code_hash) != (
-        pin.address,
+    if pool.address != pin.address:
+        raise DataError(
+            "deployment_changed",
+            f"the Across SpokePool this deployment uses on {chain} ({pool.address}) is not "
+            f"the reviewed one ({pin.address}); new deposits wait for its review",
+        )
+    if (pool.implementation, pool.implementation_code_hash) != (
         pin.implementation,
         pin.implementation_code_hash,
     ):

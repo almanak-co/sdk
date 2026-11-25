@@ -12,6 +12,7 @@ from almanak.connectors.across.domain import SPOKE_POOLS
 from almanak.connectors.across.observations import IMPLEMENTATION_SLOT, snapshot
 from almanak.connectors.across.resolution import (
     MarketSelection,
+    admit_route,
     complete_market,
     resolve_market,
 )
@@ -34,6 +35,7 @@ from tests.across_support import (
 )
 
 CODE = "0x6080"
+BASE_PIN = SPOKE_POOLS[BASE.chain_id]
 VALUES = {
     "depositQuoteTimeBuffer()": 3600,
     "fillDeadlineBuffer()": 21600,
@@ -75,21 +77,42 @@ class Reader:
 
 
 class DestinationReader:
-    """The destination chain's own reads at its own anchor."""
+    """The destination chain's own reads at its own anchor: its SpokePool and the asset."""
 
-    def __init__(self, block, decimals=6):
+    def __init__(self, block, decimals=6, implementation=BASE_PIN.implementation, code=CODE):
         self.block, self.chain, self.decimals = block, block.chain, decimals
+        self.implementation, self.code = implementation, code
 
     def pin_block(self, number):
         return self.block
+
+    def _rpc(self, method, params):
+        assert params[-1] == {"blockHash": self.block.hash, "requireCanonical": True}
+        if method == "eth_getStorageAt":
+            assert params[:2] == [BASE_PIN.address, IMPLEMENTATION_SLOT]
+            return "0x" + "00" * 12 + self.implementation[2:]
+        assert (method, params[0]) == ("eth_getCode", self.implementation)
+        return self.code
+
+    def call(self, address, signature, block, inputs=(), args=(), outputs=("uint256",)):
+        assert (address, block) == (BASE_PIN.address, self.block)
+        return (VALUES[signature],)
 
     def asset(self, identifier, block):
         return Asset(chain=block.chain, identifier=identifier, decimals=self.decimals)
 
 
-def completed(resolved, chain=BASE, decimals=6):
+def review(monkeypatch):
+    """Pin both SpokePools to the code these readers serve."""
+    code_hash = "0x" + keccak(bytes.fromhex(CODE[2:])).hex()
+    for chain in (ARBITRUM, BASE):
+        pin = SPOKE_POOLS[chain.chain_id].model_copy(update={"implementation_code_hash": code_hash})
+        monkeypatch.setitem(SPOKE_POOLS, chain.chain_id, pin)
+
+
+def completed(resolved, chain=BASE, decimals=6, **reader):
     block = BLOCK.model_copy(update={"chain": chain, "number": 30_000_000})
-    return complete_market(DestinationReader(block, decimals), resolved, block)
+    return complete_market(DestinationReader(block, decimals, **reader), resolved, block)
 
 
 def selection(**changes):
@@ -118,17 +141,16 @@ def test_the_snapshot_reads_the_fund_and_the_spoke_pool_at_the_pinned_block():
     assert (USDC.reference, "allowance(address,address)", (SENDER, PIN.address)) in reader.calls
 
 
-def test_resolution_refuses_an_implementation_that_was_not_reviewed():
-    with pytest.raises(DataError) as error:
-        resolve_market(Reader(), selection(), BLOCK)
+def test_a_new_resolution_refuses_an_implementation_that_was_not_reviewed():
+    # The reads resolve, as they must on replay; first resolution holds them to the pin.
+    resolved = resolve_market(Reader(), selection(), BLOCK)
+    with pytest.raises(DataError, match="eip155:42161 runs another implementation") as error:
+        admit_route(resolved)
     assert error.value.kind == "deployment_changed"
 
 
 def test_a_resolved_route_becomes_an_allocation_between_two_accounts(monkeypatch):
-    reviewed = PIN.model_copy(
-        update={"implementation_code_hash": "0x" + keccak(bytes.fromhex(CODE[2:])).hex()}
-    )
-    monkeypatch.setitem(SPOKE_POOLS, ARBITRUM.chain_id, reviewed)
+    review(monkeypatch)
     unverified = resolve_market(Reader(), selection(), BLOCK)
     with pytest.raises(ValueError, match="not verified on its chain"):
         _ = unverified.route
@@ -140,27 +162,51 @@ def test_a_resolved_route_becomes_an_allocation_between_two_accounts(monkeypatch
         completed(unverified, chain=ARBITRUM)
     assert error.value.kind == "chain_mismatch"
     assert resolved.assets == (Asset(chain=ARBITRUM, identifier=USDC, decimals=6),)
-    assert resolved.summary()["spoke_pool"] == PIN.address and len(resolved.digest) == 64
-    choice = AllocationInput(
-        market="usdc",
-        account="arb",
-        destination_account="base",
-        capital="1000",
-        minimum_native_balance="0.001",
+    # The SpokePool that fills is read at the destination anchor and held to its pin.
+    assert resolved.destination_pool.address == BASE_PIN.address
+    assert resolved.destination_pool.implementation == BASE_PIN.implementation
+
+
+def test_a_destination_spoke_pool_that_was_not_reviewed_does_not_resolve(monkeypatch):
+    review(monkeypatch)
+    unverified = resolve_market(Reader(), selection(), BLOCK)
+    admit_route(unverified)
+    for changed in ({"implementation": "0x" + "77" * 20}, {"code": "0x6081"}):
+        read = completed(unverified, **changed)
+        with pytest.raises(DataError, match="eip155:8453 runs another implementation") as error:
+            admit_route(read)
+        assert error.value.kind == "deployment_changed"
+    # A route cannot be retained as completed without the pool it was held to.
+    resolved = completed(unverified)
+    admit_route(resolved)
+    assert resolved.route.destination_pool == BASE_PIN.model_copy(
+        update={"implementation_code_hash": resolved.destination_pool.implementation_code_hash}
     )
-    allocation = choice.resolve("move", resolved)
-    assert allocation == CONFIG.allocation("move")
-    assert (
-        AllocationInput(
-            market="usdc", account="arb", destination_account="base", minimum_native_balance="0"
-        )
-        .resolve("move", resolved)
-        .capital
-        == 0
-    )
-    with pytest.raises(DataError) as error:
-        resolve_market(Reader(), selection(), BLOCK.model_copy(update={"chain": BASE}))
-    assert error.value.kind == "chain_mismatch"
+    with pytest.raises(ValueError, match="destination anchor and pool"):
+        type(resolved)(**{**dict(resolved), "destination_pool": None})
+
+
+class Moving(DestinationReader):
+    """A destination whose anchor stops being canonical at its `at`-th pin."""
+
+    def __init__(self, block, at):
+        super().__init__(block)
+        self.at, self.pinned = at, 0
+
+    def pin_block(self, number):
+        self.pinned += 1
+        return self.block if self.pinned != self.at else BLOCK
+
+
+@pytest.mark.parametrize("at", [1, 2])
+def test_a_destination_anchor_is_held_before_and_after_its_reads(monkeypatch, at):
+    review(monkeypatch)
+    unverified = resolve_market(Reader(), selection(), BLOCK)
+    anchor = BLOCK.model_copy(update={"chain": BASE, "number": 30_000_000})
+    with pytest.raises(DataError, match="no longer canonical") as error:
+        complete_market(Moving(anchor, at), unverified, anchor)
+    assert error.value.kind == "block_mismatch"
+    assert complete_market(Moving(anchor, 3), unverified, anchor).destination_block == anchor
 
 
 @pytest.mark.parametrize(
@@ -276,10 +322,7 @@ def test_resolution_through_two_fork_nodes_takes_each_chain_from_its_account(mon
     from almanak.models import Chain, StrategyAccounts
     from tests.across_support import RECIPIENT, eoa, parameters
 
-    reviewed = PIN.model_copy(
-        update={"implementation_code_hash": "0x" + keccak(bytes.fromhex(CODE[2:])).hex()}
-    )
-    monkeypatch.setitem(SPOKE_POOLS, ARBITRUM.chain_id, reviewed)
+    review(monkeypatch)
     here = Chain(chain_id=ARBITRUM.chain_id, environment="anvil:0x" + "a1" * 32)
     there = Chain(chain_id=BASE.chain_id, environment="anvil:0x" + "b2" * 32)
     resolved = completed(
@@ -314,6 +357,8 @@ class SymbolReader(DestinationReader):
     def call(self, address, signature, block, inputs=(), args=(), outputs=()):
         from almanak.gateway.resolution_evm import ResolutionRead
 
+        if signature != "symbol()":
+            return super().call(address, signature, block, inputs, args, outputs)
         read = ResolutionRead(
             method="eth_call", params=(address, signature), result="USDC", retrieved_at=1.0
         )
@@ -331,10 +376,7 @@ def test_a_two_chain_market_is_completed_and_replayed_on_its_destination(monkeyp
     from almanak.configuration import parameters
     from almanak.gateway.bootstrap import MarketFacts, complete_named_market
 
-    reviewed = PIN.model_copy(
-        update={"implementation_code_hash": "0x" + keccak(bytes.fromhex(CODE[2:])).hex()}
-    )
-    monkeypatch.setitem(SPOKE_POOLS, ARBITRUM.chain_id, reviewed)
+    review(monkeypatch)
     monkeypatch.setitem(VALUES, "symbol()", "USDC")
     source = resolve_market(Reader(), selection(), BLOCK)
     anchor = BLOCK.model_copy(update={"chain": BASE, "number": 30_000_000})

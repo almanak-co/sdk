@@ -58,6 +58,7 @@ def route(**changes):
         "destination_asset": BASE_USDC,
         "decimals": 6,
         "spoke_pool": PIN.address,
+        "destination_pool": SPOKE_POOLS[BASE.chain_id],
         "max_fee_bps": 10,
         "quote": "across_api",
         **changes,

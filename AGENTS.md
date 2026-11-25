@@ -430,6 +430,20 @@ independently.
   `destination_account` on the destination chain.
 - The SpokePool is pinned per chain by proxy address, implementation address
   and implementation code hash. Another implementation refuses new deposits.
+  The pins are held when a market is first resolved, on both chains, and
+  whenever a deposit or its approval is planned, signed or sent: the source
+  pool as read at the planning block, the destination pool as retained at
+  resolution, with no destination read. A route retains the two pools it was
+  resolved on, and they stay the deployment's own whatever the pins name
+  later, a new proxy address included: replay asks the retained reads about
+  them, arrival and refund scans, `fillStatuses`, `getRelayerRefund` and the
+  revocation's spender use them, and loading holds them to no pin. Replay
+  verifies the retained reads for consistency only. A pool that differs from
+  its pin in proxy, implementation or code refuses new deposits with the
+  cause, before the venue is asked, and nothing else: arrival, refund,
+  `revoke`, teardown and closure keep working, so a changed pin never traps a
+  transfer in flight or a standing approval. Accepted limit: a destination
+  SpokePool upgraded after resolution is seen only at the next resolution.
 - The deposit's quote timestamp is its calldata deadline: the SpokePool reverts
   a deposit mined later than that timestamp plus its own quote buffer, which is
   read at the planning block. Expired signed deposits are released under the
@@ -706,6 +720,54 @@ independently.
 - Proposed, not accepted: the composed fork keeper used by `almanak test` runs
   settles a composed deployment's transfers in flight beside GMX requests. It
   is covered at component level only; no fork run exercises it.
+- Proposed, not accepted: the venue answer rule. A venue's answer is not
+  block-addressable: asked twice, the venue names another relayer, amount or
+  time. The gateway verifies a reserved plan by preparing it again, so it keeps
+  its own answer in memory, by venue, decision, pinned block, target and
+  amount, and reads that for the same question. A caller never supplies an
+  answer. Admission runs on every preparation, retained answer or not. An
+  answer lost with the gateway process is asked again, the submitted plan then
+  differs and is refused before anything is signed, the coordinator stops with
+  `invalid_request`, and a resumed run plans afresh. So a gateway restarted
+  between a deposit's preparation and its record costs that decision and signs
+  nothing. A refused answer is retained for its block like any other; a
+  transport failure is never retained. Without this rule no deposit quoted by
+  the venue's API can be recorded. The answer is not authority and is never
+  durable state.
+- Current contract: the readers are held to known answers from Arbitrum and
+  Base mainnet, captured read-only on 24 November 2026 and kept in
+  `tests/fixtures/across-mainnet-captures.json`: a venue answer parsed and
+  admitted at its own block, a plain `deposit` whose calldata the planner
+  reproduces up to the sender's trailing integrator tag, its receipt, its fast
+  fill matched by the whole relay hash, and one transaction that executes
+  three refund roots. The relay hash is also held to the contract: the Base
+  SpokePool's `fillStatuses` of the computed hash reads unfilled one block
+  before that fill and filled after it. The arrival page and the refund page
+  run through the settlement entry point over the reads retained from both
+  chains. The refund is a real payment under a real refund leaf to a relayer;
+  the transfer it is attributed to is constructed, because no deposit of this
+  repository was ever refunded. No slow fill was found in the Base blocks
+  searched, so a slow fill is proven against constructed logs only.
+- Current contract: the production EOA rehearsal has an in-process fixture
+  for a standalone bridge: one fork per chain of the route and one funded EOA
+  per named account. Both bridge references are listed in
+  `tests/strategy_fork/rehearsal.py::UNREHEARSED`, and `PRODUCTION_SOURCES` in
+  the connector's support declaration is empty. Declaring the source chain
+  selects them for the hosted Fork Qualification as its own subjects; they join
+  the default rehearsal selection only when a hosted run has rehearsed them and
+  they leave that list. No rehearsal of either is retained or hosted.
+- Proposed, not accepted: a rehearsed bridge asks the venue's live API, as the
+  production gateway does, with the fixture's public test addresses. The
+  forks' clocks are moved ten minutes ahead of the present first: the venue
+  stamps a quote some minutes behind the present, a fork mines only when the
+  run sends, and the gateway refuses a quote stamped after its pinned block.
+  The fill is the fixture relayer's, and a refund is not rehearsed. A hosted
+  rehearsal then depends on the venue's API answering.
+- Not built, and required before Across declares production: a recent-window
+  rule, without which `backtest recent` refuses a bridge with
+  `unsupported_connector`; a claim for a deferred refund; and the cell's
+  evidence package. Every rule above marked proposed is one the declaration
+  would rest on.
 
 ## Hyperliquid
 
