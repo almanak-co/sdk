@@ -115,4 +115,5 @@ def connector():
         projection=AcrossProjection(),
         external_effects=ExternalEffects(),
         fork=AcrossFork(),
+        economic="almanak.connectors.across.economic_binding:AcrossEconomic",
     )

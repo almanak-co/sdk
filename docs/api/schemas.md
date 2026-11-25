@@ -6,6 +6,7 @@ These schemas are published with the site and versioned with the package.
 
 - [aave-backtest.schema.json](../schemas/aave-backtest.schema.json)
 - [aave-v3-economic.schema.json](../schemas/aave-v3-economic.schema.json)
+- [across-economic.schema.json](../schemas/across-economic.schema.json)
 - [aerodrome-economic.schema.json](../schemas/aerodrome-economic.schema.json)
 - [aerodrome-slipstream-economic.schema.json](../schemas/aerodrome-slipstream-economic.schema.json)
 - [backtest.schema.json](../schemas/backtest.schema.json)

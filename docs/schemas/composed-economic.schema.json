@@ -74,6 +74,9 @@
             },
             "aave_v4": {
               "$ref": "aave-backtest.schema.json#/oneOf/1/properties/execution/properties/models"
+            },
+            "across": {
+              "$ref": "across-economic.schema.json#/properties/execution/properties/models"
             }
           }
         }
@@ -664,6 +667,9 @@
                 "risk_prices"
               ],
               "type": "object"
+            },
+            "across": {
+              "$ref": "across-economic.schema.json#/properties/data"
             }
           }
         }
@@ -709,6 +715,9 @@
         },
         "aave_v4": {
           "$ref": "aave-backtest.schema.json#/oneOf/1/properties/costs"
+        },
+        "across": {
+          "$ref": "across-economic.schema.json#/properties/costs"
         }
       }
     }

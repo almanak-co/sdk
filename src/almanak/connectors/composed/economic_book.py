@@ -9,6 +9,7 @@ from pydantic import Field
 
 from almanak.backtest.dataset import file_digest
 from almanak.connectors.aave_v3.economic_book import Book as LendingBook
+from almanak.connectors.across.economic_prepare import Book as AcrossBook
 from almanak.connectors.aerodrome.economic_book import PoolBook as AerodromeBook
 from almanak.connectors.aerodrome_slipstream.economic_book import PoolBook as SlipstreamBook
 from almanak.connectors.composed.aave_v4_economic import Book as AaveV4Book
@@ -67,7 +68,8 @@ class Book:
             | type[MorphoBook]
             | type[CompoundBook]
             | type[CurveBook]
-            | type[GmxBook],
+            | type[GmxBook]
+            | type[AcrossBook],
         ] = {
             ConnectorId("aave_v3"): LendingBook,
             ConnectorId("aave_v4"): AaveV4Book,
@@ -81,6 +83,7 @@ class Book:
             ConnectorId("compound_v3"): CompoundBook,
             ConnectorId("curve"): CurveBook,
             ConnectorId("gmx_v2"): GmxBook,
+            ConnectorId("across"): AcrossBook,
         }
         self.components: dict[
             ConnectorId,
@@ -95,7 +98,8 @@ class Book:
             | MorphoBook
             | CompoundBook
             | CurveBook
-            | GmxBook,
+            | GmxBook
+            | AcrossBook,
         ] = {}
         self._stack = ExitStack()
         try:

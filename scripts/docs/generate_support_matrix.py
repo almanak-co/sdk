@@ -32,8 +32,15 @@ def joined(values, formatter=str):
     return ", ".join(formatter(v) for v in values) if values else "none"
 
 
-def historical_cell(entries):
-    return joined(entries, lambda h: f"`{h['model']}` ({h['mode']})")
+def historical_cell(entries, actions=()):
+    """Each backtest model, with its actions where it serves fewer than the chain declares."""
+
+    def cell(entry):
+        served = entry.get("actions", actions)
+        narrower = f": {joined(served)}" if set(served) != set(actions) else ""
+        return f"`{entry['model']}` ({entry['mode']}{narrower})"
+
+    return joined(entries, cell)
 
 
 def matrix(support):
@@ -62,7 +69,8 @@ def connector_section(name, rows):
             f"| `{row['chain']}` | {joined(row['modes'])} | {joined(row['actions'])} | "
             f"{joined(row.get('direct_actions', []))} | "
             f"{joined(row['account_profiles'])} | {joined(row['restrictions'])} | "
-            f"{historical_cell(row.get('historical', []))} | {joined(row.get('variants', []))} |"
+            f"{historical_cell(row.get('historical', []), row['actions'])} | "
+            f"{joined(row.get('variants', []))} |"
         )
     lines.append("")
     lifecycle = next((row["gas_lifecycle"] for row in rows if row.get("gas_lifecycle")), None)

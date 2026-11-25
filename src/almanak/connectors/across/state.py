@@ -15,7 +15,7 @@ from almanak.connectors.across.operations import (
 )
 from almanak.connectors.across.settlement_types import (
     ArrivalOutcome,
-    ArrivalResult,
+    MeasuredArrival,
     RefundOutcome,
     RefundResult,
     Scan,
@@ -84,7 +84,7 @@ class ActionResult(Model):
         return self
 
 
-OutcomeInput = OutcomeContext[Config | Parameters, ActionResult | ArrivalResult | RefundResult]
+OutcomeInput = OutcomeContext[Config | Parameters, ActionResult | MeasuredArrival | RefundResult]
 
 
 class TransactionPlan(Model):

@@ -558,17 +558,31 @@ ask it: no relayer quotes a fork. A fork gateway constructs the quote instead,
 from a stated fee of one basis point and the fork's own block time, and the
 same checks admit it. Reports and dashboards show its source as
 `across_fork_constructed` beside each transfer. Such a quote says nothing about
-what the venue would have quoted. Across declares fork runs only today, so
-every run an author can start signs a constructed quote; no production run
-and no backtest is declared.
+what the venue would have quoted. Across declares fork runs and economic
+backtests today, and no production run, so every transaction an author can
+sign carries a constructed quote. A backtest asks no venue either: it
+[models the bridge](backtesting.md#bridges).
+
+A backtest calls `decide` once with the observations of every chain, where a
+fork or live run calls it once per chain. A strategy that chooses its step from
+the allocation it sees should try the destination's step when the source's asks
+for nothing, as the composed bridge reference does.
 
 `on_outcome` receives three kinds of result for a bridge:
 
 - An `ActionResult` for the strategy's own steps. A completed `bridge` carries
   the opened `transfer` and `sent`, what left the source account. The received
   amount is not known yet.
-- An `ArrivalResult` when a relayer filled the transfer. `received` is measured
-  on the destination chain and `offered` is what the deposit asked for.
+- An `ArrivalResult` when the transfer arrived. `received` is what the
+  destination account was credited and `offered` is what the deposit asked
+  for. In a fork or live run it is a `MeasuredArrival`: a relayer filled the
+  transfer, `received` is measured on the destination chain, and the result
+  also carries `identity`, `fill_type`, `block`, `tx_hash` and
+  `accounting_issues`. In a backtest it is a `ModeledArrival`: `received` is
+  modeled and equals `offered`, the result carries `sent`, `modeled_fee` and
+  `measurement_status: modeled`, and the measured fields do not exist. Test
+  `isinstance(result, ArrivalResult)` and read only `received`, `offered` and
+  `transfer` in code that must run in both.
 - A `RefundResult` when nobody filled it. `returned` is measured on the source
   chain. A refund is read only after the destination chain has shown that no
   fill can follow, which is after the quote's fill deadline.
@@ -618,6 +632,7 @@ def on_outcome(ctx):
     if isinstance(ctx.result, ArrivalResult):
         return state(ctx).updated(received=ctx.result.received.amount)
     ...
+
 
 def decide(ctx):
     memory = state(ctx)

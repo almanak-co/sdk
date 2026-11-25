@@ -13,7 +13,7 @@ from almanak.configuration.backtest_inputs import read_backtest_inputs
 from almanak.configuration.unresolved import read_inputs
 from almanak.connectors.composition import installed_connectors
 from almanak.connectors.identifiers import ConnectorId
-from almanak.connectors.support import EconomicAction
+from almanak.connectors.support import EconomicAction, RunMode
 from scripts import qa_bench
 from tests.qa.catalog import ROOT, Case, catalog, validate
 from tests.qa.inputs import resolved_author, resolved_history, write_json
@@ -702,13 +702,50 @@ def test_a_composed_reference_is_fork_only_exactly_when_a_component_declares_no_
         for source in discover(ROOT / "strategies", ROOT / "tests/strategy_fork/scenarios")
         if source.name in composed_catalog.COMPOSED_REFERENCES
     }
-    produced = {name: list(composed_catalog.composed_cases(s)) for name, s in sources.items()}
-    fork_only = {
-        name for name, found in produced.items() if not any(c.lane == "backtest" for c in found)
-    }
-    # Across declares fork mode alone; every other composed reference keeps its backtest.
-    assert fork_only == {"arbitrum_base_bridge_and_lend"}
-    assert all(any(c.lane != "backtest" for c in found) for found in produced.values())
+
+    def lanes(found):
+        return {c.lane for c in found}
+
+    def fork_only_references():
+        produced = {name: list(composed_catalog.composed_cases(s)) for name, s in sources.items()}
+        assert all(lanes(found) - {"backtest"} for found in produced.values())
+        return {name for name, found in produced.items() if "backtest" not in lanes(found)}
+
+    # Every component of every composed reference declares backtest on its chain, the
+    # bridge included, so none is fork-only and the bridge reference owes backtest cases.
+    assert fork_only_references() == set()
+    bridged = list(composed_catalog.composed_cases(sources["arbitrum_base_bridge_and_lend"]))
+    backtests = [c for c in bridged if c.lane == "backtest"]
+    assert {c.input_policy for c in backtests} == {"pinned", "fresh", "native"}
+    assert all(
+        {scope.connector: scope.model for scope in c.scopes}[ConnectorId("across")]
+        == "across-full-fee-ceiling-fixed-latency-v1"
+        for c in backtests
+    )
+    # The category is derived from the declaration: with Across declaring fork mode
+    # alone, the bridge reference is fork-only and no other reference changes.
+    installed = dict(composed_catalog.installed_connectors())
+    across = installed[ConnectorId("across")]
+    fork_alone = replace(
+        across,
+        chain_support=tuple(
+            s.model_copy(
+                update={
+                    "modes": tuple(m for m in s.modes if m != RunMode.BACKTEST),
+                    "historical": (),
+                }
+            )
+            for s in across.chain_support
+        ),
+    )
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            composed_catalog,
+            "installed_connectors",
+            lambda: tuple({**installed, ConnectorId("across"): fork_alone}.items()),
+        )
+        assert fork_only_references() == {"arbitrum_base_bridge_and_lend"}
+    fork_only = set()
     # Deriving the category skips no obligation. The bridge is proven by this reference
     # and by the standalone one; without both the catalog has a coverage gap.
     cases = catalog()

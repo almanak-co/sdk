@@ -206,7 +206,40 @@ def resolve_backtest(
     try:
         return settings_type.model_validate_json(json.dumps(wire))
     except ValidationError as error:
-        raise document.error(error) from error
+        raise document.error(settings_refusal(error, wire, document.inputs)) from error
+
+
+# Settings keys that are not model selections of `execution.models`.
+SETTINGS_BLOCKS = frozenset(
+    {"market_model", "schedule", "history", "funds", "payers", "costs", "data", "models"}
+)
+
+
+def settings_refusal(error: ValidationError, wire: dict, inputs) -> ConfigurationError:
+    """The first settings refusal, named by the path the author wrote it under.
+
+    The settings wire flattens `execution.models` beside the other blocks, and a
+    composed wire gathers each connector's model, data and costs under `models`.
+    """
+    detail = error.errors()[0]
+    message = detail["msg"].removeprefix("Value error, ")
+    nested = getattr(detail.get("ctx", {}).get("error"), "location", None)
+    if nested is not None:
+        refused = detail["ctx"]["error"]
+        return ConfigurationError(refused.reason, field=composed_field(*nested))
+    location = tuple(str(part) for part in detail["loc"])
+    blocks = (set(wire) - set(inputs.execution.models)) | SETTINGS_BLOCKS
+    if location and location[0] not in blocks:
+        location = ("execution", "models", *location)
+    return ConfigurationError(message, field=".".join(location))
+
+
+def composed_field(connector: str, block: str = "", *rest: str) -> str:
+    """Where a composed connector's policy field sits in the author's backtest file."""
+    prefix = {"data": ("data", "connectors", connector), "costs": ("costs", connector)}.get(
+        block, ("execution", "models", connector, block)
+    )
+    return ".".join(part for part in (*prefix, *rest) if part)
 
 
 def refuse_strategy_prices(document: Document, value, prefix="data"):

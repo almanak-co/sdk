@@ -66,9 +66,13 @@ class Actions:
 
 
 def decided(reference, memory, *, side, teardown=False, allowance=0, lent=False):
+    source = {"move": SimpleNamespace(allowance=allowance)}
+    destination = {"earn": SimpleNamespace(allowance=allowance, lent=lent)}
     seen = {
-        "source": {"move": SimpleNamespace(allowance=allowance)},
-        "destination": {"earn": SimpleNamespace(allowance=allowance, lent=lent)},
+        "source": source,
+        "destination": destination,
+        # A backtest evaluates once and shows both allocations.
+        "both": {**source, **destination},
         "neither": {},
     }[side]
     context = SimpleNamespace(
@@ -233,3 +237,19 @@ def test_outcomes_record_the_deposit_the_arrival_the_refund_and_the_supply(
     assert acted(reference, stuck, revoke, "completed").revoke_failed is False
     # A bridge that fails after a failed revoke keeps that mark.
     assert acted(reference, stuck, bridge, "failed").revoke_failed is True
+
+
+def test_with_both_allocations_visible_the_destination_step_follows_an_idle_source(reference):
+    memory = reference.State()
+    assert decided(reference, memory, side="both").intent == ("bridge", "move", AMOUNT)
+    flying = memory.updated(sent=AMOUNT)
+    assert decided(reference, flying, side="both").intent is None
+    arrived = flying.updated(received=OFFERED)
+    assert decided(reference, arrived, side="both").intent == ("supply", "earn", OFFERED)
+    lent = arrived.updated(supplied=OFFERED)
+    assert decided(reference, lent, side="both").intent is None
+    closing = decided(reference, lent, side="both", teardown=True, lent=True)
+    assert closing.intent == ("withdraw", "earn", None)
+    # A standing bridge approval is cleared before the destination unwinds.
+    revoking = decided(reference, lent, side="both", teardown=True, allowance=1, lent=True)
+    assert revoking.intent == ("revoke", "move", None)

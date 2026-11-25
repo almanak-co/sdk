@@ -7,6 +7,7 @@ from pydantic import Field, model_validator
 from almanak.backtest import economic_state as aave_v4
 from almanak.backtest.engine import RunState, Transition
 from almanak.connectors.aave_v3 import economic_state as lending
+from almanak.connectors.across import economic_state as across
 from almanak.connectors.aerodrome import economic_state as aerodrome
 from almanak.connectors.aerodrome_slipstream import economic_state as slipstream
 from almanak.connectors.composed.models import OwnedParameters
@@ -40,6 +41,7 @@ Position = (
     | curve.EconomicPosition
     | gmx.EconomicPosition
     | gmx_perpetual.EconomicPerpetualPosition
+    | across.Position
 )
 Observation = (
     v4.EconomicSnapshot
@@ -55,6 +57,7 @@ Observation = (
     | curve.EconomicSnapshot
     | gmx.EconomicSnapshot
     | gmx_perpetual.EconomicPerpetualSnapshot
+    | across.Snapshot
 )
 ActionResult = (
     v4.EconomicResult
@@ -72,6 +75,7 @@ ActionResult = (
     | gmx.EconomicFailure
     | gmx_perpetual.EconomicPerpetualResult
     | gmx_perpetual.EconomicPerpetualFailure
+    | across.ActionResult
 )
 NativeEvent = (
     aave_v4.EconomicEvent
@@ -80,6 +84,7 @@ NativeEvent = (
     | morpho.Event
     | compound.Event
     | gmx_perpetual.EconomicLiquidationBatch
+    | across.ArrivalEvent
 )
 
 
@@ -96,6 +101,7 @@ class ComponentEvent(Model):
             ConnectorId("morpho_blue"): morpho.Event,
             ConnectorId("compound_v3"): compound.Event,
             ConnectorId("gmx_v2"): gmx_perpetual.EconomicLiquidationBatch,
+            ConnectorId("across"): across.ArrivalEvent,
         }
         if type(self.transition.result) is not expected.get(self.connector):
             raise ValueError("composed event differs from its connector identity")
@@ -126,7 +132,8 @@ Result = ActionResult | Event
 State = RunState[Position, Intent, Result]
 EconomicOwnership = Ownership | gmx_perpetual.PerpetualOwnership
 DecisionInput = DecisionContext[OwnedParameters, EconomicOwnership, Observation]
-OutcomeInput = OutcomeContext[OwnedParameters, ActionResult]
+# A modeled bridge arrival reaches `on_outcome`, as a measured one does in a live run.
+OutcomeInput = OutcomeContext[OwnedParameters, ActionResult | across.ModeledArrival]
 
 
 class EventInput(Model):

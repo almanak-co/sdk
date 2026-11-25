@@ -10,6 +10,7 @@ from almanak.backtest.cli import write_json
 from almanak.backtest.dataset import file_digest
 from almanak.backtest.prepared import PROVISIONAL, acquisition_request, require_private_directory
 from almanak.connectors.aave_v3 import economic_prepare as lending
+from almanak.connectors.across import economic_prepare as across
 from almanak.connectors.aerodrome import economic_prepare as aerodrome
 from almanak.connectors.aerodrome_slipstream import economic_prepare as slipstream
 from almanak.connectors.composed import aave_v4_economic
@@ -60,6 +61,7 @@ NATIVE_PREPARATION = {
     ConnectorId("compound_v3"): compound,
     ConnectorId("curve"): curve,
     ConnectorId("gmx_v2"): gmx,
+    ConnectorId("across"): across,
 }
 
 

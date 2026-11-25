@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Almanak modeled bridge backtest configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "window": {
+      "$ref": "uniswap-economic.schema.json#/properties/window"
+    },
+    "inventory": {
+      "$ref": "uniswap-economic.schema.json#/properties/inventory"
+    },
+    "mode": {
+      "const": "economic"
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "latency": {
+          "$ref": "strategy.schema.json#/$defs/Duration"
+        },
+        "decision_interval": {
+          "$ref": "strategy.schema.json#/$defs/Duration"
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "bridge_model": {
+              "const": "full_fee_ceiling_fixed_latency",
+              "title": "Bridge Model",
+              "type": "string",
+              "description": "Every bridge pays the market's whole max_fee_bps and arrives after the stated latency."
+            }
+          },
+          "required": [
+            "bridge_model"
+          ]
+        }
+      },
+      "required": [
+        "latency",
+        "models"
+      ]
+    },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "title": "BridgePolicy",
+      "properties": {
+        "arrival_latency_seconds": {
+          "$ref": "strategy.schema.json#/$defs/Duration",
+          "description": "Time from the modeled deposit to the modeled arrival. Required; nothing defaults it."
+        }
+      },
+      "required": [
+        "arrival_latency_seconds"
+      ]
+    },
+    "costs": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "title": "ExcludedCosts",
+          "properties": {
+            "kind": {
+              "const": "excluded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "title": "Costs",
+          "properties": {
+            "kind": {
+              "const": "fixed_native",
+              "type": "string"
+            },
+            "bridge": {
+              "minimum": 0,
+              "title": "Bridge",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "bridge"
+          ]
+        }
+      ],
+      "title": "Costs"
+    }
+  },
+  "required": [
+    "window",
+    "inventory",
+    "mode",
+    "execution",
+    "data",
+    "costs"
+  ]
+}

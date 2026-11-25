@@ -36,9 +36,14 @@ The amount received is Across's own quote. The gateway refuses a quote whose fee
 is above `max_fee_bps` before anything is signed. The ceiling is a gateway
 check, not on-chain enforcement.
 
-Limits: both accounts are EOAs. Across declares fork runs only, for an Arbitrum
-source, so this reference has no backtest configuration and stays out of the
-production rehearsal. On a fork no venue is asked: the fork gateway constructs
+`backtest-economic.yaml` runs the same hooks in an economic backtest. The bridge
+is modeled: it pays the whole `max_fee_bps`, arrives after the
+`arrival_latency_seconds` the file states and is never refunded. The supply
+reads Comet history. Every bridge amount in the report is labeled modeled.
+
+Limits: both accounts are EOAs. Across declares fork runs and economic
+backtests, for an Arbitrum source, and no production support, so this reference
+stays out of the production rehearsal. On a fork no venue is asked: the fork gateway constructs
 the quote from a stated fee and the fork's own block time, and it is retained
 and reported under the source `across_fork_constructed`. A refund on a fork is a
 fork-constructed bundle and proves only how the SDK reads one.

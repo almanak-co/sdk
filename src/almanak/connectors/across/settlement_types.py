@@ -37,15 +37,24 @@ def refund_scope(target: Target) -> ObservationScope:
 
 
 class ArrivalResult(Model):
-    """What the strategy learns when a transfer arrives."""
+    """What the strategy learns when a transfer arrives.
+
+    A fork or live run delivers a `MeasuredArrival`, read from the destination chain. A
+    backtest delivers a modeled arrival of the same kind, which names no block.
+    """
 
     kind: Literal["bridge_arrival"] = "bridge_arrival"
-    identity: ExternalIdentity
     target: Target
     transfer: Reference
-    # Measured on the destination chain. `offered` is what the deposit asked for.
+    # What the destination account received. `offered` is what the deposit asked for.
     received: AssetAmount
     offered: AssetAmount
+
+
+class MeasuredArrival(ArrivalResult):
+    """An arrival measured on the destination chain, with the fill that paid it."""
+
+    identity: ExternalIdentity
     fill_type: FillType
     block: Block
     tx_hash: Hash32
@@ -116,7 +125,7 @@ class ArrivalOutcome(Settlement):
         return self
 
     def strategy_result(self):
-        return ArrivalResult(
+        return MeasuredArrival(
             identity=self.identity,
             target=self.target,
             transfer=self.transfer,

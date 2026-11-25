@@ -16,7 +16,7 @@ from almanak.connectors.across.resolution import (
     resolve_market,
 )
 from almanak.connectors.composition import connector_for, connector_from_wire
-from almanak.connectors.support import RunMode
+from almanak.connectors.support import EconomicAction, RunMode
 from almanak.gateway.ethereum import DataError
 from almanak.models import Asset
 from tests.across_support import (
@@ -232,21 +232,29 @@ def test_the_author_file_names_a_destination_account_on_the_destination_chain():
         parse_inputs(document(destination_account="nowhere"))
 
 
-def test_the_connector_declares_fork_runs_for_the_proven_source_chain_only():
+def test_the_connector_declares_fork_runs_and_backtests_for_the_proven_source_chain_only():
     binding = connector_from_wire({"connector": "across"})
     assert connector_for(CONFIG).codec.checkpoint is binding.codec.checkpoint
     source, destination = binding.support_for(ARBITRUM.chain_id), binding.support_for(BASE.chain_id)
-    assert (source.modes, destination.modes) == ((RunMode.FORK,), ())
+    assert (source.modes, destination.modes) == ((RunMode.FORK, RunMode.BACKTEST), ())
+    (historical,) = source.historical
+    # The model keeps no approval, so the historical declaration lists no revoke.
+    assert historical.actions == (EconomicAction.BRIDGE,) and not destination.historical
+    assert historical.backtest_start_at.isoformat() == "2026-08-15T00:00:00+00:00"
     assert source.account_profiles == destination.account_profiles == ("eoa",)
     assert any("constructs the quote" in text for text in source.restrictions)
     assert any("no run mode" in text for text in destination.restrictions)
     binding.require_target(ARBITRUM.chain_id, TARGET, RunMode.FORK, account_profile="eoa")
     with pytest.raises(ValueError, match="fork is unsupported"):
         binding.require_target(BASE.chain_id, TARGET, RunMode.FORK)
-    for chain in (ARBITRUM.chain_id, BASE.chain_id):
-        for mode in (RunMode.PRODUCTION, RunMode.BACKTEST):
-            with pytest.raises(ValueError, match="is unsupported"):
-                binding.require_target(chain, TARGET, mode)
+    binding.require_target(ARBITRUM.chain_id, TARGET, RunMode.BACKTEST, model=historical.model)
+    for chain, mode in (
+        (ARBITRUM.chain_id, RunMode.PRODUCTION),
+        (BASE.chain_id, RunMode.PRODUCTION),
+        (BASE.chain_id, RunMode.BACKTEST),
+    ):
+        with pytest.raises(ValueError, match="is unsupported"):
+            binding.require_target(chain, TARGET, mode)
     assert binding.codec.actions(SimpleNamespace(config=CONFIG)) is CONFIG
 
 

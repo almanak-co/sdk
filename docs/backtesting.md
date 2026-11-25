@@ -138,6 +138,80 @@ calculator as other swaps. Recentring is bounded by the allocation's inventory,
 as in live execution. `historical_path` backtests and composed
 strategies refuse band allocations.
 
+### Bridges
+
+A bridge is modeled, not replayed. The model reads no history and asks no
+venue, so a backtest of a bridge needs no bridge data and every amount it
+reports is labeled `modeled`.
+
+```yaml
+execution:
+  latency: 1s
+  models:
+    bridge_model: full_fee_ceiling_fixed_latency
+data:
+  arrival_latency_seconds: 30s
+costs:
+  kind: excluded
+```
+
+Both settings are required and nothing defaults them. In a composed backtest
+they sit under the connector's name: `execution.models.across`,
+`data.connectors.across` and `costs.across`.
+
+- **Fee.** Every bridge pays the market's whole `max_fee_bps`: the amount
+  received is the amount sent less `amount * max_fee_bps // 10000`. This is the
+  most a live bridge may cost, not a measured fee. It stands in for every
+  relayer cost, and no destination gas is charged.
+- **Admission.** Every deposit is admitted. A live run bridges only when the
+  venue's fee is within the ceiling, and no history of that fee is read, so a
+  ceiling below the venue's real fee bridges in a backtest and would not
+  bridge live. Do not choose `max_fee_bps` by sweeping it in a backtest: the
+  model always prefers the lowest. `max_fee_bps: 0` is refused, because no live
+  run admits it and it would model a free bridge.
+- **Arrival.** The deposit debits the source account when it executes, under
+  the usual `execution.latency`. The destination account is credited
+  `arrival_latency_seconds` later, and `on_outcome` receives an
+  `ArrivalResult` then. The latency is a stated assumption, not a measured
+  fill time.
+- **In flight.** Between the two the value is in neither balance and cannot be
+  spent. The decision input shows the transfer with what was sent and offered
+  and no received amount, as a live run does. Its fill deadline is the
+  deposit's second plus one hour, as a fork's constructed quote states it. It
+  says nothing about when the transfer arrives.
+- **No refund.** Every transfer arrives. Unfilled transfers, refunds and slow
+  fills are not modeled, so a strategy's refund path is not exercised. An
+  `arrival_latency_seconds` of one hour or more is refused, since it would
+  place the arrival at or past the fill deadline.
+- **End of the window.** A run that ends with a transfer in flight reports it
+  as in flight, with its sent amount and no received amount; the position's
+  `received_by_arrived_transfers` total is absent until a transfer has arrived. With
+  `end_policy: teardown` the run waits for the arrival and sends nothing new;
+  if `cleanup` ends first the run fails as unresolved, so make `cleanup` longer
+  than the latency.
+- **Gas.** `costs` is `excluded`, or `fixed_native` with a `bridge` amount
+  charged on the source chain for each bridge. `backtest recent` builds no
+  window for a strategy that bridges and refuses it with
+  `unsupported_connector`.
+- **Approvals.** The model keeps none and does not serve `revoke`. A strategy
+  that decides `revoke` in a backtest stops the run with an availability
+  error, as any action a backtest model does not declare does. Request it only
+  when the observation shows an allowance, which a backtest never does.
+- **Result type.** `on_outcome` receives a `ModeledArrival`. It is an
+  `ArrivalResult`, with `received`, `offered` and `transfer`, plus `sent` and
+  `modeled_fee`. It has none of a measured arrival's `identity`, `fill_type`,
+  `block` and `tx_hash`.
+
+The route is still resolved at the window start through the operator's
+providers for both chains. On the source chain this verifies the SpokePool's
+proxy, implementation and code hash against the pin, and the sent asset. On
+the destination chain it verifies the received asset only; the destination
+SpokePool is taken from the pin in code and is not read.
+Across declares the model on Arbitrum from 15 August 2026, when that pinned
+implementation was in place, and an earlier window is refused. Preparation after resolution makes no provider
+call, and the dataset holds only the frozen statement of the routes, the window
+and the latency: a resumed run cannot change them.
+
 ### Results in the funding asset
 
 An economic Uniswap V3, PancakeSwap V3 or Aerodrome Slipstream run whose

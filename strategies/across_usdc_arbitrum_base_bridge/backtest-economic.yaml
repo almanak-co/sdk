@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=../../docs/schemas/backtest.schema.json
+# A modeled bridge. It reads no history and asks no venue: every bridge pays the
+# market's whole max_fee_bps and arrives after the latency stated under data. Both are
+# model assumptions and the report says so.
+mode: economic
+window:
+  start: '2026-09-07T15:00:00Z'
+  end: '2026-09-07T15:01:00Z'
+  end_policy: teardown
+  cleanup: 60s
+inventory:
+  funds:
+    arbitrum_fund:
+      balances:
+      - asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+        quantity: '100'
+      - asset: eip155:42161/slip44:60
+        quantity: '1'
+    # The receiving account starts with nothing; the arrival credits it.
+    base_fund:
+      balances:
+      - asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+        quantity: '0'
+execution:
+  latency: 1s
+  models:
+    bridge_model: full_fee_ceiling_fixed_latency
+data:
+  # Seconds from the modeled deposit to the modeled arrival. Required; nothing defaults it.
+  arrival_latency_seconds: 30s
+costs:
+  kind: excluded

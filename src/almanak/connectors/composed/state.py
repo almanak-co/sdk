@@ -170,7 +170,7 @@ OutcomeInput = OutcomeContext[
     | gmx.ActionResult
     | gmx.LiquidationResult
     | across.ActionResult
-    | across_settlement.ArrivalResult
+    | across_settlement.MeasuredArrival
     | across_settlement.RefundResult,
 ]
 Work = ChainWork[DecisionRecord, TransactionPlan, Pending]

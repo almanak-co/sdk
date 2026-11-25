@@ -1,0 +1,17 @@
+# Read-only historical provider bindings for backtests of every reference whose
+# accounts live on eip155:42161, eip155:8453. Hypothetical funds are simulation
+# identities; no account bindings exist. Credentials stay in the selected --env-file.
+schema_version: operator-gateway-config-v1
+modes:
+- backtest
+networks:
+- chain: eip155:42161
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+- chain: eip155:8453
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings: []

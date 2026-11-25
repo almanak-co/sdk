@@ -3,12 +3,13 @@
 import json
 from typing import Annotated, Literal
 
-from pydantic import Field, ValidationInfo, field_validator, model_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from almanak.backtest.config import ExcludedCosts
 from almanak.backtest.inventory import InventoryConfig
 from almanak.backtest.strategy_prices import StrategyPriceData
 from almanak.connectors.aave_v3 import economic_config as lending
+from almanak.connectors.across import economic_config as across
 from almanak.connectors.aerodrome import economic_config as aerodrome
 from almanak.connectors.aerodrome_slipstream import economic_config as slipstream
 from almanak.connectors.composed.aave_v4_economic import Policy as AaveV4Policy
@@ -23,6 +24,25 @@ from almanak.connectors.sparklend import economic_config as spark
 from almanak.connectors.uniswap_v3 import economic_config as exchange
 from almanak.connectors.uniswap_v4 import economic_config as v4
 from almanak.models import Model
+
+
+class PolicyRefused(ValueError):
+    """One connector's policy refused, with the path of the refused field inside it."""
+
+    def __init__(self, connector: str, error: ValidationError):
+        detail = error.errors()[0]
+        self.location = (connector, *(str(part) for part in detail["loc"]))
+        self.reason = detail["msg"].removeprefix("Value error, ")
+        super().__init__(f"{'.'.join(self.location)}: {self.reason}")
+
+
+def decode_policy(policy, connector: str, value, wire: bool):
+    try:
+        return (
+            policy.model_validate_json(json.dumps(value)) if wire else policy.model_validate(value)
+        )
+    except ValidationError as error:
+        raise PolicyRefused(connector, error) from error
 
 
 class LendingPolicy(Model):
@@ -100,6 +120,18 @@ class GmxPolicy(Model):
     position_model: Literal["prepared_position_accounting"] | None
 
 
+class AcrossPolicy(Model):
+    # The stated arrival latency; the bridge model reads no history.
+    data: across.BridgePolicy
+    costs: Annotated[ExcludedCosts | across.Costs, Field(discriminator="kind")]
+    bridge_model: across.BridgeModel
+
+    @model_validator(mode="before")
+    @classmethod
+    def stated(cls, values):
+        return across.stated_policy(values)
+
+
 class EconomicConfig(InventoryConfig):
     market_model: Literal["economic"]
     models: dict[
@@ -115,7 +147,8 @@ class EconomicConfig(InventoryConfig):
         | MorphoPolicy
         | CompoundPolicy
         | CurvePolicy
-        | GmxPolicy,
+        | GmxPolicy
+        | AcrossPolicy,
     ]
     # The strategy's declared series, folded in at resolution; absent when it declares none.
     data: StrategyPriceData = Field(
@@ -141,6 +174,7 @@ class EconomicConfig(InventoryConfig):
             "compound_v3": CompoundPolicy,
             "curve": CurvePolicy,
             "gmx_v2": GmxPolicy,
+            "across": AcrossPolicy,
         }
         # Excluded-cost exchange policies have identical shapes. Connector identity
         # selects their concrete type before the union can erase that distinction.
@@ -148,11 +182,7 @@ class EconomicConfig(InventoryConfig):
         for key, value in values.items():
             policy = classes.get(str(key))
             if policy is not None:
-                value = (
-                    policy.model_validate_json(json.dumps(value))
-                    if info.mode == "json"
-                    else policy.model_validate(value)
-                )
+                value = decode_policy(policy, str(key), value, info.mode == "json")
             decoded[key] = value
         return decoded
 
@@ -173,6 +203,7 @@ class EconomicConfig(InventoryConfig):
             ConnectorId("compound_v3"): CompoundPolicy,
             ConnectorId("curve"): CurvePolicy,
             ConnectorId("gmx_v2"): GmxPolicy,
+            ConnectorId("across"): AcrossPolicy,
         }
         if any(
             type(policy) is not expected.get(identity) for identity, policy in self.models.items()
@@ -189,6 +220,12 @@ class EconomicConfig(InventoryConfig):
     def component(self, identity, parameters):
         policy = self.models[identity]
         accounts = {a.account for a in parameters.positions}
+        # A bridge also binds the account that receives it, on another chain.
+        accounts |= {
+            a.destination_account
+            for a in parameters.positions
+            if getattr(a, "destination_account", None) is not None
+        }
         funds = tuple(f for f in self.funds if f.name in accounts)
         payers = {f.profile.submitter for f in funds if f.profile.submitter != f.fund}
         chains = {a.chain for a in parameters.positions}
@@ -205,6 +242,7 @@ class EconomicConfig(InventoryConfig):
             CompoundPolicy: compound.EconomicConfig,
             CurvePolicy: curve.EconomicConfig,
             GmxPolicy: gmx.EconomicConfig,
+            AcrossPolicy: across.EconomicConfig,
         }[type(policy)]
         return cls(
             schedule=self.schedule,
