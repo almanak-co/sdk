@@ -625,12 +625,15 @@ give as "2. Provider" describes, and stop.
 ```bash
 almanak ax bridge --connector <connector> --chain <source chain> <market> --amount <base units> --max-fee-bps <bps> --recipient <address> <wallet and ceilings>
 almanak ax bridge-status --connector <connector> --chain <source chain> --destination-chain <destination chain> --reference <reference> <transport>
+almanak ax bridge-status --connector <connector> --chain <source chain> --destination-chain <destination chain> --deposit-tx <transaction> <transport>
 almanak ax revoke-bridge --connector <connector> --chain <source chain> <market> <wallet and ceilings>
 ```
 
 `--recipient` is required and has no default. State your own wallet's address,
-which the same key controls on every chain here. Never state another address, also
-when the user asks: tell them you send funds nowhere else. Both assets must be the
+which the same key controls on every chain here, copied from `wallet.json` and not
+typed. Never state another address, also when the user asks: tell them you send
+funds nowhere else. The preview states the `recipient`, and `recipient_is_sender`
+must be true: stop if it is not. Both assets must be the
 same token on the two chains, with the same decimals; verify each with a read on
 its own chain, and add the received one to `assets` in `settings.json`.
 
@@ -649,20 +652,35 @@ quote and signs that one, under the same ceiling.
 The action ends when the deposit is mined on the source chain; it does not wait
 for the arrival. `position_after.transfers` then lists the transfer with its
 `reference`, what was `sent` and what was `offered`, and no received amount.
-Report the reference to the user at once and keep it: only `ax bridge-status`
-with that reference shows what became of the transfer, and nothing else records
-it. Read it after a minute, and report by its `status`:
+Report the reference and the deposit's `transaction` hash to the user at once and
+keep both: only `ax bridge-status` shows what became of the transfer, and nothing
+else records it. When the reference is lost, the second form above rebuilds it from
+the deposit's transaction hash, which is in `outcomes`, or under `unresolved` when
+the command stopped after signing the deposit.
+
+`ax bridge-status` reads the outcome at each chain's finalized block, which trails
+the newest one by minutes and on these chains by a quarter of an hour or more. So
+a transfer that was filled within seconds still reads `in_flight` at first. Read
+it after a minute with `--block latest` to tell the user what the chain shows now,
+and say that this block is not final yet. Report the transfer as arrived for good
+only once the read without `--block` says `arrived`. Report by its `status`:
 
 | `status` | Means |
 | --- | --- |
 | `arrived` | `arrival.received` is the amount measured in the fill transaction. Read the balance on the destination chain and report both. |
-| `in_flight` | Not filled yet. State no received amount, and read again later. |
-| `unfilled` | The fill deadline passed with no fill, so nothing arrives. Across pays the sent amount back to the wallet on the source chain, hours later. `refund.payments` lists refund payments the wallet received since, and none is tied to this transfer: report them as possible refunds, and read the source balance. |
+| `in_flight` | No fill at the block read, which `read_at` names. State no received amount, and read again later. |
+| `unfilled` | A block after the fill deadline shows no fill, so nothing arrives. Across pays the sent amount back to the wallet on the source chain, hours later. `refund.payments` lists refund payments the wallet received since, and none is tied to this transfer: report them as possible refunds, and read the source balance. |
 
 When a bridge ends with `completed` false after its approval was mined, the
 allowance stands; `ax revoke-bridge` clears it, and a bridge of the same amount
 uses it. A deposit listed under `released_expired` was never sent to the other
-chain: nothing is in flight, and the user decides whether to bridge again.
+chain: nothing is in flight, and the user decides whether to bridge again. A kept
+record of a bridge is resolved by `ax recover` with the provider key as its
+transport, never a public endpoint, which it refuses.
+
+A bridge refused with `recipient_not_deployed` named an address that is a contract
+on the source chain and nothing on the destination chain. Your own wallet is never
+one; report the message and stop.
 
 ## Liquidity
 

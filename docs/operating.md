@@ -798,7 +798,7 @@ almanak ax bridge --connector across --chain eip155:42161 \
   --destination-chain eip155:8453 \
   --destination-asset eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913 \
   --amount 25000000 --max-fee-bps 10 \
-  --recipient 0x1111111111111111111111111111111111111111 \
+  --recipient <your-address-on-base> \
   --wallet /private/operator --env-file /private/providers.env \
   --max-gas-price-wei 1000000000 --max-transaction-fee 200000000000000
 ```
@@ -809,7 +809,7 @@ almanak ax bridge --connector across --chain eip155:42161 \
 | `--destination-chain`, `--destination-asset` | The chain it arrives on and the CAIP-19 asset received. Both assets must have the same decimals. |
 | `--amount` | Base units sent. The deployment sends exactly this and binds no more of the wallet. |
 | `--max-fee-bps` | Required, 0 to 10000. A venue quote whose whole fee exceeds this many basis points of the amount is refused before anything is signed. |
-| `--recipient` | Required. The address on the destination chain that receives. State the wallet's own address to keep the funds; no default chooses it. |
+| `--recipient` | Required. The address on the destination chain that receives. State the wallet's own address to keep the funds; no default chooses it. State it with its checksum (mixed case), which catches a mistyped character. |
 
 The output amount is Across's own quote, asked from its API by the command's gateway
 and named in the result as `across_api`. Only the gateway holds the quote to
@@ -824,9 +824,19 @@ block. Both SpokePools must run their reviewed implementations. After that the
 deployment has one chain: nothing is read, planned or signed on the destination chain
 while the command runs.
 
+The command checks the recipient before anything is planned. An address that is a
+contract on the source chain and holds no code on the destination chain is refused
+with `recipient_not_deployed`: a contract account such as a Safe does not exist at
+the same address on another chain until it is deployed there. A plain account that
+delegates its code is not a contract here. The check is the command's, made once at
+its start, and not on-chain enforcement; it does not show that anyone controls the
+address.
+
 Without `--execute` the result is a preview: `first_step`, the `steps` the request
-takes, and `quote` with its `source`, `output_amount`, `fee`, `fee_ceiling`,
-`timestamp` and `fill_deadline`. The steps are the approval of exactly the amount to
+takes, the `recipient` with `recipient_is_sender`, and `quote` with its `source`,
+`output_amount`, `fee`, `fee_ceiling`, `timestamp` and `fill_deadline`. The `note`
+says so when the recipient is not the sending wallet, and when it was stated in one
+case, which carries no checksum. The steps are the approval of exactly the amount to
 the SpokePool, then the deposit, which spends the approval whole. An allowance of
 another size the wallet already gave the SpokePool is set to zero first. The deposit
 asks the venue again and signs its own quote, held to the same ceiling, so the
@@ -836,7 +846,8 @@ With `--execute` the command ends when the deposit is mined. It does not wait fo
 the arrival, which happens on another chain: `position_after.transfers` lists the
 transfer with its `reference`, the amount `sent`, the amount `offered` and its
 `fill_deadline`, and states no received amount. Keep the reference; nothing else is
-kept once the command ends. A recipient that is not the wallet receives the funds
+kept once the command ends. A lost reference is rebuilt from the deposit's
+transaction hash, which every result and every kept record names. A recipient that is not the wallet receives the funds
 on the destination chain, and a refund of an unfilled transfer is paid to the wallet
 on the source chain.
 
@@ -849,16 +860,28 @@ almanak ax bridge-status --connector across --chain eip155:42161 \
   --env-file /private/providers.env
 ```
 
-It takes `--env-file` or the read gateway, and `--block` as other reads do
-(`finalized` unless stated, applied to both chains). The deposit is read again from
-the source SpokePool and held to the reference's relay hash, so a reference that is
-not a deposit of the named route is refused. `status` is one of:
+It takes `--env-file` or the read gateway. The transfer is named by `--reference`,
+or by `--deposit-tx` with the deposit's transaction hash on the source chain: the
+command then reads the one deposit that transaction made through the reviewed
+SpokePool towards the destination chain, and the result states its `reference`. A
+signed deposit has no reference before it is mined, because the SpokePool assigns
+its identifier then.
+
+The deposit is read at the source chain's latest block, since the operator already
+holds its receipt, and held to the reference's relay hash and quote timestamp, so a
+reference that is not a deposit of the named route is refused. What became of it is
+read at the block `--block` names on each chain, `finalized` unless stated, or
+`latest`. It takes no block number: one number names no block of two chains. A
+finalized block trails the head by minutes, on a rollup by a quarter of an hour or
+more, so a transfer filled within seconds reads as `in_flight` until its fill is
+final. `--block latest` reads the fill at once; a block that is not final can still
+be replaced. `read_at` names the tag and the blocks read. `status` is one of:
 
 | `status` | Meaning |
 | --- | --- |
 | `arrived` | The destination SpokePool filled the relay. `arrival.received` is the amount of the token transfer to the recipient in the fill transaction, required to equal the fill event's amount. |
 | `in_flight` | Not filled at the block read, and the fill deadline has not passed there. No received amount is stated. |
-| `unfilled` | Not filled at a block past the fill deadline, so no fill can follow. `refund` lists what the wallet was paid since. |
+| `unfilled` | Not filled at a block stamped after the fill deadline. The SpokePool reverts a fill of a relay whose deadline is before its block's time, so no fill can follow. `refund` lists what the wallet was paid since. |
 
 For an unfilled transfer, `refund.payments` lists each payment of the sent asset from
 the SpokePool to the depositor that an executed refund leaf names, from the fill
@@ -872,7 +895,11 @@ what the SpokePool holds for the wallet because a refund transfer to it failed;
 claiming it is not built.
 
 A deposit that is refused or reverts after its approval was mined leaves that
-approval standing. `ax revoke-bridge` sets it to zero, and takes the route only:
+approval standing. `ax revoke-bridge` sets it to zero, and takes the route only. It
+reads the source chain alone and holds no SpokePool to its reviewed implementation,
+so it works while the destination chain is unavailable and after a pool was
+upgraded. The spender it clears is the SpokePool proxy address this version of the
+SDK names for the chain:
 
 ```bash
 almanak ax revoke-bridge --connector across --chain eip155:42161 \
@@ -883,7 +910,9 @@ almanak ax revoke-bridge --connector across --chain eip155:42161 \
   --max-gas-price-wei 1000000000 --max-transaction-fee 200000000000000
 ```
 
-`ax recover` resolves an interrupted bridge as it does any action. A signed deposit
+`ax recover` resolves an interrupted bridge as it does any action, through
+`--env-file` only: a kept bridge record refuses `--public-rpc`, as the bridge itself
+does. A signed deposit
 carries its quote's timestamp, and the SpokePool reverts it once mined later than
 that timestamp plus its quote buffer. Past that deadline, with no receipt, no copy at
 the provider and the nonce unused, `ax recover` releases the deposit and lists it

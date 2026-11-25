@@ -60,6 +60,7 @@ PLACEHOLDERS = {
     "<destination chain>": "eip155:8453",
     "<received asset>": "eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
     "<reference>": "7:0x" + "ab" * 32 + ":1795498091",
+    "<transaction>": "0x" + "cd" * 32,
 }
 # Commands no public endpoint serves: they read two chains, and a bridge asks the
 # venue's quote API. Their `<transport>` is the provider key.

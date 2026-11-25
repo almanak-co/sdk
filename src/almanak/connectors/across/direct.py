@@ -148,7 +148,41 @@ def details(backend, state) -> dict:
         return stated
     quote = execution.quoted(backend, state, decided, before)
     venue.admit(quote, decided.target, amount, before.pool, before.block.timestamp)
-    return {**stated, "quote": quoted_terms(quote, decided.target, amount)}
+    receiving = decided.target.destination_fund.address
+    return {
+        **stated,
+        "recipient": receiving,
+        "recipient_is_sender": receiving == decided.target.fund.address,
+        "quote": quoted_terms(quote, decided.target, amount),
+    }
+
+
+def sender(config) -> str:
+    return config.accounts.bindings[0].profile.fund.address
+
+
+def unchecked(stated: str) -> bool:
+    """Whether an address was stated in one case, which carries no checksum."""
+    body = stated[2:]
+    return body in (body.lower(), body.upper())
+
+
+def recipient_note(config, request: ActionRequest) -> str:
+    """What the operator must see about a recipient before the deposit is signed."""
+    stated = request.recipient or ""
+    notes = []
+    if stated.lower() != sender(config):
+        notes.append(
+            f" The recipient {stated.lower()} is not the sending wallet: whoever controls"
+            " that address on the destination chain receives the funds, and a deposit is"
+            " not undone."
+        )
+    if unchecked(stated):
+        notes.append(
+            " The recipient was stated without a checksum, so a mistyped character in it"
+            " is not detected; compare it before executing."
+        )
+    return "".join(notes)
 
 
 def note(config, observed, request: ActionRequest) -> str | None:
@@ -156,8 +190,10 @@ def note(config, observed, request: ActionRequest) -> str | None:
         return None
     return (
         "The command ends when the deposit is mined. The transfer arrives later, on the "
-        "destination chain: read it with `ax bridge-status` and the reported reference. "
+        "destination chain: read it with `ax bridge-status` and the reported reference, or "
+        "with the deposit's transaction hash. "
         "Only the gateway holds the quote to --max-fee-bps; the SpokePool checks no price."
+        + recipient_note(config, request)
     )
 
 
@@ -168,4 +204,5 @@ DIRECT = DirectActions(
     position=position,
     note=note,
     details=details,
+    public_recovery=False,
 )

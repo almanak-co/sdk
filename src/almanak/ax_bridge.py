@@ -78,6 +78,8 @@ def fee_bps(value: str) -> int:
 
 
 def evm_address(value: str) -> str:
+    """A nonzero EVM address, returned as stated: its case says whether it carried a
+    checksum, which the command reports. Every later use validates and lowers it."""
     import argparse
 
     from almanak.models import ZERO_ADDRESS, address
@@ -88,7 +90,16 @@ def evm_address(value: str) -> str:
         raise argparse.ArgumentTypeError(f"expected an EVM address: {error}") from None
     if parsed == ZERO_ADDRESS:
         raise argparse.ArgumentTypeError("expected a nonzero EVM address")
-    return parsed
+    return value
+
+
+def transaction_hash(value: str) -> str:
+    import argparse
+
+    body = value[2:].lower()
+    if not value.startswith("0x") or len(body) != 64 or set(body) - set("0123456789abcdef"):
+        raise argparse.ArgumentTypeError("expected a transaction hash: 0x and 64 hex digits")
+    return "0x" + body
 
 
 def validate(parser, args) -> None:
@@ -127,18 +138,92 @@ def prove_genesis(reader) -> None:
         raise DataError("chain_mismatch", "the destination provider has a different genesis")
 
 
-def completed(connector: str, env_file, resolved):
+# EIP-7702: a plain account that delegates answers this prefix and its delegate's address.
+DELEGATION_PREFIX = "0xef0100"
+
+
+def contract_code(reader, address: str, block) -> bool:
+    """Whether the address holds contract code at the block. A delegating plain account
+    is no contract: its key signs on every chain."""
+    code = reader._rpc("eth_getCode", [address, {"blockHash": block.hash}])
+    if not isinstance(code, str) or not code.startswith("0x"):
+        raise DataError("malformed", "eth_getCode: invalid code response")
+    delegating = code.lower().startswith(DELEGATION_PREFIX) and len(code) == 48
+    return len(code) > 2 and not delegating
+
+
+def require_receivable(recipient: str, on_source: bool, on_destination: bool, chains) -> None:
+    """Refuse a recipient that is a contract where the asset leaves and nothing where
+    it arrives.
+
+    A contract account of one chain, such as a Safe, is not the same account at the
+    same address on another: until it is deployed there nobody may control it. This is
+    a check of the command before anything is planned, not on-chain enforcement.
+    """
+    if on_source and not on_destination:
+        raise DataError(
+            "recipient_not_deployed",
+            f"the recipient {recipient} is a contract on {chains[0]} and holds no code on"
+            f" {chains[1]}: a contract account does not exist at the same address on"
+            " another chain until it is deployed there, and what it receives before may be"
+            " unrecoverable; nothing was planned or signed",
+        )
+
+
+def completed(connector: str, env_file, resolved, recipient: str, on_source: bool):
     """The route completed on its destination chain, at that chain's own anchor, and
-    held to the reviewed SpokePool pins on both chains."""
+    held to the reviewed SpokePool pins on both chains. The recipient is checked there
+    too, under `require_receivable`."""
     from almanak.ax_actions import resolution
     from almanak.gateway.read_endpoints import verified_reader
 
     resolver = resolution(connector)
-    with verified_reader(resolved.selection.destination_chain, env_file) as reader:
+    selection = resolved.selection
+    with verified_reader(selection.destination_chain, env_file) as reader:
         prove_genesis(reader)
-        route = resolver.complete_market(reader, resolved, reader.pin_block("latest"))
+        block = reader.pin_block("latest")
+        route = resolver.complete_market(reader, resolved, block)
+        on_destination = contract_code(reader, recipient, block)
     resolver.admit_route(route)
+    chains = (selection.chain, selection.destination_chain)
+    require_receivable(recipient, on_source, on_destination, chains)
     return route
+
+
+@dataclass(frozen=True)
+class SourceRoute:
+    """A revocation's route, stated from the source chain alone."""
+
+    route: object
+
+
+def revocation_route(resolved) -> SourceRoute:
+    """The route of a revocation: the sent token and the SpokePool at the reviewed proxy
+    address, as read on the source chain, whatever implementation that proxy runs.
+
+    A revocation sends nothing, so it reads nothing on the destination chain and holds
+    neither pool to its pin: a pin difference or a destination outage must never keep an
+    approval standing. The destination pool is the pin as written in code and the
+    received asset is as stated, both unread; the revocation uses neither. The spender
+    cleared is the proxy the pins name today. An allowance to a proxy the pins no longer
+    name is not this command's to clear.
+    """
+    from almanak.connectors.across.domain import Route, spoke_pool
+
+    selection = resolved.selection
+    return SourceRoute(
+        Route(
+            chain=resolved.block.chain,
+            asset=selection.asset,
+            destination_chain=selection.destination_chain,
+            destination_asset=selection.destination_asset,
+            decimals=resolved.asset.decimals,
+            spoke_pool=resolved.pool.address,
+            destination_pool=spoke_pool(selection.destination_chain),
+            max_fee_bps=selection.max_fee_bps,
+            quote=selection.quote,
+        )
+    )
 
 
 def deployment(env_file, request, action, wallet, provider, endpoint, limits):
@@ -151,10 +236,15 @@ def deployment(env_file, request, action, wallet, provider, endpoint, limits):
     connector = request.connector
     chain = Chain(chain_id=request.chain, environment="mainnet")
     account = Wallet(account=wallet["account"], address=wallet["address"].lower())
+    stated = None if action.recipient is None else action.recipient.lower()
     with EthereumReader(chain, endpoint) as reader:
         block = reader.pin_block("latest")
         resolved = resolution(connector).resolve_market(reader, request, block)
-    route = completed(connector, env_file, resolved)
+        on_source = stated is not None and contract_code(reader, stated, block)
+    if action.action == "bridge" and stated is not None:
+        route = completed(connector, env_file, resolved, stated, on_source)
+    else:
+        route = revocation_route(resolved)
     positions = binding(connector).positions(None, block, route, account, action)
     return configuration(connector, positions, account, provider, chain, limits)
 
@@ -171,6 +261,7 @@ class Deposit:
     output_token: str
     sent: int
     offered: int
+    quoted_at: int
     fill_deadline: int
 
 
@@ -200,7 +291,7 @@ def decoded_deposit(row, origin: int, deposit_id: int) -> tuple[tuple, Deposit]:
         data = decode(DATA_TYPES, bytes.fromhex(row["data"][2:]))
     except (DecodingError, ValueError):
         raise DataError("integrity", "Across deposit event data is malformed") from None
-    input_token, output_token, sent, offered, _quoted_at, fill_deadline = data[:6]
+    input_token, output_token, sent, offered, quoted_at, fill_deadline = data[:6]
     exclusivity, recipient, relayer, message = data[6:]
     depositor = topic_word(row, 3)
     relay = (
@@ -226,6 +317,7 @@ def decoded_deposit(row, origin: int, deposit_id: int) -> tuple[tuple, Deposit]:
         output_token=account(output_token),
         sent=sent,
         offered=offered,
+        quoted_at=quoted_at,
         fill_deadline=fill_deadline,
     )
 
@@ -257,13 +349,75 @@ def read_deposit(reader, pool, destination: int, reference, head) -> Deposit:
                 continue
             relay, deposit = decoded_deposit(row, origin, reference.deposit_id)
             if relay_hash(relay, destination) == reference.relay_hash:
-                return deposit
+                return held_to_quote(deposit, reference)
     raise DataError(
         "not_found",
         "no deposit with this reference left the source chain for the destination chain"
-        " in the blocks its quote allows, as of the block read; check the chains and the"
-        " reference, or read at a later block",
+        " in the blocks its quote allows, as of the source chain's latest block; check the"
+        " chains and the reference, or name the deposit's transaction with --deposit-tx",
     )
+
+
+def held_to_quote(deposit: Deposit, reference) -> Deposit:
+    """The relay hash does not cover the quote's timestamp, and the arrival scan starts
+    from it, so a reference that states another one is refused."""
+    if deposit.quoted_at != reference.quoted_at:
+        raise DataError(
+            "integrity",
+            f"the reference states the quote timestamp {reference.quoted_at}, and its"
+            f" deposit was mined with {deposit.quoted_at}; nothing is read for it",
+        )
+    return deposit
+
+
+def mined_receipt(reader, tx_hash: str) -> dict:
+    """The successful receipt of a transaction in a block that is still canonical."""
+    receipt = reader._rpc("eth_getTransactionReceipt", [tx_hash], allow_none=True)
+    if receipt is None or receipt.get("status") != "0x1":
+        raise DataError(
+            "not_found",
+            "no successful transaction with this hash is mined on the source chain, as of"
+            " its latest block; check the hash and the chain",
+        )
+    if reader.pin_block(int(receipt["blockNumber"], 16)).hash != receipt["blockHash"]:
+        raise DataError("reorganization", "the deposit transaction's block is not canonical")
+    return receipt
+
+
+def deposit_of(reader, pool: str, destination: int, tx_hash: str):
+    """The reference and the deposit of the one deposit a transaction made through the
+    reviewed SpokePool towards the destination chain.
+
+    The deposit's identifier is assigned when it is mined, so a transfer has no
+    reference before; its transaction hash is known from signing and leads here.
+    """
+    from almanak.connectors.across import settlement_reader as chain
+    from almanak.connectors.across.receipts import FUNDS_DEPOSITED_TOPIC
+    from almanak.connectors.across.relay import DepositReference, relay_hash
+    from almanak.gateway.evm import chain_number
+
+    wanted = [FUNDS_DEPOSITED_TOPIC, chain.uint_topic(destination)]
+    rows = [
+        row
+        for row in mined_receipt(reader, tx_hash)["logs"]
+        if row["address"].lower() == pool and len(row["topics"]) == 4
+        if [topic.lower() for topic in row["topics"][:2]] == wanted
+    ]
+    if len(rows) != 1:
+        raise DataError(
+            "not_found",
+            f"the transaction holds {len(rows)} deposits through the reviewed SpokePool"
+            " towards the destination chain, and one is needed; check the hash and the"
+            " chains",
+        )
+    deposit_id = int(rows[0]["topics"][2], 16)
+    relay, deposit = decoded_deposit(rows[0], chain_number(reader.chain.chain_id), deposit_id)
+    reference = DepositReference(
+        deposit_id=deposit_id,
+        relay_hash=relay_hash(relay, destination),
+        quoted_at=deposit.quoted_at,
+    )
+    return reference, deposit
 
 
 def read_arrival(reader, pool, origin: int, deposit: Deposit, reference, head) -> dict | None:
@@ -355,45 +509,71 @@ def described(chain_id, deposit: Deposit) -> dict:
     }
 
 
-def outcome(near, far, pools, deposit: Deposit, reference, heads, refund_from) -> dict:
-    """What became of the deposit as of the two blocks read. A received amount appears
-    only when a fill was measured; an open transfer states none, never zero."""
+IN_FLIGHT = (
+    "No fill is in the destination chain's {tag} block or before it. A fill mined in a"
+    " later block is not read yet: a finalized block trails the head by minutes."
+)
+
+
+def outcome(near, far, pools, deposit: Deposit, reference, tag: str, refund_from) -> dict:
+    """What became of the deposit as of each chain's `tag` block. A received amount
+    appears only when a fill was measured; an open transfer states none, never zero.
+
+    Unfilled: the SpokePool reverts a fill of a relay whose fill deadline is before its
+    block's timestamp, so a block past the deadline that holds the relay as not filled
+    shows that no fill can follow.
+    """
     from almanak.gateway.evm import chain_number
 
-    near_head, far_head = heads
+    far_head = far.pin_block(tag)
+    read_at = {"block": tag, "destination_block": far_head.number}
     origin = chain_number(near.chain.chain_id)
     arrival = read_arrival(far, pools[1], origin, deposit, reference, far_head)
     if arrival is not None:
-        return {"status": "arrived", "arrival": arrival}
+        return {"read_at": read_at, "status": "arrived", "arrival": arrival}
     if far_head.timestamp <= deposit.fill_deadline:
-        return {"status": "in_flight"}
-    # Past the fill deadline with no fill: no fill can follow. The refund is paid to the
-    # depositor on the source chain, in a later bundle.
+        return {"read_at": read_at, "status": "in_flight", "note": IN_FLIGHT.format(tag=tag)}
+    # The refund is paid to the depositor on the source chain, in a later bundle.
+    near_head = near.pin_block(tag)
     refund = read_refunds(near, pools[0], deposit, near_head, refund_from)
-    return {"status": "unfilled", "refund": refund}
+    read_at["source_block"] = near_head.number
+    return {"read_at": read_at, "status": "unfilled", "refund": refund}
+
+
+def named_deposit(reader, pool: str, destination: int, args):
+    """The deposit a command names, by reference or by its transaction, read at the
+    source chain's latest block.
+
+    The operator holds the deposit's receipt, and a finalized block trails it by
+    minutes. The deposit decides no outcome: it only says what to look for, and the
+    outcome is read at the block the command names.
+    """
+    from almanak.connectors.across.relay import parse_reference
+
+    head = reader.pin_block("latest")
+    if args.deposit_tx is not None:
+        return deposit_of(reader, pool, destination, args.deposit_tx)
+    reference = parse_reference(args.reference)
+    return reference, read_deposit(reader, pool, destination, reference, head)
 
 
 def status(args) -> dict:
     from almanak.ax import observation_reader
     from almanak.caip import ChainId
     from almanak.connectors.across.domain import spoke_pool
-    from almanak.connectors.across.relay import parse_reference
     from almanak.gateway.evm import chain_number
 
     source, destination = ChainId(args.chain), ChainId(args.destination_chain)
     pools = (spoke_pool(source).address, spoke_pool(destination).address)
-    reference = parse_reference(args.reference)
     with observation_reader(args, source) as near, observation_reader(args, destination) as far:
-        heads = (near.pin_block(args.block), far.pin_block(args.block))
-        deposit = read_deposit(near, pools[0], chain_number(destination), reference, heads[0])
-        result = outcome(near, far, pools, deposit, reference, heads, args.refund_from_block)
+        reference, deposit = named_deposit(near, pools[0], chain_number(destination), args)
+        result = outcome(near, far, pools, deposit, reference, args.block, args.refund_from_block)
     return {
         "product": "bridge_status",
         "connector": args.connector,
-        "reference": args.reference,
+        "reference": reference.text,
         "source_chain": str(source),
         "destination_chain": str(destination),
-        "read_at": {"source_block": heads[0].number, "destination_block": heads[1].number},
         "deposit": described(source, deposit),
         **result,
     }
@@ -402,13 +582,13 @@ def status(args) -> dict:
 def status_arguments(commands) -> None:
     from pathlib import Path
 
-    from almanak.cli_arguments import block_option
     from almanak.connectors.direct import connectors_for
 
     text = (
-        "what became of one bridge transfer, by the reference `ax bridge` reported:"
-        " arrived with the measured amount, in flight, or unfilled past its fill deadline"
-        " with the refund payments the wallet received since"
+        "what became of one bridge transfer, named by the reference `ax bridge` reported"
+        " or by its deposit transaction: arrived with the measured amount, in flight, or"
+        " unfilled past its fill deadline with the refund payments the wallet received"
+        " since"
     )
     command = commands.add_parser("bridge-status", help=text, description=text)
     command.set_defaults(product="ax-bridge-status")
@@ -422,8 +602,13 @@ def status_arguments(commands) -> None:
     command.add_argument(
         "--destination-chain", required=True, help="strict CAIP-2 chain the asset arrives on"
     )
-    command.add_argument(
-        "--reference", required=True, help="the transfer reference `ax bridge` reported"
+    named = command.add_mutually_exclusive_group(required=True)
+    named.add_argument("--reference", help="the transfer reference `ax bridge` reported")
+    named.add_argument(
+        "--deposit-tx",
+        type=transaction_hash,
+        help="the deposit's transaction hash on the source chain, when the reference is"
+        " lost; the result states the reference",
     )
     command.add_argument(
         "--refund-from-block",
@@ -431,7 +616,15 @@ def status_arguments(commands) -> None:
         help="source block a refund scan starts at, to continue one that did not reach"
         " the block read (default: the last block not after the fill deadline)",
     )
-    block_option(command)
+    # A tag only: the command reads two chains, and one number names no block of both.
+    command.add_argument(
+        "--block",
+        choices=("finalized", "latest"),
+        default="finalized",
+        help="the block of each chain the outcome is read at; the deposit itself is"
+        " found at the source chain's latest block (default: finalized, which trails"
+        " the head by minutes, so a recent fill reads as in_flight until then)",
+    )
     # A provider key or the read gateway, which serve both chains. No listed public
     # endpoint does, so none is offered.
     command.set_defaults(public_rpc=None)

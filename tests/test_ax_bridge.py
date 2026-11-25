@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from eth_abi import decode
 from pydantic import ValidationError
 
 from almanak import ax_actions, ax_bridge
@@ -20,14 +21,16 @@ from almanak.chains import configured_chains, evm_network
 from almanak.cli_arguments import build_parser, parse_validated
 from almanak.connectors import direct
 from almanak.connectors.across import direct as across_direct
+from almanak.connectors.across import planning
 from almanak.connectors.across import quote as venue
 from almanak.connectors.across.authority import declared
 from almanak.connectors.across.connector import connector as across_connector
 from almanak.connectors.across.domain import SPOKE_POOLS
 from almanak.connectors.across.lifecycle import AcrossLifecycle, adopt_owned
 from almanak.connectors.across.observations import PoolState, Snapshot
-from almanak.connectors.across.operations import DepositOperation, plan_call
+from almanak.connectors.across.operations import DEPOSIT_TYPES, DepositOperation, plan_call
 from almanak.connectors.across.receipts import opened_transfer
+from almanak.connectors.across.relay import deposited_relay
 from almanak.connectors.across.resolution import MarketSelection, ResolvedRoute
 from almanak.connectors.across.state import Checkpoint, DecisionRecord, Outcome, Pending
 from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
@@ -43,6 +46,7 @@ from almanak.state import Journal
 from almanak.strategy import StrategyDefinition
 from almanak.strategy_api import Memory
 from almanak.triggers import OperatorEvent
+from tests.across_settlement_support import FakeChain, fill, payment
 from tests.across_support import (
     AMOUNT,
     ARBITRUM,
@@ -60,7 +64,9 @@ from tests.across_support import (
     quote,
 )
 from tests.across_support import allocation as stated_allocation
-from tests.test_across_deposit import MINED, receipt
+from tests.across_support import route as stated_route
+from tests.test_across_deposit import MINED, MINED_AT, deposit_log, receipt
+from tests.test_across_quote import BASE_WETH
 from tests.test_ax_swap import Observed
 from tests.test_expired_attempt_release import CLEAN, gateway_service
 from tests.test_operator_runtime import GatewayJournal
@@ -336,6 +342,8 @@ def test_the_preview_states_the_admitted_venue_quote_under_the_ceiling():
     result = across_direct.details(gateway, planned(config))
     assert result == {
         "steps": ["approve", "deposit"],
+        "recipient": RECIPIENT,
+        "recipient_is_sender": False,
         "quote": {
             "source": "across_api",
             "input_amount": str(AMOUNT),
@@ -350,6 +358,57 @@ def test_the_preview_states_the_admitted_venue_quote_under_the_ceiling():
     # The same request at the same block reads the gateway's own answer.
     across_direct.details(gateway, planned(config))
     assert asked.asked == 1
+    own = ActionRequest("bridge", AMOUNT, recipient=SENDER)
+    kept = across_direct.details(backend(Venue()), planned(operator_config(own), own))
+    assert (kept["recipient"], kept["recipient_is_sender"]) == (SENDER, True)
+
+
+CHECKSUMMED = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+
+
+def test_the_note_names_a_recipient_that_is_not_the_wallet_or_carries_no_checksum():
+    def noted(stated):
+        request = ActionRequest("bridge", AMOUNT, recipient=stated)
+        return across_direct.note(operator_config(request), (), request)
+
+    other = noted(CHECKSUMMED)
+    assert f"The recipient {CHECKSUMMED.lower()} is not the sending wallet" in other
+    assert "without a checksum" not in other
+    for unchecked in (CHECKSUMMED.lower(), "0x" + CHECKSUMMED[2:].upper()):
+        assert "without a checksum" in noted(unchecked)
+    # The wallet's own address, stated in one case, is only told about the checksum.
+    own = noted(SENDER)
+    assert "is not the sending wallet" not in own and "without a checksum" in own
+    assert "deposit's transaction hash" in own
+
+
+def test_the_deposit_calldata_names_the_wallet_as_depositor_and_the_stated_recipient():
+    call = plan_call(deposit(operator_config()))
+    stated = decode(DEPOSIT_TYPES, bytes.fromhex(call.data[10:]))
+    assert stated[0] == bytes(12) + bytes.fromhex(SENDER[2:])
+    assert stated[1] == bytes(12) + bytes.fromhex(RECIPIENT[2:])
+    assert stated[1] != stated[0]
+
+
+def test_a_stated_recipient_is_never_paid_a_wrapped_native_output():
+    """A stated recipient is an address of unknown kind, so it is held as an EOA is:
+    Across would pay it the native asset, which this scope does not record."""
+    wrapped = SimpleNamespace(route=stated_route(destination_asset=BASE_WETH))
+    positions = across_direct.positions(None, BLOCK, wrapped, WALLET, BRIDGE)
+    provider = ax_actions.alchemy(ARBITRUM.chain_id)
+    with pytest.raises(ValidationError, match="native asset"):
+        ax_actions.configuration("across", positions, WALLET, provider, ARBITRUM, LIMITS)
+
+
+def test_a_stated_recipient_is_in_the_environment_of_the_route():
+    document = json.loads(operator_config().model_dump_json())
+    allocation = document["allocations"][0]
+    fork = {"chain_id": allocation["route"]["destination_chain"], "environment": "fork"}
+    elsewhere = {**allocation, "adopt": {"fund": {"chain": fork, "address": RECIPIENT}}}
+    with pytest.raises(ValidationError, match="recipient is on the route's destination chain"):
+        type(operator_config()).model_validate_json(
+            json.dumps({**document, "allocations": [elsewhere]})
+        )
 
 
 def test_a_quote_above_the_ceiling_or_no_transport_refuses_the_preview():
@@ -506,6 +565,12 @@ def test_recovery_releases_an_expired_signed_deposit_of_a_direct_bridge():
     service.validate_pending_resolution(state, released)
     service.validate_released_record(state, released)
     assert Checkpoint.model_validate_json(released.model_dump_json()) == released
+    # A signed deposit has no reference yet: its identifier is assigned when it is
+    # mined. The kept record and the `steps_sent` event name its transaction, which
+    # `ax bridge-status --deposit-tx` turns into the reference.
+    assert ax_actions.unresolved(state) == {
+        "unresolved": {"operation": "deposit", "transaction": attempt.tx_hash}
+    }
     result = ax_actions.executed_result(released, released.outcomes, None)
     assert result["released_expired"] == [{"operation": "deposit", "transaction": attempt.tx_hash}]
     assert (result["executed"], result["completed"]) == (True, False)
@@ -624,9 +689,13 @@ def test_the_command_refuses_an_undeclared_chain_and_passes_the_bridge_on(monkey
 class Resolving:
     """A reader that is only handed on to the resolver, with a head and a genesis."""
 
-    def __init__(self, chain, head, genesis=None):
-        self.chain, self.head = chain, head
+    def __init__(self, chain, head, genesis=None, code="0x"):
+        self.chain, self.head, self.code = chain, head, code
         self.genesis = genesis or evm_network(chain.chain_id).genesis
+
+    def _rpc(self, method, params, *, allow_none=False):
+        assert method == "eth_getCode" and params[1] == {"blockHash": self.head.hash}
+        return self.code
 
     def __enter__(self):
         return self
@@ -640,23 +709,88 @@ class Resolving:
         return self.head
 
 
-def resolving(monkeypatch, destination_pool=BASE_POOL, genesis=None):
+CONTRACT, DELEGATING = "0x6080604052", "0xef0100" + "ab" * 20
+
+
+def resolving(
+    monkeypatch,
+    destination_pool=BASE_POOL,
+    genesis=None,
+    request=BRIDGE,
+    codes=("0x", "0x"),
+    source=SOURCE_ONLY,
+    far=None,
+):
     resolver = ax_actions.resolution("across")
     monkeypatch.setattr(
-        "almanak.gateway.ethereum.EthereumReader", lambda chain, endpoint: Resolving(chain, BLOCK)
+        "almanak.gateway.ethereum.EthereumReader",
+        lambda chain, endpoint: Resolving(chain, BLOCK, code=codes[0]),
     )
     monkeypatch.setattr(
         "almanak.gateway.read_endpoints.verified_reader",
-        lambda chain, env_file: Resolving(BASE, BASE_BLOCK, genesis),
+        far or (lambda chain, env_file: Resolving(BASE, BASE_BLOCK, genesis, codes[1])),
     )
-    monkeypatch.setattr(resolver, "resolve_market", lambda reader, selection, block: SOURCE_ONLY)
-    completed = ResolvedRoute(**{**dict(ROUTE), "destination_pool": destination_pool})
+    monkeypatch.setattr(resolver, "resolve_market", lambda reader, selection, block: source)
+    route = {**dict(ROUTE), "pool": source.pool, "destination_pool": destination_pool}
+    completed = ResolvedRoute(**route)
     monkeypatch.setattr(resolver, "complete_market", lambda reader, resolved, block: completed)
     wallet = {"account": WALLET.account, "address": WALLET.address}
     provider = ax_actions.alchemy(ARBITRUM.chain_id)
     return lambda: ax_bridge.deployment(
-        Path(".env"), SELECTION, BRIDGE, wallet, provider, "endpoint", LIMITS
+        Path(".env"), SELECTION, request, wallet, provider, "endpoint", LIMITS
     )
+
+
+def unavailable(chain, env_file):
+    raise DataError("unavailable", "the destination provider does not answer")
+
+
+def test_a_revocation_reads_the_source_chain_only(monkeypatch):
+    """A destination outage must not keep an approval standing."""
+    config = resolving(monkeypatch, request=REVOKE, far=unavailable)()
+    assert config == operator_config(REVOKE)
+    target = config.target(ALLOCATION)
+    assert target.route.spoke_pool == POOL.address
+    assert target.route.destination_pool == BASE_PIN
+    # The same outage refuses a bridge, which completes its route there.
+    with pytest.raises(DataError) as error:
+        resolving(monkeypatch, far=unavailable)()
+    assert error.value.kind == "unavailable"
+
+
+def test_a_revocation_survives_a_spoke_pool_that_differs_from_its_pin(monkeypatch, tmp_path):
+    """A pin difference refuses new deposits only: the approval the wallet gave the
+    reviewed proxy address is cleared whatever implementation that proxy runs now."""
+    other = POOL.model_copy(update={"implementation": "0x" + "99" * 20})
+    changed = ResolvedRoute(**{**dict(SOURCE_ONLY), "pool": other})
+    # Neither chain's pool is held to its pin: the destination's is not even read.
+    config = resolving(monkeypatch, request=REVOKE, source=changed, far=pytest.fail)()
+    assert config == operator_config(REVOKE)
+    desk = Desk(tmp_path, config, pool=other, allowance=7)
+    record = desk.runtime().submit(desk.config.revoke(ALLOCATION))
+    state = desk.store.load()
+    step = planning.operation(config, state, record.intent, desk.gateway.seen)
+    assert (step.kind, step.final) == ("revoke", True)
+    spender = decode(("address", "uint256"), bytes.fromhex(plan_call(step).data[10:]))
+    assert spender == (POOL.address, 0)
+    # The same pool refuses a bridge at resolution.
+    with pytest.raises(DataError) as error:
+        resolving(monkeypatch, source=changed)()
+    assert error.value.kind == "deployment_changed"
+
+
+def test_a_contract_recipient_with_no_code_on_the_destination_is_refused(monkeypatch):
+    with pytest.raises(DataError) as error:
+        resolving(monkeypatch, codes=(CONTRACT, "0x"))()
+    assert error.value.kind == "recipient_not_deployed"
+    assert RECIPIENT in str(error.value) and "eip155:8453" in str(error.value)
+    # A contract on both chains, a plain account, a delegating plain account and a
+    # contract that exists on the destination only are all admitted.
+    for codes in ((CONTRACT, CONTRACT), ("0x", "0x"), (DELEGATING, "0x"), ("0x", CONTRACT)):
+        assert resolving(monkeypatch, codes=codes)() == operator_config()
+    with pytest.raises(DataError) as malformed:
+        resolving(monkeypatch, codes=(None, "0x"))()
+    assert malformed.value.kind == "malformed"
 
 
 def test_the_route_is_resolved_on_the_source_and_completed_on_the_destination(monkeypatch):
@@ -687,10 +821,13 @@ ARB_POOL, FAR_POOL = SPOKE_POOLS[ARBITRUM.chain_id].address, BASE_PIN.address
 class Ledger:
     """A chain that holds the given receipts and nothing else, one block a second."""
 
-    def __init__(self, chain, anchor, head, receipts=(), calls=None):
+    def __init__(self, chain, anchor, head, receipts=(), calls=None, finalized=None):
         self.chain, self.anchor, self.head = chain, anchor, head
+        self.finalized = head if finalized is None else finalized
         self.receipts = {r["transactionHash"]: r for r in receipts}
-        self.calls, self.queries = calls or {}, []
+        # A block that holds a retained receipt carries that receipt's own hash.
+        self.hashes = {int(r["blockNumber"], 16): r["blockHash"] for r in receipts}
+        self.calls, self.queries, self.pinned = calls or {}, [], []
 
     def __enter__(self):
         return self
@@ -699,12 +836,14 @@ class Ledger:
         return None
 
     def pin_block(self, selector) -> Block:
-        number = self.head if selector in ("latest", "finalized") else selector
+        self.pinned.append(selector)
+        tags = {"latest": self.head, "finalized": self.finalized}
+        number = tags.get(selector, selector)
         first, at = self.anchor
         return Block(
             chain=self.chain,
             number=number,
-            hash="0x" + number.to_bytes(32, "big").hex(),
+            hash=self.hashes.get(number, "0x" + number.to_bytes(32, "big").hex()),
             timestamp=at + number - first,
         )
 
@@ -734,7 +873,7 @@ class Ledger:
         return self.calls[signature]
 
 
-def source(head_after=10_000, receipts=None, deferred=0):
+def source(head_after=10_000, receipts=None, deferred=0, finalized_after=None):
     number = int(DEPOSIT["receipt"]["blockNumber"], 16)
     return Ledger(
         ARBITRUM,
@@ -742,10 +881,11 @@ def source(head_after=10_000, receipts=None, deferred=0):
         number + head_after,
         [DEPOSIT["receipt"]] if receipts is None else receipts,
         {"getRelayerRefund(address,address)": (deferred,)},
+        None if finalized_after is None else number + finalized_after,
     )
 
 
-def destination(status, head_after=10, receipts=None):
+def destination(status, head_after=10, receipts=None, finalized_after=None):
     number = int(FILL["receipt"]["blockNumber"], 16)
     return Ledger(
         BASE,
@@ -753,6 +893,7 @@ def destination(status, head_after=10, receipts=None):
         number + head_after,
         [FILL["receipt"]] if receipts is None else receipts,
         {"fillStatuses(bytes32)": (status,)},
+        None if finalized_after is None else number + finalized_after,
     )
 
 
@@ -767,6 +908,7 @@ def status(monkeypatch, near, far, **options):
         "chain": "eip155:42161",
         "destination_chain": "eip155:8453",
         "reference": REFERENCE,
+        "deposit_tx": None,
         "block": "finalized",
         "refund_from_block": None,
         "env_file": Path(".env"),
@@ -795,8 +937,8 @@ def test_the_status_of_an_arrived_transfer_is_its_measured_fill(monkeypatch):
         "received": "1562446253",
         "fill_type": "fast",
     }
-    assert result["read_at"] == {"source_block": near.head, "destination_block": far.head}
-    assert "refund" not in result
+    assert result["read_at"] == {"block": "finalized", "destination_block": far.head}
+    assert result["reference"] == REFERENCE and "refund" not in result
     # Every log query stays inside the bounded page span.
     for query in (*near.queries, *far.queries):
         assert int(query["toBlock"], 16) - int(query["fromBlock"], 16) < 2_000
@@ -809,6 +951,129 @@ def test_an_unfilled_transfer_before_its_deadline_is_in_flight_and_states_no_amo
     assert result["status"] == "in_flight"
     assert "arrival" not in result and "refund" not in result
     assert "received" not in json.dumps(result)
+    assert "destination chain's finalized block" in result["note"]
+
+
+def test_the_deposit_is_found_at_the_latest_block_and_the_outcome_at_the_named_one(
+    monkeypatch,
+):
+    """A finalized block trails the head by minutes. The operator holds the deposit's
+    receipt, so the deposit is looked up at the head; a fill is evidence only at the
+    block the command names."""
+    # Neither chain has finalized the deposit's or the fill's block yet.
+    near, far = source(finalized_after=-50), destination(0, finalized_after=-5)
+    waiting = status(monkeypatch, near, far)
+    assert waiting["status"] == "in_flight"
+    assert waiting["deposit"]["transaction"] == DEPOSIT["receipt"]["transactionHash"]
+    assert waiting["read_at"] == {"block": "finalized", "destination_block": far.finalized}
+    assert "latest" in near.pinned and "finalized" not in near.pinned
+    assert "finalized" in far.pinned and "latest" not in far.pinned
+    seen = status(monkeypatch, source(finalized_after=-50), destination(2), block="latest")
+    assert seen["status"] == "arrived" and seen["read_at"]["block"] == "latest"
+
+
+def test_the_fill_deadline_itself_is_still_in_flight(monkeypatch):
+    """The SpokePool fills a relay in a block stamped with its fill deadline and
+    reverts one second later, so only a block past the deadline shows it unfilled."""
+    at_deadline = FILL_DEADLINE - FILL["block_timestamp"]
+    on_time = status(monkeypatch, source(), destination(0, head_after=at_deadline, receipts=[]))
+    assert on_time["status"] == "in_flight"
+    late = status(monkeypatch, source(), destination(0, head_after=at_deadline + 1, receipts=[]))
+    assert late["status"] == "unfilled"
+    assert late["read_at"]["source_block"] == source().head
+
+
+def test_a_lost_reference_is_rebuilt_from_the_deposit_transaction(monkeypatch):
+    """Held to a known answer: the retained mainnet deposit's receipt yields the
+    reference whose relay hash the Base SpokePool filled."""
+    named = {"reference": None, "deposit_tx": DEPOSIT["receipt"]["transactionHash"]}
+    result = status(monkeypatch, source(), destination(2), **named)
+    assert result["reference"] == REFERENCE and result["status"] == "arrived"
+    assert result["arrival"]["received"] == "1562446253"
+    with pytest.raises(DataError) as unknown:
+        status(monkeypatch, source(), destination(2), reference=None, deposit_tx="0x" + "ab" * 32)
+    assert unknown.value.kind == "not_found"
+    failed = {**DEPOSIT["receipt"], "status": "0x0"}
+    with pytest.raises(DataError) as reverted:
+        status(monkeypatch, source(receipts=[failed]), destination(2), **named)
+    assert reverted.value.kind == "not_found"
+    # A transaction that deposited nothing through the reviewed pool towards this chain.
+    foreign = [log for log in DEPOSIT["receipt"]["logs"] if log["address"].lower() != ARB_POOL]
+    with pytest.raises(DataError, match="holds 0 deposits") as none:
+        status(
+            monkeypatch,
+            source(receipts=[{**DEPOSIT["receipt"], "logs": foreign}]),
+            far := destination(2),
+            **named,
+        )
+    assert none.value.kind == "not_found" and far.queries == []
+    replaced = source()
+    replaced.hashes.clear()
+    with pytest.raises(DataError) as reorganized:
+        status(monkeypatch, replaced, destination(2), **named)
+    assert reorganized.value.kind == "reorganization"
+
+
+def test_a_reference_with_another_quote_timestamp_is_refused(monkeypatch):
+    """The relay hash does not cover the quote's timestamp, which sets where the
+    arrival scan starts, so the reference is held to the deposit event's own."""
+    earlier = REFERENCE.rsplit(":", 1)[0] + ":1795498090"
+    with pytest.raises(DataError, match="mined with 1795498091") as error:
+        status(monkeypatch, source(), destination(2), reference=earlier)
+    assert error.value.kind == "integrity"
+
+
+class Constructed(FakeChain):
+    """A constructed chain the status command reads through, with both block tags."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *arguments):
+        return None
+
+    def pin_block(self, selector):
+        return super().pin_block("latest" if selector == "finalized" else selector)
+
+
+def test_the_status_reads_a_transfer_whose_recipient_is_not_its_depositor(monkeypatch):
+    """The case the command exists for: the fill pays the stated recipient, and the
+    amount is the transfer to that address, not to the depositor."""
+    config = operator_config()
+    operation = deposit(config)
+    outcome = mined_deposit(config)
+    emitted = deposit_log(operation)
+    near = Constructed(ARBITRUM, NOW - 1_000, 1, 2_000)
+    row = (emitted["address"], emitted["topics"], bytes.fromhex(emitted["data"][2:]))
+    near.mine(1_000 + MINED_AT - NOW, "0x" + "d1" * 32, [row])
+    far = Constructed(BASE, NOW - 1_000, 1, 1_100)
+    far.views["fillStatuses(bytes32)"] = 2
+    relay = deposited_relay(operation, MINED)
+    paid = operation.quote.output_amount
+    rows = [
+        fill(FAR_POOL, relay),
+        payment(BASE_USDC.reference, "0x" + "77" * 20, RECIPIENT, paid),
+    ]
+    far.mine(1_020, "0x" + "f1" * 32, rows)
+    result = status(monkeypatch, near, far, reference=outcome.transfer.reference)
+    assert result["status"] == "arrived" and result["arrival"]["received"] == str(paid)
+    assert (result["deposit"]["depositor"], result["deposit"]["recipient"]) == (SENDER, RECIPIENT)
+    # The same fill paying the depositor instead is not this transfer's arrival.
+    misdirected = Constructed(BASE, NOW - 1_000, 1, 1_100)
+    misdirected.views["fillStatuses(bytes32)"] = 2
+    wrong = [fill(FAR_POOL, relay), payment(BASE_USDC.reference, "0x" + "77" * 20, SENDER, paid)]
+    misdirected.mine(1_020, "0x" + "f2" * 32, wrong)
+    with pytest.raises(DataError):
+        status(monkeypatch, near, misdirected, reference=outcome.transfer.reference)
+
+
+def test_a_bridge_record_is_never_recovered_through_a_public_endpoint():
+    with pytest.raises(ValueError, match="takes no --public-rpc"):
+        ax_actions.require_recovery_transport(operator_config(), "arbitrum")
+    ax_actions.require_recovery_transport(operator_config(), None)
+    # Every other connector keeps the accepted public recovery.
+    ax_actions.require_recovery_transport(SimpleNamespace(connector="aave_v3"), "arbitrum")
+    assert direct.binding("aave_v3").public_recovery and not across_direct.DIRECT.public_recovery
 
 
 def test_past_the_deadline_the_transfer_is_unfilled_and_no_refund_is_attributed(monkeypatch):
@@ -837,6 +1102,7 @@ def test_a_refund_leaf_payment_is_listed_and_never_tied_to_the_transfer():
 
     def deposit_of(sent):
         return ax_bridge.Deposit(
+            quoted_at=page["mined_at"] - 100,
             transaction="0x" + "00" * 32,
             block=number - 100,
             depositor=page["payee"],
@@ -871,7 +1137,7 @@ def test_a_refund_leaf_payment_is_listed_and_never_tied_to_the_transfer():
 def test_a_refund_scan_stops_at_its_page_limit_and_names_where(monkeypatch):
     monkeypatch.setattr(ax_bridge, "MAXIMUM_REFUND_PAGES", 2)
     near = source(head_after=10_000, receipts=[])
-    deposit = ax_bridge.Deposit("0x", 0, DEPOSITOR, DEPOSITOR, USDC.reference, "0x", 1, 1, 0)
+    deposit = ax_bridge.Deposit("0x", 0, DEPOSITOR, DEPOSITOR, USDC.reference, "0x", 1, 1, 0, 0)
     start = near.head - 9_000
     refund = ax_bridge.read_refunds(near, ARB_POOL, deposit, near.pin_block("latest"), start)
     assert refund["scanned"] == {"from": start, "to": start + 3_999}
@@ -917,6 +1183,19 @@ def test_the_status_command_takes_a_read_transport_and_no_public_endpoint(monkey
         "finalized",
         None,
     )
+    # A tag only: one block number names no block of two chains.
+    assert parse_validated(build_parser(), [*argv, "--env-file", ".env", "--block", "latest"])
+    with pytest.raises(SystemExit):
+        parse_validated(build_parser(), [*argv, "--env-file", ".env", "--block", "12"])
+    # The transfer is named once: by its reference or by its deposit transaction.
+    by_hash = [*argv[:-2], "--deposit-tx", "0x" + "AB" * 32, "--env-file", ".env"]
+    named = parse_validated(build_parser(), by_hash)
+    assert (named.deposit_tx, named.reference) == ("0x" + "ab" * 32, None)
+    for refused in ([*by_hash, "--reference", REFERENCE], [*argv[:-2], "--env-file", ".env"]):
+        with pytest.raises(SystemExit):
+            parse_validated(build_parser(), refused)
+    with pytest.raises(SystemExit):
+        parse_validated(build_parser(), [*by_hash[:-3], "0x12", "--env-file", ".env"])
     continued = parse_validated(
         build_parser(), [*argv, "--env-file", ".env", "--refund-from-block", "12"]
     )

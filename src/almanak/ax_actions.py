@@ -828,6 +828,7 @@ def recover_command(args) -> int:
         return 0
 
     def backend_for(config):
+        require_recovery_transport(config, args.public_rpc)
         endpoint = record_endpoint(config, args.env_file, args.public_rpc)
         return production_backend(config, endpoint, None)
 
@@ -835,6 +836,22 @@ def recover_command(args) -> int:
     print(json.dumps(result, indent=2))
     # A record resolved by releasing a step is freed, not a step that happened.
     return 0 if result["resolved"] and not RELEASES & set(result) else 1
+
+
+def require_recovery_transport(config, public_rpc: str | None) -> None:
+    """Refuse a public endpoint for a record whose connector's actions refuse one.
+
+    Recovery releases a signed step on the endpoint's word that it was not mined and
+    cannot be. For a bridge deposit a false word frees a deposit that was mined, and the
+    operator who states the bridge again sends twice.
+    """
+    from almanak.connectors.direct import binding_for
+
+    if public_rpc is not None and not binding_for(config).public_recovery:
+        raise ValueError(
+            f"a kept {config.connector} record takes no --public-rpc: its action refuses"
+            " one, and so does its recovery; name the provider key with --env-file"
+        )
 
 
 def record_endpoint(config, env_file: Path | None, public_rpc: str | None = None) -> str:
