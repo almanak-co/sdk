@@ -19,7 +19,7 @@ from almanak.connectors.support import (
 
 # Every pinned chain is the source and the destination of routes to the others.
 FORK_SOURCES = tuple(SPOKE_POOLS)
-# Chains declared for production as the source of a route, with EOA accounts. The
+# Chains declared for production as the source of a route. The
 # production EOA rehearsal and the hosted Fork Qualification select a bridge reference
 # from this declaration. No cell's evidence package is complete.
 PRODUCTION_SOURCES: tuple[ChainId, ...] = FORK_SOURCES
@@ -34,6 +34,18 @@ DIRECT_ACTIONS = (EconomicAction.BRIDGE, EconomicAction.REVOKE_BRIDGE)
 # Qualification selection leave those cells out by this constant, and `almanak support`
 # states it on each of them.
 PROVEN_SOURCES = (ChainId("eip155:42161"),)
+# The account profiles a source chain declares. A Safe deposits through generated Roles
+# grants (`permissions.py`); the receiving account may be an EOA or a Safe on any chain.
+ACCOUNT_PROFILES: tuple[Literal["eoa", "safe_roles"], ...] = ("eoa", "safe_roles")
+# Profiles declared with no run behind them, on every chain, the proven one included:
+# the maintainer declared the Safe/Roles bridge without fork proofs. Its grants were
+# never installed in any Roles module, and no Safe has bridged on a fork or on mainnet.
+# The QA catalog leaves these profiles out by this constant, the generated fork operator
+# file keeps provisioning plain accounts for a bridge, the fork fixture of a standalone
+# bridge refuses a Safe fund, and `almanak support` states it on each row. The
+# generated authority is new, so every production cell owes a hosted Fork Qualification
+# that exercises it, and none has run.
+UNPROVEN_PROFILES: tuple[Literal["eoa", "safe_roles"], ...] = ("safe_roles",)
 # The bridge model of economic backtests. It reads no history: it charges the author's
 # whole fee ceiling and credits the arrival after a latency the backtest file states.
 BACKTEST_MODEL: Literal["across-full-fee-ceiling-fixed-latency-v1"] = (
@@ -62,6 +74,11 @@ def declared_without_proof() -> tuple[ChainId, ...]:
     return tuple(chain for chain in FORK_SOURCES if chain not in PROVEN_SOURCES)
 
 
+def profiles_without_proof() -> tuple[str, ...]:
+    """The declared account profiles no bridge has run with, on any chain."""
+    return tuple(profile for profile in ACCOUNT_PROFILES if profile in UNPROVEN_PROFILES)
+
+
 def backtest_start(source: ChainId) -> datetime | None:
     """The first whole day on which every pinned implementation was in place.
 
@@ -84,6 +101,9 @@ BACKTEST_STARTS = {
 
 SCOPE = (
     "ERC-20 routes between two bound accounts; no wrapped native asset is sent",
+    "a Safe/Roles account deposits under scope-only grants that pin the SpokePool, both "
+    "tokens, the destination chain, the Safe as depositor, the destination fund as "
+    "recipient and an empty message; Roles cannot relate the output amount to the input",
     "pinned SpokePool proxy and implementation",
     "the output amount is the venue's quote under the author's fee ceiling, a gateway check",
     "arrival and refund are read from the SpokePools; a refund is read only "
@@ -140,6 +160,15 @@ WITHOUT_PROOF = (
 )
 
 
+PROFILE_WITHOUT_PROOF = {
+    "safe_roles": (
+        "Safe/Roles accounts are declared with no run behind them: the generated grants "
+        "were never installed, and no Safe has bridged on a fork or on mainnet; the fork "
+        "fixture of a standalone bridge funds EOA accounts only and refuses a Safe"
+    ),
+}
+
+
 def mode_scope(mode: RunMode, chain: ChainId) -> tuple[str, ...]:
     if mode is RunMode.FORK:
         return (*MODE_SCOPE[mode], FORK_REFUND[chain in FORK_REFUND_SOURCES])
@@ -155,7 +184,8 @@ def restrictions(chain: ChainId) -> tuple[str, ...]:
     source = f"{listed} only, as the source of a route to another pinned chain{absent}"
     scoped = tuple(text for mode in declared for text in mode_scope(mode, chain))
     unproven = WITHOUT_PROOF if chain in declared_without_proof() else ()
-    return SCOPE + (source, *scoped, *CHAIN_NOTES.get(chain, ()), *unproven)
+    profiles = tuple(PROFILE_WITHOUT_PROOF[profile] for profile in profiles_without_proof())
+    return SCOPE + (source, *scoped, *CHAIN_NOTES.get(chain, ()), *unproven, *profiles)
 
 
 def historical(chain: ChainId) -> tuple[HistoricalSupport, ...]:
@@ -188,7 +218,7 @@ def candidate_support():
             chain=chain,
             modes=modes(chain),
             actions=(EconomicAction.BRIDGE, EconomicAction.REVOKE_BRIDGE),
-            account_profiles=("eoa",),
+            account_profiles=ACCOUNT_PROFILES,
             direct_actions=DIRECT_ACTIONS if chain in PRODUCTION_SOURCES else (),
             restrictions=restrictions(chain),
             historical=historical(chain),

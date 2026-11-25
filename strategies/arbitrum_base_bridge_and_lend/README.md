@@ -41,7 +41,8 @@ is modeled: it pays the whole `max_fee_bps`, arrives after the
 `arrival_latency_seconds` the file states and is never refunded. The supply
 reads Comet history. Every bridge amount in the report is labeled modeled.
 
-Limits: both accounts are EOAs. Across declares fork runs, production and
+Limits: the reference runs with EOA accounts; a Safe/Roles bridge is declared
+and has never run. Across declares fork runs, production and
 economic backtests on Arbitrum, and Compound V3 declares production on
 Base, so this reference is part of the production rehearsal. Its operator example
 is the fork file only. In production the gateway signs Across's own quote from its

@@ -285,6 +285,23 @@ def test_summary_lists_each_cell_with_its_references():
     assert "3 references exercise them" in text
     assert "| `aave_v3` | `eip155:1` | `aave_lending`, `composed` |" in text
     assert "| `gmx_v2` | `eip155:42161` | `gmx_swap` |" in text
+    assert "no fork run" not in text
+
+
+def test_the_summary_names_a_profile_no_selected_case_exercises():
+    """Across declares Safe/Roles accounts with no fork run. The selection of a bridge
+    cell is unchanged, its nodes run EOA fixtures, and the summary says the profile is
+    left out, by the connector's own list."""
+    from almanak.connectors.across import support
+
+    assert (
+        fork_qualification_matrix.profiles_without_proof()
+        == {("across", profile) for profile in support.profiles_without_proof()}
+        == {("across", "safe_roles")}
+    )
+    text = summary({("across", ARBITRUM): ["across_usdc_arbitrum_base_bridge"]})
+    assert "`across` declares `safe_roles` accounts with no fork run" in text
+    assert "| `across` | `eip155:42161` | `across_usdc_arbitrum_base_bridge` |" in text
 
 
 def test_main_selects_the_production_cells_and_writes_the_summary(tmp_path, capsys, monkeypatch):

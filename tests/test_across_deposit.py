@@ -633,14 +633,9 @@ def test_a_reverted_deposit_moves_nothing_and_opens_no_transfer(monkeypatch):
     assert (outcome.success, outcome.assets, outcome.transfer) == (False, 0, None)
 
 
-def test_a_safe_account_has_no_bridge_grants_yet():
+def test_a_deposit_debits_the_fund_and_a_reverted_one_moves_nothing():
     from almanak.connectors.across.connector import connector
-    from almanak.connectors.across.permissions import AcrossPermissions
 
-    with pytest.raises(ValueError, match="no Roles grants yet"):
-        AcrossPermissions.derive(None, None)
-    with pytest.raises(ValueError, match="no Roles grants yet"):
-        AcrossPermissions.identities(None, "arb", None)
     binding = connector()
     assert (
         binding.execution_effects(

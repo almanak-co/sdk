@@ -668,10 +668,12 @@
     "revoke_bridge"
    ],
    "account_profiles": [
-    "eoa"
+    "eoa",
+    "safe_roles"
    ],
    "restrictions": [
     "ERC-20 routes between two bound accounts; no wrapped native asset is sent",
+    "a Safe/Roles account deposits under scope-only grants that pin the SpokePool, both tokens, the destination chain, the Safe as depositor, the destination fund as recipient and an empty message; Roles cannot relate the output amount to the input",
     "pinned SpokePool proxy and implementation",
     "the output amount is the venue's quote under the author's fee ceiling, a gateway check",
     "arrival and refund are read from the SpokePools; a refund is read only once the destination chain has proven the transfer unfilled",
@@ -679,7 +681,8 @@
     "a fork run asks no venue: the fork gateway constructs the quote from a stated fee and the fork's block time and retains it as across_fork_constructed; it is no evidence of a venue quote",
     "a fork refund is a fork-constructed bundle, never Fork Qualification evidence",
     "a production run signs the venue's own quote from its API, retained as across_api; only the gateway holds it to the author's fee ceiling",
-    "a backtest models the bridge and reads no history: it charges the market's whole max_fee_bps, credits the arrival after the latency the backtest file states, fills every transfer and models no refund; it keeps no approval, so it serves no revoke_bridge"
+    "a backtest models the bridge and reads no history: it charges the market's whole max_fee_bps, credits the arrival after the latency the backtest file states, fills every transfer and models no refund; it keeps no approval, so it serves no revoke_bridge",
+    "Safe/Roles accounts are declared with no run behind them: the generated grants were never installed, and no Safe has bridged on a fork or on mainnet; the fork fixture of a standalone bridge funds EOA accounts only and refuses a Safe"
    ],
    "historical": [
     {
@@ -723,10 +726,12 @@
     "revoke_bridge"
    ],
    "account_profiles": [
-    "eoa"
+    "eoa",
+    "safe_roles"
    ],
    "restrictions": [
     "ERC-20 routes between two bound accounts; no wrapped native asset is sent",
+    "a Safe/Roles account deposits under scope-only grants that pin the SpokePool, both tokens, the destination chain, the Safe as depositor, the destination fund as recipient and an empty message; Roles cannot relate the output amount to the input",
     "pinned SpokePool proxy and implementation",
     "the output amount is the venue's quote under the author's fee ceiling, a gateway check",
     "arrival and refund are read from the SpokePools; a refund is read only once the destination chain has proven the transfer unfilled",
@@ -736,7 +741,8 @@
     "a production run signs the venue's own quote from its API, retained as across_api; only the gateway holds it to the author's fee ceiling",
     "a backtest models the bridge and reads no history: it charges the market's whole max_fee_bps, credits the arrival after the latency the backtest file states, fills every transfer and models no refund; it keeps no approval, so it serves no revoke_bridge",
     "a fork refuses authored gas ceilings on this chain, so a fork run uses an author file without a gas policy",
-    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain"
+    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain",
+    "Safe/Roles accounts are declared with no run behind them: the generated grants were never installed, and no Safe has bridged on a fork or on mainnet; the fork fixture of a standalone bridge funds EOA accounts only and refuses a Safe"
    ],
    "historical": [
     {
@@ -780,10 +786,12 @@
     "revoke_bridge"
    ],
    "account_profiles": [
-    "eoa"
+    "eoa",
+    "safe_roles"
    ],
    "restrictions": [
     "ERC-20 routes between two bound accounts; no wrapped native asset is sent",
+    "a Safe/Roles account deposits under scope-only grants that pin the SpokePool, both tokens, the destination chain, the Safe as depositor, the destination fund as recipient and an empty message; Roles cannot relate the output amount to the input",
     "pinned SpokePool proxy and implementation",
     "the output amount is the venue's quote under the author's fee ceiling, a gateway check",
     "arrival and refund are read from the SpokePools; a refund is read only once the destination chain has proven the transfer unfilled",
@@ -792,7 +800,8 @@
     "no fork refund is defined for a transfer sent from this chain",
     "a production run signs the venue's own quote from its API, retained as across_api; only the gateway holds it to the author's fee ceiling",
     "a backtest models the bridge and reads no history: it charges the market's whole max_fee_bps, credits the arrival after the latency the backtest file states, fills every transfer and models no refund; it keeps no approval, so it serves no revoke_bridge",
-    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain"
+    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain",
+    "Safe/Roles accounts are declared with no run behind them: the generated grants were never installed, and no Safe has bridged on a fork or on mainnet; the fork fixture of a standalone bridge funds EOA accounts only and refuses a Safe"
    ],
    "historical": [
     {
@@ -836,10 +845,12 @@
     "revoke_bridge"
    ],
    "account_profiles": [
-    "eoa"
+    "eoa",
+    "safe_roles"
    ],
    "restrictions": [
     "ERC-20 routes between two bound accounts; no wrapped native asset is sent",
+    "a Safe/Roles account deposits under scope-only grants that pin the SpokePool, both tokens, the destination chain, the Safe as depositor, the destination fund as recipient and an empty message; Roles cannot relate the output amount to the input",
     "pinned SpokePool proxy and implementation",
     "the output amount is the venue's quote under the author's fee ceiling, a gateway check",
     "arrival and refund are read from the SpokePools; a refund is read only once the destination chain has proven the transfer unfilled",
@@ -849,7 +860,8 @@
     "a production run signs the venue's own quote from its API, retained as across_api; only the gateway holds it to the author's fee ceiling",
     "a backtest models the bridge and reads no history: it charges the market's whole max_fee_bps, credits the arrival after the latency the backtest file states, fills every transfer and models no refund; it keeps no approval, so it serves no revoke_bridge",
     "a fork refuses authored gas ceilings on this chain, so a fork run uses an author file without a gas policy",
-    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain"
+    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain",
+    "Safe/Roles accounts are declared with no run behind them: the generated grants were never installed, and no Safe has bridged on a fork or on mainnet; the fork fixture of a standalone bridge funds EOA accounts only and refuses a Safe"
    ],
    "historical": [
     {
@@ -893,10 +905,12 @@
     "revoke_bridge"
    ],
    "account_profiles": [
-    "eoa"
+    "eoa",
+    "safe_roles"
    ],
    "restrictions": [
     "ERC-20 routes between two bound accounts; no wrapped native asset is sent",
+    "a Safe/Roles account deposits under scope-only grants that pin the SpokePool, both tokens, the destination chain, the Safe as depositor, the destination fund as recipient and an empty message; Roles cannot relate the output amount to the input",
     "pinned SpokePool proxy and implementation",
     "the output amount is the venue's quote under the author's fee ceiling, a gateway check",
     "arrival and refund are read from the SpokePools; a refund is read only once the destination chain has proven the transfer unfilled",
@@ -905,7 +919,8 @@
     "no fork refund is defined for a transfer sent from this chain",
     "a production run signs the venue's own quote from its API, retained as across_api; only the gateway holds it to the author's fee ceiling",
     "a backtest models the bridge and reads no history: it charges the market's whole max_fee_bps, credits the arrival after the latency the backtest file states, fills every transfer and models no refund; it keeps no approval, so it serves no revoke_bridge",
-    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain"
+    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain",
+    "Safe/Roles accounts are declared with no run behind them: the generated grants were never installed, and no Safe has bridged on a fork or on mainnet; the fork fixture of a standalone bridge funds EOA accounts only and refuses a Safe"
    ],
    "historical": [
     {
@@ -949,10 +964,12 @@
     "revoke_bridge"
    ],
    "account_profiles": [
-    "eoa"
+    "eoa",
+    "safe_roles"
    ],
    "restrictions": [
     "ERC-20 routes between two bound accounts; no wrapped native asset is sent",
+    "a Safe/Roles account deposits under scope-only grants that pin the SpokePool, both tokens, the destination chain, the Safe as depositor, the destination fund as recipient and an empty message; Roles cannot relate the output amount to the input",
     "pinned SpokePool proxy and implementation",
     "the output amount is the venue's quote under the author's fee ceiling, a gateway check",
     "arrival and refund are read from the SpokePools; a refund is read only once the destination chain has proven the transfer unfilled",
@@ -962,7 +979,8 @@
     "a production run signs the venue's own quote from its API, retained as across_api; only the gateway holds it to the author's fee ceiling",
     "a backtest models the bridge and reads no history: it charges the market's whole max_fee_bps, credits the arrival after the latency the backtest file states, fills every transfer and models no refund; it keeps no approval, so it serves no revoke_bridge",
     "the network states no finality margin, so a signed step whose nonce another transaction consumed is never released on this chain",
-    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain"
+    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain",
+    "Safe/Roles accounts are declared with no run behind them: the generated grants were never installed, and no Safe has bridged on a fork or on mainnet; the fork fixture of a standalone bridge funds EOA accounts only and refuses a Safe"
    ],
    "historical": [
     {
@@ -1006,10 +1024,12 @@
     "revoke_bridge"
    ],
    "account_profiles": [
-    "eoa"
+    "eoa",
+    "safe_roles"
    ],
    "restrictions": [
     "ERC-20 routes between two bound accounts; no wrapped native asset is sent",
+    "a Safe/Roles account deposits under scope-only grants that pin the SpokePool, both tokens, the destination chain, the Safe as depositor, the destination fund as recipient and an empty message; Roles cannot relate the output amount to the input",
     "pinned SpokePool proxy and implementation",
     "the output amount is the venue's quote under the author's fee ceiling, a gateway check",
     "arrival and refund are read from the SpokePools; a refund is read only once the destination chain has proven the transfer unfilled",
@@ -1018,7 +1038,8 @@
     "no fork refund is defined for a transfer sent from this chain",
     "a production run signs the venue's own quote from its API, retained as across_api; only the gateway holds it to the author's fee ceiling",
     "a backtest models the bridge and reads no history: it charges the market's whole max_fee_bps, credits the arrival after the latency the backtest file states, fills every transfer and models no refund; it keeps no approval, so it serves no revoke_bridge",
-    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain"
+    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain",
+    "Safe/Roles accounts are declared with no run behind them: the generated grants were never installed, and no Safe has bridged on a fork or on mainnet; the fork fixture of a standalone bridge funds EOA accounts only and refuses a Safe"
    ],
    "historical": [
     {
@@ -1062,10 +1083,12 @@
     "revoke_bridge"
    ],
    "account_profiles": [
-    "eoa"
+    "eoa",
+    "safe_roles"
    ],
    "restrictions": [
     "ERC-20 routes between two bound accounts; no wrapped native asset is sent",
+    "a Safe/Roles account deposits under scope-only grants that pin the SpokePool, both tokens, the destination chain, the Safe as depositor, the destination fund as recipient and an empty message; Roles cannot relate the output amount to the input",
     "pinned SpokePool proxy and implementation",
     "the output amount is the venue's quote under the author's fee ceiling, a gateway check",
     "arrival and refund are read from the SpokePools; a refund is read only once the destination chain has proven the transfer unfilled",
@@ -1074,7 +1097,8 @@
     "no fork refund is defined for a transfer sent from this chain",
     "a production run signs the venue's own quote from its API, retained as across_api; only the gateway holds it to the author's fee ceiling",
     "a backtest models the bridge and reads no history: it charges the market's whole max_fee_bps, credits the arrival after the latency the backtest file states, fills every transfer and models no refund; it keeps no approval, so it serves no revoke_bridge",
-    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain"
+    "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain",
+    "Safe/Roles accounts are declared with no run behind them: the generated grants were never installed, and no Safe has bridged on a fork or on mainnet; the fork fixture of a standalone bridge funds EOA accounts only and refuses a Safe"
    ],
    "historical": [
     {

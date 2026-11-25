@@ -289,7 +289,9 @@ def test_every_pinned_chain_declares_its_modes_and_only_one_rests_on_a_lifecycle
     rows = {chain: binding.support_for(chain) for chain in SPOKE_POOLS}
     assert len(rows) == 8 and ChainId("eip155:999") not in rows
     for row in rows.values():
-        assert row.modes == declared and row.account_profiles == ("eoa",)
+        assert row.modes == declared and row.account_profiles == ("eoa", "safe_roles")
+        # The Safe/Roles profile is declared with no run behind it, and every row says so.
+        assert support.PROFILE_WITHOUT_PROOF["safe_roles"] in row.restrictions
         (historical,) = row.historical
         # The model keeps no approval, so the historical declaration lists no revoke.
         assert historical.actions == (EconomicAction.BRIDGE,)
@@ -307,10 +309,9 @@ def test_every_pinned_chain_declares_its_modes_and_only_one_rests_on_a_lifecycle
     model = source.historical[0].model
     binding.require_target(ARBITRUM.chain_id, TARGET, RunMode.BACKTEST, model=model)
     binding.require_target(ARBITRUM.chain_id, TARGET, RunMode.PRODUCTION, account_profile="eoa")
-    with pytest.raises(ValueError, match="unsupported"):
-        binding.require_target(
-            ARBITRUM.chain_id, TARGET, RunMode.PRODUCTION, account_profile="safe_roles"
-        )
+    for mode in (RunMode.FORK, RunMode.PRODUCTION):
+        binding.require_target(ARBITRUM.chain_id, TARGET, mode, account_profile="safe_roles")
+    assert support.profiles_without_proof() == ("safe_roles",)
     # A chain with no pin declares nothing and serves no run.
     with pytest.raises(ValueError):
         binding.require_target(ChainId("eip155:999"), TARGET, RunMode.FORK)

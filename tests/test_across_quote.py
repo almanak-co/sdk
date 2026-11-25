@@ -101,14 +101,6 @@ def safe(name, chain, address):
         (
             lambda: parameters(
                 accounts=StrategyAccounts(
-                    bindings=(safe("arb", ARBITRUM, SENDER), ACCOUNTS.bindings[1])
-                )
-            ),
-            "EOA account only",
-        ),
-        (
-            lambda: parameters(
-                accounts=StrategyAccounts(
                     bindings=(ACCOUNTS.bindings[0], eoa("base", ARBITRUM, RECIPIENT))
                 )
             ),
@@ -120,6 +112,23 @@ def safe(name, chain, address):
 def test_parameters_refuse_accounts_a_bridge_cannot_use(build, cause):
     with pytest.raises(ValidationError, match=cause):
         build()
+
+
+def test_a_safe_may_send_and_a_safe_may_receive():
+    """A Safe deposits through generated grants, and either account may be a Safe. A
+    Safe is a contract, so it keeps a wrapped native output; an EOA beside it does not."""
+    sending = StrategyAccounts(bindings=(safe("arb", ARBITRUM, SENDER), ACCOUNTS.bindings[1]))
+    receiving = StrategyAccounts(bindings=(ACCOUNTS.bindings[0], safe("base", BASE, RECIPIENT)))
+    both = StrategyAccounts(bindings=(sending.bindings[0], receiving.bindings[1]))
+    for accounts in (sending, receiving, both):
+        config = parameters(accounts=accounts)
+        assert config.target("move") == TARGET
+        assert config.bridge("move", AMOUNT).target == TARGET
+    wrapped = allocation(route=route(destination_asset=BASE_WETH))
+    for accounts in (receiving, both):
+        assert parameters(wrapped, accounts=accounts).bridge("move", AMOUNT).amount.amount == AMOUNT
+    with pytest.raises(ValidationError, match="native asset"):
+        parameters(wrapped, accounts=sending)
 
 
 def test_the_request_names_the_exact_route_amount_and_recipient():

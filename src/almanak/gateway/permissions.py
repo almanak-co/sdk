@@ -19,7 +19,7 @@ from almanak.gateway.roles_storage import (
 )
 from almanak.gateway.routing import backend_for
 from almanak.gateway.safe_fixture import calldata
-from almanak.models import SafeRoles
+from almanak.models import Eoa, SafeRoles
 
 
 def configuration_hash(config) -> str:
@@ -85,10 +85,13 @@ def generate(config, strategy, backend, *, connector, prepared=None) -> Permissi
     else:
         prepared.require_configuration(config, strategy)
         capabilities = prepared.capabilities
+    bindings = safe_bindings(config)
+    if not bindings:
+        # Nothing takes generated authority: a caller that asks anyway has mistaken
+        # the deployment's accounts, and an empty manifest would hide that.
+        raise ValueError("permission generation requires a bound Safe account; none is bound")
     partitions = []
-    for binding in config.accounts.bindings:
-        if not isinstance(binding.profile, SafeRoles):
-            raise ValueError("permission generation requires an explicit supported account adapter")
+    for binding in bindings:
         selected = backend_for(backend, binding.profile.fund.chain)
         selected.guard()
         block = selected.reader.pin_block("latest")
@@ -117,6 +120,18 @@ def generate(config, strategy, backend, *, connector, prepared=None) -> Permissi
         capabilities=capabilities,
         partitions=tuple(partitions),
     )
+
+
+def safe_bindings(config) -> tuple:
+    """The bound accounts that take generated authority: the Safes.
+
+    An EOA account signs with its own key and takes no grant, so a deployment may bind
+    one beside a Safe, as a bridge between a Safe and an EOA does. It has no partition.
+    """
+    for binding in config.accounts.bindings:
+        if not isinstance(binding.profile, (Eoa, SafeRoles)):
+            raise ValueError("permission generation requires an explicit supported account adapter")
+    return tuple(b for b in config.accounts.bindings if isinstance(b.profile, SafeRoles))
 
 
 def installation_started(reader, partition) -> bool:
@@ -170,9 +185,9 @@ def validate_manifest(config, manifest, *, connector):
         raise ValueError("permission manifest belongs to another authoritative configuration")
     connector.codec.validate(config, manifest.capabilities)
     if tuple(p.account for p in manifest.partitions) != tuple(
-        b.name for b in config.accounts.bindings
+        b.name for b in safe_bindings(config)
     ):
-        raise ValueError("manifest must retain each account authorization partition exactly once")
+        raise ValueError("manifest must retain each Safe authorization partition exactly once")
     for partition in manifest.partitions:
         binding = config.accounts.binding(partition.account)
         if binding.profile != partition.profile:

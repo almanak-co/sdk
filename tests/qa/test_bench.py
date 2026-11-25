@@ -27,8 +27,16 @@ def test_declared_matrix_and_new_chain_cannot_silently_lose_coverage():
     assert len(expected) > 0
     # Every reference proves EOA beside Safe/Roles, unless its connector declares only
     # Safe/Roles: HyperCore's Safe owns the account (blueprint 30).
-    # Across declares only EOA accounts: the Roles grants of a bridge are not built.
+    # Across declares Safe/Roles accounts with no fork run behind them, so the catalog
+    # leaves that profile out by the connector's own list and owes it nothing.
     # A composed reference that bridges proves EOA accounts alone for the same reason.
+    from almanak.connectors.across.support import ACCOUNT_PROFILES
+    from tests.qa.catalog import profiles_without_proof, required
+
+    assert "safe_roles" in ACCOUNT_PROFILES
+    assert profiles_without_proof() == {("across", "safe_roles")}
+    owed = {o.profile for o in required() if o.connector == ConnectorId("across") and o.profile}
+    assert owed == {"eoa"}
     eoa_only = {
         c.reference
         for c in cases

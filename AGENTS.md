@@ -361,9 +361,11 @@ independently.
   Provider availability is a separate fact.
 - A candidate deployment does not establish support. A supported pair needs a
   prepared offline backtest and an actual reference lifecycle proof for every
-  advertised core intent. Accepted exception, for Across only and stated under
-  "Bridges": its chains other than Arbitrum are declared on read-only mainnet
-  facts and offline tests. No other connector may declare a cell this way.
+  advertised core intent. Two accepted exceptions, for Across only and stated
+  under "Bridges": its chains other than Arbitrum are declared on read-only
+  mainnet facts and offline tests, and the Safe/Roles account profile of every
+  Across cell, Arbitrum included, is declared without a lifecycle proof. No
+  other connector may declare a cell or a profile this way.
 - Several cells declare production support ahead of their complete evidence
   package. Do not describe the open gates as complete: the full QA matrix with
   its reverse-fault case, the recovery-foundation nodes, the global offline and
@@ -387,9 +389,11 @@ independently.
   deposit on the source chain and opens the transfer, and reconciles its arrival
   on the destination chain and its refund on the source chain.
 - Current contract: Across declares fork mode, production and economic
-  backtests, for EOA accounts, on every chain with a pinned SpokePool:
+  backtests on every chain with a pinned SpokePool:
   Arbitrum, Base, Ethereum, OP Mainnet, BNB Smart Chain, Polygon, Robinhood
-  Chain and Avalanche. Each is the source of routes to the others. The
+  Chain and Avalanche. Its account profiles there are EOA and Safe/Roles. They
+  concern fork and production runs only: a backtest account is a simulation
+  profile and signs nothing. Each is the source of routes to the others. The
   declarations are derived from the pin table, never listed per chain. The
   declaration follows the chain a bridge leaves; the destination chain needs
   only its pinned SpokePool and a bound account. Every production declaration
@@ -409,7 +413,23 @@ independently.
   support` states this on each such row. The QA catalog and the hosted Fork
   Qualification selection leave these cells out by name, from the connector's
   own list, with the reason in the code; they never pass on an empty
-  selection. This excepts no other connector and no other rule.
+  selection. This excepts no other connector, and no other rule than the
+  Safe/Roles profile exception below.
+- Accepted, for Across only: the Safe/Roles account profile is declared on
+  every Across cell, Arbitrum included, without a reference lifecycle, a
+  production rehearsal or a Fork Qualification run. Basis: the maintainer
+  chose on 25 November 2026 to skip fork proofs for the bridge work,
+  Safe/Roles included. The profile is declared on the grants being held
+  offline to the calldata the connector's own planner builds, under a test
+  model of the Roles operators they use. Accepted risk: the grants were never
+  installed in a Roles module, and no Safe has bridged on a fork or on
+  mainnet, so a first Safe bridge is that path's first run. The connector's
+  own list (`profiles_without_proof` in `connectors/across/support.py`) names
+  the profile, with the reason in the code. The QA catalog leaves its
+  obligations and fork cases out by that list, the hosted Fork Qualification
+  summary names it as exercised by no selected case, and `almanak support`
+  states it on each row. The EOA profile of the Arbitrum cell still owes every
+  proof. This excepts no other connector, no other profile and no other rule.
 - Current contract: HyperEVM is the one network the SDK defines that Across
   serves and that has no pin. Its SpokePool passes the same checks. A deposit
   is prepared at the head, and so is the status read that closes an arrival
@@ -460,7 +480,18 @@ independently.
   evidence of what the venue would quote.
 - Current contract: a generated fork operator file provisions plain EOA
   accounts, with no fixture operator, for the accounts of a connector that
-  supports only EOAs on its chain, the receiving account of a bridge included.
+  supports only EOAs on its chain, and for the accounts of a bridge, the
+  receiving one included. Across declares Safe/Roles accounts, but its fork
+  binding asks for plain fixture accounts, because no fork run has installed a
+  bridge's grants.
+- Current contract: a standalone bridge has no fork run with a Safe. Every
+  fork run of one, supervised or in-process, reads the connector's fork
+  fixture, which funds EOA accounts only and refuses a Safe fund with that
+  cause, a hand-written operator file included. So the Safe/Roles profile of a
+  standalone bridge is declared for fork mode and cannot run there. A composed
+  deployment's fixture takes Safe funds, so a composed Safe bridge is reachable
+  on a fork only through a hand-written operator file that names Safe funds
+  and their fixture operators. No such run was ever made.
   A fork fixture chain is one a position acts on or the chain of an account a
   position names as its `destination_account`; another bound account adds
   none. The fork key file names the receiving account too, which signs nothing.
@@ -531,6 +562,58 @@ independently.
   asset out of the Safe by depositing at a near-zero output and filling the
   deposit itself. Only the gateway enforces the fee ceiling. Never describe the
   ceiling as on-chain enforcement.
+- Current contract: an Across allocation's source account is an EOA or a Safe
+  with Roles, and so is its destination account, in any combination. `ax
+  bridge` stays a plain-wallet command.
+- Current contract: the grants of a Safe that sends, derived by the connector
+  from the route capability, are two. The approval grant names the sent asset
+  as contract and pins the route's SpokePool as the only spender, for any
+  amount, zero included, so it serves the revocation and no other cleanup
+  grant exists. The deposit grant names the route's SpokePool proxy and the
+  function `deposit` in its `bytes32` form, with no native value and no
+  delegate call, and pins, by position: the Safe as depositor, the destination
+  fund as recipient, the sent token, the received token, the destination chain
+  number and an empty message. Left free: the input and the output amount,
+  each any nonzero value, because no grant bounds an amount and Roles cannot
+  relate the two; the exclusive relayer and the exclusivity parameter, any
+  value, because the venue chooses them per quote and states none in some; the
+  quote timestamp and the fill deadline, any nonzero value, because they are
+  per quote and the SpokePool holds them to its own buffers. Several routes of
+  one Safe are alternatives of whole argument tuples, never mixed. A Safe that
+  only receives takes no grant.
+- Current contract: the permission identities of a bridge are the sent
+  assets' code only. The SpokePool is left out: verification refuses every
+  dispatch of an account whose retained identity changed, the revocation
+  included, and a SpokePool that leaves its pin must refuse new deposits only.
+  The connector's own pin check holds the pool wherever a deposit or its
+  approval is planned, signed or sent. Consequence, shared with every
+  connector: a sent asset whose code changes stops the Safe's dispatches,
+  the revocation among them, until permissions are generated again.
+- Current contract: an Across deployment may bind a Safe and an EOA together.
+  Permission generation makes one partition per Safe, and a manifest holds
+  exactly the Safe accounts. An EOA account has no partition and is held to
+  the plain-account check at dispatch. Generation refuses a deployment that
+  binds no Safe. A Safe that only receives has a partition without grants: an
+  operator not yet in its role leaves the owner's `assignRoles` batch pending,
+  a wired one reports as installed, other wiring refuses, and its Safe and
+  Roles wiring is verified like any other. These paths are covered at
+  component level only.
+- Proposed, not accepted: the mixed binding above is built in the shared
+  permission code, so it holds for every connector and not for Across alone.
+  The maintainer has not decided that. Consequence: a deployment of other
+  connectors, composed or not, with one Safe and one EOA account now generates
+  a partition for the Safe only, where generation refused it before, and can
+  reach production. No fork run covers that shape. One component test covers
+  it, for a Comet Safe beside an EOA.
+- Current contract: a wrapped native output is admitted when the destination
+  account is a Safe, which is a contract and is paid the wrapped token, and
+  refused when it is an EOA. The Safe is verified on its own chain with its
+  permissions before a deployment is created. No fill of a wrapped native
+  output to a contract was ever read by this repository's arrival reader.
+- Current contract: the Safe/Roles profile is declared on every pinned chain;
+  each has the canonical Safe and Roles facts other connectors declare
+  Safe/Roles on. It is declared under the accepted exception stated near the
+  top of this section.
 - A transfer and its two accounts stay within one environment.
 - Proposed, not accepted: teardown waits for open transfers on both chains and
   does not bridge back.
@@ -868,7 +951,8 @@ independently.
   finality margin; its
   QA obligations are left out of the catalog rather than proven; the page span
   and the provider's log ranges were not exercised on its block time; and
-  every gate of the Arbitrum cell below is open for it too.
+  every gate of the Arbitrum cell below is open for it too, the Safe/Roles
+  gates among them.
 - Open gates of the production cell `across` on `eip155:42161`, none of which
   may be described as complete: no hosted Fork Qualification run has rehearsed
   either reference; no reverse-fault case exists for the cell, so a hosted
@@ -888,6 +972,23 @@ independently.
   reference keeps its production gas policy in `config.production.yaml` and
   its fork runs are gasless; and no mainnet transaction of this connector has
   been sent.
+- Open gates of the Safe/Roles profile on every Across cell, Arbitrum
+  included, none of which may be described as complete: no Safe/Roles bridge
+  has run on a fork or on mainnet; the generated grants were never installed
+  anywhere, so their acceptance by the Roles integrity check, their evaluation
+  of a real deposit and the dynamic comparison of the empty message are
+  unproven outside the offline model; the generated authority is new, so every
+  production cell owes a hosted Fork Qualification that exercises it, and none
+  has run; the weekly selection's lifecycle nodes for the bridge references run
+  their EOA fork operator files and the rehearsal is an EOA rehearsal, so a
+  passing run is no Safe/Roles evidence; no fork fixture, reference, operator
+  example or rehearsal binds a Safe to a bridge, and the fork fixture of a
+  standalone bridge refuses one; the mixed Safe and EOA
+  manifest, the grantless partition of a receiving Safe, a refund paid to a
+  Safe, a wrapped native output paid to a Safe, the composed Safe bridge and
+  the Safe's revocation are each covered at component level or not at all; and
+  the QA obligations of the profile are left out of the catalog rather than
+  proven.
 - Not built: a recent-window rule, without which `backtest recent` refuses a
   bridge with `unsupported_connector`; a claim for a deferred refund, which
   stops the source chain as unresolved; and an operator's resolution of a
@@ -1212,7 +1313,9 @@ independently.
   cell that declares production support, with the Safe/Roles lifecycle and the
   production EOA rehearsal. An empty selection or a declared cell no reference
   exercises fails the run, except the Across cells declared without proof
-  under "Bridges", which the selection leaves out by name. It uses identified Anvil forks and public Foundry
+  under "Bridges", which the selection leaves out by name. No selected case
+  exercises the Safe/Roles profile of a bridge, which the run's summary states.
+  It uses identified Anvil forks and public Foundry
   test keys only. Accepted exception: the rehearsal of an Across bridge asks
   the venue's live quote API, keyless and with public test addresses, so a
   venue outage fails that run. A failed run is not proof of support, and a

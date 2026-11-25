@@ -420,10 +420,37 @@ before further work. Invalidated history halts with pending evidence retained.
 
 ### Bridging through Across in production
 
-Across is declared for production with EOA accounts, for a bridge between any
-two of the chains with a pinned SpokePool: Arbitrum, Base, Ethereum, OP Mainnet,
-BNB Smart Chain, Polygon, Robinhood Chain and Avalanche. HyperEVM is not among
-them. `almanak support` lists each chain.
+Across is declared for production with EOA and Safe/Roles accounts, for a
+bridge between any two of the chains with a pinned SpokePool: Arbitrum, Base,
+Ethereum, OP Mainnet, BNB Smart Chain, Polygon, Robinhood Chain and Avalanche.
+HyperEVM is not among them. `almanak support` lists each chain.
+
+A Safe that sends takes two generated grants. The approval names the sent asset
+and the SpokePool as the only spender, for any amount, so it also serves the
+revocation. The deposit names the SpokePool's `deposit` and pins the Safe as
+depositor, the receiving fund as recipient, both tokens, the destination chain
+and an empty message, with no native value. The amounts, the venue's relayer,
+the quote time, the fill deadline and the exclusivity are free. A Safe that
+only receives takes no grant; its owner still assigns the operator its role,
+because every bound Safe is verified with its Roles wiring. One deployment may
+bind a Safe and an EOA: the EOA signs with its own key and has no permission
+partition.
+
+Roles cannot relate a deposit's output amount to its input. A compromised
+operator or gateway host can therefore move the bridged asset out of the Safe,
+by depositing at a near-zero output and filling the deposit itself. The fee
+ceiling `max_fee_bps` is a gateway check and nothing on chain enforces it.
+
+No Safe has bridged, on a fork or on mainnet, and the grants were never
+installed in a Roles module: they are held to the planner's own calldata by
+offline tests only. Treat a first Safe bridge as the first run of that path.
+A generated fork operator file still provisions plain EOAs for a bridge. A
+standalone bridge has no fork run with a Safe: its fork fixture funds EOA
+accounts only and refuses a Safe fund, in a hand-written operator file too. A
+strategy that composes a bridge with another connector can name Safe funds and
+their fixture operators in a hand-written fork operator file; that is the only
+way to a Safe bridge on a fork, and nobody has run it. `ax bridge` stays a
+plain-wallet command.
 
 Only a bridge that leaves Arbitrum has been run: its reference has fork
 lifecycle, refund and production rehearsal proofs. Every other source chain is

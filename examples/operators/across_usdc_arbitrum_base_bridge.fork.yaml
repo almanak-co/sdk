@@ -1,7 +1,8 @@
 # Operator execution context for a fork run of strategies/across_usdc_arbitrum_base_bridge.
 # Provider credentials stay in the selected --env-file. The account bindings are
 # placeholders: fork provisioning generates the actual fixture accounts, plain
-# EOAs on both chains, because Across deposits are supported from an EOA only.
+# EOAs on both chains. Across also declares Safe/Roles accounts, but no fork run
+# has installed a bridge's grants, so this file keeps the accounts that have run.
 # No venue is asked on a fork: the fork gateway constructs each quote from a
 # stated fee and the fork's own block time, and retains it under the source
 # across_fork_constructed.

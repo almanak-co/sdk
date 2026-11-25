@@ -98,6 +98,21 @@ def declared_without_proof() -> frozenset[Cell]:
     return frozenset(("across", str(chain)) for chain in chains())
 
 
+def profiles_without_proof() -> frozenset[tuple[str, str]]:
+    """Account profiles a connector declares that no selected case exercises.
+
+    Across declares Safe/Roles accounts with no fork run behind them. The lifecycle
+    nodes of a bridge reference run its own fork operator file, which provisions plain
+    EOAs, and the production rehearsal is an EOA rehearsal, so no node of this matrix
+    installs or uses the bridge's generated grants. The profile is left out by name,
+    from the connector's own list, and the summary says so: a passing run of a bridge
+    reference is never Safe/Roles evidence for its cell.
+    """
+    from almanak.connectors.across.support import profiles_without_proof as profiles
+
+    return frozenset(("across", profile) for profile in profiles())
+
+
 def production_cells(rows: dict[str, list[dict]]) -> set[Cell]:
     return (
         {
@@ -167,6 +182,12 @@ def summary(covering: dict[Cell, list[str]]) -> str:
         *(
             f"| `{connector}` | `{chain}` | {', '.join(f'`{n}`' for n in names)} |"
             for (connector, chain), names in covering.items()
+        ),
+        *(
+            f"\n`{connector}` declares `{profile}` accounts with no fork run: no selected "
+            "case exercises that profile, and a passing run is no evidence for it."
+            for connector, profile in sorted(profiles_without_proof())
+            if any(cell[0] == connector for cell in covering)
         ),
     ]
     return "\n".join(lines) + "\n"

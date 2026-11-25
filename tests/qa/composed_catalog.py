@@ -240,7 +240,8 @@ def composed_cases(source):
         scopes=scopes,
     )
     # A composed reference proves only the account profiles every component declares
-    # on its chains: a bridge that declares EOA accounts alone has no Safe/Roles case.
+    # on its chains and owes a proof for: a bridge, whose Safe/Roles profile is declared
+    # with no run behind it, has no Safe/Roles case.
     profiles = set.intersection(
         *(declared_profiles(scope.connector, scope.chains) for scope in scopes)
     )
