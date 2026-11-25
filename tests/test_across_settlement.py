@@ -6,11 +6,13 @@ The chains are fakes with evenly spaced blocks. No run mode is declared for Acro
 the `config` fixture installs a fork declaration for the test alone.
 """
 
+import json
 from datetime import timedelta
 
 import pytest
 from pydantic import ValidationError
 
+from almanak import external_effects
 from almanak.connectors.across import settlement
 from almanak.connectors.across.asset_effects import effects
 from almanak.connectors.across.domain import spoke_pool
@@ -26,10 +28,11 @@ from almanak.connectors.across.relay import (
 )
 from almanak.connectors.across.settlement_reader import MAXIMUM_EVENT_BLOCK_SPAN as SPAN
 from almanak.connectors.across.settlement_reader import decoded_fill
-from almanak.connectors.across.settlement_types import Scan
+from almanak.connectors.across.settlement_types import RefundOutcome, Scan
 from almanak.connectors.across.state import Checkpoint
 from almanak.gateway import external_effects as gateway_effects
 from almanak.gateway.ethereum import DataError
+from almanak.models import AssetAmount
 from almanak.work import merge, project, work_for
 from tests.across_settlement_support import (
     RELAYER,
@@ -434,6 +437,73 @@ def test_only_the_twelve_oldest_transfers_are_considered_for_one_refund(config):
     assert [t.open for t in state.transfers] == [False] * 12 + [True]
 
 
+def test_a_transfer_beyond_the_twelve_oldest_is_eligible_once_others_are_taken(config):
+    """Thirteen equal transfers, one block paying twelve of them and then one: the
+    second payment's window is the oldest transfers the first left."""
+    transfers = [flight(config, serial) for serial in range(13)]
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, *transfers), config, chain)
+    number = chain.head + 3
+    refunded(config, chain, number, [12 * AMOUNT], tx="0x" + "e1" * 32)
+    refunded(config, chain, number, [AMOUNT], tx="0x" + "e3" * 32)
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    assert (page.unsolicited, page.outcome.returned.amount) == ((), 13 * AMOUNT)
+    assert not any(t.open for t in state.transfers)
+
+
+def test_a_stray_payment_in_the_block_does_not_undo_the_joint_assignment(config):
+    a, b, c, d = four_sized(config)
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, a, b, c, d), config, chain)
+    number = chain.head + 3
+    refunded(config, chain, number, [30], tx="0x" + "e1" * 32)
+    refunded(config, chain, number, [7], tx="0x" + "e2" * 32)
+    refunded(config, chain, number, [35], tx="0x" + "e3" * 32)
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    assert page.outcome.transfers == (c.reference, b.reference, d.reference)
+    assert [p.amount.amount for p in page.unsolicited] == [7]
+
+
+def test_a_joint_search_past_its_budget_takes_the_payments_one_by_one(config, monkeypatch):
+    monkeypatch.setattr(settlement, "JOINT_SEARCH_STEPS", 1)
+    a, b, c, d = four_sized(config)
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, a, b, c, d), config, chain)
+    number = chain.head + 3
+    refunded(config, chain, number, [30], tx="0x" + "e1" * 32)
+    refunded(config, chain, number, [35], tx="0x" + "e3" * 32)
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    assert page.outcome.transfers == (a.reference, b.reference)
+    assert [p.amount.amount for p in page.unsolicited] == [35]
+
+
+def test_a_checkpoint_of_the_earlier_schema_is_refused_as_audit_only(config):
+    from almanak.connectors.composition import checkpoint_from_json
+
+    current = checkpoint(config).model_dump_json()
+    assert checkpoint_from_json(current).schema_version == 2
+    with pytest.raises(ValueError, match="audit-only.*across schema version 1"):
+        checkpoint_from_json(current.replace('"schema_version":2', '"schema_version":1'))
+
+
+@pytest.mark.parametrize("earlier", [None, {"tx_hash": "0x" + "e1" * 32}])
+def test_a_scan_page_of_the_earlier_unsolicited_representation_is_refused_by_name(config, earlier):
+    """A composed checkpoint has no version per connector, so its pages are checked by name."""
+    from almanak.connectors.across.settlement_types import refuse_earlier_pages
+
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, *four_sized(config)), config, chain)
+    wire = json.loads(state.model_dump_json())
+    refuse_earlier_pages(wire["external_scans"])
+    wire["external_scans"][-1]["unsolicited"] = earlier
+    with pytest.raises(ValueError, match="earlier unsolicited representation"):
+        refuse_earlier_pages(wire["external_scans"])
+    refuse_earlier_pages([{"kind": "gmx_liquidation_scan", "unsolicited": None}])
+
+
 def test_two_allocations_of_one_source_fund_and_asset_are_refused_at_configuration():
     from tests.across_support import allocation, parameters
 
@@ -552,6 +622,175 @@ def test_two_refunds_in_one_block_are_attributed_in_log_order_as_one_outcome(con
     chain.receipts["0x" + "e3" * 32] = {**chain.receipts["0x" + "e3" * 32], "status": "0x0"}
     with pytest.raises(DataError, match="receipt has changed"):
         settlement.audit(backend(config, chain), project(state, FORK_ARB))
+
+
+def test_the_gateway_refuses_a_refund_page_that_runs_past_its_first_payment(config):
+    """A page over an unattributed payment and a later refund would move the scan past
+    the refund. The gateway's re-derivation refuses it, and so does the page itself."""
+    from types import SimpleNamespace
+
+    one, chain = flight(config), here(FILL_DEADLINE + 50)
+    state = settle(proven(config, one), config, chain)
+    base = chain.head
+    refunded(config, chain, base + 3, [5], tx="0x" + "d0" * 32)
+    refunded(config, chain, base + 5, [AMOUNT], tx="0x" + "d1" * 32)
+    chain.head = base + 10
+    fake, local = backend(config, chain), project(state, chain.chain)
+    honest = settlement.reconcile(fake, local)
+    assert honest.end == chain.block(base + 3) and honest.outcome is None
+    wide = {**honest.model_dump(), "end": chain.block(base + 10)}
+    with pytest.raises(ValidationError, match="ends at the block of the payments it names"):
+        Scan.model_validate(wide)
+    # A runtime that drops the payment to pass the page's own check is refused too.
+    silent = Scan.model_validate({**wide, "unsolicited": ()})
+    committed = external_effects.commit(local, local, silent)
+    with pytest.raises(DataError, match="runs past its first refund payment"):
+        gateway_effects.verified_commit(fake, local, committed)
+    reference = SimpleNamespace(
+        side="refund", target=honest.target, transfer=None, start=honest.start, end=silent.end
+    )
+    with pytest.raises(DataError, match="runs past its first refund payment"):
+        settlement.reconcile(fake, local, reference=reference)
+    # The honest pages read both: the stray payment, then the refund.
+    state = settle(settle(state, config, chain), config, chain)
+    assert [p.end.number - base for p in state.external_scans[-2:]] == [3, 5]
+    assert state.transfers[0].resolution.returned.amount == AMOUNT
+
+
+def sized(transfer, amount):
+    sent = AssetAmount(asset=transfer.sent.asset, amount=amount)
+    return transfer.model_copy(update={"sent": sent})
+
+
+def four_sized(config):
+    """Transfers of 10, 20, 30 and 15, oldest first."""
+    a = flight(config)
+    b, c, d = later(a, 1), later(later(a, 1), 1), later(later(later(a, 1), 1), 1)
+    return [sized(t, amount) for t, amount in zip((a, b, c, d), (10, 20, 30, 15), strict=True)]
+
+
+def test_the_payments_of_one_block_are_assigned_together_so_none_is_stranded(config):
+    """Taken one by one, 30 would take the two oldest and leave 35 no set. Together,
+    30 pays the third and 35 the second and fourth, and every payment is credited."""
+    a, b, c, d = four_sized(config)
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, a, b, c, d), config, chain)
+    number = chain.head + 3
+    refunded(config, chain, number, [30], tx="0x" + "e1" * 32)
+    refunded(config, chain, number, [35], tx="0x" + "e3" * 32)
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    assert (page.outcome.returned.amount, page.unsolicited) == (65, ())
+    assert page.outcome.transfers == (c.reference, b.reference, d.reference)
+    assert [t.open for t in state.transfers] == [True, False, False, False]
+    # The oldest transfer's own refund still resolves it.
+    refunded(config, chain, chain.head + 3, [10], tx="0x" + "e4" * 32)
+    state = settle(delivered(state), config, chain)
+    assert not any(t.open for t in state.transfers)
+
+
+def test_without_a_complete_assignment_each_payment_takes_what_the_earlier_left(config):
+    a, b, c, d = four_sized(config)
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, a, b, c, d), config, chain)
+    number = chain.head + 3
+    refunded(config, chain, number, [30], tx="0x" + "e1" * 32)
+    refunded(config, chain, number, [7], tx="0x" + "e3" * 32)
+    refunded(config, chain, number, [45], tx="0x" + "e5" * 32)
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    # 30 takes the two oldest, 7 fits nothing, 45 takes the two that are left.
+    assert page.outcome.transfers == (a.reference, b.reference, c.reference, d.reference)
+    assert [p.amount.amount for p in page.unsolicited] == [7]
+    assert page.outcome.returned.amount == 75
+
+
+def test_refunds_in_two_blocks_of_one_span_are_two_pages(config):
+    """A page takes the payments of its first payment block only. A refund two blocks
+    later is read by the next page, against what the first left waiting."""
+    one, two, chain = flight(config), flight(config, 1), here(FILL_DEADLINE + 50)
+    state = settle(proven(config, one, two), config, chain)
+    base = chain.head
+    refunded(config, chain, base + 3, [AMOUNT], tx="0x" + "e1" * 32)
+    refunded(config, chain, base + 5, [AMOUNT], tx="0x" + "e3" * 32)
+    chain.head = base + 10
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    assert page.end == chain.block(base + 3) and page.outcome.companions == ()
+    assert (page.outcome.returned.amount, page.outcome.transfers) == (AMOUNT, (one.reference,))
+    assert [t.open for t in state.transfers] == [False, True]
+    state = settle(delivered(state), config, chain)
+    assert state.external_scans[-1].end == chain.block(base + 5)
+    assert state.external_scans[-1].outcome.transfers == (two.reference,)
+
+
+def test_a_mismatching_and_a_matching_refund_in_one_block(config):
+    one, chain = flight(config), here(FILL_DEADLINE + 50)
+    state = settle(proven(config, one), config, chain)
+    number = chain.head + 3
+    refunded(config, chain, number, [AMOUNT], payments=[AMOUNT - 1], tx="0x" + "e1" * 32)
+    refunded(config, chain, number, [AMOUNT], tx="0x" + "e3" * 32)
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    assert (page.outcome.tx_hash, page.outcome.returned.amount) == ("0x" + "e3" * 32, AMOUNT)
+    (stray,) = page.unsolicited
+    assert (stray.tx_hash, stray.amount.amount, stray.leaf_amount.amount) == (
+        "0x" + "e1" * 32,
+        AMOUNT - 1,
+        AMOUNT,
+    )
+    assert state.transfers[0].resolution.returned.amount == AMOUNT
+
+
+@pytest.mark.parametrize(
+    "change", [{"status": "0x0"}, {"blockNumber": "0x1"}, {"blockHash": "0x" + "00" * 32}]
+)
+def test_a_companion_needs_its_own_canonical_successful_receipt(config, change):
+    one, two, chain = flight(config), flight(config, 1), here(FILL_DEADLINE + 50)
+    state = settle(proven(config, one, two), config, chain)
+    number = chain.head + 3
+    refunded(config, chain, number, [AMOUNT], tx="0x" + "e1" * 32)
+    refunded(config, chain, number, [AMOUNT], tx="0x" + "e3" * 32)
+    outcome = settle(state, config, chain).external_scans[-1].outcome.model_dump()
+    (companion,) = outcome["companions"]
+    offered = {**companion, "receipt": {**companion["receipt"], **change}}
+    with pytest.raises(ValidationError, match="canonical successful receipt"):
+        RefundOutcome.model_validate({**outcome, "companions": (offered,)})
+
+
+def test_the_report_and_dashboard_tell_waiting_from_followed_by_a_payment(config):
+    """A transfer proven unfilled waits for its refund. Only one whose fill deadline an
+    unattributed payment of its bridge followed is named as possibly stuck."""
+    from almanak.connectors.across.connector import AcrossProjection
+    from almanak.connectors.across.dashboard import project as dashboard
+
+    one = flight(config)
+    late = later(one, 400)
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, one, late), config, chain)
+    report = AcrossProjection.report(state)
+    assert report["awaiting_refund"] == [one.reference, late.reference]
+    assert "awaiting_refund_note" not in report
+    assert "awaiting_refund_after_unattributed_payment" not in report
+    context, _ = dashboard(state)
+    dataset = context.datasets["transfers"]
+    assert [row["refund"] for row in dataset.rows] == ["awaiting", "awaiting"]
+    assert "never applied" not in dataset.coverage
+    # A stray payment after the first deadline and before the second concerns the first.
+    refunded(config, chain, chain.head + 3, [5], tx="0x" + "d0" * 32)
+    state = settle(state, config, chain)
+    assert state.external_scans[-1].end.timestamp < FILL_DEADLINE + 400
+    report = AcrossProjection.report(state)
+    assert report["awaiting_refund"] == [one.reference, late.reference]
+    assert report["awaiting_refund_after_unattributed_payment"] == [one.reference]
+    assert "never applied" in report["awaiting_refund_note"]
+    context, _ = dashboard(state)
+    dataset = context.datasets["transfers"]
+    assert [row["refund"] for row in dataset.rows] == [
+        "awaiting; an unattributed payment followed its fill deadline",
+        "awaiting",
+    ]
+    assert "never applied" in dataset.coverage
 
 
 def test_a_second_refund_of_a_block_cannot_take_a_transfer_the_first_paid(config):
@@ -962,3 +1201,17 @@ def test_a_crash_after_the_arrival_commit_does_not_record_it_twice(config):
     assert arrivals(final) == [page.outcome] and final.external_scans.count(page) == 1
     assert all(p.outcome is None for p in final.external_scans if p != page)
     assert final.transfers[0].resolution.received == page.outcome.received
+
+
+def test_an_unattributed_payment_of_another_bridge_concerns_no_transfer_of_this_one(config):
+    from types import SimpleNamespace
+
+    from almanak.connectors.across.settlement_types import followed_by_unattributed
+
+    one, chain = flight(config), here(FILL_DEADLINE + 50)
+    state = settle(proven(config, one), config, chain)
+    refunded(config, chain, chain.head + 3, [5], tx="0x" + "d0" * 32)
+    state = settle(state, config, chain)
+    assert followed_by_unattributed(state, one)
+    other = SimpleNamespace(allocation="another", fill_deadline=one.fill_deadline)
+    assert not followed_by_unattributed(state, other)

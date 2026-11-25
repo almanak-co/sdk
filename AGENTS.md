@@ -598,8 +598,8 @@ independently.
   value in flight until its refund is measured. A transfer goes from open to
   unfilled or to arrived on the destination chain and from unfilled to
   refunded on the source chain, and never otherwise.
-- Proposed, not accepted: a refund is read only for transfers proven unfilled
-  and never inferred from time. With the destination chain unavailable refunds
+- Accepted, as part of the unfilled proof and the attribution rule: a refund
+  is read only for transfers proven unfilled and never inferred from time. With the destination chain unavailable refunds
   wait, and the source chain keeps working. The refund scan also waits while
   its page would pass the fill deadline of a transfer of the same allocation
   that is in flight and not yet proven unfilled.
@@ -612,7 +612,17 @@ independently.
   interchangeable, so the one with the oldest fill deadlines is taken, then
   the lowest references. Consequence: a foreign payment of an equal amount can
   resolve a transfer, and that transfer's own later refund is then the
-  unattributed one. The totals stay right.
+  unattributed one. Within one block the amount credited equals the amount of
+  the attributed payments. Across blocks it need not equal what the fund's own
+  refunds paid: a payment attributed to an older set of equal sum can leave a
+  later own refund with no set, and that refund is then an unattributed
+  payment, in the wallet and in no inventory, while a transfer it was meant
+  for stays open and its deployment unclosed.
+- Unresolved, a candidate accepted risk the maintainer has not decided: dust
+  in the same leaf. A stranger's expired deposit that names the fund as
+  depositor can be summed into the same refund leaf entry as the fund's own
+  refund. The payment then matches no set, the own refund is unattributed and
+  the transfer stays open.
 - Proposed, not accepted: unsolicited inflow. Anyone can deposit naming the
   fund as depositor and let it expire. A refund-leaf payment that matches no
   set is retained in its committed page with its transaction and amount,
@@ -620,12 +630,21 @@ independently.
   and the scan continues. It is no outcome and raises no accounting issue of
   one, because such an issue stops new exposure on the chain and a stranger's
   dust would then freeze a strategy.
-- Proposed, not accepted: attribution considers the 12 oldest transfers proven
-  unfilled of an allocation.
+- Proposed, not accepted: attribution of one payment considers the 12 oldest
+  transfers proven unfilled of an allocation that no other payment of the
+  block took.
+- Accepted: a refund page ends at the first block that holds a refund-leaf
+  payment to the fund, and the payments it names are in that block. The
+  gateway refuses a page that runs past it, so no scan continues beyond a
+  refund it never read.
 - Accepted: several refund payments to one fund in one block are settled in
-  that block's page, in the block's own log order, and stop nothing. Each takes
-  its set from the transfers still waiting after the payments before it, so
-  none takes a transfer another paid. The page's one refund outcome names the
+  that block's page and stop nothing. The payments that fit some set on their
+  own are assigned together: when some assignment gives each of them its own
+  disjoint set of the transfers waiting, the first such in the tie rule's
+  order, payment by payment in log order, is taken, and the other payments
+  then take in log order what is left. Without such an assignment, or past
+  the search's fixed budget of 10,000 sets tried, each payment in log order
+  takes the oldest set the earlier ones left. No payment takes a transfer another paid. The page's one refund outcome names the
   first attributed transaction, retains the receipts of the others, resolves
   every transfer they pay and returns their sum. A payment of the block that
   matches no set is an unattributed refund payment.
@@ -789,7 +808,11 @@ independently.
   either reference; no reverse-fault case exists for the cell, so a hosted
   cell QA run reports that gap and does not pass; the recovery-foundation
   nodes, the global offline and CRAP gates over retained evidence, and the
-  evidence review are open; a refund has been read from another party's
+  evidence review are open; the `revoke` action is proven on forks only,
+  after a constructed quote, because no rehearsal reaches a revoke; the
+  composed reference's refund credit, its fork keeper and the full-repay hold
+  are unrehearsed, the hold being proven at component level only; a refund
+  has been read from another party's
   mainnet refund execution and from fork-constructed bundles, and a slow fill
   from constructed logs only, never for a transfer of this repository; no gas
   reference exists for an EOA bridge, so `almanak check` compares a bridge's
@@ -804,6 +827,18 @@ independently.
   stops the source chain as unresolved; and an operator's resolution of a
   transfer whose refund was paid unattributed. The rules above still marked
   proposed are ones the production declaration rests on.
+- Current contract: the Across checkpoint is schema version 2. A version 1
+  checkpoint, which retained one unattributed payment per refund page, is
+  audit-only and refused for execution. A composed checkpoint carries no
+  version of its components: one written before with an unattributed Across
+  payment fails validation. Such checkpoints exist on forks only.
+- Known limit: a full empty scan page is retained, and every retained page of
+  a chain is audited, two block reads and one log query each, whenever that
+  chain's history is audited. GMX liquidation pages share this. A refund scan
+  on Arbitrum commits a full page every 2,000 blocks, about eight minutes, so
+  a transfer that waits for a refund that never comes grows the checkpoint by
+  about 170 pages a day and the audit by as many log queries. Nothing bounds
+  it; pages are not dropped.
 
 ## Hyperliquid
 

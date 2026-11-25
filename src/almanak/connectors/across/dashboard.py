@@ -5,7 +5,12 @@ amount that was not measured has no figure here, never a zero.
 """
 
 from almanak.connectors.across.models import Parameters
-from almanak.connectors.across.settlement_types import ArrivalOutcome, RefundOutcome
+from almanak.connectors.across.settlement_types import (
+    AWAITING_NOTE,
+    ArrivalOutcome,
+    RefundOutcome,
+    followed_by_unattributed,
+)
 from almanak.dashboard.bound import MAX_TABLE_ROWS
 from almanak.dashboard.models import Column, Context, Ref, Scope, Value
 from almanak.dashboard.projection import snapshot
@@ -33,6 +38,18 @@ def status(transfer) -> str:
     if isinstance(transfer.resolution, Refunded):
         return "refunded"
     return "unfilled" if transfer.unfilled else "open"
+
+
+AWAITING = "awaiting"
+AWAITING_AFTER_PAYMENT = "awaiting; an unattributed payment followed its fill deadline"
+
+
+def refund_status(state, transfer) -> str:
+    """Whether a transfer proven unfilled waits for its refund, and whether an
+    unattributed payment that could have been that refund was read meanwhile."""
+    if not (transfer.open and transfer.unfilled):
+        return ""
+    return AWAITING_AFTER_PAYMENT if followed_by_unattributed(state, transfer) else AWAITING
 
 
 def deposits(state) -> dict:
@@ -102,16 +119,22 @@ def transfer_values(state, index, transfer, deposit, settled) -> dict:
     return values
 
 
-def row(index, transfer, deposit) -> dict:
+def row(state, index, transfer, deposit) -> dict:
     return {
         "allocation": transfer.allocation,
         "account": transfer.source.account,
         "destination": transfer.destination.account,
         "status": status(transfer),
+        "refund": refund_status(state, transfer),
         "quote_source": deposit.operation.quote.source if deposit else "not retained",
         "fill_deadline": utc(int(transfer.fill_deadline.timestamp())),
         **{name: Ref(ref=f"transfer-{index}-{name}") for name in AMOUNTS},
     }
+
+
+def coverage(rows) -> str:
+    followed = any(row["refund"] == AWAITING_AFTER_PAYMENT for row in rows)
+    return f"{COVERAGE} {AWAITING_NOTE}" if followed else COVERAGE
 
 
 def transfer_table(state):
@@ -125,7 +148,7 @@ def transfer_table(state):
         values.update(
             transfer_values(state, index, transfer, deposit, ended.get(transfer.reference))
         )
-        rows.append(row(index, transfer, deposit))
+        rows.append(row(state, index, transfer, deposit))
     dataset = accounts_dataset(
         keep=True,
         columns=(
@@ -133,6 +156,7 @@ def transfer_table(state):
             Column(key="account", label="Source account"),
             Column(key="destination", label="Destination account"),
             Column(key="status", label="Status"),
+            Column(key="refund", label="Refund"),
             Column(key="quote_source", label="Quote source"),
             Column(key="fill_deadline", label="Fill deadline"),
             Column(key="sent", label="Sent", kind="value"),
@@ -141,7 +165,7 @@ def transfer_table(state):
             Column(key="returned", label="Returned", kind="value"),
         ),
         rows=tuple(rows),
-        coverage=COVERAGE,
+        coverage=coverage(rows),
         truncated=len(state.transfers) > len(kept),
     )
     return values, dataset

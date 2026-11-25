@@ -272,6 +272,25 @@ def test_a_refund_makes_source_cash_whole_and_credits_nothing_on_the_destination
         validate_inventory(project(state, FORK_BASE), supply(state, 1))
 
 
+def test_a_composed_checkpoint_with_an_earlier_across_page_is_refused_by_name(
+    monkeypatch,
+    config,  # noqa: F811
+):
+    import json
+
+    from almanak.connectors.composition import checkpoint_from_json
+
+    state, _ = deposited(monkeypatch, config)
+    state = settle(state, there())
+    current = state.model_dump_json()
+    assert checkpoint_from_json(current) == state
+    wire = json.loads(current)
+    for earlier in (None, {"tx_hash": "0x" + "e1" * 32}):
+        wire["external_scans"][-1]["unsolicited"] = earlier
+        with pytest.raises(ValueError, match="earlier unsolicited representation"):
+            checkpoint_from_json(json.dumps(wire))
+
+
 def test_each_component_sees_only_its_own_pages_outcomes_and_transfers(
     monkeypatch,
     config,  # noqa: F811

@@ -1,8 +1,9 @@
 """Settle transfers in flight from canonical pages: arrival where it lands, refund where it left.
 
-A page is committed only when it settles a transfer, ends an arrival scan past the fill
-deadline, anchors a scan's first block, or is full. A shorter empty page is read again
-on the next tick, so waiting grows no history.
+A page is committed only when it settles a transfer, holds an unattributed refund
+payment, ends an arrival scan past the fill deadline, anchors a scan's first block, or
+is full. A shorter empty page is read again on the next tick. Full empty pages are
+retained and audited, so a scan that waits grows by one page per span of blocks.
 """
 
 from datetime import UTC, datetime
@@ -29,6 +30,9 @@ from almanak.models import AssetAmount
 SPAN = chain.MAXIMUM_EVENT_BLOCK_SPAN
 # One refund can pay several transfers. Attribution enumerates their subsets, so it is bounded.
 MAXIMUM_REFUND_CANDIDATES = 12
+# How many sets the joint assignment of one block's payments may try before it falls back
+# to taking the payments one by one.
+JOINT_SEARCH_STEPS = 10_000
 
 
 def seconds(instant) -> int:
@@ -219,7 +223,7 @@ def checked(page, first, reference, cross_check):
 def candidates(state, target, timestamp: int):
     """The transfers a refund mined at `timestamp` may pay: this allocation's, proven
     unfilled by the destination chain, past their fill deadline. Oldest deadline first,
-    then by reference, and only the oldest few: attribution enumerates their subsets."""
+    then by reference."""
     waiting = [
         transfer
         for transfer in state.transfers
@@ -230,24 +234,7 @@ def candidates(state, target, timestamp: int):
         and seconds(transfer.fill_deadline) < timestamp
     ]
     waiting.sort(key=lambda transfer: (transfer.fill_deadline, transfer.reference))
-    return waiting[:MAXIMUM_REFUND_CANDIDATES]
-
-
-def attributed(total: int, waiting) -> tuple:
-    """The transfers a refund of `total` pays, or none when it matches no set of them.
-
-    A refund returns each transfer's whole sent amount. Sets of equal sum are
-    interchangeable: the totals are the same whichever is taken, so the one with the
-    oldest transfers is. A foreign payment of an equal amount can therefore resolve a
-    transfer; that transfer's own later refund is then the unattributed one.
-    """
-    matches = [
-        subset
-        for size in range(1, len(waiting) + 1)
-        for subset in combinations(range(len(waiting)), size)
-        if sum(waiting[index].sent.amount for index in subset) == total
-    ]
-    return tuple(waiting[index] for index in min(matches)) if matches else ()
+    return waiting
 
 
 def refund_payment(receipt, target) -> tuple[int, int, bool] | None:
@@ -290,22 +277,87 @@ def unattributed(target, row, named: int, paid: int, exact: bool) -> Unsolicited
     )
 
 
-def settled(state, target, block, payments):
-    """Attribute the block's refund payments one after the other, in log order.
+def matching_sets(total: int, waiting, free):
+    """Index sets of the free transfers whose sent amounts sum to `total`, oldest first.
 
-    Each exact payment takes the oldest set of the transfers still waiting whose sent
-    amounts sum to it, so a later payment of the block cannot take a transfer an earlier
-    one paid. A payment that matches no set, or that the SpokePool paid in another
-    amount than its leaf names, is attributed to nothing.
+    Only the oldest few free transfers are considered, because their subsets are
+    enumerated. A transfer another payment of the block took is not free, so a younger
+    one moves into the window.
+    """
+    window = free[:MAXIMUM_REFUND_CANDIDATES]
+    return sorted(
+        subset
+        for size in range(1, len(window) + 1)
+        for subset in combinations(window, size)
+        if sum(waiting[index].sent.amount for index in subset) == total
+    )
+
+
+def joint(totals, waiting, free, budget):
+    """Disjoint sets of waiting transfers, one per total, or None when there are none.
+
+    The first complete assignment in the tie rule's order: the first payment takes its
+    oldest possible set, the next the oldest of what that leaves, and so on. The search
+    is bounded: past its budget of steps it gives up, as if there were none.
+    """
+    if not totals:
+        return ()
+    for subset in matching_sets(totals[0], waiting, free):
+        budget[0] -= 1
+        if budget[0] < 0:
+            return None
+        rest = joint(totals[1:], waiting, tuple(i for i in free if i not in subset), budget)
+        if rest is not None:
+            return (subset, *rest)
+    return None
+
+
+def one_by_one(totals, waiting, free):
+    """Each payment in log order takes its oldest set of what the earlier ones left."""
+    taken = []
+    for total in totals:
+        matches = matching_sets(total, waiting, free)
+        taken.append(matches[0] if matches else ())
+        free = tuple(i for i in free if i not in taken[-1])
+    return taken
+
+
+def assigned(totals, waiting):
+    """One set of waiting transfers per payment total, empty where none is taken.
+
+    Payments that fit some set on their own are assigned together, so that none of
+    them is left without one where a complete assignment exists; a stranger's payment
+    that fits nothing does not enter that search. The others then take, in log order,
+    what is left. Without a complete assignment every payment is taken one by one.
+    """
+    everything = tuple(range(len(waiting)))
+    fitting = [n for n, total in enumerate(totals) if matching_sets(total, waiting, everything)]
+    together = joint([totals[n] for n in fitting], waiting, everything, [JOINT_SEARCH_STEPS])
+    if together is None:
+        return one_by_one(totals, waiting, everything)
+    sets = dict(zip(fitting, together, strict=True))
+    used = {index for subset in together for index in subset}
+    rest = [n for n in range(len(totals)) if n not in sets]
+    left = tuple(i for i in everything if i not in used)
+    sets.update(zip(rest, one_by_one([totals[n] for n in rest], waiting, left), strict=True))
+    return [sets[n] for n in range(len(totals))]
+
+
+def settled(state, target, block, payments):
+    """Attribute the block's refund payments to disjoint sets of waiting transfers.
+
+    All payments of a block are known at once, so they are assigned together, under
+    `assigned`. A payment that fits no set is attributed to nothing, and one the
+    SpokePool paid in another amount than its leaf names is never attributed.
     """
     waiting = candidates(state, target, block.timestamp)
+    sets = iter(assigned([paid for _, _, _, paid, agrees in payments if agrees], waiting))
     refunds, left = [], []
-    for row, receipt, named, paid, exact in payments:
-        taken = attributed(paid, waiting) if exact else ()
+    for row, receipt, named, paid, agrees in payments:
+        taken = tuple(waiting[index] for index in next(sets)) if agrees else ()
         if not taken:
-            left.append(unattributed(target, row, named, paid, exact))
+            left.append(unattributed(target, row, named, paid, agrees))
             continue
-        waiting = [transfer for transfer in waiting if transfer not in taken]
         refunds.append((row, receipt, paid, taken))
     return refunds, tuple(left)
 
@@ -386,7 +438,11 @@ def refund_page(backend, state, target, earliest: int, reference=None):
     payments, block = leaf_payments(reader, target, events)
     outcome, left = None, ()
     if block is not None:
-        if reference is None and block.number < end.number:
+        if block.number < end.number:
+            # A page ends at its first refund-leaf payment: a wider one would let the
+            # scan continue past refunds it never read.
+            if reference is not None:
+                raise chain.integrity("Across refund page runs past its first refund payment")
             end, events = block, chain.refund_logs(reader, token, pool, fund, start, block)
         refunds, left = settled(state, target, block, payments)
         outcome = refund_outcome(target, block, refunds) if refunds else None
