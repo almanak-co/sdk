@@ -6,6 +6,7 @@ The chains are fakes with evenly spaced blocks. No run mode is declared for Acro
 the `config` fixture installs a fork declaration for the test alone.
 """
 
+import json
 from datetime import timedelta
 
 import pytest
@@ -484,8 +485,23 @@ def test_a_checkpoint_of_the_earlier_schema_is_refused_as_audit_only(config):
 
     current = checkpoint(config).model_dump_json()
     assert checkpoint_from_json(current).schema_version == 2
-    with pytest.raises(ValueError, match="audit-only"):
+    with pytest.raises(ValueError, match="audit-only.*across schema version 1"):
         checkpoint_from_json(current.replace('"schema_version":2', '"schema_version":1'))
+
+
+@pytest.mark.parametrize("earlier", [None, {"tx_hash": "0x" + "e1" * 32}])
+def test_a_scan_page_of_the_earlier_unsolicited_representation_is_refused_by_name(config, earlier):
+    """A composed checkpoint has no version per connector, so its pages are checked by name."""
+    from almanak.connectors.across.settlement_types import refuse_earlier_pages
+
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, *four_sized(config)), config, chain)
+    wire = json.loads(state.model_dump_json())
+    refuse_earlier_pages(wire["external_scans"])
+    wire["external_scans"][-1]["unsolicited"] = earlier
+    with pytest.raises(ValueError, match="earlier unsolicited representation"):
+        refuse_earlier_pages(wire["external_scans"])
+    refuse_earlier_pages([{"kind": "gmx_liquidation_scan", "unsolicited": None}])
 
 
 def test_two_allocations_of_one_source_fund_and_asset_are_refused_at_configuration():

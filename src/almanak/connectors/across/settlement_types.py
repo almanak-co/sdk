@@ -280,3 +280,19 @@ def followed_by_unattributed(state, transfer) -> bool:
         and page.end.timestamp > deadline
         for page in getattr(state, "external_scans", ())
     )
+
+
+def refuse_earlier_pages(pages) -> None:
+    """Refuse wire pages written before `unsolicited` became a list, naming the cause.
+
+    A composed checkpoint carries no schema version per connector, so its Across pages are
+    checked on the wire before the strict model would refuse them without saying why.
+    """
+    for page in pages:
+        if page.get("kind") != "across_scan" or "unsolicited" not in page:
+            continue
+        if not isinstance(page["unsolicited"], list):
+            raise ValueError(
+                "Across scan page holds the earlier unsolicited representation, null or one "
+                "payment where a list is required; this checkpoint is not restored"
+            )
