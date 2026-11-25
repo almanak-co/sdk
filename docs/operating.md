@@ -103,12 +103,17 @@ under the lock. Renewals therefore never wait behind a slow plan or signature.
 They do wait behind a send, which can take longer than the lease on a slow
 endpoint. That time does not count against the lease: a request that held the
 lock under a current lease leaves the lease running for its full duration from
-the moment the lock is released, whether the request committed or failed, and the
-coordinator's renewal waits for its own request instead of giving up. No other
-coordinator can be admitted while the lock is held. A lease that is lost is
-reported with the renewal failure that lost it. A direct action then names the
-command that resolves its record, `almanak ax recover --record <path>` with the
-record's own path; the record is kept only while it holds a signed step.
+the end of the request, whether the request committed or failed, and the
+coordinator's renewal waits for its own request instead of giving up. The new
+expiry takes effect only when the gateway commits it; storage that fails that
+commit leaves the expiry the request was admitted under, and the commit's own
+time counts against the lease. No other coordinator can be admitted while the
+lock is held. A lease that is lost is reported with the renewal failure that
+lost it. A direct action then names the command that resolves its record,
+`almanak ax recover --record <path>` with the record's own path, to run when the
+command reports `record_kept`. The record is kept while it may hold a signed
+step, which includes a record that cannot be read, and while another command
+holds its claim; otherwise it is removed and there is nothing to recover.
 Replacement families keep the lock for their whole request. Each
 `gateway_request` log line reports provider calls by method (`rpc_calls`,
 `rpc`), HTTP exchanges with the provider (`rpc_round_trips`, a batch counting

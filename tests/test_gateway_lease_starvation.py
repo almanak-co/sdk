@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from almanak import ax_actions
+from almanak.gateway.client import Fenced
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.service import GatewayService
 from almanak.operator_runtime import OperatorRuntime
@@ -46,6 +47,9 @@ class SlowSend(Backend):
         self.fail = fail
         self.slowed = False
         self.submissions = []
+        # What each send was asked to send, taken before any injected failure.
+        self.sent = []
+        self.signed = []
 
     def audit_history(self, state):
         pass
@@ -60,11 +64,16 @@ class SlowSend(Backend):
         return super().observe()
 
     def sign(self, state=None):
-        return super().sign()
+        signed = super().sign()
+        self.signed.append(signed.operation.kind)
+        return signed
 
     def submit(self, state):
         pending = state.pending
         self.submissions.append(pending.operation.kind)
+        self.sent.append(
+            (pending.operation.kind, pending.attempt_id, pending.raw_transaction, pending.tx_hash)
+        )
         if pending.operation.kind == "supply" and not self.slowed:
             self.slowed = True
             time.sleep(HOLD)
@@ -143,6 +152,10 @@ def test_a_send_slower_than_the_lease_keeps_the_lease_and_completes(tmp_path, re
     assert len(backend.broadcasts) == len(set(backend.broadcasts)) == 2
     assert backend.submissions.count("supply") == (2 if fail else 1)
     assert backend.submissions.count("approve") == 1
+    # The retry sends the recorded attempt itself: one signature, the same attempt and bytes.
+    assert backend.signed.count("supply") == 1
+    supplies = {item for item in backend.sent if item[0] == "supply"}
+    assert len(supplies) == 1
 
 
 def test_a_signed_step_is_in_the_journal_before_its_bytes_leave(tmp_path, recorded):
@@ -299,6 +312,9 @@ def test_a_lost_lease_names_the_renewal_failure_that_lost_it(tmp_path, recorded)
     # The command that resolves a kept record, with this record's own path; without
     # `--record` it only lists them.
     assert f"`almanak ax recover --record {shlex.quote(str(desk.store.path.parent))}`" in message
+    # Raised before the command decides whether to keep the record, so it names the
+    # event that says it was kept.
+    assert "if the command reports `record_kept`" in message
     assert "resume to recover" not in message
     assert refused.value.__cause__ is client.lease_error
     assert client.lease_error.kind == "gateway_unavailable"
@@ -367,8 +383,8 @@ def test_a_request_answered_while_the_renewal_waited_counts_at_its_next_failure(
     spent = threading.Event()
     progressed = client.fenced.progressed
 
-    def spending():
-        result = progressed()
+    def spending(deadline):
+        result = progressed(deadline)
         if result:
             spent.set()
             client.healed.set()
@@ -396,7 +412,7 @@ def test_a_request_answered_while_the_renewal_waited_counts_at_its_next_failure(
 def test_a_send_slower_than_the_lease_confirms_the_lease_from_its_answer(
     tmp_path, recorded, monkeypatch
 ):
-    """The lease runs from the release of the lock, so the renewal counts it from the
+    """The lease runs from the end of the request, so the renewal counts it from the
     answer: renewals that then fail for a while do not end a lease that still runs."""
     service, client = leased(tmp_path, recorded)
     dispatch = service.dispatch
@@ -463,3 +479,79 @@ def test_a_storage_failure_while_a_signed_step_waits_is_held_and_asked_again(tmp
     assert state.pending is None
     assert len(backend.broadcasts) == len(set(backend.broadcasts)) == 2
     assert backend.submissions.count("supply") == 1
+
+
+def fenced_request(fenced, *, fail=None):
+    """One fenced request, answered or failed as `fail` says."""
+    with fenced:
+        if fail is not None:
+            raise fail
+
+
+def test_an_answer_during_a_renewal_still_counts_at_the_next_failure():
+    """A renewal covers only the requests answered before it was sent. One answered
+    while it was in flight may have extended the lease in a later commit."""
+    fenced = Fenced()
+    before = fenced.count()
+    # Answered between the renewal's send and its answer, with a refusal: the gateway
+    # extended the lease, but the client confirmed nothing.
+    with pytest.raises(DataError):
+        fenced_request(fenced, fail=DataError("transport", "provider failed"))
+    fenced.covered(before)
+    assert fenced.progressed(time.monotonic())
+    # Counted once.
+    assert not fenced.progressed(time.monotonic())
+
+
+def test_only_a_request_running_at_the_deadline_keeps_the_renewal_waiting():
+    fenced = Fenced()
+    entered, leave = threading.Event(), threading.Event()
+
+    def running():
+        with fenced:
+            entered.set()
+            leave.wait(5)
+
+    thread = threading.Thread(target=running)
+    thread.start()
+    try:
+        assert entered.wait(5)
+        # Started after the deadline, against a gateway that serves nothing: no grace.
+        assert not fenced.progressed(time.monotonic() - 60)
+        # Already running at the deadline: the renewal waits for it.
+        assert fenced.progressed(time.monotonic())
+    finally:
+        leave.set()
+        thread.join()
+    # Its answer then counts once, however late it came.
+    assert fenced.progressed(time.monotonic() - 60)
+    with pytest.raises(DataError):
+        fenced_request(fenced, fail=DataError("gateway_unavailable", "unreachable"))
+    assert not fenced.progressed(time.monotonic())
+
+
+def test_the_commit_that_releases_the_lock_counts_against_the_lease(
+    tmp_path, recorded, monkeypatch
+):
+    """The documented limit: the expiry is written in the commit that releases the lock,
+    so a commit slower than the lease leaves it expired. Time under the lock before that
+    commit does not count, as the request that raises above shows."""
+    journal = Desk(tmp_path, recorded).store
+    journal.acquire("first", 5)
+    connect, slow = sqlite3.connect, threading.Event()
+
+    def stalling(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        if slow.is_set():
+            connection.set_trace_callback(
+                lambda statement: time.sleep(0.6) if statement == "COMMIT" else None
+            )
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", stalling)
+    slow.set()
+    with journal.authorized("first", 0.4):
+        pass
+    slow.clear()
+    with pytest.raises(RuntimeError, match="absent, expired or superseded"):
+        journal.renew("first", 5)

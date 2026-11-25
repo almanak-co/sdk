@@ -156,12 +156,14 @@ class LocalGateway(GatewayClient):
 
     def lease_recovery(self) -> str:
         # A direct command has no resume. Its record is the directory of its journal,
-        # and `ax recover` resolves it only when named with `--record`. Quoted, so the
+        # and `ax recover` resolves it only when named with `--record`. This is raised
+        # before the command decides whether to keep the record, so it names the event
+        # that says so instead of reading the journal on a failing path. Quoted, so the
         # command pastes whatever the state directory is called.
         record = shlex.quote(str(self.service.journal.path.parent))
         return (
-            "the record is kept while a signed step is unresolved; then run "
-            f"`almanak ax recover --record {record}`"
+            "if the command reports `record_kept`, a signed step may be unresolved; "
+            f"then run `almanak ax recover --record {record}`"
         )
 
     def close(self):

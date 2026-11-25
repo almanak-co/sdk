@@ -261,11 +261,14 @@ class Journal:
         detect changes since their `read_fenced`. A gateway killed after broadcast leaves
         the preexisting pending bytes intact.
 
-        The lease runs for `duration` from the release of the lock, whether the request
-        committed or raised. A submission sends under this lock and no renewal can be
-        written meanwhile, so time under the lock must not count against the lease: the
-        holder proved a current lease when it took the lock, and nothing can supersede it
-        before the lock is released. A request that raises still loses its own writes.
+        The lease runs for `duration` from the end of the request, whether it committed
+        or raised. A submission sends under this lock and no renewal can be written
+        meanwhile, so the request's time under the lock must not count against the lease:
+        the holder proved a current lease when it took the lock, and nothing can supersede
+        it before the lock is released. The expiry is written in the commit that releases
+        the lock, so that commit's own time does count. A request that raises still loses
+        its own writes, and when the lease cannot then be committed either, the expiry it
+        was admitted under stands.
         """
         connection = sqlite3.connect(f"file:{quote(str(self.path))}?mode=rw", uri=True, timeout=0)
         try:
