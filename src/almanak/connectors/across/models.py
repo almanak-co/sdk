@@ -121,11 +121,9 @@ class Parameters(AuthorGas):
         return self
 
     def require_profiles(self, allocation: Allocation):
-        source = self.profile(allocation.account)
-        # The Roles grants of a bridge are not built yet; without them a Safe cannot deposit.
-        # A backtest's hypothetical account signs nothing and stands for an EOA.
-        if source.kind not in ("eoa", "simulation"):
-            raise ValueError("Across deposits are supported from an EOA account only")
+        # The source deposits as an EOA with its own key or as a Safe through generated
+        # Roles grants; a backtest's hypothetical account signs nothing. Only the
+        # recipient's kind decides anything here.
         kind = self.recipient_kind(allocation)
         # An operator's allocation may only revoke, which pays nobody: its payout rule is
         # held where a deposit is asked for and again where the gateway admits one.
@@ -139,6 +137,8 @@ class Parameters(AuthorGas):
                 raise ValueError("a stated Across recipient names no bound account")
             return "eoa"
         kind = self.profile(allocation.destination_account).kind
+        # A Safe is a contract and keeps a wrapped native output as the token. A
+        # backtest's hypothetical account is held to the stricter rule.
         return "eoa" if kind == "simulation" else kind
 
     def bridge(self, name: str, amount: int) -> BridgeIntent[Target]:

@@ -174,6 +174,12 @@ def route_transports(venues) -> dict:
 
 
 class AcrossFork:
+    # A generated fork operator file provisions plain EOAs for a bridge although the
+    # connector declares Safe/Roles accounts: no fork run has installed the bridge's
+    # grants, so the unrun profile is never the default. An operator file that names
+    # Safe funds itself is that path's first run.
+    plain_fixture_accounts = True
+
     @staticmethod
     def prepare_chains(config, bindings, scopes):
         chains = {binding.origin.chain: binding.chain for binding in scopes}

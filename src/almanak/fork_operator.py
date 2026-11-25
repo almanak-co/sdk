@@ -249,18 +249,19 @@ def plain_accounts(inputs) -> set[str]:
     """Accounts the fixture provisions as plain EOAs instead of Safes.
 
     A fixture account is a Safe with delegated permissions unless a connector that acts
-    from it supports only plain accounts on that chain. An account that only receives a
-    bridge holds no venue authority, so it follows its chain's sending accounts.
+    from it supports only plain accounts on that chain, or its fork binding asks for
+    plain fixture accounts because no fork run has installed its grants. An account
+    that only receives a bridge holds no venue authority, so it follows its chain's
+    sending accounts.
     """
     from almanak.connectors.composition import connector_from_wire
 
     plain = set()
     for position in (*inputs.strategy.allocations.values(), *inputs.strategy.debts.values()):
         market = inputs.markets[position.market]
-        support = connector_from_wire({"connector": str(market.connector)}).support_for(
-            market.chain
-        )
-        if "safe_roles" not in support.account_profiles:
+        connector = connector_from_wire({"connector": str(market.connector)})
+        declared = connector.support_for(market.chain).account_profiles
+        if "safe_roles" not in declared or getattr(connector.fork, "plain_fixture_accounts", False):
             plain |= {position.account, getattr(position, "destination_account", position.account)}
     return plain
 

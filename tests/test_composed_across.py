@@ -887,3 +887,59 @@ def test_a_reference_that_bridges_from_a_chain_makes_that_chains_proofs_owed():
     sending = {chain: names for chain, names in across_reference_sources().items()}
     assert not exempt & set(sending), {str(c): sorted(sending[c]) for c in exempt & set(sending)}
     assert set(sending) <= set(support.PROVEN_SOURCES)
+
+
+def test_a_composed_safe_bridge_takes_each_components_grants_on_its_own_safe(
+    monkeypatch,
+    config,  # noqa: F811
+):
+    """Composition derives permissions per component and per Safe: the sending Safe
+    takes the bridge's approval and deposit, the receiving Safe only what the lending
+    allocation on it needs, and no grant of one Safe names the other's contracts."""
+    from types import SimpleNamespace
+
+    from almanak.connectors.across.operations import DEPOSIT
+    from almanak.connectors.across.permissions import identities
+    from almanak.connectors.composed.permissions import ComposedPermissions
+    from almanak.models import AccountBinding, SafeRoles, StrategyAccounts
+
+    def safe(binding):
+        fund = binding.profile.fund
+        profile = SafeRoles(
+            kind="safe_roles",
+            fund=fund,
+            operator=fund.model_copy(update={"address": "0x" + "44" * 20}),
+            roles_module="0x" + "55" * 20,
+            role_key="0x" + "66" * 32,
+        )
+        return AccountBinding(name=binding.name, profile=profile)
+
+    from almanak.connectors.across import connector
+
+    # The fixture's support names EOA accounts; a composed configuration holds each
+    # account to the profiles its connectors declare.
+    both = tuple(
+        support.model_copy(update={"account_profiles": ("eoa", "safe_roles")})
+        for support in connector.candidate_support()
+    )
+    monkeypatch.setattr(connector, "candidate_support", lambda: both)
+    accounts = StrategyAccounts(bindings=tuple(safe(b) for b in config.accounts.bindings))
+    parameters = composed(config.model_copy(update={"accounts": accounts}))
+    capabilities = declared(parameters)
+    across = parameters.component(ACROSS)
+    route = across.target("move").route
+    sending, receiving = (
+        ComposedPermissions.derive(binding.profile, capabilities) for binding in accounts.bindings
+    )
+    assert {(g.target, g.signature) for g in sending} == {
+        (USDC.reference, "approve(address,uint256)"),
+        (route.spoke_pool, DEPOSIT),
+    }
+    assert {g.target for g in receiving} == {BASE_USDC.reference, COMET}
+    assert DEPOSIT not in {g.signature for g in receiving}
+    # The receiving Safe's approval names its Comet and never a SpokePool.
+    approval = next(g for g in receiving if g.signature.startswith("approve("))
+    assert route.destination_pool.address[2:] not in approval.condition.children[0].value
+    reader = SimpleNamespace(identity=lambda address: address)
+    assert identities(across, "arb", reader) == (USDC.reference,)
+    assert identities(across, "base", reader) == ()

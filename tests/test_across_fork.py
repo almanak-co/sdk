@@ -246,7 +246,14 @@ def test_an_allocation_moves_to_its_source_fork_and_keeps_its_destination():
     assert allocation().chain == ARBITRUM
 
 
-def test_the_generated_operator_provisions_plain_accounts_for_an_eoa_only_connector():
+def test_the_generated_operator_provisions_plain_accounts_for_a_bridge():
+    """Across declares Safe/Roles accounts with no fork run behind them, so its fork
+    binding keeps the generated fixture plain: the unrun profile is never the default."""
+    from almanak.connectors.across.fork import AcrossFork
+    from almanak.connectors.composition import connector_from_wire
+
+    declared = connector_from_wire({"connector": "across"}).chain_support[0].account_profiles
+    assert "safe_roles" in declared and AcrossFork.plain_fixture_accounts is True
     parsed = read_inputs(REFERENCE)
     chains = sorted({account.chain for account in parsed.inputs.accounts.values()}, key=str)
     plan = FixturePlan(parsed.inputs, chains)

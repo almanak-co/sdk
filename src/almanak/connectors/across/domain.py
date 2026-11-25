@@ -152,7 +152,12 @@ class Target(BridgeTarget):
 
 
 def refuse_native_output(route: Route, recipient_kind: str) -> None:
-    """An EOA is paid the native asset for a wrapped native output; only a contract keeps it."""
+    """An EOA is paid the native asset for a wrapped native output; only a contract keeps it.
+
+    A Safe is a contract: the SpokePool pays it the wrapped token, which the arrival
+    reader measures as it does any other token. A bound Safe account is verified on its
+    own chain, with its Roles wiring, before a deployment is created.
+    """
     wrapped = evm_network(route.destination_chain).wrapped_native
     if route.destination_asset == wrapped and recipient_kind == "eoa":
         raise ValueError(

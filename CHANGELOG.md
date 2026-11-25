@@ -8,6 +8,28 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Added
+- An Across bridge may send from a Safe with Zodiac Roles, and either account of a
+  bridge may be an EOA or a Safe. The connector derives two scope-only grants for a
+  Safe that sends: an approval of the sent asset to the route's SpokePool only, for
+  any amount, which also serves the revocation, and the SpokePool's `deposit` with
+  the Safe as depositor, the destination fund as recipient, both tokens, the
+  destination chain and an empty message pinned. Amounts, the venue's relayer, the
+  quote time, the fill deadline and the exclusivity are free: Roles cannot relate a
+  deposit's output to its input, so the fee ceiling stays a gateway check and a
+  compromised operator or gateway host can move the bridged asset out of the Safe.
+  A Safe destination keeps a wrapped native output as the token. `ax bridge` is
+  unchanged and takes a plain wallet.
+- Across declares the Safe/Roles account profile on every chain with a pinned
+  SpokePool, for fork runs and production. It is declared with no fork proof: the
+  grants are held to the planner's calldata by offline tests and were never installed
+  in a Roles module, and no Safe has bridged on a fork or on mainnet. `almanak
+  support` says so on each row, the QA catalog leaves the profile out by the
+  connector's own list, and a generated fork operator file still provisions plain
+  accounts for a bridge.
+- One deployment may bind Safe and EOA accounts together. Permission generation
+  makes one partition per Safe, and an EOA account has none.
+
 ### Changed
 - The agent skill is named `almanak-defi` and lives in `skills/almanak-defi/`. It was
   `almanak` in `skills/almanak/`. An agent finds a skill by its name and description,

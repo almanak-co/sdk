@@ -291,6 +291,26 @@ def declared_without_proof() -> frozenset[tuple[str, ChainId]]:
     return frozenset(("across", chain) for chain in chains())
 
 
+def profiles_without_proof() -> frozenset[tuple[str, str]]:
+    """Declared account profiles that owe no proof, on any chain, for Across alone.
+
+    Across declares Safe/Roles accounts without a fork run: the bridge's generated
+    grants were never installed and no Safe has bridged, on the proven Arbitrum cell
+    either. The obligations and the fork cases of that profile are left out by the
+    connector's own list, which `almanak support` states on each row. The EOA profile
+    of a proven cell still owes every proof. No other connector may be added.
+    """
+    from almanak.connectors.across.support import profiles_without_proof as profiles
+
+    return frozenset(("across", profile) for profile in profiles())
+
+
+def proven_profiles(name, profiles) -> tuple[str, ...]:
+    """A connector's declared profiles less those it declares with no run behind them."""
+    unproven = profiles_without_proof()
+    return tuple(profile for profile in profiles if (str(name), profile) not in unproven)
+
+
 def required(bindings=None):
     result = set()
     unproven = declared_without_proof()
@@ -311,7 +331,7 @@ def required(bindings=None):
 def execution_obligations(name, support):
     return {
         Obligation(name, support.chain, "fork", profile, "", action, variant)
-        for profile in support.account_profiles
+        for profile in proven_profiles(name, support.account_profiles)
         for action in support.actions
         for variant in support.variants or (None,)
         if RunMode.FORK in support.modes or RunMode.PRODUCTION in support.modes
@@ -440,12 +460,14 @@ def fork_cases(common, actions):
 
 
 def declared_profiles(connector, chains):
-    """The account profiles a reference's connector declares on its chains; a composed
-    reference's scopes name their connectors themselves, so it keeps every profile."""
+    """The account profiles a reference's connector declares on its chains and owes a
+    proof for; a composed reference's scopes name their connectors themselves, so it
+    keeps every profile. A profile declared with no run behind it has no case."""
     if connector is None:
         return {"safe_roles", "eoa"}
     binding = dict(installed_connectors())[connector]
-    return {p for s in binding.chain_support if s.chain in chains for p in s.account_profiles}
+    declared = {p for s in binding.chain_support if s.chain in chains for p in s.account_profiles}
+    return set(proven_profiles(connector, declared))
 
 
 def history_cases(common, actions, mode, backtest_file=""):

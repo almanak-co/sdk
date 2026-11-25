@@ -1,8 +1,9 @@
 # Operator execution context for a production run of strategies/across_usdc_arbitrum_base_bridge.
 # Provider credentials stay in the selected --env-file. The account bindings are
 # placeholders: a production run requires reviewed bindings and signing files outside
-# strategy-readable paths. Both accounts are plain EOAs, because Across deposits are
-# supported from an EOA only. The sending account signs and pays gas on Arbitrum. The
+# strategy-readable paths. Both accounts are plain EOAs, the profile the reference's
+# rehearsal runs; a Safe/Roles account may send or receive too, on generated grants no
+# run has installed yet. The sending account signs and pays gas on Arbitrum. The
 # receiving account on Base signs nothing in this strategy; it still has an execution
 # network and a payer ceiling, as every bound account does, and spends none of it. The
 # production gateway asks Across's own quote API for each deposit; an optional key is

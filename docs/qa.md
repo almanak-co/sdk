@@ -84,7 +84,12 @@ revisions. Backtest mode is an explicit field checked against the declared model
 not inferred from its revision label. Required support comes from the existing
 connector composition.
 Adding a supported chain, profile, action or model without a proof fails plan
-validation. Every discovered strategy needs a catalog mapping. Supplemental
+validation. Two exceptions hold for Across alone, each from the connector's own
+list in `almanak.connectors.across.support`: the chains no reference sends from
+(`declared_without_proof`), and the Safe/Roles account profile on every chain
+(`profiles_without_proof`), which is declared with no fork run. The catalog
+leaves those obligations and cases out by name and owes the EOA profile of the
+Arbitrum cell in full. Every discovered strategy needs a catalog mapping. Supplemental
 model tests are labeled component proofs; they are not additional strategy
 lifecycles.
 
