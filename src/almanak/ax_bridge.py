@@ -464,11 +464,15 @@ def leaf_payment(reader, pool: str, deposit: Deposit, row) -> dict | None:
     named = chain.refund_entries(receipt, pool, deposit.input_token, deposit.depositor)
     if not named:
         return None
+    # A leaf can name an amount the pool deferred and never transferred, so the amounts
+    # the pool paid are read from its own token transfers in the same transaction.
+    paid = chain.refund_payments(receipt, deposit.input_token, pool, deposit.depositor)
     return {
         "transaction": row["transactionHash"],
         "block": int(row["blockNumber"], 16),
         "amounts": [str(amount) for amount in named],
-        "equals_sent": deposit.sent in named,
+        "paid": [str(amount) for amount in paid],
+        "equals_sent": deposit.sent in named and deposit.sent in paid,
     }
 
 
@@ -479,8 +483,10 @@ def read_refunds(reader, pool: str, deposit: Deposit, head, start: int | None) -
     """
     from almanak.connectors.across import settlement_reader as chain
 
-    if start is None:
-        start = chain.block_at_or_before(reader, deposit.fill_deadline, head).number
+    # A deposit can still fill in a block stamped with its deadline, so no refund of it is
+    # in that block or an earlier one. A stated cursor continues a scan and never precedes it.
+    expired = chain.block_at_or_before(reader, deposit.fill_deadline, head).number + 1
+    start = expired if start is None else max(start, expired)
     payments, scanned_to = [], None
     seen: set[str] = set()
     for first, end in pages(reader, start, head.number, MAXIMUM_REFUND_PAGES):

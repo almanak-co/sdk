@@ -910,7 +910,8 @@ be replaced. `read_at` names the tag and the blocks read. `status` is one of:
 
 For an unfilled transfer, `refund.payments` lists each payment of the sent asset from
 the SpokePool to the depositor that an executed refund leaf names, from the fill
-deadline on, with `equals_sent` where an amount equals the amount sent. A refund
+deadline on: `amounts` as the refund leaf names them, `paid` as the pool
+transferred them, and `equals_sent` where both hold the amount sent. A refund
 names the wallet and the token, never a deposit, and one payment can cover several
 deposits, so the command attributes none of them to the transfer: a payment equal to
 the sent amount is consistent with its refund and may be another deposit's. The scan

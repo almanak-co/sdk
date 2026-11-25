@@ -1123,7 +1123,8 @@ def test_past_the_deadline_the_transfer_is_unfilled_and_no_refund_is_attributed(
     refund = result["refund"]
     first = int(DEPOSIT["receipt"]["blockNumber"], 16) + FILL_DEADLINE - DEPOSIT["block_timestamp"]
     assert refund["payments"] == [] and refund["deferred_in_spoke_pool"] == "0"
-    assert refund["scanned"] == {"from": first, "to": near.head} and refund["complete"]
+    # The block stamped with the deadline can still fill, so the scan starts after it.
+    assert refund["scanned"] == {"from": first + 1, "to": near.head} and refund["complete"]
     assert "none is attributed to this transfer" in refund["note"]
 
 
@@ -1171,6 +1172,11 @@ def test_a_refund_leaf_payment_is_listed_and_never_tied_to_the_transfer():
     other = ax_bridge.read_refunds(near, ARB_POOL, deposit_of(7), head, number - 10)
     assert other["payments"][0]["equals_sent"] is False
     assert other["scanned"]["from"] == number - 10
+    # The pool's own transfer is reported beside the leaf, and both must equal the amount.
+    assert payment["paid"] == [str(page["total"])]
+    # A cursor before the fill deadline is moved to the first block after it.
+    early = ax_bridge.read_refunds(near, ARB_POOL, deposit_of(7), head, 1)
+    assert early["scanned"]["from"] == refund["scanned"]["from"] > 1
     # A scan that starts after the payment finds none.
     short = ax_bridge.read_refunds(
         near, ARB_POOL, deposit_of(7), near.pin_block(number + 5_000), number + 1
