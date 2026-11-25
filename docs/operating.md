@@ -444,9 +444,13 @@ ceiling `max_fee_bps` is a gateway check and nothing on chain enforces it.
 No Safe has bridged, on a fork or on mainnet, and the grants were never
 installed in a Roles module: they are held to the planner's own calldata by
 offline tests only. Treat a first Safe bridge as the first run of that path.
-A generated fork operator file still provisions plain EOAs for a bridge; a fork
-run with Safes needs an operator file that names Safe funds. `ax bridge` stays
-a plain-wallet command.
+A generated fork operator file still provisions plain EOAs for a bridge. A
+standalone bridge has no fork run with a Safe: its fork fixture funds EOA
+accounts only and refuses a Safe fund, in a hand-written operator file too. A
+strategy that composes a bridge with another connector can name Safe funds and
+their fixture operators in a hand-written fork operator file; that is the only
+way to a Safe bridge on a fork, and nobody has run it. `ax bridge` stays a
+plain-wallet command.
 
 Only a bridge that leaves Arbitrum has been run: its reference has fork
 lifecycle, refund and production rehearsal proofs. Every other source chain is

@@ -116,7 +116,12 @@ class ForkConfig(ForkConfigBase[Allocation]):
             raise ValueError("bridge allocations must identify exactly the funded accounts")
         funds = {fund.account: fund for fund in self.funds if isinstance(fund, ForkEoaFund)}
         if len(funds) != len(self.funds):
-            raise ValueError("Across fixtures fund EOA accounts only")
+            # Every fork run of a standalone bridge reads this fixture, a supervised one
+            # with a hand-written operator file included, so none can bind a Safe.
+            raise ValueError(
+                "Across fork fixtures fund EOA accounts only: no fork fixture of a "
+                "standalone bridge provisions a Safe, so a Safe/Roles bridge has no fork run"
+            )
         for allocation in self.allocations:
             validate_funding(allocation, funds[allocation.account])
         return self
@@ -176,8 +181,10 @@ def route_transports(venues) -> dict:
 class AcrossFork:
     # A generated fork operator file provisions plain EOAs for a bridge although the
     # connector declares Safe/Roles accounts: no fork run has installed the bridge's
-    # grants, so the unrun profile is never the default. An operator file that names
-    # Safe funds itself is that path's first run.
+    # grants, so the unrun profile is never the default. A standalone bridge has no
+    # fork fixture for a Safe at all (`ForkConfig.scope` refuses one). A composed
+    # deployment's fixture takes Safe funds from a hand-written operator file, which
+    # would be that path's first run.
     plain_fixture_accounts = True
 
     @staticmethod

@@ -85,8 +85,13 @@ def generate(config, strategy, backend, *, connector, prepared=None) -> Permissi
     else:
         prepared.require_configuration(config, strategy)
         capabilities = prepared.capabilities
+    bindings = safe_bindings(config)
+    if not bindings:
+        # Nothing takes generated authority: a caller that asks anyway has mistaken
+        # the deployment's accounts, and an empty manifest would hide that.
+        raise ValueError("permission generation requires a bound Safe account; none is bound")
     partitions = []
-    for binding in safe_bindings(config):
+    for binding in bindings:
         selected = backend_for(backend, binding.profile.fund.chain)
         selected.guard()
         block = selected.reader.pin_block("latest")

@@ -377,6 +377,16 @@ def test_a_bridge_fixture_funds_exactly_its_two_named_eoa_accounts():
     }
     with pytest.raises(ValueError, match="EOA accounts only"):
         fixture(funds=[plain, wire["funds"][1]])
+    # A Safe fund with its fixture operator is refused too, with the cause: every fork
+    # run of a standalone bridge reads this fixture, so a Safe bridge has no fork run.
+    safe = {"account": "arb", "operator": "operator", "assets": wire["funds"][0]["assets"]}
+    operator = {
+        "name": "operator",
+        "native_balance": wire["funds"][0]["native_balance"],
+        "foundry_account_index": 9,
+    }
+    with pytest.raises(ValueError, match="a Safe/Roles bridge has no fork run"):
+        fixture(funds=[safe, wire["funds"][1]], operators=[operator])
 
 
 def gas_policy(account, chain):

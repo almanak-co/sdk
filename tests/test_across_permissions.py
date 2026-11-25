@@ -388,3 +388,109 @@ def test_a_manifest_must_hold_exactly_the_safe_partitions(monkeypatch):
     )
     with pytest.raises(ValueError, match="explicit supported account adapter"):
         permissions.safe_bindings(simulated)
+
+
+def test_one_safe_address_on_both_chains_takes_grants_on_its_source_chain_only():
+    """A Safe is normally deployed at one address on every chain. The destination
+    chain's Safe has the source Safe's address and still takes no grant: a grant
+    follows the fund's chain and address together."""
+    accounts = StrategyAccounts(
+        bindings=(safe("arb", ARBITRUM, SENDER), safe("base", BASE, SENDER))
+    )
+    config = parameters(accounts=accounts)
+    source, destination = (binding.profile for binding in accounts.bindings)
+    assert source.fund.address == destination.fund.address and source.fund != destination.fund
+    capabilities = declared(config)
+    assert derive(destination, capabilities) == ()
+    found = {g.signature: g for g in derive(source, capabilities)}
+    assert set(found) == {"approve(address,uint256)", DEPOSIT}
+    depositor, recipient = found[DEPOSIT].condition.children[:2]
+    assert depositor.value == recipient.value == "0x" + padded(SENDER).hex()
+
+
+class Wired(Storage):
+    """Roles storage of a Safe that only receives: no scoped target, and the operator
+    in the role or not, as `member` and `modules` say."""
+
+    member, enabled = 1, None
+
+    def storage(self, address, slot):
+        profile = SAFE_BOTH.bindings[1].profile
+        held = (address, slot) == (profile.roles_module, permissions.membership_slot(profile))
+        return self.member if held else 0
+
+    def modules(self, address):
+        operator = SAFE_BOTH.bindings[1].profile.operator.address
+        return (operator,) if self.enabled is None else self.enabled
+
+
+def receiving(monkeypatch, wiring=None, **storage):
+    """Generate the receiving Safe's partition over `Wired` storage; `wiring` stands
+    for the Safe and Roles wiring check and records what it was asked to hold."""
+    config = parameters(
+        accounts=StrategyAccounts(bindings=(ACCOUNTS.bindings[0], SAFE_BOTH.bindings[1]))
+    )
+    asked = []
+
+    def checked(reader, profile, *, operator_enabled):
+        asked.append(operator_enabled)
+        if wiring is not None:
+            raise wiring
+
+    backend = SimpleNamespace(
+        reader=SimpleNamespace(pin_block=lambda tag: BLOCK, rpc_count=0), guard=lambda: None
+    )
+    monkeypatch.setattr(permissions, "backend_for", lambda selected, chain: selected)
+    monkeypatch.setattr(permissions, "AuthorityReader", type("Reads", (Wired,), storage))
+    monkeypatch.setattr(permissions, "verify_wiring", checked)
+    prepared = SimpleNamespace(require_configuration=lambda *a: None, capabilities=declared(config))
+    manifest = permissions.generate(
+        config,
+        SimpleNamespace(sha256="0" * 64),
+        backend,
+        connector=AcrossPermissions,
+        prepared=prepared,
+    )
+    return config, manifest, backend, asked
+
+
+def test_a_wired_receiving_safe_is_installed_and_verifies(monkeypatch):
+    config, manifest, backend, asked = receiving(monkeypatch)
+    (partition,) = manifest.partitions
+    # The EOA that sends has no partition; the Safe that receives has one with no grant.
+    assert (partition.account, partition.grants, partition.transactions) == ("base", (), ())
+    assert asked == [True]
+    stated = permissions.statement(manifest)
+    assert stated["pending"] is False and stated["partitions"][0]["status"] == "installed"
+    monkeypatch.setattr(Wired, "retain_plan", lambda self: None, raising=False)
+    verified = permissions.verify(config, manifest, backend, connector=AcrossPermissions)
+    assert verified["partitions"] == [{"account": "base"}] and asked == [True, True]
+
+
+@pytest.mark.parametrize(
+    "storage",
+    [{"member": 0}, {"enabled": ()}, {"enabled": (OTHER,)}],
+    ids=["no-role", "operator-not-enabled", "another-module"],
+)
+def test_a_receiving_safe_without_its_operator_exports_the_pending_assignment(monkeypatch, storage):
+    config, manifest, backend, asked = receiving(monkeypatch, **storage)
+    (partition,) = manifest.partitions
+    assert selectors(partition) == [selector("assignRoles(address,bytes32[],bool[])")]
+    # The wiring is then held with no operator enabled, so another module refuses there.
+    assert asked == [False]
+    stated = permissions.statement(manifest)
+    assert stated["pending"] is True and stated["partitions"][0]["status"] == "pending"
+
+
+def test_a_receiving_safe_with_other_wiring_or_no_membership_fails_closed(monkeypatch):
+    from almanak.gateway.ethereum import DataError
+
+    wrong = DataError("authority", "Safe must enable only its dedicated Roles module")
+    with pytest.raises(DataError, match="dedicated Roles module"):
+        receiving(monkeypatch, wiring=wrong)
+    # Installed when generated, the role gone when verified: verification refuses.
+    config, manifest, backend, _ = receiving(monkeypatch)
+    monkeypatch.setattr(Wired, "retain_plan", lambda self: None, raising=False)
+    monkeypatch.setattr(permissions, "AuthorityReader", type("Gone", (Wired,), {"member": 0}))
+    with pytest.raises(DataError, match="role membership is absent"):
+        permissions.verify(config, manifest, backend, connector=AcrossPermissions)

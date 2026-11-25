@@ -26,9 +26,12 @@ its changelog is on the `v2` branch.
   in a Roles module, and no Safe has bridged on a fork or on mainnet. `almanak
   support` says so on each row, the QA catalog leaves the profile out by the
   connector's own list, and a generated fork operator file still provisions plain
-  accounts for a bridge.
+  accounts for a bridge. A standalone bridge has no fork run with a Safe: its fork
+  fixture funds EOA accounts only and refuses a Safe fund with that cause.
 - One deployment may bind Safe and EOA accounts together. Permission generation
-  makes one partition per Safe, and an EOA account has none.
+  makes one partition per Safe, an EOA account has none, and a deployment that
+  binds no Safe is refused. The change is in the shared permission code, so it
+  applies to every connector.
 
 ### Changed
 - The agent skill is named `almanak-defi` and lives in `skills/almanak-defi/`. It was

@@ -41,9 +41,10 @@ ACCOUNT_PROFILES: tuple[Literal["eoa", "safe_roles"], ...] = ("eoa", "safe_roles
 # the maintainer declared the Safe/Roles bridge without fork proofs. Its grants were
 # never installed in any Roles module, and no Safe has bridged on a fork or on mainnet.
 # The QA catalog leaves these profiles out by this constant, the generated fork operator
-# file keeps provisioning plain accounts for a bridge, and `almanak support` states it
-# on each row. The generated authority is new, so every production cell owes a hosted
-# Fork Qualification that exercises it, and none has run.
+# file keeps provisioning plain accounts for a bridge, the fork fixture of a standalone
+# bridge refuses a Safe fund, and `almanak support` states it on each row. The
+# generated authority is new, so every production cell owes a hosted Fork Qualification
+# that exercises it, and none has run.
 UNPROVEN_PROFILES: tuple[Literal["eoa", "safe_roles"], ...] = ("safe_roles",)
 # The bridge model of economic backtests. It reads no history: it charges the author's
 # whole fee ceiling and credits the arrival after a latency the backtest file states.
@@ -162,7 +163,8 @@ WITHOUT_PROOF = (
 PROFILE_WITHOUT_PROOF = {
     "safe_roles": (
         "Safe/Roles accounts are declared with no run behind them: the generated grants "
-        "were never installed, and no Safe has bridged on a fork or on mainnet"
+        "were never installed, and no Safe has bridged on a fork or on mainnet; the fork "
+        "fixture of a standalone bridge funds EOA accounts only and refuses a Safe"
     ),
 }
 

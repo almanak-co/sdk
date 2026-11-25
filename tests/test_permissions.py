@@ -24,6 +24,7 @@ from almanak.gateway.permissions import statement, write_artifacts
 from almanak.gateway.roles_conditions import bounded, equal, matches
 from almanak.gateway.roles_storage import mapping_slot
 from tests.reference_parameters import authored_values
+from tests.test_compound_v3_config import parameters as compound_parameters  # noqa: F401
 
 FIXTURE = Path(__file__).with_name("fixtures") / "safe-roles-2.1.0-authority.json.gz"
 PARAMETERIZED_CONFIGURATION = "5cb6d399569054c0e99e155c0455ba2c12533c12842aa85f9f524aed3a16de9b"
@@ -282,3 +283,113 @@ def test_statement_names_installed_safes_and_the_batch_admission_exports(authori
         for index, partition in enumerate(pending_manifest.partitions)
         if partition.transactions
     ]
+
+
+def mixed_generation(monkeypatch, config):
+    """Generate over empty Roles storage with the wiring check and the connector's
+    identity reads stood in for; the partitions and their grants are the real ones."""
+    from almanak.connectors.compound_v3.authority import declared
+    from almanak.connectors.compound_v3.permissions import CompoundPermissions
+    from almanak.gateway import permissions
+    from almanak.models import Block
+
+    class Empty:
+        def __init__(self, reader, block, reads=None):
+            self.reader, self.block = reader, block
+
+        def storage(self, address, slot):
+            return 0
+
+    chain = config.accounts.bindings[0].profile.fund.chain
+    block = Block(chain=chain, number=1, hash="0x" + "ab" * 32, timestamp=1)
+    backend = SimpleNamespace(
+        reader=SimpleNamespace(pin_block=lambda tag: block), guard=lambda: None
+    )
+    monkeypatch.setattr(permissions, "backend_for", lambda selected, chain: selected)
+    monkeypatch.setattr(permissions, "AuthorityReader", Empty)
+    monkeypatch.setattr(permissions, "verify_wiring", lambda *a, **k: None)
+    connector = SimpleNamespace(
+        codec=CompoundPermissions.codec,
+        manifest_type=CompoundPermissions.manifest_type,
+        runtime_checks=CompoundPermissions.runtime_checks,
+        derive=CompoundPermissions.derive,
+        identities=lambda *a: (),
+    )
+    prepared = SimpleNamespace(require_configuration=lambda *a: None, capabilities=declared(config))
+    strategy = SimpleNamespace(sha256="0" * 64)
+
+    def generate():
+        return permissions.generate(
+            config, strategy, backend, connector=connector, prepared=prepared
+        )
+
+    return connector, generate
+
+
+def with_safe(config, name):
+    """The configuration with one named account bound as a Safe and the others as they are."""
+    from almanak.models import AccountBinding, SafeRoles, StrategyAccounts
+
+    def bound(binding):
+        if binding.name != name:
+            return binding
+        fund = binding.profile.fund
+        profile = SafeRoles(
+            kind="safe_roles",
+            fund=fund,
+            operator=fund.model_copy(update={"address": "0x" + "12" * 20}),
+            roles_module="0x" + "34" * 20,
+            role_key="0x" + "56" * 32,
+        )
+        return AccountBinding(name=name, profile=profile)
+
+    accounts = StrategyAccounts(bindings=tuple(bound(b) for b in config.accounts.bindings))
+    return config.model_copy(update={"accounts": accounts})
+
+
+def test_generation_refuses_a_deployment_that_binds_no_safe(
+    compound_parameters,  # noqa: F811
+    monkeypatch,
+):
+    _, generate = mixed_generation(monkeypatch, compound_parameters)
+    with pytest.raises(ValueError, match="requires a bound Safe account"):
+        generate()
+
+
+def test_a_safe_beside_an_eoa_generates_exactly_the_safes_partition(
+    compound_parameters,  # noqa: F811
+    monkeypatch,
+):
+    """Not an Across deployment: a Comet borrower Safe beside a lender EOA. The Safe's
+    partition carries every grant its allocations need, and the EOA has none."""
+    from almanak.connectors.compound_v3.authority import declared
+    from almanak.gateway.permissions import validate_manifest
+
+    config = with_safe(compound_parameters, "borrower")
+    connector, generate = mixed_generation(monkeypatch, config)
+    manifest = generate()
+    (partition,) = manifest.partitions
+    borrower = config.accounts.binding("borrower").profile
+    assert (partition.account, partition.profile) == ("borrower", borrower)
+    assert partition.grants == connector.derive(borrower, declared(config))
+    comet = config.target("loan").reserve.market.comet
+    assets = {config.target(name).asset.reference for name in ("collateral", "loan")}
+    assert {(g.target, g.signature) for g in partition.grants} == {
+        (comet, "supply(address,uint256)"),
+        (comet, "withdraw(address,uint256)"),
+        *((asset, "approve(address,uint256)") for asset in assets),
+    }
+    # One grant per contract and function: the lender EOA's allocation adds none.
+    assert len(partition.grants) == 4
+    validate_manifest(config, manifest, connector=connector)
+    # Without the Safe's partition, or with one more under the EOA's name, it is refused.
+    with pytest.raises(ValueError, match="each Safe authorization partition"):
+        validate_manifest(
+            config, manifest.model_copy(update={"partitions": ()}), connector=connector
+        )
+    extra = partition.model_copy(update={"account": "lender", "grants": ()})
+    for partitions in ((partition, extra), (extra,)):
+        with pytest.raises(ValueError, match="each Safe authorization partition"):
+            validate_manifest(
+                config, manifest.model_copy(update={"partitions": partitions}), connector=connector
+            )
