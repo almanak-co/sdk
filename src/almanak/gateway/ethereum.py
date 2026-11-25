@@ -189,6 +189,7 @@ READS = frozenset(
     {
         "eth_chainId",
         "net_version",
+        "web3_clientVersion",
         "eth_blockNumber",
         "eth_getBlockByNumber",
         "eth_getBlockByHash",

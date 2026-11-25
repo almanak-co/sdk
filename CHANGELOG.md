@@ -28,6 +28,13 @@ its changelog is on the `v2` branch.
   state reads older than about 100 seconds unanswered (#42).
 
 ### Fixed
+- The provider guard's `web3_clientVersion` read is sent again after a transient
+  failure, as its `eth_chainId` read already was. The method was missing from the
+  reads the execution reader may send again, so one refused connection, timeout, HTTP
+  5xx or HTTP 429 on that read before a privileged gateway request ended a direct
+  action run with `--execute`, even with a signed step waiting, and left the record to
+  `ax recover`. A failure that outlasts the reader's retry bounds is now marked transient
+  like any other read. Other HTTP 4xx answers are unchanged (#64).
 - A direct action run with `--execute` no longer ends over one failed read between two
   of its steps once a step is mined. A transient provider or storage failure was held
   only while a signed step was unresolved, so between a reconciled step and the next
