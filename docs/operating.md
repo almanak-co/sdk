@@ -422,7 +422,9 @@ before further work. Invalidated history halts with pending evidence retained.
 
 Across is declared for production with EOA accounts, for a bridge that leaves
 Arbitrum. `examples/operators/across_usdc_arbitrum_base_bridge.production.yaml`
-is the operator file of the reference. A production bridge needs:
+is the operator file of the reference, and the reference's
+`config.production.yaml`, selected with `--config`, is its author file with the
+gas policy production requires. A production bridge needs:
 
 - A bound EOA account on each chain of the route. The sending account signs the
   approval and the deposit and pays their gas. The receiving account signs
@@ -471,6 +473,12 @@ change on the destination chain, a new deployment.
 
 A refund the SpokePool could not pay, because the transfer to the fund failed,
 stops the source chain with `refund_deferred`. Claiming it is not built.
+
+An author file with a gas policy for an Arbitrum account and one for a Base or
+Optimism account has no fork run: a fork refuses authored ceilings on Base and
+Optimism, and `fork.author_gas: unenforced` is admitted only when every policy
+is on one of those two chains. Fork runs of such a strategy use an author file
+without `strategy.gas`, as the reference's `config.yaml` is.
 
 No gas reference exists for a bridge from an EOA, so the gas a bridge uses is
 compared with nothing; the author's gas policy and the operator's payer ceilings

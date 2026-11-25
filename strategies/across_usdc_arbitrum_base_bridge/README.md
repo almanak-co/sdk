@@ -34,9 +34,11 @@ is modeled, not replayed: it pays the whole `max_fee_bps`, arrives after the
 path is not exercised there. Every amount in the report is labeled modeled.
 
 Limits: the source account is an EOA. Fork runs, production and economic
-backtests are declared for an Arbitrum source only. `strategy.gas` gives each
-bound account its policy; the receiving account signs nothing here and spends
-none of it. In production the gateway signs Across's own quote from its API,
+backtests are declared for an Arbitrum source only. `config.production.yaml` is
+`config.yaml` with the gas policy production requires, one per bound account;
+the receiving account signs nothing here and spends none of its policy.
+`config.yaml` states no gas policy: a fork that includes a Base account refuses
+authored gas ceilings, so fork runs are gasless. In production the gateway signs Across's own quote from its API,
 retained under the source `across_api`; `docs/operating.md` lists what an
 operator configures. On a fork no venue is asked: the fork gateway's quote
 transport constructs the quote from a stated fee and the fork's own block time,
