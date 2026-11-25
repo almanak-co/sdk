@@ -1,8 +1,9 @@
 """Settle transfers in flight from canonical pages: arrival where it lands, refund where it left.
 
-A page is committed only when it settles a transfer, ends an arrival scan past the fill
-deadline, anchors a scan's first block, or is full. A shorter empty page is read again
-on the next tick, so waiting grows no history.
+A page is committed only when it settles a transfer, holds an unattributed refund
+payment, ends an arrival scan past the fill deadline, anchors a scan's first block, or
+is full. A shorter empty page is read again on the next tick. Full empty pages are
+retained and audited, so a scan that waits grows by one page per span of blocks.
 """
 
 from datetime import UTC, datetime
@@ -228,23 +229,6 @@ def candidates(state, target, timestamp: int):
     return waiting[:MAXIMUM_REFUND_CANDIDATES]
 
 
-def attributed(total: int, waiting) -> tuple:
-    """The transfers a refund of `total` pays, or none when it matches no set of them.
-
-    A refund returns each transfer's whole sent amount. Sets of equal sum are
-    interchangeable: the totals are the same whichever is taken, so the one with the
-    oldest transfers is. A foreign payment of an equal amount can therefore resolve a
-    transfer; that transfer's own later refund is then the unattributed one.
-    """
-    matches = [
-        subset
-        for size in range(1, len(waiting) + 1)
-        for subset in combinations(range(len(waiting)), size)
-        if sum(waiting[index].sent.amount for index in subset) == total
-    ]
-    return tuple(waiting[index] for index in min(matches)) if matches else ()
-
-
 def refund_payment(receipt, target) -> tuple[int, int, bool] | None:
     """What the transaction's refund leaves name for the fund, what the SpokePool paid
     it there, and whether the two agree; None when it executed no leaf for the fund."""
@@ -285,22 +269,61 @@ def unattributed(target, row, named: int, paid: int, exact: bool) -> Unsolicited
     )
 
 
-def settled(state, target, block, payments):
-    """Attribute the block's refund payments one after the other, in log order.
+def matching_sets(total: int, waiting, free):
+    """Index sets of the free transfers whose sent amounts sum to `total`, oldest first."""
+    return sorted(
+        subset
+        for size in range(1, len(free) + 1)
+        for subset in combinations(free, size)
+        if sum(waiting[index].sent.amount for index in subset) == total
+    )
 
-    Each exact payment takes the oldest set of the transfers still waiting whose sent
-    amounts sum to it, so a later payment of the block cannot take a transfer an earlier
-    one paid. A payment that matches no set, or that the SpokePool paid in another
-    amount than its leaf names, is attributed to nothing.
+
+def joint(totals, waiting, free):
+    """Disjoint sets of waiting transfers, one per total, or None when there are none.
+
+    The first complete assignment in the tie rule's order: the first payment takes its
+    oldest possible set, the next the oldest of what that leaves, and so on.
+    """
+    if not totals:
+        return ()
+    for subset in matching_sets(totals[0], waiting, free):
+        rest = joint(totals[1:], waiting, tuple(i for i in free if i not in subset))
+        if rest is not None:
+            return (subset, *rest)
+    return None
+
+
+def one_by_one(totals, waiting):
+    """Each payment in log order takes its oldest set of what the earlier ones left."""
+    free, taken = tuple(range(len(waiting))), []
+    for total in totals:
+        matches = matching_sets(total, waiting, free)
+        taken.append(matches[0] if matches else ())
+        free = tuple(i for i in free if i not in taken[-1])
+    return tuple(taken)
+
+
+def settled(state, target, block, payments):
+    """Attribute the block's refund payments to disjoint sets of waiting transfers.
+
+    All payments of a block are known at once, so they are assigned together: when
+    some assignment gives every exact payment a set whose sent amounts sum to it, the
+    first such in the tie rule's order is taken. Otherwise each payment in log order
+    takes the oldest set the earlier ones left, and one that fits none is attributed to
+    nothing. A payment the SpokePool paid in another amount than its leaf names is
+    never attributed.
     """
     waiting = candidates(state, target, block.timestamp)
+    exact = [paid for _, _, _, paid, agrees in payments if agrees]
+    assigned = joint(exact, waiting, tuple(range(len(waiting))))
+    sets = iter(assigned if assigned is not None else one_by_one(exact, waiting))
     refunds, left = [], []
-    for row, receipt, named, paid, exact in payments:
-        taken = attributed(paid, waiting) if exact else ()
+    for row, receipt, named, paid, agrees in payments:
+        taken = tuple(waiting[index] for index in next(sets)) if agrees else ()
         if not taken:
-            left.append(unattributed(target, row, named, paid, exact))
+            left.append(unattributed(target, row, named, paid, agrees))
             continue
-        waiting = [transfer for transfer in waiting if transfer not in taken]
         refunds.append((row, receipt, paid, taken))
     return refunds, tuple(left)
 
@@ -381,7 +404,11 @@ def refund_page(backend, state, target, earliest: int, reference=None):
     payments, block = leaf_payments(reader, target, events)
     outcome, left = None, ()
     if block is not None:
-        if reference is None and block.number < end.number:
+        if block.number < end.number:
+            # A page ends at its first refund-leaf payment: a wider one would let the
+            # scan continue past refunds it never read.
+            if reference is not None:
+                raise chain.integrity("Across refund page runs past its first refund payment")
             end, events = block, chain.refund_logs(reader, token, pool, fund, start, block)
         refunds, left = settled(state, target, block, payments)
         outcome = refund_outcome(target, block, refunds) if refunds else None

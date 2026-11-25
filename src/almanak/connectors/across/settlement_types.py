@@ -245,6 +245,13 @@ class Scan(ExternalScan):
             named += [outcome.tx_hash, *(companion.tx_hash for companion in outcome.companions)]
         if len(set(named)) != len(named):
             raise ValueError("a refund page names each transaction of its last block once")
+        last = {
+            row.get("transactionHash")
+            for row in self.events
+            if row.get("blockNumber") == hex(self.end.number)
+        }
+        if not arrival and not set(named) <= last:
+            raise ValueError("a refund page ends at the block of the payments it names")
         if outcome is not None:
             if isinstance(outcome, ArrivalOutcome) != arrival or outcome.block != self.end:
                 raise ValueError("Across scan ends at its own side's settlement block")
@@ -253,3 +260,23 @@ class Scan(ExternalScan):
             if isinstance(outcome, ArrivalOutcome) and outcome.transfer != self.transfer:
                 raise ValueError("Across arrival differs from the transfer its page follows")
         return self
+
+
+AWAITING_NOTE = (
+    "An unattributed refund payment of the same bridge was paid after the fill deadline "
+    "of each transfer named here. It may have been that transfer's refund, and it is "
+    "never applied: the transfer stays open, and its deployment unclosed, until a refund "
+    "of exactly its sent amount is read."
+)
+
+
+def followed_by_unattributed(state, transfer) -> bool:
+    """Whether an unattributed refund payment could concern the transfer: one of its
+    allocation, paid after its fill deadline. Such a payment is never applied to it."""
+    deadline = int(transfer.fill_deadline.timestamp())
+    return any(
+        page.unsolicited
+        and page.target.allocation == transfer.allocation
+        and page.end.timestamp > deadline
+        for page in getattr(state, "external_scans", ())
+    )
