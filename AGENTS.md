@@ -411,11 +411,19 @@ independently.
   own list, with the reason in the code; they never pass on an empty
   selection. This excepts no other connector and no other rule.
 - Current contract: HyperEVM is the one network the SDK defines that Across
-  serves and that has no pin. Its SpokePool passes the same checks. An
-  observation there pins about 250 seconds behind the head, the venue stamped
-  a quote 219 seconds behind the present when asked, and admission refuses a
-  quote stamped after the pinned block. The settlement pages were not examined
-  against the provider's handling of reads pinned near the head.
+  serves and that has no pin. Its SpokePool passes the same checks. A deposit
+  is prepared at the head, and so is the status read that closes an arrival
+  page. The chain's one provider runs a read pinned near its head at a later
+  block, which the reader refuses as `provider_context`: measured read-only on
+  25 November 2026, the SpokePool read was refused at the head six times of
+  six and 64 blocks behind it, and served 140 blocks behind it and deeper,
+  where the venue's quote is stamped after the pinned block and admission
+  refuses it. So no deposit can be prepared there and no arrival recorded. A
+  pin would also make HyperEVM a destination of production routes from every
+  other chain, whose arrival could then not be recorded. A fork run and a
+  backtest do not read the provider's head and could be declared once a route
+  to a chain without production support is refused; that refusal is not
+  built.
 - Current contract: routes are author configuration and no chain carries a
   token list. USDC and USDT have 18 decimals on BNB Smart Chain and 6 on the
   other chains, so a route between them is refused at resolution, and the
@@ -831,8 +839,9 @@ independently.
   receipt read as unfilled and then filled by the destination SpokePool's
   `fillStatuses`, and the fill measured from its receipt; and one execution
   of refund roots on Ethereum and on Base, kept to the logs of the SpokePool
-  and of the asset. The venue states exclusivity as an absolute time for an
-  Ethereum source and as an offset for the others seen; both are admitted. No
+  and of the asset. The venue states exclusivity as an offset in some
+  answers and as an absolute time in others, whatever the source chain; both
+  forms occur and both are admitted. No
   settlement page was replayed for these routes. OP Mainnet, BNB Smart Chain,
   Polygon, Robinhood Chain and Avalanche have no known answer of a deposit, a
   fill or a refund: only the facts of the accepted exception above.
@@ -853,7 +862,10 @@ independently.
   stated once and holding for each of them: no reference sends from the chain;
   no fork lifecycle, refund proof, production rehearsal, prepared backtest or
   Fork Qualification run exists for it; no fork refund is defined for a
-  transfer it sends, so a fork run from it that is not filled stays open; its
+  transfer it sends, so a fork run from it that is not filled stays open; a
+  fork refuses authored gas ceilings on Base and OP Mainnet; a signed step
+  whose nonce was consumed is never released on Polygon, which states no
+  finality margin; its
   QA obligations are left out of the catalog rather than proven; the page span
   and the provider's log ranges were not exercised on its block time; and
   every gate of the Arbitrum cell below is open for it too.
@@ -888,11 +900,39 @@ independently.
   payment fails validation. Such checkpoints exist on forks only.
 - Known limit: a full empty scan page is retained, and every retained page of
   a chain is audited, two block reads and one log query each, whenever that
-  chain's history is audited. GMX liquidation pages share this. A refund scan
-  on Arbitrum commits a full page every 2,000 blocks, about eight minutes, so
-  a transfer that waits for a refund that never comes grows the checkpoint by
-  about 170 pages a day and the audit by as many log queries. Nothing bounds
-  it; pages are not dropped.
+  chain's history is audited. GMX liquidation pages share this. A scan that
+  waits commits a full page every 2,000 blocks, so a transfer that waits for a
+  refund that never comes grows the checkpoint, and the audit by as many log
+  queries, at a rate set by the chain's block time. From the block times read
+  on 25 November 2026:
+
+  | Chain | Block time | One page spans | Pages a day |
+  | --- | --- | --- | --- |
+  | Robinhood Chain | 0.105 s | 3.5 min | 411 |
+  | Base | 0.2 s | 6.7 min | 216 |
+  | Arbitrum | 0.285 s | 9.5 min | 152 |
+  | BNB Smart Chain | 0.451 s | 15 min | 96 |
+  | Avalanche | 0.995 s | 33 min | 43 |
+  | Polygon | 1.5 s | 50 min | 29 |
+  | OP Mainnet | 2 s | 67 min | 22 |
+  | Ethereum | 12 s | 6.7 h | 4 |
+
+  An arrival scan grows the same way on the destination chain until the fill
+  or the fill deadline. After a pause a scan catches up one page per tick,
+  before signed work is admitted on that chain. Nothing bounds the growth;
+  pages are not dropped.
+- Current contract: a page may end at the head, and the first page of a scan
+  is committed at once, so a chain whose head can be replaced, Ethereum and
+  Polygon among them, can replace a committed page's last block. A scan never
+  continues after a block that is no longer the chain's: the coordinator's
+  audit before each tick of the chain, the scan's own next page and the
+  gateway's commit each stop with `reorganization`, never with the status
+  cross-check's accounting cause. The halt is of that chain only. The page is
+  retained, nothing is recorded and the transfer stays open and owned; a fill
+  mined in the replacement block is on chain and in the fund's wallet, in no
+  inventory. No command drops a page that is no longer canonical, so the
+  transfer is not resolved by the SDK after such a halt. A head replaced
+  before its page was committed leaves nothing stale and is read again.
 
 ## Hyperliquid
 

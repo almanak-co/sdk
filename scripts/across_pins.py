@@ -123,6 +123,10 @@ def installed(node: Node, proxy: str, implementation: str) -> dict:
             head = middle
         else:
             low = middle
+    # Bisection assumes the slot changed to this implementation once. Hold the answer.
+    held = node.implementation(proxy, hex(head)), node.implementation(proxy, hex(head - 1))
+    if held[0] != implementation or held[1] == implementation:
+        raise RuntimeError(f"install block {head} is not where the implementation first appears")
     stamp = int(node.rpc("eth_getBlockByNumber", [hex(head), False])["timestamp"], 16)
     return {"block": head, "at": datetime.fromtimestamp(stamp, UTC).isoformat()}
 

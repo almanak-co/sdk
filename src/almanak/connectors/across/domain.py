@@ -31,11 +31,13 @@ class SpokePoolPin(Model):
 # and views this connector uses, and reports its own chain number. A pin table, not an
 # allowlist of routes: which assets a route moves is the author's configuration.
 #
-# HyperEVM has a SpokePool that passes the same checks and is left out. An observation
-# there pins 256 blocks, about 250 seconds, behind the head, and the venue stamped a
-# quote 219 seconds behind the present when asked, which admission refuses as ahead of
-# the pinned block. The provider also runs reads pinned near the head at a later block,
-# which the settlement pages were not examined against.
+# HyperEVM has a SpokePool that passes the same checks and is left out. A deposit is
+# prepared at the head, and an arrival page's status read is at the head too. The
+# chain's one provider runs a read pinned near its head at a later block, which the
+# reader refuses as `provider_context`: on 25 November 2026 the SpokePool read was
+# refused at the head and 64 blocks behind it, and served from 140 blocks behind it,
+# where the venue's quote is stamped after the pinned block. A pin here would also make
+# HyperEVM a destination of production routes whose arrival could not be recorded.
 SPOKE_POOLS: dict[ChainId, SpokePoolPin] = {
     ChainId("eip155:42161"): SpokePoolPin(
         address="0xe35e9842fceaca96570b734083f4a58e8f7c5f2a",

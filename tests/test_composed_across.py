@@ -822,3 +822,49 @@ def test_the_composed_fork_keeper_settles_transfers_through_the_bridge_component
     assert keeper.align(state, 60) == 65
     assert tuple(keeper.settle(state)) == ({"advanced_seconds": 0},)
     assert seen == [(state.config.component(ACROSS), (transfer,))]
+
+
+def across_reference_sources() -> dict:
+    """Each chain a converted reference bridges from, with the references that do."""
+    from almanak.configuration.unresolved import read_inputs
+    from scripts.ci.check_strategies import CONVERTED, ROOT, named_connectors
+
+    sources: dict = {}
+    for name in sorted(CONVERTED):
+        config = ROOT / "strategies" / name / "config.yaml"
+        if "across" not in named_connectors(config):
+            continue
+        for market in read_inputs(config).inputs.markets.values():
+            if str(market.connector) == "across":
+                sources.setdefault(market.chain, set()).add(name)
+    return sources
+
+
+def test_a_proven_source_chain_has_a_rehearsed_reference_that_sends_from_it():
+    """`PROVEN_SOURCES` alone decides which cells owe their proofs, so a chain cannot be
+    named there without a reference that bridges from it, is in the default production
+    rehearsal and is a subject of the weekly matrix."""
+    from almanak.connectors.across import support
+    from scripts.ci import fork_qualification_matrix as matrix
+    from tests.strategy_fork import rehearsal
+
+    sources = across_reference_sources()
+    rehearsed, weekly = set(rehearsal.production_references()), matrix.production_references()
+    assert support.PROVEN_SOURCES
+    for chain in support.PROVEN_SOURCES:
+        names = sources.get(chain, set())
+        assert names, f"{chain} is proven without a reference that bridges from it"
+        assert names & rehearsed, f"no reference from {chain} is rehearsed"
+        assert names & set(weekly[("across", str(chain))])
+
+
+def test_a_reference_that_bridges_from_a_chain_makes_that_chains_proofs_owed():
+    """A reference that sends from a chain declared without proof would be exempt from
+    the catalog and the weekly run by name. Adding one must move the chain into
+    `PROVEN_SOURCES`, where its obligations are owed."""
+    from almanak.connectors.across import support
+
+    exempt = set(support.declared_without_proof())
+    sending = {chain: names for chain, names in across_reference_sources().items()}
+    assert not exempt & set(sending), {str(c): sorted(sending[c]) for c in exempt & set(sending)}
+    assert set(sending) <= set(support.PROVEN_SOURCES)

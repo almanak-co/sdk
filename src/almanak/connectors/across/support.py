@@ -115,6 +115,21 @@ FORK_REFUND = {
     True: "a fork refund is a fork-constructed bundle, never Fork Qualification evidence",
     False: "no fork refund is defined for a transfer sent from this chain",
 }
+# What an author or operator meets on one chain and on no other.
+CHAIN_NOTES = {
+    ChainId("eip155:8453"): (
+        "a fork refuses authored gas ceilings on this chain, so a fork run uses an "
+        "author file without a gas policy",
+    ),
+    ChainId("eip155:10"): (
+        "a fork refuses authored gas ceilings on this chain, so a fork run uses an "
+        "author file without a gas policy",
+    ),
+    ChainId("eip155:137"): (
+        "the network states no finality margin, so a signed step whose nonce another "
+        "transaction consumed is never released on this chain",
+    ),
+}
 WITHOUT_PROOF = (
     "declared on read-only mainnet known answers and offline tests: no reference "
     "lifecycle, refund proof or production rehearsal has run from this chain",
@@ -136,7 +151,7 @@ def restrictions(chain: ChainId) -> tuple[str, ...]:
     source = f"{listed} only, as the source of a route to another pinned chain{absent}"
     scoped = tuple(text for mode in declared for text in mode_scope(mode, chain))
     unproven = WITHOUT_PROOF if chain in declared_without_proof() else ()
-    return SCOPE + (source, *scoped, *unproven)
+    return SCOPE + (source, *scoped, *CHAIN_NOTES.get(chain, ()), *unproven)
 
 
 def historical(chain: ChainId) -> tuple[HistoricalSupport, ...]:

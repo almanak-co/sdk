@@ -175,3 +175,25 @@ def test_the_command_prints_one_row_per_candidate(monkeypatch, capsys, tmp_path)
     ]
     with pytest.raises(SystemExit):
         tool.main([])
+
+
+def test_an_install_block_that_is_not_the_first_appearance_fails_loudly():
+    """The reported block is held to the chain: the pin at it, another implementation
+    one block before. A slot that never changed has no such block and is refused."""
+
+    class Reverted(FakeNode):
+        def eth_getStorageAt(self, proxy, slot, block):
+            number = HEAD if block == "latest" else int(block, 16)
+            held = number >= INSTALLED_AT or number < 3
+            address = PIN.implementation if held else "0x" + "01" * 20
+            return "0x" + address[2:].rjust(64, "0")
+
+    node = Reverted(whole_code())
+    assert tool.installed(node, PIN.address, PIN.implementation)["block"] == INSTALLED_AT
+
+    class Always(FakeNode):
+        def eth_getStorageAt(self, proxy, slot, block):
+            return "0x" + PIN.implementation[2:].rjust(64, "0")
+
+    with pytest.raises(RuntimeError, match="not where the implementation first appears"):
+        tool.installed(Always(whole_code()), PIN.address, PIN.implementation)

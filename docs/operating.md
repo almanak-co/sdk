@@ -431,7 +431,16 @@ declared on read-only mainnet reads and offline tests alone, and `almanak
 support` says so on its row. Nobody has run a deposit, an arrival or a refund
 from those chains, on a fork or on mainnet. Treat a first bridge from one of
 them as the first run of that path, and send a small amount first. On a fork, a
-refund is defined for a transfer sent from Arbitrum only.
+refund is defined for a transfer sent from Arbitrum only, and a fork refuses
+authored gas ceilings on Base and OP Mainnet, so a fork run of a strategy with an
+account there uses an author file without `strategy.gas`. On Polygon, which
+states no finality margin, a signed step whose nonce another transaction consumed
+is never released.
+
+Ethereum and Polygon can replace their head block. A destination chain that
+replaces the last block of a recorded scan page stops with `reorganization`; the
+transfer stays open, and a fill mined in the replacement block is in the fund's
+wallet but is not recorded.
 
 A route needs both assets to have the same decimals. USDC and USDT have 18
 decimals on BNB Smart Chain and 6 elsewhere, so a route between them is refused

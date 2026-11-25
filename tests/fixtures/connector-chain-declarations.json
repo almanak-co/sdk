@@ -731,6 +731,7 @@
     "no fork refund is defined for a transfer sent from this chain",
     "a production run signs the venue's own quote from its API, retained as across_api; only the gateway holds it to the author's fee ceiling",
     "a backtest models the bridge and reads no history: it charges the market's whole max_fee_bps, credits the arrival after the latency the backtest file states, fills every transfer and models no refund; it keeps no approval, so it serves no revoke_bridge",
+    "a fork refuses authored gas ceilings on this chain, so a fork run uses an author file without a gas policy",
     "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain"
    ],
    "historical": [
@@ -835,6 +836,7 @@
     "no fork refund is defined for a transfer sent from this chain",
     "a production run signs the venue's own quote from its API, retained as across_api; only the gateway holds it to the author's fee ceiling",
     "a backtest models the bridge and reads no history: it charges the market's whole max_fee_bps, credits the arrival after the latency the backtest file states, fills every transfer and models no refund; it keeps no approval, so it serves no revoke_bridge",
+    "a fork refuses authored gas ceilings on this chain, so a fork run uses an author file without a gas policy",
     "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain"
    ],
    "historical": [
@@ -939,6 +941,7 @@
     "no fork refund is defined for a transfer sent from this chain",
     "a production run signs the venue's own quote from its API, retained as across_api; only the gateway holds it to the author's fee ceiling",
     "a backtest models the bridge and reads no history: it charges the market's whole max_fee_bps, credits the arrival after the latency the backtest file states, fills every transfer and models no refund; it keeps no approval, so it serves no revoke_bridge",
+    "the network states no finality margin, so a signed step whose nonce another transaction consumed is never released on this chain",
     "declared on read-only mainnet known answers and offline tests: no reference lifecycle, refund proof or production rehearsal has run from this chain"
    ],
    "historical": [
