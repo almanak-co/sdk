@@ -299,23 +299,44 @@ def holds_nothing(position: object) -> bool:
 SHARE_FIELDS = ("supplied_shares", "debt_shares")
 
 
-def share_changes(supplied: object, before_withdrawal: object) -> list[str]:
-    """How the position the withdrawal would take differs from the one the supply left.
+# What a refusal to withdraw says about the funds, whatever the shares showed: the
+# check cannot tell from the reports alone where the supplied amount now is.
+POSITION_UNCERTAIN = (
+    " THE SUPPLIED AMOUNT MAY STILL BE IN THE MARKET. Read the position with"
+    " `almanak ax lending-position` before recovering it with `almanak ax withdraw`"
+)
 
-    Empty only when both reports carry every share field and they agree; a report that
-    is missing or carries no shares is a difference, never assumed to agree.
+
+def share_refusal(supplied: object, before_withdrawal: object) -> str | None:
+    """Why the withdrawal is not run, from the share fields of the two position reports.
+
+    None only when both reports carry every share field and they agree. A report that is
+    missing or lacks a share field is no evidence of a change, so it is named as shares
+    that could not be compared; a real difference is reported as observed, in either
+    direction, never as funds that reached the position.
     """
     after, now = (
         {name: report.get(name) for name in SHARE_FIELDS} if isinstance(report, dict) else {}
         for report in (supplied, before_withdrawal)
     )
     if None in (*after.values(), *now.values()) or not (after and now):
-        return [f"a position report lacks its shares: after the supply {after}, now {now}"]
-    return [
+        return (
+            "the withdrawal was not run: a position report lacks its shares, so the check"
+            " could not compare the position the supply left with the one the withdrawal"
+            f" would take (after the supply {after}, now {now})." + POSITION_UNCERTAIN
+        )
+    changed = [
         f"{name} {after[name]} after the supply, {now[name]} now"
         for name in SHARE_FIELDS
         if after[name] != now[name]
     ]
+    if not changed:
+        return None
+    return (
+        "the withdrawal was not run: the position it would take differs from the one the"
+        " supply left (" + "; ".join(changed) + "), and the confirmation covered only"
+        " this check's supply." + POSITION_UNCERTAIN
+    )
 
 
 class WriteCheck:
@@ -399,16 +420,11 @@ class WriteCheck:
         # confirmation covered only this check's supply. Something that reached the
         # position after the supply is not withdrawn here. The position can still change
         # between this preview and the withdrawal; that window is not closed.
-        changed = share_changes(
+        refusal = share_refusal(
             supply.output.get("position_after"), withdraw_preview.output.get("position_before")
         )
-        if changed:
-            return (
-                "the wallet's position changed after the supply, so the withdrawal was not"
-                " run: it would withdraw more than this check supplied ("
-                + "; ".join(changed)
-                + "). THE SUPPLIED AMOUNT IS STILL IN THE MARKET, with what reached it since"
-            )
+        if refusal is not None:
+            return refusal
         withdrawal = self.step("withdraw", "withdraw", execute=True)
         if not completed(withdrawal):
             return (
@@ -431,6 +447,25 @@ def transactions(steps: Sequence[Step]) -> list[str]:
     ]
 
 
+def transaction_lines(check: WriteCheck) -> list[str]:
+    """The report's transactions: every recorded outcome, and what no outcome shows.
+
+    An executing command that was interrupted, or returned no outcome, may still have
+    sent a transaction, so "none sent" is said only when no command signed.
+    """
+    lines = transactions(check.steps)
+    if check.running is not None and check.running[1]:
+        lines.append(
+            f"`{check.running[0]}` was interrupted before it returned: whether it sent a"
+            " transaction is not known"
+        )
+    if lines:
+        return lines
+    if check.signing_started():
+        return ["no transaction outcomes recorded; a transaction may still have been sent"]
+    return ["none sent"]
+
+
 def write_report(directory: Path, request: WriteRequest, check: WriteCheck, verdict: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     document = {
@@ -444,7 +479,7 @@ def write_report(directory: Path, request: WriteRequest, check: WriteCheck, verd
     lines = ["# Live write check", "", f"- Market: {request.market}"]
     lines += [f"- Amount: {request.amount} base units", f"- Verdict: {verdict}", ""]
     lines += ["## Transactions", ""]
-    lines += [f"- {line}" for line in transactions(check.steps)] or ["- none sent"]
+    lines += [f"- {line}" for line in transaction_lines(check)]
     lines += ["", "## Commands", ""]
     lines += [
         f"- `{step.invocation.command}` (exit {step.invocation.exit_code})" for step in check.steps

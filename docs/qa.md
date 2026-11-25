@@ -645,11 +645,16 @@ It stops and exits 1, leaving the rest to you, when:
   once the reason is resolved.
 - the withdrawal preview's `position_before` does not report the same
   `supplied_shares` and `debt_shares` as the supply's `position_after`, or either
-  report lacks them. Something reached the position after the supply, and a full
-  withdrawal would take it too, without the confirmation covering it. The
-  withdrawal is not run, the report names the difference, and the supplied amount
-  is still in the market. The position can still change between that preview and
-  the withdrawal; the check does not close that window.
+  report lacks them. The withdrawal is not run, since a full withdrawal takes
+  whatever the position holds and the confirmation covered only the supply. When
+  both reports carry the shares and they differ, the position changed after the
+  supply, in either direction, and the report names the difference as observed.
+  When either report lacks them, the check could not compare the shares, and the
+  report says so; that is no evidence that the position changed. Either way the
+  supplied amount may still be in the market: read the position with
+  `ax lending-position` before recovering it with `almanak ax withdraw`. The
+  position can still change between that preview and the withdrawal; the check
+  does not close that window.
 - the withdrawal was executed but did not complete. Its outcome is not known:
   the amount may still be supplied, or the withdrawal may have been mined. Do
   not request another withdrawal yet. A signed step left unresolved keeps its
@@ -662,7 +667,9 @@ A run stopped by an exception, Ctrl-C included, still writes `summary.md` and
 and a verdict that names the command that was running. Once an executing command
 has started, the verdict says that its outcome is not known and that the supplied
 amount may still be in the market; resolve it as for a withdrawal that did not
-complete.
+complete. Its transactions in `summary.md` then name the interrupted command as
+one whose submission is not known, and say "none sent" only when no command
+signed.
 
 Only the gates and the flow have tests, offline and against a fake command
 (`tests/test_live_qa_writes.py`). No test and no workflow runs the write level for

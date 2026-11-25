@@ -372,22 +372,31 @@ def test_shares_that_reached_the_position_after_the_supply_are_never_withdrawn(w
     """The full withdrawal takes what the wallet holds; the confirmation covered the supply."""
     request = request_for(wallet, execute=True, confirm=PHRASE)
     grown = {"supplied_shares": "150", "debt_shares": "0"}
+    shrunk = {"supplied_shares": "50", "debt_shares": "0"}
     borrowed = {"supplied_shares": "99", "debt_shares": "7"}
     for before_withdrawal, named in (
         (grown, "supplied_shares 99 after the supply, 150 now"),
+        (shrunk, "supplied_shares 99 after the supply, 50 now"),
         (borrowed, "debt_shares 0 after the supply, 7 now"),
-        ({}, "lacks its shares"),
+        ({}, "could not compare"),
     ):
         almanak = round_trip(withdraw_preview=preview(before_withdrawal))
         code, said, output = check(request, SPEND, almanak, tmp_path)
         assert code == 1 and almanak.sent == ["supply"] and len(almanak.commands) == 3
-        assert named in said and "THE SUPPLIED AMOUNT IS STILL IN THE MARKET" in said
-        assert named in json.loads((output / "writes.json").read_text())["verdict"]
-    # A supply that reported no position after it is not taken to agree either.
+        assert named in said and "THE SUPPLIED AMOUNT MAY STILL BE IN THE MARKET" in said
+        assert "almanak ax lending-position" in said
+        verdict = json.loads((output / "writes.json").read_text())["verdict"]
+        assert named in verdict
+        # An observed difference is reported as observed, in either direction: no claim
+        # that the withdrawal would take more, or that the amount certainly remains.
+        assert "more than" not in verdict and "IS STILL IN THE MARKET" not in verdict
+    # A supply that reported no position after it is not taken to agree either, and the
+    # missing shares are named as not compared, not as a change of the position.
     supplied = executed(["approve", "supply"], None)
     almanak = round_trip(supply_execute=supplied)
     code, said, _ = check(request, SPEND, almanak, tmp_path)
     assert code == 1 and almanak.sent == ["supply"] and "lacks its shares" in said
+    assert "could not compare" in said and "differs" not in said
 
 
 def interrupting(almanak, at):
@@ -430,6 +439,34 @@ def test_an_interrupted_run_keeps_the_steps_it_had_sent_in_its_report(wallet, tm
         )
     verdict = json.loads((output / "writes.json").read_text())["verdict"]
     assert verdict.endswith("(KeyboardInterrupt); nothing was signed")
+    assert "- none sent" in (output / "summary.md").read_text()
+
+
+def test_an_interrupted_supply_is_not_reported_as_nothing_sent(wallet, tmp_path):
+    """The supply may have sent its transactions before Ctrl-C; no outcome came back."""
+    request = request_for(wallet, execute=True, confirm=PHRASE)
+    output = tmp_path / "report"
+    run = interrupting(round_trip(), "supply_execute")
+    with pytest.raises(KeyboardInterrupt):
+        writes.run_writes(request, SPEND, run, output, say=[].append)
+    summary = (output / "summary.md").read_text()
+    assert "none sent" not in summary
+    assert "--execute` was interrupted before it returned" in summary
+    assert "whether it sent a transaction is not known" in summary
+    assert "THE SUPPLIED AMOUNT MAY STILL BE IN THE MARKET" in summary
+
+
+def test_an_executed_step_without_outcomes_is_not_reported_as_nothing_sent(wallet, tmp_path):
+    """A supply that returned no outcomes may still have sent one; a preview signs nothing."""
+    request = request_for(wallet, execute=True, confirm=PHRASE)
+    silent = executed([], POSITION_EMPTY, completed=False)
+    code, _, output = check(request, SPEND, round_trip(supply_execute=silent), tmp_path)
+    summary = (output / "summary.md").read_text()
+    assert code == 1 and "none sent" not in summary
+    assert "no transaction outcomes recorded" in summary
+    code, _, output = check(request_for(wallet), SPEND, round_trip(), tmp_path)
+    summary = (output / "summary.md").read_text()
+    assert code == 0 and "- none sent" in summary
 
 
 def test_a_refused_preview_stops_before_the_confirmation(wallet, tmp_path):
