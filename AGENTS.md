@@ -1196,9 +1196,11 @@ independently.
   `tests/fixtures/evidence.json`. Add copies only through
   `scripts/evidence_fixtures.py pin`, which refuses URLs, credentials and
   operator env values. Locally, missing evidence is a failure.
-- Hosted CI (`pr.yml`, `main.yml`, `release_tag.yml`) runs lint, types, the
-  offline suite with `--skip-missing-evidence`, CLI smoke checks and the docs
-  build. A skipped case is not a pass, and a green hosted run is not full QA.
+- Hosted CI (`pr.yml`, `release_candidate.yml`, `release_tag.yml`) runs lint,
+  types, the offline suite with `--skip-missing-evidence`, CLI smoke checks
+  and the docs build. Nothing runs these gates on a push to `main`; the pull
+  request already ran them. A skipped case is not a pass, and a green hosted
+  run is not full QA.
   Pull requests also run the CRAP gate over that reduced coverage, scoped to
   functions with an executable line the pull request changed.
 - The offline shards run on the org's 8-core `ubuntu-latest-l` runner. Shard
