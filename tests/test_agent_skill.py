@@ -1787,3 +1787,34 @@ def test_a_released_deposit_is_checked_through_another_endpoint_before_bridging_
         "continue with `--refund-from-block` set to that block plus one",
     ):
         assert statement in stated, statement
+
+
+def test_a_read_after_an_action_or_an_arrival_asks_for_the_latest_block():
+    """A read without `--block` is the finalized block; the skill says so once and reads
+    what an action or an arrival changed at `latest`."""
+    stated = " ".join(section("Public endpoints").split())
+    for statement in (
+        "A read without `--block` is the chain's finalized block, on every transport",
+        "trails the newest one by minutes on most chains",
+        "says which block it is under `block_read`",
+        "`age_seconds` how old that block was when the command ran",
+    ):
+        assert statement in stated, statement
+    arrived = next(row for row in rows(section("Bridges")) if row[0] == "`arrived`")
+    assert "Read the balance on the destination chain with `--block latest`" in arrived[1]
+    assert "then read the position again with `--block latest` and report both" in flat()
+
+
+def test_the_skill_reports_the_step_count_and_that_later_gas_is_not_quoted():
+    preview = " ".join(subsection("5. Preview").split())
+    for statement in (
+        "`steps` lists every transaction the action sends, in order by kind",
+        "Report the step count from the preview",
+        "Only the first step's gas is quoted",
+        "the later steps' gas is not quoted up front and never estimate it yourself",
+        "A result without `steps` is an action whose later steps are not listed",
+    ):
+        assert statement in preview, statement
+    bridge = " ".join(section("Bridges").split())
+    assert "Tell the user how many transactions that is" in bridge
+    assert "the deposit's gas is not quoted up front" in bridge

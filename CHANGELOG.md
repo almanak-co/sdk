@@ -8,6 +8,24 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Added
+- Every `almanak ax` read that pins a block states it as `block_read`: the
+  `selector` that was asked (`finalized`, `latest` or the number), the block's
+  `number` and `timestamp`, and `age_seconds`, the command's clock less that
+  timestamp. A read without `--block` is the finalized block, which trails the head
+  by minutes, and the result now says so. No extra read is made for it.
+- A direct action's preview states `steps_note`: how many transactions the request
+  sends, in order by kind, and that only the first step's gas is quoted, because a
+  later step cannot be simulated before the earlier one is mined. Aave V4, Aave V3
+  and SparkLend now list `steps` as Across does, where the planned block decides
+  every step; a full repayment and the other connectors list none and say that
+  more can follow the first step. No gas is estimated for a later step.
+
+### Changed
+- The agent skill reads a balance or a position after an action or a bridge's
+  arrival with `--block latest`, reports the step count of a preview, and says that
+  the later steps' gas is not quoted up front.
+
 ## [3.4.1] - 2026-11-25
 
 ### Changed

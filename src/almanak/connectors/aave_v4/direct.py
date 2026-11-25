@@ -268,9 +268,34 @@ def position(state) -> dict:
     return {"supplied_shares": str(owned.shares), "debt_shares": str(owned.drawn_shares)}
 
 
+def withdrawal_steps(before) -> list[str]:
+    """A withdrawal, then the revocation of an allowance the wallet still gives the Spoke."""
+    withdrawn = ["withdraw"] if before.position.supplied_shares else []
+    return withdrawn + (["revoke"] if before.allowance else [])
+
+
+def steps(state) -> list[str] | None:
+    """The steps the admitted request sends, as `reader.plan_operation` plans them.
+
+    A repayment states none: it approves the held balance, repays, revokes what the
+    repayment left and releases collateral, and what is left is known only once the
+    repayment is mined.
+    """
+    decided, before = state.decision.intent, state.plan.before
+    if decided.kind == "supply":
+        return ["supply"] if before.allowance else ["approve", "supply"]
+    if decided.kind == "withdraw":
+        return withdrawal_steps(before)
+    if decided.kind == "borrow":
+        enabling = ["collateral" for item in before.collateral if not item.enabled]
+        return [*enabling, "borrow"]
+    return None
+
+
 DIRECT = DirectActions(
     actions=("supply", "withdraw", "borrow", "repay"),
     positions=positions,
     intent=intent,
     position=position,
+    steps=steps,
 )

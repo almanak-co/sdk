@@ -204,6 +204,64 @@ def test_balance_refuses_reads_that_leave_the_pinned_block(live_reader, monkeypa
         ax.balance(invocation)
 
 
+class Tagged(Pinned):
+    def pin_block(self, selector):
+        self.asked = selector
+        return BLOCK
+
+
+@pytest.mark.parametrize("selector", ["finalized", "latest"])
+def test_a_balance_read_states_the_block_it_asked_for_and_its_age(
+    live_reader, monkeypatch, capsys, selector
+):
+    def read(reader, asset, account, block):
+        return BalanceObservation(
+            asset=asset,
+            account=account,
+            block=BLOCK,
+            amount="1",
+            denomination="native",
+            decimals=18,
+        )
+
+    monkeypatch.setattr(ax, "read_balance", read)
+    monkeypatch.setattr(ax, "now", lambda: BLOCK.timestamp + 780)
+    reader = live_reader(Tagged())
+    invocation = SimpleNamespace(
+        product="ax-balance",
+        asset="eip155:1/slip44:60",
+        account=[OWNER],
+        block=selector,
+        env_file=Path("operator.env"),
+    )
+    assert ax.command(invocation) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert reader.asked == selector
+    assert output["block_read"] == {
+        "selector": selector,
+        "number": BLOCK.number,
+        "timestamp": BLOCK.timestamp,
+        "age_seconds": 780,
+    }
+    # The observation's own block is unchanged beside it.
+    assert output["observations"][0]["block"]["number"] == BLOCK.number
+
+
+def test_a_numbered_read_states_its_number_and_a_read_without_a_block_states_none(monkeypatch):
+    monkeypatch.setattr(ax, "now", lambda: BLOCK.timestamp - 3)
+    numbered = SimpleNamespace(block=BLOCK.number, pinned_block=BLOCK)
+    stated = ax.with_block_read({"product": "x"}, numbered)["block_read"]
+    # A clock behind the block's is shown as it is, never as zero.
+    assert (stated["selector"], stated["age_seconds"]) == (str(BLOCK.number), -3)
+    unpinned = SimpleNamespace(block="finalized")
+    assert ax.with_block_read({"product": "x"}, unpinned) == {"product": "x"}
+
+
+def test_the_command_clock_is_whole_seconds(monkeypatch):
+    monkeypatch.setattr(ax.time, "time", lambda: 12.9)
+    assert ax.now() == 12
+
+
 def gmx_request_json():
     chain = Chain(chain_id=ChainId("eip155:42161"), environment="mainnet")
     reference = str(chain.chain_id)

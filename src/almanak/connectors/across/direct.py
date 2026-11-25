@@ -129,9 +129,16 @@ def quoted_terms(quote, target, amount: int) -> dict:
     }
 
 
+def steps(state) -> list[str]:
+    """The steps the admitted request sends, from the allowance its first step saw."""
+    decided = state.decision.intent
+    amount = decided.amount.amount if decided.kind == "bridge" else None
+    return planned_steps(decided.kind, state.plan.before.allowance, amount)
+
+
 def details(backend, state) -> dict:
-    """What the admitted request rests on beyond its first step: the steps it takes, and
-    for a bridge the venue's quote, admitted under the stated ceiling.
+    """What the admitted request rests on beyond its steps: for a bridge the venue's
+    quote, admitted under the stated ceiling.
 
     The quote is the gateway's own answer for this request at the planned block, the one
     its first step was admitted with. The deposit asks again and signs its own quote,
@@ -143,14 +150,12 @@ def details(backend, state) -> dict:
     decided, plan = state.decision.intent, state.plan
     before = plan.before
     amount = decided.amount.amount if decided.kind == "bridge" else None
-    stated: dict = {"steps": planned_steps(decided.kind, before.allowance, amount)}
     if amount is None:
-        return stated
+        return {}
     quote = execution.quoted(backend, state, decided, before)
     venue.admit(quote, decided.target, amount, before.pool, before.block.timestamp)
     receiving = decided.target.destination_fund.address
     return {
-        **stated,
         "recipient": receiving,
         "recipient_is_sender": receiving == decided.target.fund.address,
         "quote": quoted_terms(quote, decided.target, amount),
@@ -204,4 +209,5 @@ DIRECT = DirectActions(
     position=position,
     note=note,
     details=details,
+    steps=steps,
 )

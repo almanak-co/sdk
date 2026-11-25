@@ -596,6 +596,19 @@ not opened. With `--execute` it signs and sends each step, waits for its receipt
 prints the outcomes with the position before and after. A supply is an approval
 followed by the supply, so the preview shows the approval.
 
+A preview says how many transactions the request sends. `steps` lists them in order
+by kind, such as `["approve", "supply"]`, and `steps_note` says the same in a
+sentence. `first_step` carries the gas and the gas price of the first one only: a
+later step cannot be simulated before the earlier one is mined, so no gas is quoted
+or estimated for it, and each step pays its own gas under the same ceilings. The
+list restates the connector's planner over the block the first step was planned
+on, and each later step is planned again once the earlier one is mined, so it is
+what the request sends when nothing is refused and nothing changes in between.
+`steps` is stated by Across, Aave V4, Aave V3 and SparkLend, and only where that
+block decides every step: a full repayment states none, because the revocation
+after it depends on what the repayment leaves. A result without `steps` names the
+first step in `steps_note` and says that more can follow.
+
 An executed action reports `completed`, true only when the whole request finished,
 and the command exits 1 when it is false. A supply is not atomic: its approval can
 be mined and the supply then be refused, for example on a fee quote above the
@@ -927,12 +940,14 @@ its start, and not on-chain enforcement; it does not show that anyone controls t
 address.
 
 Without `--execute` the result is a preview: `first_step`, the `steps` the request
-takes, the `recipient` with `recipient_is_sender`, and `quote` with its `source`,
+takes with `steps_note`, the `recipient` with `recipient_is_sender`, and `quote` with its `source`,
 `output_amount`, `fee`, `fee_ceiling`, `timestamp` and `fill_deadline`. The `note`
 says so when the recipient is not the sending wallet, and when it was stated in one
 case, which carries no checksum. The steps are the approval of exactly the amount to
 the SpokePool, then the deposit, which spends the approval whole. An allowance of
-another size the wallet already gave the SpokePool is set to zero first. The deposit
+another size the wallet already gave the SpokePool is set to zero first. The gas in
+`first_step` is the approval's alone: the deposit is a second transaction, and its
+gas is not quoted before the approval is mined. The deposit
 asks the venue again and signs its own quote, held to the same ceiling, so the
 previewed terms are not a promise.
 
@@ -1585,6 +1600,17 @@ header's hash with `requireCanonical`, so the output's `block` records the
 concrete number and hash all values came from. A `latest` observation can be
 reorganized away; a later read against a block that is no longer canonical
 fails instead of mixing blocks.
+
+Every read that pins a block also states it as `block_read`, beside its other
+fields: the `selector` that was asked (`finalized`, `latest` or the number), the
+block's `number` and `timestamp`, and `age_seconds`, the command's clock less that
+timestamp. No head is read for it, so the age is as good as the local clock and is
+negative when that clock is behind the block's. A read without `--block` is the
+finalized block, which trails the head by minutes on most chains and by a quarter
+of an hour or more on some: it does not show a transaction that was just mined.
+Read a balance or a position after an action, or after a bridge's arrival, with
+`--block latest`. `ax bridge-status` names its own blocks under `read_at` and
+carries no `block_read`.
 
 On HyperEVM (`eip155:999`), `finalized` is the head, and Alchemy runs a read
 pinned within about 128 to 192 blocks of its head at the next block. There a

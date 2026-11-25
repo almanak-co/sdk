@@ -8,6 +8,7 @@ name the time each answer was received.
 """
 
 import json
+import time
 
 from almanak import ax_bridge, ax_discovery, ax_hypercore, ax_lending_markets, ax_portfolio
 from almanak.balances import parse_balance_request, read_balance
@@ -55,7 +56,7 @@ from almanak.gateway.observation_gateway import gateway_reader
 from almanak.gateway.onchain_lookup import GatewayLookups, VendorLookups
 from almanak.gateway.rabby_portfolio import RabbyPortfolio
 from almanak.gateway.read_endpoints import public_reader, verified_reader
-from almanak.models import ZERO_ADDRESS, Account, Chain, Model
+from almanak.models import ZERO_ADDRESS, Account, Block, Chain, Model
 
 # Request model per (product, connector). The parser's --connector choices in
 # cli_arguments.py must cover exactly these pairs; tests assert they match.
@@ -94,15 +95,48 @@ def command(args) -> int:
         "ax-portfolio": portfolio,
         "ax-bridge-status": ax_bridge.status,
     }
-    print(json.dumps(handlers[args.product](args), indent=2))
+    result = handlers[args.product](args)
+    print(json.dumps(with_block_read(result, args), indent=2))
     return 0
+
+
+def pin(reader, args) -> Block:
+    """Pin the read's block and keep it with the arguments, for `block_read`."""
+    args.pinned_block = reader.pin_block(args.block)
+    return args.pinned_block
+
+
+def with_block_read(result, args):
+    """The result with the block its values were read at, as `block_read`.
+
+    `selector` is what `--block` asked for: `finalized`, `latest` or a number.
+    `age_seconds` is this command's clock less the block's own timestamp, so a reader
+    sees how far behind the present the values are. It is negative when the clock is
+    behind the block's. No head is read for it. A read that pins no block, or one that
+    reports its own blocks, carries none.
+    """
+    block = getattr(args, "pinned_block", None)
+    if block is None or not isinstance(result, dict):
+        return result
+    stated = {
+        "selector": str(args.block),
+        "number": block.number,
+        "timestamp": block.timestamp,
+        "age_seconds": now() - block.timestamp,
+    }
+    return {**result, "block_read": stated}
+
+
+def now() -> int:
+    """The command's clock, in whole seconds since the epoch."""
+    return int(time.time())
 
 
 def pool_price(args):
     request = parse_request(args)
     chain = live_chain(request.source.chain)
     with observation_reader(args, chain.chain_id) as reader:
-        block = reader.pin_block(args.block)
+        block = pin(reader, args)
         pool = read_pool(reader, request.source, block)
         price = pool.spot_price(request)
         return {
@@ -120,7 +154,7 @@ def pool_price(args):
 def lending_reserve(args):
     request = lending_request(args)
     with observation_reader(args, request.chain) as reader:
-        block = reader.pin_block(args.block)
+        block = pin(reader, args)
         return read_lending_reserve(reader, request, block, risk_query(args))
 
 
@@ -132,7 +166,7 @@ def lending_position(args):
     request = lending_request(args)
     account = Account(chain=live_chain(mainnet(request.chain)), address=args.account)
     with observation_reader(args, request.chain) as reader:
-        return read_lending_position(reader, request, account, reader.pin_block(args.block))
+        return read_lending_position(reader, request, account, pin(reader, args))
 
 
 def lending_request(args):
@@ -154,7 +188,7 @@ def balance(args):
     with observation_reader(args, asset.chain) as reader:
         # Pin once so every account is read at the same block, not the head
         # each read would otherwise resolve for a `latest` selector.
-        block = reader.pin_block(args.block)
+        block = pin(reader, args)
         observations = [
             read_balance(reader, asset, account, block.number) for _, account in requests
         ]
@@ -171,7 +205,7 @@ def perp_position(args):
     chain = live_chain(request.market.chain)
     account = Account(chain=chain, address=args.account)
     with observation_reader(args, chain.chain_id) as reader:
-        block = reader.pin_block(args.block)
+        block = pin(reader, args)
         return read_gmx_position(reader, request, account, block)
 
 
@@ -179,7 +213,7 @@ def perp_markets(args):
     request = parse_request(args)
     chain = live_chain(mainnet(request.chain))
     with observation_reader(args, chain.chain_id) as reader:
-        block = reader.pin_block(args.block)
+        block = pin(reader, args)
         return read_gmx_market(reader, request, block)
 
 
@@ -191,7 +225,7 @@ def pool(args):
     if resolved_only and args.depth_bps is not None:
         raise ValueError("--depth-bps is available for V3-style concentrated-liquidity pools")
     with observation_reader(args, chain.chain_id) as reader:
-        block = reader.pin_block(args.block)
+        block = pin(reader, args)
         if resolved_only:
             return read_resolved_pool(reader, args.connector, request, block)
         return read_pool_state(reader, args.connector, request, block, args.depth_bps)
@@ -202,7 +236,7 @@ def liquidity_position(args):
     chain = live_chain(mainnet(request.chain))
     support_level(args.connector, request.chain)
     with observation_reader(args, chain.chain_id) as reader:
-        block = reader.pin_block(args.block)
+        block = pin(reader, args)
         if not isinstance(request, PositionRequest):
             return account_position_read(args.connector)(reader, request, block)
         return read_liquidity_position(reader, args.connector, request, block)
@@ -219,7 +253,7 @@ def account_position_read(connector: str):
 def token_resolve(args):
     chain = live_chain(mainnet(ChainId(args.chain))).chain_id
     with lookup_source(args) as lookups, observation_reader(args, chain) as reader:
-        block = reader.pin_block(args.block)
+        block = pin(reader, args)
         return ax_discovery.resolve(lookups, reader, block, args.query, args.limit)
 
 
@@ -234,7 +268,7 @@ def pool_discovery(args):
         offset=args.offset,
     )
     with lookup_source(args) as lookups, observation_reader(args, chain) as reader:
-        block = reader.pin_block(args.block)
+        block = pin(reader, args)
         return ax_discovery.dex_pools(lookups, reader, block, query)
 
 
@@ -251,7 +285,7 @@ def lending_markets(args):
         include_unlisted=args.include_unlisted,
     )
     with lookup_source(args) as lookups, observation_reader(args, chain) as reader:
-        block = reader.pin_block(args.block)
+        block = pin(reader, args)
         return ax_lending_markets.lending_markets(reader, lookups, block, query)
 
 
