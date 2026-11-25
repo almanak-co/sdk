@@ -833,7 +833,7 @@ almanak ax bridge --connector across --chain eip155:42161 \
 | `--chain`, `--asset` | The chain the asset leaves and the CAIP-19 asset sent. |
 | `--destination-chain`, `--destination-asset` | The chain it arrives on and the CAIP-19 asset received. Both assets must have the same decimals. |
 | `--amount` | Base units sent. The deployment sends exactly this and binds no more of the wallet. |
-| `--max-fee-bps` | Required, 0 to 10000. A venue quote whose whole fee exceeds this many basis points of the amount is refused before anything is signed. |
+| `--max-fee-bps` | Required, 0 to 10000. A venue quote whose whole fee exceeds this many basis points of the amount is refused before the step it was asked for is signed. The approval and the deposit each ask their own quote, so a deposit quote refused after the approval was mined leaves that approval standing: clear it with `ax revoke-bridge`, or bridge the same amount later. |
 | `--recipient` | Required. The address on the destination chain that receives. State the wallet's own address to keep the funds; no default chooses it. State it with its checksum (mixed case), which catches a mistyped character. |
 
 The output amount is Across's own quote, asked from its API by the command's gateway

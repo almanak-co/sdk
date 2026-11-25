@@ -1069,6 +1069,11 @@ independently.
   is the proxy address the pins name today, whatever implementation it runs. It
   takes no other spender, as `ax revoke-exchange` takes none: an allowance to a
   proxy address the pins no longer name is not cleared by this command.
+- Known limit: a revocation, direct or a strategy's, observes the source
+  SpokePool as every Across step does, reading its quote buffer, fill deadline
+  buffer and deposit pause. It is held to no pin, but a proxy whose
+  implementation no longer serves those views refuses the observation, and the
+  approval then stands until the owner clears it with another tool.
 - Accepted: the recipient checks of a direct bridge. The preview
   and the result state `recipient` and `recipient_is_sender` beside the quote.
   The `note` says when the recipient is not the sending wallet, and when it was

@@ -199,7 +199,8 @@ class SourceRoute:
 
 def revocation_route(resolved) -> SourceRoute:
     """The route of a revocation: the sent token and the SpokePool at the reviewed proxy
-    address, as read on the source chain, whatever implementation that proxy runs.
+    address, as read on the source chain, on any implementation that still serves the
+    pool views every Across observation reads.
 
     A revocation sends nothing, so it reads nothing on the destination chain and holds
     neither pool to its pin: a pin difference or a destination outage must never keep an

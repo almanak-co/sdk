@@ -669,7 +669,7 @@ only once the read without `--block` says `arrived`. Report by its `status`:
 | --- | --- |
 | `arrived` | `arrival.received` is the amount measured in the fill transaction. Read the balance on the destination chain and report both. |
 | `in_flight` | No fill at the block read, which `read_at` names. State no received amount, and read again later. |
-| `unfilled` | A block after the fill deadline shows no fill, so nothing arrives. Across pays the sent amount back to the wallet on the source chain, hours later. `refund.payments` lists refund payments the wallet received since, and none is tied to this transfer: report them as possible refunds, and read the source balance. |
+| `unfilled` | A block after the fill deadline shows no fill, so nothing arrives. Across refunds an unfilled deposit on the source chain, but this result does not show that a refund was paid or when one will be: promise neither an amount nor a time. `refund.payments` lists refund payments the wallet received since, and none is tied to this transfer: report them as possible refunds, report a nonzero `refund.deferred_in_spoke_pool` as held by the bridge contract and not in the wallet, and read the source balance. |
 
 When a bridge ends with `completed` false after its approval was mined, the
 allowance stands; `ax revoke-bridge` clears it, and a bridge of the same amount
