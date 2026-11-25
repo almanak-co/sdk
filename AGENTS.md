@@ -881,10 +881,11 @@ independently.
   spenders, until `ax revoke-exchange` clears it; the minted position is
   smaller than the stated amounts cover at the planned price, by about half
   the slippage in a wide range and by half the position or more in a range
-  narrower than the slippage, and the rest stays in the wallet; one stated
-  amount beside a range the slippage reaches into is refused. The approval
-  amounts and the sizing are planning and gateway rules, not on-chain
-  enforcement; the chain enforces only the mint's own maximums.
+  narrower than the slippage, and the rest stays in the wallet. One amount
+  stated for a range the price lies beside is not sized for the slippage: its
+  mint is for all that amount covers and may take none of the other currency.
+  The approval amounts and the sizing are planning and gateway rules, not
+  on-chain enforcement; the chain enforces only the mint's own maximums.
 - Declare a direct action on a cell only after its fork rehearsal passed there.
   Morpho Blue on HyperEVM declares none: the provider runs head-pinned reads at
   a later block, which the reader refuses.

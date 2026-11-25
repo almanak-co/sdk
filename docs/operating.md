@@ -873,8 +873,9 @@ The slippage therefore costs position size. The liquidity is less than the state
 amounts cover at the planned price, and the rest of the stated amounts stays in the
 wallet. In a range much wider than the slippage the difference is about half the
 slippage: about 0.5% at `--slippage-bps 100` over the full range. A narrow range needs
-more of a currency for each move of the price, so the difference grows: about 7% at
-`--slippage-bps 50` in a range of 6% either side of the price, and half or
+more of a currency for each move of the price, so the difference grows: about 8% at
+`--slippage-bps 50` in a range of 6% either side of the price, about 20% in one of 2%
+either side, and half or
 more where the slippage reaches both bounds of the range. State the smallest slippage the step
 needs to mint closest to the stated amounts.
 
@@ -882,9 +883,12 @@ The range bounds what the slippage cannot. Where an edge of the slippage lies at
 beyond a bound of the range, the mint may take all the range holds of that currency,
 and no price in that direction reverts it. A range wholly beside the price and the
 whole slippage takes one currency only, the same amount at every price on that side.
-Where the slippage reaches into a range the price lies beside, the range takes both
-currencies there, and a command that states only one is refused: state both, or a
-slippage that stays outside the range. The gateway plans the mint only while the price
+Where the slippage reaches into a range the price lies beside, a command that states
+both amounts is sized for the price entering the range. One that states only the
+currency the range takes at the price is a one-sided order: its mint is for all that
+amount covers, the same at every price on that side, may take none of the other
+currency, and reverts once the price has entered the range. One amount stated while
+the price is inside the range adds no liquidity and is refused. The gateway plans the mint only while the price
 is within `--slippage-bps` of the price the command decided at, and does not send it
 once the price has left the slippage around the planned price; these two are the
 gateway's checks, not the chain's.

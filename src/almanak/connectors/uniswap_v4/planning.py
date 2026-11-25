@@ -72,11 +72,12 @@ def cleanup(before):
     )
 
 
-def tolerance_edges(price, tolerance_bps):
+def band_edges(price, tolerance_bps):
     """The square-root prices at `price` less and plus the tolerance.
 
     The gateway's price-movement checks compare squared prices against the same
-    tolerance, so no square-root price they admit lies outside these two.
+    tolerance, so no square-root price they admit lies outside these two. Unlike
+    `concentrated_math.tolerance_edges` the high edge is exact, not one unit above.
     """
     from math import isqrt
 
@@ -84,16 +85,28 @@ def tolerance_edges(price, tolerance_bps):
 
 
 def tolerant_liquidity(amount0, amount1, price, lower, upper, tolerance_bps):
-    """The most liquidity the amounts cover at every price within the tolerance of `price`.
+    """The liquidity of an operator's mint of the amounts planned at `price`.
 
+    It is the most the amounts cover at every price within the tolerance of `price`.
     A fixed liquidity takes the most of the first token at the lowest price and the
     most of the second at the highest, so the smaller of what the amounts cover at the
     two edges is covered everywhere between them. It is never more than they cover at
-    `price` itself. All arguments but the tolerance are square-root prices or base units.
+    `price` itself.
+
+    The exception is one amount stated beside the range: the price is at or beyond a
+    bound, where the range takes one token only, and none of the other token is stated.
+    The liquidity is then what the amount covers at `price`, the same at every price on
+    that side. Nothing is sized for the price entering the range, where the mint would
+    need the token of which it may take none.
+
+    All arguments but the tolerance are square-root prices or base units.
     """
+    beside = (price <= lower and not amount1) or (price >= upper and not amount0)
+    if beside:
+        return liquidity_for(amount0, amount1, price, lower, upper)
     return min(
         liquidity_for(amount0, amount1, edge, lower, upper)
-        for edge in tolerance_edges(price, tolerance_bps)
+        for edge in band_edges(price, tolerance_bps)
     )
 
 
@@ -119,8 +132,10 @@ def bounded_mint(intent, before, tolerance_bps):
     whole range in that token, the maximum is all the range holds of it, and no price
     in that direction reverts the mint. A range wholly beside the whole tolerance takes
     one token only, the same amount at every price on that side. Where the tolerance
-    reaches into a range that the price lies beside, both tokens are needed inside it:
-    amounts that state only one cover no liquidity there, and no mint is planned.
+    reaches into a range that the price lies beside, both tokens are needed inside it
+    and the liquidity is sized for both. With only the one token stated that the range
+    takes at this price, the mint is for all that amount covers and may take none of
+    the other, so it reverts once the price has entered the range.
     """
     selected = concrete_range(intent.target, requested=intent.range)
     lower, upper = sqrt_at_tick(selected.lower), sqrt_at_tick(selected.upper)
@@ -129,7 +144,7 @@ def bounded_mint(intent, before, tolerance_bps):
     liquidity = tolerant_liquidity(
         stated[0].amount, stated[1].amount, price, lower, upper, tolerance_bps
     )
-    low, high = tolerance_edges(price, tolerance_bps)
+    low, high = band_edges(price, tolerance_bps)
     most = (
         amounts(liquidity, low, lower, upper, up=True)[0],
         amounts(liquidity, high, lower, upper, up=True)[1],

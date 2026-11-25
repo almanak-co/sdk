@@ -684,8 +684,9 @@ earns nothing.
   about half the slippage over a wide range and far more in a narrow one: half
   the position or more where the slippage reaches both bounds of the range.
   Tell the user this before an open into a narrow range, and propose the
-  smallest slippage that fits the step. A range beside the price that the
-  slippage reaches into needs both amounts stated, or a smaller slippage.
+  smallest slippage that fits the step. One amount stated for a range beside
+  the price is not reduced: it is a one-sided order for all that amount covers,
+  and its mint reverts once the price has entered the range.
 - Only what a mint offers is approved, and what it does not take of that stays
   approved to the position manager. A Uniswap V4 open approves the stated
   `--amount0` and `--amount1` instead, once per token, to Permit2 with no expiry

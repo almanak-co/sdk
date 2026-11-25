@@ -42,9 +42,11 @@ The range bounds what the slippage cannot: where an edge of the slippage lies at
 beyond a bound of the range, the mint may take all the range holds of that token and no
 price in that direction reverts it, and a range wholly beside the whole slippage takes
 one token only, the same amount at every price on that side. Where the slippage reaches
-into a range the price lies beside, the range takes both tokens there, and a command
-that states only one is refused: it states both, or a slippage that stays outside the
-range. The gateway plans the mint only while the price is within the stated slippage of
+into a range the price lies beside, a command that states both amounts is sized for
+the price entering the range. One that states only the token the range takes at the
+price is a one-sided order: its mint is for all that amount covers, the same at every
+price on that side, may take none of the other token, and reverts once the price has
+entered the range. The gateway plans the mint only while the price is within the stated slippage of
 the price the command decided at, and does not send it once the price has left the
 slippage around the planned price; those two are its own checks, not the chain's.
 
@@ -248,8 +250,8 @@ def require_liquidity(seen, slippage_bps: int) -> None:
     """Refuse amounts that add nothing, naming what the range takes.
 
     Refused are amounts that cover no liquidity at the observed price, and amounts
-    that cover some there and none at an edge of the slippage, which is what the
-    planner sizes the mint for.
+    of both tokens that cover some there and are too small to cover any at an edge of
+    the slippage, which is what the planner sizes the mint for.
     """
     from almanak.connectors.uniswap_v4.math import liquidity_for
     from almanak.connectors.uniswap_v4.planning import tolerant_liquidity
@@ -262,10 +264,10 @@ def require_liquidity(seen, slippage_bps: int) -> None:
         if tolerant_liquidity(held[0], held[1], price, lower, upper, slippage_bps):
             return
         raise ValueError(
-            f"the stated amounts add no liquidity at every price within {slippage_bps} "
-            f"basis points of the pool's price: inside that slippage the range "
-            f"{selected.lower} to {selected.upper} takes both tokens. State both amounts, "
-            "or a --slippage-bps that stays outside the range"
+            f"the stated amounts are too small to add liquidity at every price within "
+            f"{slippage_bps} basis points of the pool's price, for which the mint in the "
+            f"range {selected.lower} to {selected.upper} is sized: state larger amounts, "
+            "or a smaller --slippage-bps"
         )
     if tick < selected.lower:
         takes = "only the first token"

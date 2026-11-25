@@ -17,9 +17,10 @@ its changelog is on the `v2` branch.
   the price towards that currency reverted it with `MaximumAmountExceeded`. The minted
   position is smaller than before for the same amounts and the rest stays in the
   wallet: by about half the slippage in a range much wider than the slippage, and by
-  far more in a narrow one, about 7% at 50 basis points in a range of 6% either side
-  and half or more where the slippage reaches both bounds of the range. A range beside
-  the price that the slippage reaches into is refused when only one amount is stated.
+  far more in a narrow one, about 8% at 50 basis points in a range of 6% either side
+  and half or more where the slippage reaches both bounds of the range. One amount
+  stated for a range beside the price is a one-sided order as before: the mint is for
+  all that amount covers and reverts once the price has entered the range.
   A price beyond the slippage is refused as before. Strategy runs are unchanged (#62).
 
 - `--public-rpc blastapi` is the public endpoint for BNB Chain (`eip155:56`), and
