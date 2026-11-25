@@ -481,9 +481,13 @@ def read_refunds(reader, pool: str, deposit: Deposit, head, start: int | None) -
     if start is None:
         start = chain.block_at_or_before(reader, deposit.fill_deadline, head).number
     payments, scanned_to = [], None
+    seen: set[str] = set()
     for first, end in pages(reader, start, head.number, MAXIMUM_REFUND_PAGES):
         rows = chain.refund_logs(reader, deposit.input_token, pool, deposit.depositor, first, end)
-        payments += [p for row in rows if (p := leaf_payment(reader, pool, deposit, row))]
+        # A payment record covers its whole transaction, so each is decoded once.
+        fresh = {row["transactionHash"]: row for row in rows if row["transactionHash"] not in seen}
+        seen.update(fresh)
+        payments += [p for row in fresh.values() if (p := leaf_payment(reader, pool, deposit, row))]
         scanned_to = end.number
     held = chain.deferred_refund(reader, pool, deposit.input_token, deposit.depositor, head)
     return {

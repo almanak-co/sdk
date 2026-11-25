@@ -396,14 +396,48 @@ def test_the_deposit_calldata_names_the_wallet_as_depositor_and_the_stated_recip
     assert stated[1] != stated[0]
 
 
-def test_a_stated_recipient_is_never_paid_a_wrapped_native_output():
+def test_a_stated_recipient_is_never_paid_a_wrapped_native_output(monkeypatch):
     """A stated recipient is an address of unknown kind, so it is held as an EOA is:
     Across would pay it the native asset, which this scope does not record."""
     wrapped = SimpleNamespace(route=stated_route(destination_asset=BASE_WETH))
     positions = across_direct.positions(None, BLOCK, wrapped, WALLET, BRIDGE)
     provider = ax_actions.alchemy(ARBITRUM.chain_id)
-    with pytest.raises(ValidationError, match="native asset"):
-        ax_actions.configuration("across", positions, WALLET, provider, ARBITRUM, LIMITS)
+    config = ax_actions.configuration("across", positions, WALLET, provider, ARBITRUM, LIMITS)
+    name = config.allocations[0].name
+    with pytest.raises(ValueError, match="native asset"):
+        config.bridge(name, AMOUNT)
+    # The gateway holds a deposit to the same rule, whatever intent reached it.
+    from almanak.connectors.across.execution import validate_entry
+    from almanak.connectors.across.operations import ApproveOperation
+    from almanak.gateway.ethereum import DataError
+
+    state = SimpleNamespace(config=config, mode="running", outcomes=())
+    operation = ApproveOperation.model_construct(target=config.target(name))
+    monkeypatch.setattr("almanak.connectors.across.execution.require_reviewed", lambda before: None)
+    with pytest.raises(DataError, match="native asset"):
+        validate_entry(state, operation, None)
+
+
+def test_a_revocation_is_not_held_to_the_payout_rule_of_a_deposit():
+    """A revocation pays nobody, so a wrapped native asset named as received refuses nothing."""
+    wrapped = SimpleNamespace(route=stated_route(destination_asset=BASE_WETH))
+    positions = across_direct.positions(None, BLOCK, wrapped, WALLET, REVOKE)
+    provider = ax_actions.alchemy(ARBITRUM.chain_id)
+    config = ax_actions.configuration("across", positions, WALLET, provider, ARBITRUM, LIMITS)
+    name = config.allocations[0].name
+    assert config.revoke(name).kind == "revoke_bridge"
+    with pytest.raises(ValueError, match="native asset"):
+        config.bridge(name, AMOUNT)
+
+
+def test_a_connector_without_details_never_costs_a_preview_its_checkpoint_read():
+    class Journal:
+        def load(self):
+            raise OSError("storage is away")
+
+    assert ax_actions.stated_details(SimpleNamespace(details=None), None, Journal()) == {}
+    with pytest.raises(OSError):
+        ax_actions.stated_details(SimpleNamespace(details=lambda b, s: {}), None, Journal())
 
 
 def test_a_stated_recipient_is_in_the_environment_of_the_route():
@@ -1124,6 +1158,15 @@ def test_a_refund_leaf_payment_is_listed_and_never_tied_to_the_transfer():
     (payment,) = refund["payments"]
     assert payment["transaction"] == paid["transactionHash"] and payment["block"] == number
     assert payment["amounts"] == [str(page["total"])] and payment["equals_sent"] is True
+    # Two matching logs of one transaction are one payment, since a record covers it all.
+    from almanak.connectors.across import settlement_reader
+
+    single = settlement_reader.refund_logs
+    twice = lambda *args: [row for row in single(*args) for _ in range(2)]  # noqa: E731
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(settlement_reader, "refund_logs", twice)
+        again = ax_bridge.read_refunds(near, ARB_POOL, deposit_of(page["total"]), head, None)
+    assert again["payments"] == refund["payments"]
     assert refund["deferred_in_spoke_pool"] == "3" and refund["complete"]
     other = ax_bridge.read_refunds(near, ARB_POOL, deposit_of(7), head, number - 10)
     assert other["payments"][0]["equals_sent"] is False

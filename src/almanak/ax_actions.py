@@ -672,7 +672,7 @@ def perform(
             "position_before": position(before),
             "first_step": first,
             **noted,
-            **stated_details(binding, service.backend, runtime.journal.load()),
+            **stated_details(binding, service.backend, runtime.journal),
         }
         interrupt()
         if execute:
@@ -688,9 +688,13 @@ def stated_note(binding, config, observed, request) -> dict:
     return {} if text is None else {"note": text}
 
 
-def stated_details(binding, backend, state) -> dict:
-    """The connector's own result fields for an admitted, planned request."""
-    return {} if binding.details is None else binding.details(backend, state)
+def stated_details(binding, backend, journal) -> dict:
+    """The connector's own result fields for an admitted, planned request.
+
+    The checkpoint is read only for a connector that states such fields, so a failed read
+    never costs another connector its preview.
+    """
+    return {} if binding.details is None else binding.details(backend, journal.load())
 
 
 def executed(runtime, start: int, interrupt) -> dict:

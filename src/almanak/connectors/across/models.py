@@ -126,7 +126,11 @@ class Parameters(AuthorGas):
         # A backtest's hypothetical account signs nothing and stands for an EOA.
         if source.kind not in ("eoa", "simulation"):
             raise ValueError("Across deposits are supported from an EOA account only")
-        refuse_native_output(allocation.route, self.recipient_kind(allocation))
+        kind = self.recipient_kind(allocation)
+        # An operator's allocation may only revoke, which pays nobody: its payout rule is
+        # held where a deposit is asked for and again where the gateway admits one.
+        if allocation.adopt is None:
+            refuse_native_output(allocation.route, kind)
 
     def recipient_kind(self, allocation: Allocation) -> str:
         # A stated recipient is an address of unknown kind, held to the stricter rule.
@@ -145,9 +149,15 @@ class Parameters(AuthorGas):
         destination chain; until then the fund holds a transfer, not a balance.
         """
         target = self.target(name)
+        self.require_payout(name)
         return BridgeIntent[Target](
             target=target, amount=AssetAmount(asset=target.asset, amount=amount)
         )
+
+    def require_payout(self, name: str) -> None:
+        """Refuse a deposit whose recipient Across would pay in the native asset."""
+        allocation = self.allocation(name)
+        refuse_native_output(allocation.route, self.recipient_kind(allocation))
 
     def revoke(self, name: str) -> RevokeBridgeIntent[Target]:
         """Clear the SpokePool approval an unfinished bridge left on the source account.
