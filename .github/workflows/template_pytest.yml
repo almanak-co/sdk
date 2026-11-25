@@ -12,7 +12,7 @@ on:
         description: >-
           Record shard coverage for the CRAP gate. The PR crap_gate job is the
           only consumer of the combined data, so callers that never score CRAP
-          (main, release flows) can run the suite without tracing overhead.
+          (release flows) can run the suite without tracing overhead.
         type: boolean
         required: false
         default: true

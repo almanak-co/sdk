@@ -340,7 +340,7 @@ def test_release_candidates_build_and_publish_nowhere():
 
 
 def test_no_release_job_hands_off_to_another_repository():
-    for name in ("release_tag.yml", "release_candidate.yml", "main.yml"):
+    for name in ("release_tag.yml", "release_candidate.yml"):
         text = (WORKFLOWS / name).read_text()
         assert "dispatches" not in text and "notify" not in text
 
