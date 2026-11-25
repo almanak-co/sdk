@@ -179,9 +179,23 @@ def test_a_reported_value_no_call_can_encode_fails_instead_of_stopping_the_run()
         "state_view": "0x" + "33" * 20,
     }
     output = {"observation": {"source": source, "block": BLOCK}}
-    case = reads.ReadCase("pool-price", ETHEREUM, ("pool-price",), checks.v4_pool_price)
+    # Requested with the same null hook, so the identity check lets it reach the encoder.
+    check = checks.v4_pool_price(source["currency0"], source["currency1"], 500, 10, None)
+    case = reads.ReadCase("pool-price", ETHEREUM, ("pool-price",), check)
     verdict = reads.judge(case, succeeded(output), Rpc(None))
     assert verdict.status == "fail" and "EncodingTypeError" in verdict.detail
+
+
+@pytest.mark.parametrize("source", [None, [], "listing"])
+def test_a_listing_whose_source_is_not_an_object_fails_instead_of_stopping_the_run(source):
+    """A null source would raise AttributeError inside the check, past the case boundary."""
+    output = {"source": source, "block": BLOCK, "markets": []}
+    for check in (checks.aave_v4_listing, checks.pool_reserve_listing(3)):
+        case = reads.ReadCase("listing", ETHEREUM, ("lending-markets",), check)
+        run, _ = scripted(succeeded(output))
+        result = reads.run_case(case, "publicnode", run, FakeRpc(), Path("."), sleep=pytest.fail)
+        assert (result.status, result.attempts) == ("fail", 1)
+        assert "output is not shaped as the check reads it" in result.detail
 
 
 SPOKE = "0x" + "33" * 20
@@ -540,7 +554,14 @@ def test_a_chain_without_its_own_cases_gets_them_from_its_network_record():
         wrapped,
     )
     assert reserve.arguments[-1] == f"eip155:8453/erc20:{wrapped}"
-    assert reserve.check is checks.pooled_reserve
+    # The check is bound to the requested asset and to the Pool Aave V3 pins on Base.
+    other = {
+        "resolution": {"pool": "0xa238dd80c259a72e81d7e4664a9801593f98d1c5", "asset": USDC},
+        "observation": {"block": BLOCK},
+    }
+    assert reserve.check is not None
+    (difference,) = reserve.check(other, FakeRpc(down=True))
+    assert difference.startswith("asset: CLI") and wrapped in difference
     # Aave V3 has no Pool there, so only the balance is read.
     (only,) = chain_cases(ChainId("eip155:4663"))
     assert only.id == "balance/native/eip155:4663"
@@ -633,6 +654,15 @@ def test_a_listing_is_complete_or_it_is_blocked_or_failed():
     refused_market = market("refused", reason="deployment_changed: unverified revision")
     assert checks.listed_markets(listing([market()]), FakeRpc()) == []
     assert checks.listed_markets(listing([]), FakeRpc()) == ["the listing reports no markets"]
+    # An empty listing beside an entry the endpoint did not answer blocks, so it is retried:
+    # the unanswered Hub may hold every market. Beside an answered finding it still fails.
+    limited_hub = {"hub": "0x2", "reason": "http: HTTP 429"}
+    with pytest.raises(RpcUnavailable, match="1 entries unreadable, first: http: HTTP 429"):
+        checks.listed_markets(listing([], [limited_hub]), FakeRpc())
+    broken = {"comet": "0x3", "reason": "invalid: no base token"}
+    assert checks.listed_markets(listing([], [limited_hub, broken]), FakeRpc()) == [
+        "comet 0x3 is unreadable: invalid: no base token"
+    ]
     assert checks.listed_markets(listing([market(), refused_market]), FakeRpc()) == [
         "market 1 is refused: deployment_changed: unverified revision"
     ]
@@ -743,11 +773,83 @@ def test_an_aave_v4_market_is_held_to_what_its_spoke_records():
         },
         "observation": {"block": BLOCK},
     }
-    assert checks.aave_v4_reserve(reserve, agreeing) == []
-    (difference,) = checks.aave_v4_reserve(reserve, other)
+    requested = checks.aave_v4_reserve("0xspoke", 3)
+    assert requested(reserve, agreeing) == []
+    (difference,) = requested(reserve, other)
     assert difference.startswith("asset: CLI")
     wrong_slot = FakeRpc({"getReserve(uint256)": (MARKET_ASSET, HUB, 9, 18), "decimals()": (18,)})
-    assert checks.aave_v4_reserve(reserve, wrong_slot) == ["hub_asset_id: CLI 4, direct read 9"]
+    assert requested(reserve, wrong_slot) == ["hub_asset_id: CLI 4, direct read 9"]
+
+
+def test_a_reserve_or_pool_read_of_another_selector_fails_before_any_direct_read():
+    """Correct data for another reserve or pool would agree with a direct read of it."""
+    other = "0x" + "22" * 20
+    weth = "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    block = {"block": BLOCK}
+    v4_source = {
+        "currency0": USDC,
+        "currency1": weth,
+        "fee": 500,
+        "tick_spacing": 10,
+        "hooks": checks.ZERO_ADDRESS,
+    }
+    cases = (
+        (
+            checks.aave_v4_reserve(SPOKE, 0),
+            {"resolution": {"selection": {"spoke": SPOKE, "reserve_id": 1}}, "observation": block},
+            "reserve_id: CLI 1, requested 0",
+        ),
+        (
+            checks.aave_v4_reserve(SPOKE, 0),
+            {"resolution": {"selection": {"spoke": other, "reserve_id": 0}}, "observation": block},
+            f"spoke: CLI {other!r}",
+        ),
+        (
+            checks.pooled_reserve(SPOKE, USDC),
+            {"resolution": {"pool": SPOKE, "asset": weth}, "observation": block},
+            f"asset: CLI {weth!r}, requested {USDC!r}",
+        ),
+        (
+            checks.pooled_reserve(SPOKE, USDC),
+            {"resolution": {"pool": other, "asset": USDC}, "observation": block},
+            f"pool: CLI {other!r}",
+        ),
+        (
+            checks.comet_reserve(SPOKE, USDC),
+            {"resolution": {"comet": other, "asset": USDC}, "observation": block},
+            f"comet: CLI {other!r}",
+        ),
+        (
+            checks.morpho_reserve(SPOKE, "0x" + "0d" * 32),
+            {"resolution": {"core": SPOKE, "market_id": "0x" + "0e" * 32}, "observation": block},
+            "market_id: CLI '0x0e0e",
+        ),
+        (
+            checks.v3_pool(SPOKE),
+            {"resolution": {"pool": other}, "observation": block},
+            f"pool: CLI {other!r}",
+        ),
+        (
+            checks.v4_pool_price(USDC, weth, 500, 10),
+            {"observation": {"source": {**v4_source, "fee": 3000}, "block": BLOCK}},
+            "fee: CLI 3000, requested 500",
+        ),
+        (
+            checks.v4_pool_price(USDC, weth, 500, 10),
+            {"observation": {"source": {**v4_source, "hooks": other}, "block": BLOCK}},
+            f"hooks: CLI {other!r}",
+        ),
+    )
+    for check, output, finding in cases:
+        # Any direct read would raise: the identity is refused before one is made.
+        (difference,) = check(output, FakeRpc(down=True))
+        assert difference.startswith(finding) and ", requested " in difference, finding
+    # The same address in another letter case is the same selector.
+    upper = {"resolution": {"pool": SPOKE.upper().replace("0X", "0x"), "asset": USDC}}
+    read = FakeRpc({"getReserveData(address)": (0,) * 8 + (MARKET_ASSET,), "decimals()": (6,)})
+    reserve = {**upper, "observation": block}
+    reserve["resolution"] |= {"a_token": f"eip155:1/erc20:{MARKET_ASSET}", "decimals": 6}
+    assert checks.pooled_reserve(SPOKE, USDC)(reserve, read) == []
 
 
 LOAN = f"eip155:1/erc20:{MARKET_ASSET}"

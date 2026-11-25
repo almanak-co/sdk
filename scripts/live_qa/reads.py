@@ -184,7 +184,8 @@ def judge_output(case: ReadCase, output: dict[str, Any], rpc: Rpc) -> Verdict:
         return Verdict("fail", f"a direct read of what the command reported reverted: {exc}")
     except RpcUnavailable as exc:
         return Verdict("transient", f"cross-check blocked: {exc}")
-    except (KeyError, IndexError, TypeError, ValueError, EncodingError) as exc:
+    except (AttributeError, KeyError, IndexError, TypeError, ValueError, EncodingError) as exc:
+        # AttributeError: a null or a list where the check reads an object's fields.
         # EncodingError: a reported value, such as a null address, cannot be a call argument.
         return Verdict("fail", f"output is not shaped as the check reads it: {exc!r}")
     if mismatches:

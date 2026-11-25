@@ -23,6 +23,7 @@ Not covered, and why:
 from almanak.caip import AssetType, ChainId
 from almanak.chains import evm_network
 from almanak.connectors.aave_v3.networks import POOLS as AAVE_V3_POOLS
+from almanak.connectors.sparklend.networks import POOLS as SPARKLEND_POOLS
 from almanak.gateway.providers import PUBLIC_RPC
 from scripts.live_qa import checks
 from scripts.live_qa.reads import KnownIssue, ReadCase, Refusal
@@ -126,7 +127,7 @@ ETHEREUM_CASES = (
         "lending-reserve/aave_v4/ethereum-weth",
         ETHEREUM,
         aave_v4("lending-reserve", ETHEREUM, AAVE_V4_ETHEREUM_SPOKE, 0),
-        checks.aave_v4_reserve,
+        checks.aave_v4_reserve(AAVE_V4_ETHEREUM_SPOKE, 0),
     ),
     ReadCase(
         "lending-position/aave_v4/ethereum-weth",
@@ -148,7 +149,7 @@ ETHEREUM_CASES = (
         "lending-reserve/aave_v3/ethereum-weth",
         ETHEREUM,
         reserve("aave_v3", ETHEREUM, "--asset", WETH),
-        checks.pooled_reserve,
+        checks.pooled_reserve(AAVE_V3_POOLS[ETHEREUM], WETH),
     ),
     ReadCase(
         "lending-markets/aave_v3/ethereum",
@@ -160,7 +161,7 @@ ETHEREUM_CASES = (
         "lending-reserve/sparklend/ethereum-weth",
         ETHEREUM,
         reserve("sparklend", ETHEREUM, "--asset", WETH),
-        checks.pooled_reserve,
+        checks.pooled_reserve(SPARKLEND_POOLS[ETHEREUM], WETH),
     ),
     ReadCase(
         "lending-markets/sparklend/ethereum",
@@ -172,13 +173,13 @@ ETHEREUM_CASES = (
         "lending-reserve/compound_v3/ethereum-usdc",
         ETHEREUM,
         reserve("compound_v3", ETHEREUM, "--comet", COMET_USDC, "--asset", USDC),
-        checks.comet_reserve,
+        checks.comet_reserve(COMET_USDC, USDC),
     ),
     ReadCase(
         "lending-reserve/morpho_blue/ethereum-cbbtc-usdc",
         ETHEREUM,
         reserve("morpho_blue", ETHEREUM, "--market-id", MORPHO_CBBTC_USDC, "--leg", "loan"),
-        checks.morpho_reserve,
+        checks.morpho_reserve(MORPHO_CORE, MORPHO_CBBTC_USDC),
     ),
     ReadCase(
         "lending-markets/morpho_blue/ethereum-usdc",
@@ -190,7 +191,7 @@ ETHEREUM_CASES = (
         "pool/uniswap_v3/ethereum-usdc-weth",
         ETHEREUM,
         v3_pool(ETHEREUM, ETHEREUM_V3_POOL),
-        checks.v3_pool,
+        checks.v3_pool(ETHEREUM_V3_POOL),
     ),
     ReadCase(
         "pool-price/uniswap_v4/ethereum-usdc-weth",
@@ -210,7 +211,7 @@ ETHEREUM_CASES = (
             "--tick-spacing",
             "10",
         ),
-        checks.v4_pool_price,
+        checks.v4_pool_price(USDC, WETH, 500, 10),
     ),
 )
 
@@ -228,7 +229,7 @@ AVALANCHE_CASES = (
         "lending-reserve/aave_v4/avalanche-usdc",
         AVALANCHE,
         aave_v4("lending-reserve", AVALANCHE, AAVE_V4_AVALANCHE_SPOKE, 2),
-        checks.aave_v4_reserve,
+        checks.aave_v4_reserve(AAVE_V4_AVALANCHE_SPOKE, 2),
     ),
     ReadCase(
         "lending-position/aave_v4/avalanche-usdc",
@@ -251,13 +252,13 @@ AVALANCHE_CASES = (
         "lending-reserve/aave_v3/avalanche-usdc",
         AVALANCHE,
         reserve("aave_v3", AVALANCHE, "--asset", AVALANCHE_USDC),
-        checks.pooled_reserve,
+        checks.pooled_reserve(AAVE_V3_POOLS[AVALANCHE], AVALANCHE_USDC),
     ),
     ReadCase(
         "pool/uniswap_v3/avalanche-wavax-usdc",
         AVALANCHE,
         v3_pool(AVALANCHE, AVALANCHE_V3_POOL),
-        checks.v3_pool,
+        checks.v3_pool(AVALANCHE_V3_POOL),
     ),
     ReadCase(
         "perp-markets/gmx_v2/avalanche-btc-by-address",
@@ -369,7 +370,7 @@ def chain_cases(chain: ChainId) -> tuple[ReadCase, ...]:
                 f"lending-reserve/aave_v3/{chain}-wrapped-native",
                 chain,
                 reserve("aave_v3", chain, "--asset", wrapped),
-                checks.pooled_reserve,
+                checks.pooled_reserve(AAVE_V3_POOLS[chain], wrapped),
             )
         )
     return tuple(cases)

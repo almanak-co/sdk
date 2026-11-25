@@ -44,21 +44,32 @@ def lowered(value: Any) -> Any:
     return value.lower() if isinstance(value, str) else value
 
 
+def not_requested(pairs: Iterable[tuple[str, Any, Any]]) -> list[str]:
+    """Where what the command reports it read differs from what the case requested.
+
+    A check whose direct read follows the reported identity would agree with a correct
+    answer about the wrong market, so identity is held to the request before any read.
+    Addresses and asset references compare in any letter case.
+    """
+    return [
+        f"{label}: CLI {reported!r}, requested {requested!r}"
+        for label, reported, requested in pairs
+        if lowered(reported) != lowered(requested)
+    ]
+
+
 def other_identity(observation: Output, asset: AssetType, account: str) -> list[str]:
     """Where an observation names another asset or account than the case requested.
 
     A direct read of what the command reported would agree with a correct balance of
     the wrong account, so identity is held to the case before any read.
     """
-    pairs = (
-        ("asset", observation["asset"], str(asset)),
-        ("account", observation["account"]["address"], account),
+    return not_requested(
+        (
+            ("asset", observation["asset"], str(asset)),
+            ("account", observation["account"]["address"], account),
+        )
     )
-    return [
-        f"{label}: CLI {reported!r}, requested {requested!r}"
-        for label, reported, requested in pairs
-        if lowered(reported) != requested.lower()
-    ]
 
 
 def unrequested(output: Output, asset: AssetType, account: str) -> list[str]:
@@ -106,23 +117,31 @@ def erc20_balance(asset: AssetType, account: str) -> Check:
     return check
 
 
-def v3_pool(output: Output, rpc: Rpc) -> list[str]:
-    observation = output["observation"]
-    pool, number = output["resolution"]["pool"], observation["block"]["number"]
-    slot0 = rpc.call(pool, "slot0()", number, ("uint160", "int24"))
-    (liquidity,) = rpc.call(pool, "liquidity()", number, ("uint128",))
-    (token0,) = rpc.call(pool, "token0()", number, ("address",))
-    (fee,) = rpc.call(pool, "fee()", number, ("uint24",))
-    return differences(
-        (
-            ("sqrt_price_x96", observation["sqrt_price_x96"], slot0[0]),
-            ("tick", observation["tick"], slot0[1]),
-            ("liquidity", observation["liquidity"], liquidity),
-            ("currency0", asset_address(observation["currency0"]["identifier"]), token0.lower()),
-            ("fee", output["resolution"]["fee"], fee),
-            same_block(observation, rpc),
+def v3_pool(pool: str) -> Check:
+    """A Uniswap V3 pool read of the requested pool, held to the pool's own state."""
+
+    def check(output: Output, rpc: Rpc) -> list[str]:
+        if other := not_requested((("pool", output["resolution"]["pool"], pool),)):
+            return other
+        observation = output["observation"]
+        number = observation["block"]["number"]
+        slot0 = rpc.call(pool, "slot0()", number, ("uint160", "int24"))
+        (liquidity,) = rpc.call(pool, "liquidity()", number, ("uint128",))
+        (token0,) = rpc.call(pool, "token0()", number, ("address",))
+        (fee,) = rpc.call(pool, "fee()", number, ("uint24",))
+        token0_reported = asset_address(observation["currency0"]["identifier"])
+        return differences(
+            (
+                ("sqrt_price_x96", observation["sqrt_price_x96"], slot0[0]),
+                ("tick", observation["tick"], slot0[1]),
+                ("liquidity", observation["liquidity"], liquidity),
+                ("currency0", token0_reported, token0.lower()),
+                ("fee", output["resolution"]["fee"], fee),
+                same_block(observation, rpc),
+            )
         )
-    )
+
+    return check
 
 
 def v4_pool_id(source: Output) -> bytes:
@@ -137,24 +156,45 @@ def v4_pool_id(source: Output) -> bytes:
     return keccak(encode(("address", "address", "uint24", "int24", "address"), key))
 
 
-def v4_pool_price(output: Output, rpc: Rpc) -> list[str]:
-    observation = output["observation"]
-    source, number = observation["source"], observation["block"]["number"]
-    slot0 = rpc.call(
-        source["state_view"],
-        "getSlot0(bytes32)",
-        number,
-        ("uint160", "int24", "uint24", "uint24"),
-        (v4_pool_id(source),),
-    )
-    return differences(
-        (
-            ("sqrt_price_x96", observation["sqrt_price_x96"], slot0[0]),
-            ("tick", observation["tick"], slot0[1]),
-            ("lp_fee", observation["lp_fee"], slot0[3]),
-            same_block(observation, rpc),
+def v4_pool_price(
+    currency0: str, currency1: str, fee: int, tick_spacing: int, hooks: str = ZERO_ADDRESS
+) -> Check:
+    """A Uniswap V4 price of the requested pool key, held to the StateView's `getSlot0`.
+
+    The pool ID is hashed from the key the case requested, so a price of another pool
+    cannot agree. `hooks` is the zero address for a hookless pool, as the command
+    reads a key given without `--hooks`.
+    """
+    key = {
+        "currency0": currency0,
+        "currency1": currency1,
+        "fee": fee,
+        "tick_spacing": tick_spacing,
+        "hooks": hooks,
+    }
+
+    def check(output: Output, rpc: Rpc) -> list[str]:
+        observation = output["observation"]
+        source, number = observation["source"], observation["block"]["number"]
+        if other := not_requested((name, source[name], value) for name, value in key.items()):
+            return other
+        slot0 = rpc.call(
+            source["state_view"],
+            "getSlot0(bytes32)",
+            number,
+            ("uint160", "int24", "uint24", "uint24"),
+            (v4_pool_id(key),),
         )
-    )
+        return differences(
+            (
+                ("sqrt_price_x96", observation["sqrt_price_x96"], slot0[0]),
+                ("tick", observation["tick"], slot0[1]),
+                ("lp_fee", observation["lp_fee"], slot0[3]),
+                same_block(observation, rpc),
+            )
+        )
+
+    return check
 
 
 def reserve_decimals(output: Output, rpc: Rpc) -> list[str]:
@@ -176,62 +216,101 @@ def spoke_reserve(rpc: Rpc, spoke: str, reserve_id: int, block: int) -> tuple[An
     return rpc.call(spoke, "getReserve(uint256)", block, SPOKE_RESERVE, (reserve_id,))
 
 
-def aave_v4_reserve(output: Output, rpc: Rpc) -> list[str]:
-    """An Aave V4 reserve: what the Spoke itself records under the selected reserve ID."""
-    resolution, number = output["resolution"], output["observation"]["block"]["number"]
-    selection = resolution["selection"]
-    underlying, hub, hub_asset_id, decimals = spoke_reserve(
-        rpc, selection["spoke"], selection["reserve_id"], number
-    )
-    return differences(
-        (
-            ("asset", asset_address(resolution["asset"]), underlying.lower()),
-            ("hub", resolution["hub"], hub.lower()),
-            ("hub_asset_id", resolution["hub_asset_id"], hub_asset_id),
-            ("spoke decimals", resolution["decimals"], decimals),
+def aave_v4_reserve(spoke: str, reserve_id: int) -> Check:
+    """An Aave V4 reserve: what the requested Spoke records under the requested reserve ID."""
+
+    def check(output: Output, rpc: Rpc) -> list[str]:
+        resolution, number = output["resolution"], output["observation"]["block"]["number"]
+        selection = resolution["selection"]
+        if other := not_requested(
+            (
+                ("spoke", selection["spoke"], spoke),
+                ("reserve_id", selection["reserve_id"], reserve_id),
+            )
+        ):
+            return other
+        underlying, hub, hub_asset_id, decimals = spoke_reserve(rpc, spoke, reserve_id, number)
+        return differences(
+            (
+                ("asset", asset_address(resolution["asset"]), underlying.lower()),
+                ("hub", resolution["hub"], hub.lower()),
+                ("hub_asset_id", resolution["hub_asset_id"], hub_asset_id),
+                ("spoke decimals", resolution["decimals"], decimals),
+            )
+        ) + reserve_decimals(output, rpc)
+
+    return check
+
+
+def pooled_reserve(pool: str, asset: str) -> Check:
+    """An Aave V3 or SparkLend reserve of the requested asset in the connector's reviewed
+    Pool: the aToken that Pool itself records. The request names no Pool, so the check
+    holds the command to the Pool the connector pins on the chain."""
+
+    def check(output: Output, rpc: Rpc) -> list[str]:
+        resolution, number = output["resolution"], output["observation"]["block"]["number"]
+        if other := not_requested(
+            (("pool", resolution["pool"], pool), ("asset", resolution["asset"], asset))
+        ):
+            return other
+        # aTokenAddress is the ninth static word of the Pool's reserve data.
+        words = rpc.call(
+            pool,
+            "getReserveData(address)",
+            number,
+            ("uint256",) * 8 + ("address",),
+            (asset_address(asset),),
         )
-    ) + reserve_decimals(output, rpc)
+        recorded = asset_address(resolution["a_token"])
+        a_token = differences((("a_token", recorded, words[8].lower()),))
+        return a_token + reserve_decimals(output, rpc)
+
+    return check
 
 
-def pooled_reserve(output: Output, rpc: Rpc) -> list[str]:
-    """An Aave V3 or SparkLend reserve: the aToken the Pool itself records."""
-    resolution, number = output["resolution"], output["observation"]["block"]["number"]
-    # aTokenAddress is the ninth static word of the Pool's reserve data.
-    words = rpc.call(
-        resolution["pool"],
-        "getReserveData(address)",
-        number,
-        ("uint256",) * 8 + ("address",),
-        (asset_address(resolution["asset"]),),
-    )
-    recorded = asset_address(resolution["a_token"])
-    return differences((("a_token", recorded, words[8].lower()),)) + reserve_decimals(output, rpc)
+def comet_reserve(comet: str, asset: str) -> Check:
+    """A Compound V3 reserve of the requested Comet and asset: the Comet's own base token."""
+
+    def check(output: Output, rpc: Rpc) -> list[str]:
+        resolution, number = output["resolution"], output["observation"]["block"]["number"]
+        if other := not_requested(
+            (("comet", resolution["comet"], comet), ("asset", resolution["asset"], asset))
+        ):
+            return other
+        (base,) = rpc.call(comet, "baseToken()", number, ("address",))
+        recorded = asset_address(resolution["base_asset"])
+        base_asset = differences((("base_asset", recorded, base.lower()),))
+        return base_asset + reserve_decimals(output, rpc)
+
+    return check
 
 
-def comet_reserve(output: Output, rpc: Rpc) -> list[str]:
-    resolution, number = output["resolution"], output["observation"]["block"]["number"]
-    (base,) = rpc.call(resolution["comet"], "baseToken()", number, ("address",))
-    recorded = asset_address(resolution["base_asset"])
-    return differences((("base_asset", recorded, base.lower()),)) + reserve_decimals(output, rpc)
+def morpho_reserve(core: str, market_id: str) -> Check:
+    """A Morpho Blue reserve of the requested market: what the core records under its ID."""
 
-
-def morpho_reserve(output: Output, rpc: Rpc) -> list[str]:
-    resolution, number = output["resolution"], output["observation"]["block"]["number"]
-    params = rpc.call(
-        resolution["core"],
-        "idToMarketParams(bytes32)",
-        number,
-        ("address", "address", "address", "address", "uint256"),
-        (bytes.fromhex(resolution["market_id"][2:]),),
-    )
-    return differences(
-        (
-            ("loan_asset", asset_address(resolution["loan_asset"]), params[0].lower()),
-            ("collateral", asset_address(resolution["collateral_asset"]), params[1].lower()),
-            ("oracle", resolution["oracle"], params[2].lower()),
-            ("lltv", resolution["lltv"], params[4]),
+    def check(output: Output, rpc: Rpc) -> list[str]:
+        resolution, number = output["resolution"], output["observation"]["block"]["number"]
+        if other := not_requested(
+            (("core", resolution["core"], core), ("market_id", resolution["market_id"], market_id))
+        ):
+            return other
+        params = rpc.call(
+            core,
+            "idToMarketParams(bytes32)",
+            number,
+            ("address", "address", "address", "address", "uint256"),
+            (bytes.fromhex(market_id[2:]),),
         )
-    ) + reserve_decimals(output, rpc)
+        return differences(
+            (
+                ("loan_asset", asset_address(resolution["loan_asset"]), params[0].lower()),
+                ("collateral", asset_address(resolution["collateral_asset"]), params[1].lower()),
+                ("oracle", resolution["oracle"], params[2].lower()),
+                ("lltv", resolution["lltv"], params[4]),
+            )
+        ) + reserve_decimals(output, rpc)
+
+    return check
 
 
 def aave_v4_position(spoke: str, reserve_id: int, account: str) -> Check:
@@ -244,17 +323,13 @@ def aave_v4_position(spoke: str, reserve_id: int, account: str) -> Check:
 
     def check(output: Output, rpc: Rpc) -> list[str]:
         observation, selection = output["observation"], output["resolution"]["selection"]
-        pairs = (
-            ("spoke", selection["spoke"], spoke),
-            ("reserve_id", selection["reserve_id"], reserve_id),
-            ("account", observation["account"]["address"], account),
-        )
-        other = [
-            f"{label}: CLI {reported!r}, requested {requested!r}"
-            for label, reported, requested in pairs
-            if lowered(reported) != lowered(requested)
-        ]
-        if other:
+        if other := not_requested(
+            (
+                ("spoke", selection["spoke"], spoke),
+                ("reserve_id", selection["reserve_id"], reserve_id),
+                ("account", observation["account"]["address"], account),
+            )
+        ):
             return other
         number = observation["reserve"]["block"]["number"]
         (supplied,) = rpc.call(
@@ -348,8 +423,6 @@ def unless_answered(findings: list[str], unanswered: list[str]) -> list[str]:
 
 def unverified(markets: list[Output]) -> list[str]:
     """Markets that are not verified for a reason that does not name the endpoint."""
-    if not markets:
-        return ["the listing reports no markets"]
     return [
         f"market {index} is {market['status']}: {market.get('reason', '')}"
         for index, market in enumerate(markets)
@@ -360,10 +433,14 @@ def unverified(markets: list[Output]) -> list[str]:
 def listed_markets(output: Output, rpc: Rpc, found: Sequence[str] = ()) -> list[str]:
     """A listing of reviewed deployments: nothing unreadable, every market verified.
 
-    `found` holds what a connector's own check already found in the same listing.
+    `found` holds what a connector's own check already found in the same listing. An
+    empty listing fails, unless an entry the endpoint did not answer may hold the
+    markets: then the case blocks and the run retries it.
     """
     findings, unanswered = entry_findings(output, rpc)
-    return unless_answered([*found, *findings, *unverified(output["markets"])], unanswered)
+    markets = output["markets"]
+    empty = [] if markets or unanswered else ["the listing reports no markets"]
+    return unless_answered([*found, *findings, *empty, *unverified(markets)], unanswered)
 
 
 def aave_v4_listing(output: Output, rpc: Rpc) -> list[str]:
