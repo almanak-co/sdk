@@ -3,18 +3,25 @@
 An AI agent can manage positions for a user from plain requests, without strategy
 code, through the [operator actions](operating.md#operator-actions) of this CLI.
 The repository ships a skill that teaches an agent how:
-[`skills/almanak/SKILL.md`](https://github.com/almanak-co/sdk/blob/main/skills/almanak/SKILL.md).
+[`skills/almanak-defi/SKILL.md`](https://github.com/almanak-co/sdk/blob/main/skills/almanak-defi/SKILL.md).
 
 ## Installing the skill
 
-Copy the `skills/almanak` directory into the agent's skills directory. For Claude
-Code that is `~/.claude/skills/almanak/` for every project, or
-`.claude/skills/almanak/` inside one project:
+The skill is named `almanak-defi`. The `skills` installer places it for the agents
+it finds in the current project:
+
+```bash
+npx skills add https://github.com/almanak-co/sdk --skill almanak-defi
+```
+
+Or copy the `skills/almanak-defi` directory into the agent's skills directory. For
+Claude Code that is `~/.claude/skills/almanak-defi/` for every project, or
+`.claude/skills/almanak-defi/` inside one project:
 
 ```bash
 git clone https://github.com/almanak-co/sdk.git
-mkdir -p ~/.claude/skills/almanak
-cp -r sdk/skills/almanak/. ~/.claude/skills/almanak/
+mkdir -p ~/.claude/skills/almanak-defi
+cp -r sdk/skills/almanak-defi/. ~/.claude/skills/almanak-defi/
 ```
 
 The agent needs the `almanak` command on its `PATH`; the skill installs it with

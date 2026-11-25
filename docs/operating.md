@@ -420,8 +420,33 @@ before further work. Invalidated history halts with pending evidence retained.
 
 ### Bridging through Across in production
 
-Across is declared for production with EOA accounts, for a bridge that leaves
-Arbitrum. `examples/operators/across_usdc_arbitrum_base_bridge.production.yaml`
+Across is declared for production with EOA accounts, for a bridge between any
+two of the chains with a pinned SpokePool: Arbitrum, Base, Ethereum, OP Mainnet,
+BNB Smart Chain, Polygon, Robinhood Chain and Avalanche. HyperEVM is not among
+them. `almanak support` lists each chain.
+
+Only a bridge that leaves Arbitrum has been run: its reference has fork
+lifecycle, refund and production rehearsal proofs. Every other source chain is
+declared on read-only mainnet reads and offline tests alone, and `almanak
+support` says so on its row. Nobody has run a deposit, an arrival or a refund
+from those chains, on a fork or on mainnet. Treat a first bridge from one of
+them as the first run of that path, and send a small amount first. On a fork, a
+refund is defined for a transfer sent from Arbitrum only, and a fork refuses
+authored gas ceilings on Base and OP Mainnet, so a fork run of a strategy with an
+account there uses an author file without `strategy.gas`. On Polygon, which
+states no finality margin, a signed step whose nonce another transaction consumed
+is never released.
+
+Ethereum and Polygon can replace their head block. A destination chain that
+replaces the last block of a recorded scan page stops with `reorganization`; the
+transfer stays open, and a fill mined in the replacement block is in the fund's
+wallet but is not recorded.
+
+A route needs both assets to have the same decimals. USDC and USDT have 18
+decimals on BNB Smart Chain and 6 elsewhere, so a route between them is refused
+at resolution.
+
+`examples/operators/across_usdc_arbitrum_base_bridge.production.yaml`
 is the operator file of the reference, and the reference's
 `config.production.yaml`, selected with `--config`, is its author file with the
 gas policy production requires. A production bridge needs:
@@ -1643,10 +1668,19 @@ block and a head no older than 120 seconds; otherwise the command is refused wit
 `chain_mismatch` or `stale`. One endpoint serves a command, and a failure fails the
 read: nothing falls back to another endpoint. A single execution read of the gateway,
 and the proof `ax recover` runs on a named public endpoint, is sent again after a
-transient failure such as an HTTP 5xx or a refused connection, for at most 8
-seconds. One whose first attempt ran into the 15 second provider timeout is sent
-once more, with an 8 second timeout. A batched read is not sent again after such a
-failure, and a transaction submission is never sent again this way. A read refused
+transient failure, for at most 8 seconds, such as a refused connection, a timeout,
+an HTTP 5xx, an HTTP 429, or an HTTP 408, which says the server gave up waiting for
+the request. One whose first attempt ran into the 15 second provider timeout is sent
+once more, with an 8 second timeout. A failure that outlasts these bounds is marked
+transient, and the holds for a signed step and
+[between two steps](#a-failure-between-two-steps) apply to it. Every other HTTP 4xx
+answer, such as 400, 401, 403, 404 or 410, ends the command at once and is not sent
+again: the same request does not pass on a repeat, and the hold for a signed step
+has no time limit, so holding such an answer would wait until interrupted. A batched
+read is sent again only after a rate limit, and a transaction submission is never
+sent again this way: one answered with a 5xx or a 408 has an unknown outcome, so it
+ends the command with its signed step recorded, and `ax recover` or a resumed run
+sends the same signed bytes. A read refused
 with `the endpoint does not serve state at that block` got geth's `missing trie
 node`: most often the pinned block is older than the state the endpoint keeps. It
 is not sent again. State the action again, or name a transport that keeps older

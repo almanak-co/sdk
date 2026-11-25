@@ -17,6 +17,7 @@ from eth_abi import decode
 from pydantic import ValidationError
 
 from almanak import ax_actions, ax_bridge
+from almanak.caip import ChainId
 from almanak.chains import configured_chains, evm_network
 from almanak.cli_arguments import build_parser, parse_validated
 from almanak.connectors import direct
@@ -141,6 +142,9 @@ def seen(config, **changes):
     return Snapshot(**values)
 
 
+HYPEREVM = ChainId("eip155:999")
+
+
 def test_across_declares_its_direct_actions_on_its_production_sources():
     found = across_connector()
     assert supports_operator(found.codec.checkpoint)
@@ -156,8 +160,10 @@ def test_across_declares_its_direct_actions_on_its_production_sources():
         assert [str(a) for a in cells[chain].direct_actions] == ["bridge", "revoke_bridge"]
         direct.require_direct("across", chain, BRIDGE)
         direct.require_direct("across", chain, REVOKE)
-    with pytest.raises(ValueError, match="across serves no direct bridge on eip155:8453"):
-        direct.require_direct("across", BASE.chain_id, BRIDGE)
+    # HyperEVM holds no pinned SpokePool, so it is no source of a direct bridge.
+    assert BASE.chain_id in served and HYPEREVM not in cells
+    with pytest.raises(ValueError, match="across serves no direct bridge on eip155:999"):
+        direct.require_direct("across", HYPEREVM, BRIDGE)
     assert (BRIDGE.kind, REVOKE.kind) == ("bridge", "revoke_bridge")
 
 
@@ -677,13 +683,12 @@ def test_the_command_refuses_an_undeclared_chain_and_passes_the_bridge_on(monkey
         ax_actions.FeeLimits(7, 9, None),
     )
     monkeypatch.setattr(ax_actions, "read_wallet", pytest.fail)
-    backwards = [*STATED]
-    backwards[backwards.index("--chain") + 1] = "eip155:8453"
-    backwards[backwards.index("--destination-chain") + 1] = "eip155:42161"
-    backwards[backwards.index("--asset") + 1] = str(BASE_USDC)
-    backwards[backwards.index("--destination-asset") + 1] = str(USDC)
-    with pytest.raises(ValueError, match="across serves no direct bridge on eip155:8453"):
-        ax_actions.command(parse_validated(build_parser(), backwards))
+    undeclared = [*STATED]
+    undeclared[undeclared.index("--chain") + 1] = str(HYPEREVM)
+    undeclared[undeclared.index("--asset") + 1] = f"{HYPEREVM}/erc20:0x{'ab' * 20}"
+    # The route itself refuses first: the chain holds no pinned SpokePool.
+    with pytest.raises(ValueError, match="no pinned SpokePool on eip155:999"):
+        ax_actions.command(parse_validated(build_parser(), undeclared))
 
 
 class Resolving:

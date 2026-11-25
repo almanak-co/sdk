@@ -1,5 +1,5 @@
 ---
-name: almanak
+name: almanak-defi
 description: Manage DeFi positions for the user from plain requests with the Almanak SDK CLI, through a wallet you create and operate yourself. Use when the user asks to supply, lend, withdraw, borrow, repay, swap tokens, provide or remove liquidity, collect fees, check balances, gas, rates or DeFi positions, or to set up an Almanak agent wallet. Start with its setup steps before asking the user anything. Covers installing the SDK, creating the agent wallet when a request first needs it, finding what each chain serves, and the preview-then-execute workflow for lending, borrowing, swaps and liquidity.
 ---
 

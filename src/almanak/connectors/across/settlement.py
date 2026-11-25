@@ -50,6 +50,11 @@ def pages_of(state, side, target, transfer=None):
 def next_bounds(reader, last, anchor: int):
     """The next page to read: after the last one, or from the anchor's own block."""
     head = reader.pin_block("latest")
+    if last is not None:
+        # A page can end at the head, which a chain may still replace. The scan never
+        # continues after a block that is no longer the chain's: a fill mined in its
+        # replacement would be in no page and read as filled outside the scan.
+        chain.canonical(reader, last)
     if head.timestamp <= anchor:
         return None
     start = None

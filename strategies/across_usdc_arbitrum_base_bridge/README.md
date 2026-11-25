@@ -33,8 +33,9 @@ is modeled, not replayed: it pays the whole `max_fee_bps`, arrives after the
 `arrival_latency_seconds` the file states and is never refunded, so the refund
 path is not exercised there. Every amount in the report is labeled modeled.
 
-Limits: the source account is an EOA. Fork runs, production and economic
-backtests are declared for an Arbitrum source only. `config.production.yaml` is
+Limits: the source account is an EOA. Across declares fork runs, production and
+economic backtests on every chain with a pinned SpokePool; this reference, which
+leaves Arbitrum, is the only route that has been run. `config.production.yaml` is
 `config.yaml` with the gas policy production requires, one per bound account;
 the receiving account signs nothing here and spends none of its policy.
 `config.yaml` states no gas policy: a fork that includes a Base account refuses

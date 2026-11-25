@@ -742,8 +742,9 @@ def test_a_fork_workspace_provisions_an_account_that_only_receives():
 
 def test_both_bridge_references_are_in_the_production_rehearsal_and_the_weekly_matrix():
     """The source chain declares production, so both references are rehearsed by default
-    and the hosted qualification holds their cell. The destination chain declares
-    nothing, so it is no cell and owes no reference."""
+    and the hosted qualification holds their cell. Every other pinned chain declares its
+    modes with no reference behind it, an exception accepted for Across alone, so the
+    weekly selection leaves those cells out by name and owes them no reference."""
     from almanak.connectors.across import support
     from scripts.ci import fork_qualification_matrix as matrix
     from tests.strategy_fork import rehearsal
@@ -755,7 +756,17 @@ def test_both_bridge_references_are_in_the_production_rehearsal_and_the_weekly_m
     assert bridges <= set(rehearsal.production_references())
     weekly = matrix.production_references()
     assert set(weekly[("across", "eip155:42161")]) == bridges
-    assert ("across", "eip155:8453") not in weekly
+    unproven = matrix.declared_without_proof()
+    assert unproven == {("across", str(c)) for c in support.declared_without_proof()}
+    assert ("across", "eip155:8453") in unproven and not unproven & set(weekly)
+    assert {c for c in unproven if c[0] != "across"} == set()
+    # The QA catalog leaves the same cells out, and still owes the proven one.
+    from tests.qa import catalog
+
+    left_out = catalog.declared_without_proof()
+    assert {(name, str(chain)) for name, chain in left_out} == unproven
+    owed = {(str(o.connector), str(o.chain)) for o in catalog.required()}
+    assert ("across", "eip155:42161") in owed and not owed & unproven
     entries = matrix.matrix(sorted(bridges), rehearsal=True, lifecycle=False)
     assert all(entry["rehearsal"] and entry["nodes"] for entry in entries)
 
@@ -778,14 +789,17 @@ def test_the_support_row_states_the_modes_it_declares_and_no_other(monkeypatch):
     from almanak.connectors.across import support
     from almanak.connectors.support import RunMode
 
-    source, destination = support.candidate_support()
+    source, destination = support.candidate_support()[:2]
     assert source.modes == (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST)
     text = " | ".join(source.restrictions)
     assert "fork runs, production runs and economic backtests only" in text
     assert "no production run" not in text
     assert "a production run signs the venue's own quote" in text
     assert "a fork run asks no venue" in text and "a backtest models" in text
-    assert destination.modes == () and "no run mode" in " | ".join(destination.restrictions)
+    # Every pinned chain declares the same modes; only the unproven ones say so.
+    assert destination.modes == source.modes
+    assert support.WITHOUT_PROOF[0] in destination.restrictions
+    assert support.WITHOUT_PROOF[0] not in source.restrictions
     # Each mode's sentence follows its declaration and nothing else.
     monkeypatch.setattr(support, "PRODUCTION_SOURCES", ())
     without = " | ".join(support.candidate_support()[0].restrictions)
@@ -793,7 +807,10 @@ def test_the_support_row_states_the_modes_it_declares_and_no_other(monkeypatch):
     assert "a production run" not in without
     monkeypatch.setattr(support, "BACKTEST_STARTS", {})
     alone = " | ".join(support.candidate_support()[0].restrictions)
-    assert "fork runs only, as the source of a route to eip155:8453; no production run" in alone
+    assert (
+        "fork runs only, as the source of a route to another pinned chain; no production run"
+        in alone
+    )
     assert "a backtest models" not in alone
 
 
@@ -824,3 +841,49 @@ def test_the_composed_fork_keeper_settles_transfers_through_the_bridge_component
     assert keeper.align(state, 60) == 65
     assert tuple(keeper.settle(state)) == ({"advanced_seconds": 0},)
     assert seen == [(state.config.component(ACROSS), (transfer,))]
+
+
+def across_reference_sources() -> dict:
+    """Each chain a converted reference bridges from, with the references that do."""
+    from almanak.configuration.unresolved import read_inputs
+    from scripts.ci.check_strategies import CONVERTED, ROOT, named_connectors
+
+    sources: dict = {}
+    for name in sorted(CONVERTED):
+        config = ROOT / "strategies" / name / "config.yaml"
+        if "across" not in named_connectors(config):
+            continue
+        for market in read_inputs(config).inputs.markets.values():
+            if str(market.connector) == "across":
+                sources.setdefault(market.chain, set()).add(name)
+    return sources
+
+
+def test_a_proven_source_chain_has_a_rehearsed_reference_that_sends_from_it():
+    """`PROVEN_SOURCES` alone decides which cells owe their proofs, so a chain cannot be
+    named there without a reference that bridges from it, is in the default production
+    rehearsal and is a subject of the weekly matrix."""
+    from almanak.connectors.across import support
+    from scripts.ci import fork_qualification_matrix as matrix
+    from tests.strategy_fork import rehearsal
+
+    sources = across_reference_sources()
+    rehearsed, weekly = set(rehearsal.production_references()), matrix.production_references()
+    assert support.PROVEN_SOURCES
+    for chain in support.PROVEN_SOURCES:
+        names = sources.get(chain, set())
+        assert names, f"{chain} is proven without a reference that bridges from it"
+        assert names & rehearsed, f"no reference from {chain} is rehearsed"
+        assert names & set(weekly[("across", str(chain))])
+
+
+def test_a_reference_that_bridges_from_a_chain_makes_that_chains_proofs_owed():
+    """A reference that sends from a chain declared without proof would be exempt from
+    the catalog and the weekly run by name. Adding one must move the chain into
+    `PROVEN_SOURCES`, where its obligations are owed."""
+    from almanak.connectors.across import support
+
+    exempt = set(support.declared_without_proof())
+    sending = {chain: names for chain, names in across_reference_sources().items()}
+    assert not exempt & set(sending), {str(c): sorted(sending[c]) for c in exempt & set(sending)}
+    assert set(sending) <= set(support.PROVEN_SOURCES)

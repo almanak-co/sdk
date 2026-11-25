@@ -16,7 +16,7 @@ from almanak import runtime as runtime_module
 from almanak.gateway import ethereum
 from almanak.gateway.client import GatewayClient
 from almanak.gateway.ethereum import DataError, EthereumReader
-from almanak.gateway.production import ProductionGateway
+from almanak.gateway.production import ETHEREUM_GENESIS, ProductionGateway
 from almanak.gateway.service import data_error_reply
 from almanak.runtime import TRANSIENT_HOLD_HORIZON_SECONDS
 from almanak.state import Journal
@@ -421,3 +421,132 @@ def test_a_page_that_is_not_json_is_read_again_and_a_malformed_answer_is_not(no_
     assert len(sent) == 3
     assert ethereum.transient("eth_call", ethereum.UnreadableAnswer("malformed", "page"))
     assert not ethereum.transient("eth_sendRawTransaction", ethereum.UnreadableAnswer("x", "y"))
+
+
+def answering(failures, client="Geth/v1.16.0"):
+    """A mainnet execution reader whose provider fails `failures` in order, then answers."""
+    from almanak.caip import ChainId
+    from almanak.models import Chain
+
+    failures = list(failures)
+    sent = []
+    results = {
+        "eth_chainId": "0x1",
+        "web3_clientVersion": client,
+        "eth_getBlockByNumber": {
+            "number": "0x0",
+            "hash": ETHEREUM_GENESIS,
+            "timestamp": "0x0",
+            "parentHash": "0x" + "00" * 32,
+        },
+    }
+
+    def respond(request):
+        body = json.loads(request.content)
+        sent.append(body["method"])
+        if body["method"] == "web3_clientVersion" and failures:
+            failure = failures.pop(0)
+            if isinstance(failure, Exception):
+                raise failure
+            return failure if isinstance(failure, httpx.Response) else httpx.Response(failure)
+        answer = {"jsonrpc": "2.0", "id": body["id"], "result": results[body["method"]]}
+        return httpx.Response(200, json=answer)
+
+    reader = EthereumReader(
+        Chain(chain_id=ChainId("eip155:1"), environment="mainnet"),
+        "https://rpc.invalid",
+        client=httpx.Client(transport=httpx.MockTransport(respond)),
+        retry_budget=ethereum.EXECUTION_RETRY_BUDGET,
+    )
+    return reader, sent
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ConnectError("refused"), httpx.ReadTimeout("slow"), 503, 429, 408],
+    ids=["connection", "timeout", "http_503", "http_429", "http_408"],
+)
+def test_the_client_version_read_is_sent_again_after_a_transient_failure(no_backoff, failure):
+    reader, sent = answering([failure])
+    assert reader._rpc("web3_clientVersion", []) == "Geth/v1.16.0"
+    assert sent == ["web3_clientVersion"] * 2 and len(no_backoff) == 1
+
+
+@pytest.mark.parametrize("failure", [httpx.ConnectError("refused"), 503, 429, 408])
+def test_a_client_version_read_that_keeps_failing_is_raised_transient(no_backoff, failure):
+    reader, sent = answering([failure] * 20)
+    with pytest.raises(DataError) as raised:
+        reader._rpc("web3_clientVersion", [])
+    assert raised.value.transient and len(sent) > 1
+    # A refusal is still final: only failures a later attempt may pass are sent again.
+    refused, sent = answering([403])
+    with pytest.raises(DataError) as final:
+        refused._rpc("web3_clientVersion", [])
+    assert final.value.kind == "http" and not final.value.transient and len(sent) == 1
+
+
+def test_a_request_timeout_answer_is_a_provider_fault_like_a_5xx(no_backoff):
+    """HTTP 408: the server gave up waiting for the request, so a repeat may pass."""
+    kept = {}
+    for status in (408, 503):
+        reader, sent = answering([status] * 20)
+        with pytest.raises(ethereum.ProviderFault) as raised:
+            reader._rpc("web3_clientVersion", [])
+        kept[status] = (raised.value.kind, raised.value.code, raised.value.transient, len(sent))
+        assert str(raised.value) == f"web3_clientVersion: HTTP {status}"
+    assert kept[408] == kept[503] and kept[408][:3] == ("http", None, True) and kept[408][3] > 1
+
+
+JSON_RPC_REFUSAL = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "too wide"}}
+
+
+@pytest.mark.parametrize(
+    ("answer", "code"),
+    [
+        (httpx.Response(400), None),
+        # Providers refuse a read with HTTP 400 and a JSON-RPC error; callers read the code.
+        (httpx.Response(400, json=JSON_RPC_REFUSAL), -32602),
+        (httpx.Response(401), None),
+        (httpx.Response(403), None),
+        (httpx.Response(404), None),
+        (httpx.Response(410), None),
+        (httpx.Response(302, headers={"location": "https://elsewhere.invalid"}), None),
+        (httpx.Response(405), None),
+        (httpx.Response(413), None),
+        (httpx.Response(425), None),
+        (httpx.Response(451), None),
+    ],
+    ids=[
+        "http_400",
+        "http_400_json_rpc",
+        "http_401",
+        "http_403",
+        "http_404",
+        "http_410",
+        "http_302",
+        "http_405",
+        "http_413",
+        "http_425",
+        "http_451",
+    ],
+)
+def test_every_other_4xx_answer_is_final_and_sent_once(no_backoff, answer, code):
+    reader, sent = answering([answer] * 20)
+    with pytest.raises(DataError) as final:
+        reader._rpc("web3_clientVersion", [])
+    assert not isinstance(final.value, ethereum.ProviderFault)
+    assert (final.value.kind, final.value.code, final.value.transient) == ("http", code, False)
+    assert sent == ["web3_clientVersion"] and no_backoff == []
+
+
+def test_the_production_guard_passes_when_its_client_version_read_fails_once(no_backoff):
+    from types import SimpleNamespace
+
+    reader, sent = answering([503])
+    assert ProductionGateway.verify_provider(SimpleNamespace(reader=reader))
+    assert sent.count("web3_clientVersion") == 2
+    # The answer of a read that was sent again is checked like a first one.
+    reader, sent = answering([503], client="anvil/v1.0.0")
+    with pytest.raises(DataError) as refused:
+        ProductionGateway.verify_provider(SimpleNamespace(reader=reader))
+    assert refused.value.kind == "environment_mismatch" and not refused.value.transient

@@ -384,11 +384,11 @@ of the wrong shape fails its check as `malformed`. Each failed check carries
 `rate_limited` and `transient`. An endpoint whose only failures are rate limits is
 checked again after a pause, up to `--attempts` times; one that stays rate limited
 fails. `transient` is the reader's own mark on a failure it re-sent until its
-bounds ran out, such as a transport failure or an HTTP 5xx; the tool reports it
-and does not retry it. A refusal the reader does not classify as transient, such
-as an HTTP 408 or a provider's own error code, is reported as definite even when
-the next run passes. Read a single failure with that in mind, and run the tool
-again before changing the list. Whether an endpoint accepts a submitted
+bounds ran out, such as a transport failure, an HTTP 5xx or an HTTP 408; the tool
+reports it and does not retry it. A refusal the reader does not classify as
+transient, such as an HTTP 403 or a provider's own error code, is reported as
+definite even when the next run passes. Read a single failure with that in mind,
+and run the tool again before changing the list. Whether an endpoint accepts a submitted
 transaction is not checked, because the tool sends none.
 
 ## Local evidence and scheduling

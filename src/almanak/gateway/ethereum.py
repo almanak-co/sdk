@@ -55,7 +55,7 @@ class ProviderBusy(DataError):
 
 
 class ProviderFault(DataError):
-    """HTTP 5xx: the provider failed to serve a request it did not refuse."""
+    """HTTP 5xx or 408: the provider failed to serve a request it did not refuse."""
 
 
 class UnreadableAnswer(ProviderFault):
@@ -189,6 +189,7 @@ READS = frozenset(
     {
         "eth_chainId",
         "net_version",
+        "web3_clientVersion",
         "eth_blockNumber",
         "eth_getBlockByNumber",
         "eth_getBlockByHash",
@@ -244,9 +245,9 @@ def throttled(error: DataError) -> bool:
 def transient(method: str, error: DataError) -> bool:
     """Whether a later attempt of this idempotent read may pass where this one failed.
 
-    A throttle, a transport failure, an HTTP 5xx, a body that is not JSON or an empty
-    block read is transient. A refusal, a revert or a malformed answer is not, and no
-    submission ever is.
+    A throttle, a transport failure, an HTTP 5xx or 408, a body that is not JSON or an
+    empty block read is transient. A refusal, a revert or a malformed answer is not, and
+    no submission ever is.
     """
     if method not in READS:
         return False
@@ -652,7 +653,10 @@ class EthereumReader:
             raise DataError("transport", f"{label}: transport failed") from None
         if response.status_code == 429:
             raise ProviderBusy(label, retry_after(response))
-        if response.status_code >= 500:
+        # A 408 says the server gave up waiting for the request: a timeout by another name,
+        # and like a 5xx it leaves a submission's outcome unknown. Every other 4xx is a
+        # refusal that a repeat does not pass.
+        if response.status_code >= 500 or response.status_code == 408:
             raise ProviderFault(
                 "http", f"{label}: HTTP {response.status_code}", code=refusal_code(response)
             )

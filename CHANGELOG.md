@@ -9,6 +9,10 @@ its changelog is on the `v2` branch.
 ## [Unreleased]
 
 ### Changed
+- The agent skill is named `almanak-defi` and lives in `skills/almanak-defi/`. It was
+  `almanak` in `skills/almanak/`. An agent finds a skill by its name and description,
+  and the name now says what the skill is for.
+
 - `--public-rpc blastapi` is the public endpoint for BNB Chain (`eip155:56`), and
   `bnbchain` is no longer a name. BNB Chain's own endpoint keeps less than a minute of
   state, so a direct action that took longer than that between a mined step and its
@@ -28,6 +32,23 @@ its changelog is on the `v2` branch.
   state reads older than about 100 seconds unanswered (#42).
 
 ### Fixed
+- The provider guard's `web3_clientVersion` read is sent again after a transient
+  failure, as its `eth_chainId` read already was. The method was missing from the
+  reads the execution reader may send again, so one refused connection, timeout, HTTP
+  5xx or HTTP 429 on that read before a privileged gateway request ended a direct
+  action run with `--execute`, even with a signed step waiting, and left the record to
+  `ax recover`. A failure that outlasts the reader's retry bounds is now marked transient
+  like any other read. Other HTTP 4xx answers are unchanged (#64).
+- An execution read answered with HTTP 408 Request Timeout is sent again within the
+  reader's retry bounds, and a 408 that outlasts them is marked transient, as an HTTP
+  5xx already was. It was a final `http` refusal, so one such answer ended a direct
+  action run with `--execute` even with a signed step waiting and left the record to
+  `ax recover`. Every other HTTP 4xx answer, HTTP 400 with a JSON-RPC error included,
+  still ends the command at once and is sent once: it does not pass on a repeat, and
+  the hold for a signed step has no time limit. A transaction submission answered 408
+  is still sent once, not marked transient, and keeps its signed step, as one answered
+  with a 5xx does; its message now reads `eth_sendRawTransaction: HTTP 408` instead of
+  calling the submission refused (#64).
 - A direct action run with `--execute` no longer ends over one failed read between two
   of its steps once a step is mined. A transient provider or storage failure was held
   only while a signed step was unresolved, so between a reconciled step and the next
