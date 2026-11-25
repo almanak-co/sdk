@@ -8,6 +8,8 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+## [3.4.1] - 2026-11-25
+
 ### Changed
 - `almanak ax bridge`, `ax bridge-status` and `ax revoke-bridge` work without a
   provider key. `--public-rpc <name>` names the public endpoint of the chain the
@@ -42,7 +44,7 @@ its changelog is on the `v2` branch.
 
 ### Fixed
 - The release of an expired signed step reads the nonce again at the pinned block
-  that shows the deadline passed, so nodes of one endpoint that disagree cannot
+  that shows the deadline passed, named by its hash, so nodes of one endpoint that disagree cannot
   release a step that was mined.
 
 ## [3.4.0] - 2026-11-25
