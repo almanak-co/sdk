@@ -8,6 +8,29 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Added
+- `almanak ax bridge` sends native ETH and delivers native ETH through Across, from
+  a plain wallet to a plain recipient, when `--asset` and `--destination-asset` both
+  name the native asset (`eip155:<chain>/slip44:60`) of two of Ethereum, Arbitrum,
+  Base, OP Mainnet and Robinhood Chain. The deposit carries the amount as its own
+  value, in one step with no approval. The wallet must hold the amount plus the
+  transaction fee ceiling. A recipient that holds contract code on the destination
+  chain is refused with `recipient_is_contract`, because the SpokePool would pay it
+  the wrapped token; that check is the command's and not on-chain enforcement. The
+  preview states the payout and that a refund is paid in the wrapped token on the
+  source chain. A strategy, a Safe and a backtest refuse the route. No native
+  bridge has been run on a fork or on mainnet: the route is declared on read-only
+  mainnet known answers and offline tests.
+- `almanak ax bridge-status` reports what a fill of a wrapped native output paid:
+  `arrival.paid_as` is `native` when the destination SpokePool unwrapped the amount
+  in the fill transaction and `wrapped_token` when it transferred the token, with
+  the evidence under `arrival.measured_by`. A refund of a wrapped native input
+  names the token under `refund.paid_in`.
+
+### Changed
+- A venue refusal of an amount as too low for its fees is the cause
+  `amount_too_low`, for every Across route. It was `quote_refused`.
+
 ## [3.4.1] - 2026-11-25
 
 ### Changed

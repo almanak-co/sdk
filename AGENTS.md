@@ -681,10 +681,65 @@ independently.
   observations, where a fork or live run evaluates each chain on its own turn.
   A strategy that picks its step from which allocation it sees must fall
   through to the destination's step when the source's asks for nothing.
-- Proposed, not accepted: the first scope is same-token ERC-20 routes. The
-  connector refuses the wrapped native asset as the sent asset, and as the
-  received asset when the recipient is an EOA, which Across pays in the native
-  asset.
+- Proposed, not accepted: the first scope of a strategy is same-token ERC-20
+  routes. The connector refuses the wrapped native asset as the sent asset,
+  and as the received asset when the recipient is an EOA, which Across pays in
+  the native asset. A strategy names no native asset on either side. The one
+  native route is the direct command's, stated below.
+- Proposed, not accepted: the native route, for the direct command only. Its
+  identity is the native asset's CAIP-19 reference on both chains. The connector
+  alone converts it to the wrapped native token, which each SpokePool must name
+  as its own `wrappedNativeToken()` at the pinned block and which must equal the
+  network definition's; the route retains both. It is admitted between chains
+  whose native coin is ETH: Ethereum, Arbitrum, Base, OP Mainnet and Robinhood
+  Chain. BNB Smart Chain, Polygon and Avalanche, and the native asset on one
+  side only, are refused. An allocation carries the route only with the
+  operator's `adopt` statement and an EOA source, so an author file, a Safe, a
+  composed deployment and a backtest refuse it. The wrapped native token stated
+  as an ERC-20 sent asset stays refused for everyone.
+- Proposed, not accepted: a native deposit is one step with no approval. The
+  operation carries its value, which must equal its amount, and the gateway
+  reads the recorded operation through the same model, so a deposit of the
+  wrapped token with another value or none is refused before signing. Without
+  value the SpokePool would pull the wrapped token by allowance instead. The
+  wallet's native balance must cover the amount plus the transaction fee
+  ceiling, and accounting expects it to fall by the gas paid plus the amount.
+  These are gateway checks, not on-chain enforcement.
+- Proposed, not accepted: the refund asymmetry. A refund of a native deposit is
+  paid in the wrapped native token on the source chain, under an executed
+  refund leaf, never in the native asset. The preview and the status say so,
+  and `equals_sent` keeps its meaning.
+- Proposed, not accepted: the recipient code rule. A native bridge is refused
+  before anything is planned when its recipient holds code on the destination
+  chain, unless that code is an EIP-7702 delegation, which the SpokePool treats
+  as a plain account. Nothing overrides the refusal. The SpokePool decides the
+  payout when the fill lands, so an address that gains code after the check is
+  paid the wrapped token, and a recipient that rejects native value leaves the
+  transfer unfilled. The check is the command's own, made once, and never
+  on-chain enforcement.
+- Proposed, not accepted: the arrival evidence rule of `ax bridge-status`. A
+  receipt holds no log of a native value transfer, so a fill of a wrapped
+  native output is read from what the pool did with its wrapped token between
+  the fill event and the pool's next fill. An unwrap of exactly the amount
+  reports the native asset as paid: a `Withdrawal` by the pool on Ethereum,
+  Base and OP Mainnet, or a transfer from the pool to the zero address on
+  Arbitrum and Robinhood Chain. A transfer of the amount to the recipient
+  reports the wrapped token, never the native asset. Neither, both or another
+  amount stops with an integrity cause. The result names the evidence. An
+  unwrap is evidence that the pool paid native value, not a measurement of the
+  recipient's balance.
+- Current contract: the native route's path has never been run by anyone with
+  this SDK, on a fork or on mainnet. Its readers are held to known answers
+  captured read-only on 25 November 2026 and kept in
+  `tests/fixtures/across-native-captures.json`: a native deposit another party
+  sent from Ethereum whose calldata and value the planner reproduces up to the
+  sender's trailing tag, its Base fill, fills on Arbitrum, Robinhood Chain and
+  OP Mainnet, a fill to a delegating account and a fill to a contract on Base,
+  and a refund on Base paid in the wrapped token. The fill to a contract
+  carried a message, so it is no relay this connector deposits; no fill of a
+  relay without a message to a contract was found. `almanak support` states
+  the route as unrun on each chain it leaves. A first native bridge is that
+  path's first run.
 - Proposed, not accepted: the quote comes from Across's keyless
   `suggested-fees` endpoint, which the vendor labels legacy. An optional
   operator key is read from `ALMANAK_ACROSS_API_KEY` in the gateway's
@@ -1114,6 +1169,13 @@ independently.
   `released_consumed_nonce` with the consuming transaction and its block, and
   the command exits 1 because the step did not happen. A command stopped after
   the drop reports it in its `steps_sent` event.
+- Proposed, not accepted: the native route of `ax bridge`. The direct command
+  sends native ETH and delivers native ETH through Across when `--asset` and
+  `--destination-asset` both name the native asset by its CAIP-19 reference, on
+  two of Ethereum, Arbitrum, Base, OP Mainnet and Robinhood Chain, from a plain
+  wallet to a plain recipient. The rules are stated under "Bridges". It is a
+  route of the direct command only: a strategy, a Safe, a composed deployment
+  and a backtest refuse it.
 - A connector package that serves direct actions declares them in its
   `direct.py`, and each chain's support lists them as `direct_actions`. Every
   other installed connector is named with its reason. Accepted: GMX V2 and

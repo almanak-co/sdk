@@ -745,6 +745,34 @@ A bridge refused with `recipient_not_deployed` named an address that is a contra
 on the source chain and nothing on the destination chain. Your own wallet is never
 one; report the message and stop.
 
+### Native ETH
+
+To bridge ETH, name the native asset on both chains: `--asset <source
+chain>/slip44:60` and `--destination-asset <destination chain>/slip44:60`. It works
+between two of Ethereum, Arbitrum, Base, OP Mainnet and Robinhood Chain. BNB Smart
+Chain, Polygon and Avalanche are refused, and so is the native asset on one side
+only. Never state the wrapped token as the sent asset to bridge ETH.
+
+- The action is one step, the deposit, with no approval: `steps` is `["deposit"]`,
+  and `ax revoke-bridge` has nothing to clear.
+- The wallet must hold `--amount` plus `--max-transaction-fee` in ETH. A refusal
+  with `funding_unavailable` names the shortfall: report it and stop.
+- A refusal with `amount_too_low` means Across calls the amount too low for its
+  fees. Report it; do not retry with another amount unless the user states one.
+- A refusal with `recipient_is_contract` means the address holds contract code on
+  the destination chain and would be paid the wrapped token. Nothing overrides it.
+  Your own wallet is a plain account: report the message and stop.
+- The preview's `native` block states what is sent, what the recipient is paid and
+  the `refund_asset`. Tell the user before they confirm: a refund of an unfilled
+  native bridge is paid in the wrapped token (WETH) on the source chain, not in ETH.
+- In `ax bridge-status`, `arrival.paid_as` says what the recipient was paid.
+  `native` is measured from the bridge contract's unwrap in the fill transaction
+  (`arrival.measured_by`). `wrapped_token` means the recipient was paid the token:
+  report `arrival.asset` as it is stated, never as ETH. Read the native balance on
+  the destination chain and report both.
+- No native bridge has been run by the SDK on a fork or on mainnet. Say so when the
+  user asks how proven it is.
+
 ## Liquidity
 
 A liquidity position holds a pool's currencies and earns its trading fees. What

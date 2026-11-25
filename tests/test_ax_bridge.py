@@ -32,7 +32,7 @@ from almanak.connectors.across.observations import PoolState, Snapshot
 from almanak.connectors.across.operations import DEPOSIT_TYPES, DepositOperation, plan_call
 from almanak.connectors.across.receipts import opened_transfer
 from almanak.connectors.across.relay import deposited_relay
-from almanak.connectors.across.resolution import MarketSelection, ResolvedRoute
+from almanak.connectors.across.resolution import DirectSelection, ResolvedRoute
 from almanak.connectors.across.state import Checkpoint, DecisionRecord, Outcome, Pending
 from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
 from almanak.gateway import read_endpoints
@@ -87,7 +87,7 @@ BASE_POOL = PoolState(
     deposits_paused=False,
 )
 BASE_BLOCK = Block(chain=BASE, number=30_000_000, hash="0x" + "bc" * 32, timestamp=NOW)
-SELECTION = MarketSelection(
+SELECTION = DirectSelection(
     connector="across",
     chain=ARBITRUM.chain_id,
     asset=USDC,

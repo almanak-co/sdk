@@ -7,8 +7,12 @@ allocation's `adopt` statement, so the deployment has one chain and never reads 
 signs on the other. The deployment sends exactly the stated amount and binds no more of
 the wallet.
 
-The steps are the approval of exactly the stated amount to the SpokePool, then the
-deposit, which spends that approval whole. An allowance of another size that the wallet
+A native route, which names the chain's native ETH on both chains, is one step: the
+deposit, carrying the stated amount as its value, with no approval. Its recipient is
+paid native ETH, and a refund of it is the wrapped token on the source chain.
+
+For a token the steps are the approval of exactly the stated amount to the SpokePool,
+then the deposit, which spends that approval whole. An allowance of another size that the wallet
 already gave the SpokePool is cleared first. The command ends with the deposit's
 receipt and reports the transfer by its reference; the arrival is read later, by
 `ax bridge-status`, because it happens on another chain. A deposit refused after its
@@ -99,17 +103,22 @@ def position(state) -> dict:
     observed, and the transfers this command opened."""
     seen = last_observed(state)
     opened = [o for o in state.outcomes if getattr(o, "transfer", None) is not None]
+    # A native route reads no allowance: the wrapped token's is not this route's.
+    unread = seen is None or seen.target.route.native
     return {
-        "allowance": None if seen is None else str(seen.allowance),
+        "allowance": None if unread else str(seen.allowance),
         "transfers": [transfer(outcome) for outcome in opened],
     }
 
 
-def planned_steps(intent_kind: str, allowance: int, amount: int | None) -> list[str]:
-    """The steps the request takes from the observed allowance, in order."""
+def planned_steps(
+    intent_kind: str, allowance: int, amount: int | None, native: bool = False
+) -> list[str]:
+    """The steps the request takes from the observed allowance, in order. A native
+    bridge is its deposit alone: the amount travels as the transaction's value."""
     if intent_kind == "revoke_bridge":
         return ["revoke"]
-    if allowance == amount:
+    if native or allowance == amount:
         return ["deposit"]
     return ["revoke", "approve", "deposit"] if allowance else ["approve", "deposit"]
 
@@ -143,7 +152,8 @@ def details(backend, state) -> dict:
     decided, plan = state.decision.intent, state.plan
     before = plan.before
     amount = decided.amount.amount if decided.kind == "bridge" else None
-    stated: dict = {"steps": planned_steps(decided.kind, before.allowance, amount)}
+    native = decided.target.route.native
+    stated: dict = {"steps": planned_steps(decided.kind, before.allowance, amount, native)}
     if amount is None:
         return stated
     quote = execution.quoted(backend, state, decided, before)
@@ -154,7 +164,40 @@ def details(backend, state) -> dict:
         "recipient": receiving,
         "recipient_is_sender": receiving == decided.target.fund.address,
         "quote": quoted_terms(quote, decided.target, amount),
+        **native_terms(decided.target),
     }
+
+
+def native_terms(target) -> dict:
+    """What a native bridge sends, pays and refunds, stated before anything is signed.
+
+    The three assets differ: native value leaves the wallet, the recipient is paid the
+    native asset, and a refund is the wrapped native token on the source chain.
+    """
+    route = target.route
+    if not route.native:
+        return {}
+    return {
+        "native": {
+            "sent_as": "native_value",
+            "sent_asset": str(route.asset),
+            "approval": None,
+            "paid_as": "native",
+            "paid_asset": str(route.destination_asset),
+            "refund_asset": f"{route.chain.chain_id}/erc20:{route.wrapped[0]}",
+        }
+    }
+
+
+NATIVE_NOTE = (
+    " This bridge sends the chain's native ETH as the deposit's own value, in one"
+    " transaction with no approval. The recipient is paid native ETH: it held no"
+    " contract code on the destination chain when this command read it, and the"
+    " SpokePool decides the form of the payout on chain when the fill lands. A recipient"
+    " that rejects ETH leaves the transfer unfilled until it is refunded. A refund of an"
+    " unfilled transfer is paid in the wrapped token (WETH) on the source chain, to the"
+    " sending wallet, not in ETH."
+)
 
 
 def sender(config) -> str:
@@ -188,11 +231,13 @@ def recipient_note(config, request: ActionRequest) -> str:
 def note(config, observed, request: ActionRequest) -> str | None:
     if request.action != "bridge":
         return None
+    native = NATIVE_NOTE if config.allocation(ALLOCATION).route.native else ""
     return (
         "The command ends when the deposit is mined. The transfer arrives later, on the "
         "destination chain: read it with `ax bridge-status` and the reported reference, or "
         "with the deposit's transaction hash. "
         "Only the gateway holds the quote to --max-fee-bps; the SpokePool checks no price."
+        + native
         + recipient_note(config, request)
     )
 

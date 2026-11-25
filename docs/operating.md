@@ -946,6 +946,74 @@ transaction hash, which every result and every kept record names. A recipient th
 on the destination chain, and a refund of an unfilled transfer is paid to the wallet
 on the source chain.
 
+##### Native ETH
+
+A bridge whose `--asset` and `--destination-asset` both name the native asset sends
+native ETH and delivers native ETH:
+
+```bash
+almanak ax bridge --connector across --chain eip155:42161 \
+  --asset eip155:42161/slip44:60 \
+  --destination-chain eip155:8453 \
+  --destination-asset eip155:8453/slip44:60 \
+  --amount 10000000000000000 --max-fee-bps 10 \
+  --recipient <your-address-on-base> \
+  --wallet /private/operator --env-file /private/providers.env \
+  --max-gas-price-wei 1000000000 --max-transaction-fee 200000000000000
+```
+
+It is a route of the direct command only, from a plain wallet to a plain recipient,
+between two of Ethereum, Arbitrum, Base, OP Mainnet and Robinhood Chain. BNB Smart
+Chain, Polygon and Avalanche have another native coin and are refused, as is the
+native asset on one side only. A strategy file, a Safe and a backtest refuse the
+route. The wrapped token stated as the ERC-20 sent asset stays refused: to bridge
+ETH, name the native asset.
+
+| What | A native bridge |
+| --- | --- |
+| Steps | One: the deposit, which carries `--amount` as the transaction's own value. There is no approval, so `steps` is `["deposit"]` and `ax revoke-bridge` refuses the route. |
+| Funding | The wallet's native balance must cover `--amount` plus `--max-transaction-fee`. A shorter balance is refused before signing with `funding_unavailable`, naming the shortfall. |
+| Quote | Across is asked with the wrapped tokens of both chains, which each SpokePool names as its own at the pinned block. An amount the venue calls too low for its fees, about 0.0003 ETH when this was written, is refused with `amount_too_low`. |
+| Recipient | Must hold no contract code on the destination chain, or be a plain account that delegates its code. Any other is refused with `recipient_is_contract` before anything is planned: the SpokePool would pay a contract the wrapped token. No option overrides this. |
+| Preview | `native` states `sent_as`, `sent_asset`, `approval` (none), `paid_as`, `paid_asset` and `refund_asset`, and the `note` states the payout and the refund in words. |
+| Refund | A refund of an unfilled native bridge is paid in the wrapped token (WETH) on the source chain, to the sending wallet, never in ETH. |
+
+The recipient check is the command's, made once on the destination chain before
+signing, and not on-chain enforcement. The SpokePool decides the form of the payout
+when the fill lands: an address that gains contract code between the check and the
+fill is paid the wrapped token. The pool sends native ETH with a plain value
+transfer, so a recipient that rejects ETH leaves the transfer unfilled until its
+refund.
+
+`ax bridge-status` reports a native bridge by what the destination SpokePool did
+with its wrapped token in the fill transaction, between the fill event and the
+pool's next fill:
+
+| `arrival.paid_as` | `arrival.measured_by` | Evidence |
+| --- | --- | --- |
+| `native` | `wrapped_token_withdrawal` | The pool unwrapped the amount: a `Withdrawal` of the wrapped token by the pool, as on Ethereum, Base and OP Mainnet. |
+| `native` | `wrapped_token_burn` | The pool unwrapped the amount: a transfer of the wrapped token from the pool to the zero address, as on Arbitrum and Robinhood Chain. |
+| `wrapped_token` | `wrapped_token_transfer` | The pool transferred the wrapped token to the recipient. `arrival.asset` then names the token, never the native asset. |
+
+`arrival.received` is the fill event's amount, and `arrival.asset` names what was
+paid. An unwrap is evidence that the pool sent native value in that transaction; a
+receipt holds no log of the value transfer itself. A fill with neither form, with
+both, or with another amount stops with an integrity cause and reports nothing as
+received. `deposit.sent_as_native_value` says whether the deposit's own transaction
+paid the SpokePool its amount as value; the deposit is recorded by the SpokePool in
+the wrapped token, which `deposit.sent.recorded_as` names. For an unfilled native
+bridge, `refund.paid_in` names the wrapped token the scan reads.
+
+Recovery of a native deposit is that of any signed step: `ax recover` reads its
+receipt or sends the same signed bytes again, and signs nothing. A signed native
+deposit reserves its value beside its fee, so the wallet must still hold both for a
+resend.
+
+No native bridge has been run by this SDK, on a fork or on mainnet. The route is
+declared on read-only mainnet known answers and offline tests: a native deposit and
+its fill, fills on both kinds of chain and to a contract, and a refund, all sent by
+others.
+
 `almanak ax bridge-status` reads what became of a transfer, from both chains, and
 plans and signs nothing:
 

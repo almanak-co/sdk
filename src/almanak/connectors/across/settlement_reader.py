@@ -40,6 +40,18 @@ REFUND_ROOT_TOPIC = "0x" + keccak(text=REFUND_ROOT).hex()
 REFUND_TYPES = ("uint256", "uint256[]", "address", "address[]", "bool", "address")
 FILLED = 2
 EMPTY = bytes(32)
+WITHDRAWAL_TOPIC = "0x" + keccak(text="Withdrawal(address,uint256)").hex()
+ZERO = "0x" + "00" * 20
+# How a fill of the pool's wrapped native token left the SpokePool. The first two are
+# the pool unwrapping it to pay the recipient in the native asset, which itself leaves
+# no log: a WETH9 token emits `Withdrawal`, others burn with a transfer to the zero
+# address. The third is the token itself, paid to a recipient that held code.
+WITHDRAWAL, BURN, TOKEN_TRANSFER = (
+    "wrapped_token_withdrawal",
+    "wrapped_token_burn",
+    "wrapped_token_transfer",
+)
+UNWRAPS = frozenset({WITHDRAWAL, BURN})
 
 
 def integrity(message: str) -> DataError:
@@ -191,6 +203,70 @@ def paid_to(receipt, token: str, payee: str, after: int, sender: str | None) -> 
                 )
             return uint_data(row)
     return None
+
+
+def fill_window(receipt, fill_row) -> list[dict]:
+    """The logs after one `FilledRelay` and before the pool's next one, in log order.
+
+    The SpokePool emits the fill, pulls the output token from the relayer and pays the
+    recipient before it handles anything else, so what the pool moved for this fill
+    lies between its event and the next.
+    """
+    pool, after = fill_row["address"].lower(), position(fill_row)[1]
+    window = []
+    for row in sorted(receipt["logs"], key=position):
+        index = position(row)[1]
+        if index <= after:
+            continue
+        if row["address"].lower() == pool and row["topics"][:1] == [FILLED_RELAY_TOPIC]:
+            break
+        window.append(row)
+    return window
+
+
+def pool_outflow(row, wrapped: str, pool: str, recipient: str) -> tuple[str | None, int] | None:
+    """One movement of the wrapped native token out of the pool, as (form, amount).
+
+    None for any other log. The form is None for a transfer to anyone but the zero
+    address or the recipient, which no fill of this relay makes.
+    """
+    topics = row["topics"]
+    if row["address"].lower() != wrapped or not topics:
+        return None
+    if topics[0] == WITHDRAWAL_TOPIC and len(topics) == 2 and topic_address(row, 1) == pool:
+        return WITHDRAWAL, uint_data(row)
+    if topics[0] != TRANSFER_TOPIC or len(topics) != 3 or topic_address(row, 1) != pool:
+        return None
+    payee = topic_address(row, 2)
+    form = {ZERO: BURN, recipient: TOKEN_TRANSFER}.get(payee)
+    # A recipient that is the zero address is refused long before; a burn stays a burn.
+    return form, uint_data(row)
+
+
+def native_payout(receipt, fill_row, wrapped: str, recipient: str, amount: int) -> str:
+    """How a fill of the wrapped native token paid `recipient`, from the pool's own logs.
+
+    The fill event names the recipient and the amount. The pool then either unwraps
+    that amount, to pay the native asset, or transfers the token to the recipient: the
+    pool decides by the recipient's code when the fill lands. Every movement of the
+    wrapped token out of the pool in the fill's window must be of exactly the event's
+    amount and of one kind. Anything else is refused: nothing is reported from a guess.
+    """
+    pool = fill_row["address"].lower()
+    moved = [
+        out
+        for row in fill_window(receipt, fill_row)
+        if (out := pool_outflow(row, wrapped, pool, recipient)) is not None
+    ]
+    forms = {form for form, _ in moved}
+    exact = bool(moved) and all(paid == amount for _, paid in moved) and None not in forms
+    if not exact or not (forms <= UNWRAPS or forms == {TOKEN_TRANSFER}):
+        raise integrity(
+            f"Across fill {receipt['transactionHash']} shows no unwrap and no transfer of "
+            f"exactly the {amount} its event states by the SpokePool after that event; "
+            "nothing is reported as received"
+        )
+    return next(form for form in (TOKEN_TRANSFER, WITHDRAWAL, BURN) if form in forms)
 
 
 def fill_status(reader, pool: str, relay_hash: str, block: Block) -> int:

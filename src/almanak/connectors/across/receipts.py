@@ -122,6 +122,30 @@ def token_moved(receipt, operation: DepositOperation) -> int:
     return uint_data(log)
 
 
+def value_moved(receipt, operation: DepositOperation) -> int:
+    """Wei a native deposit moved from the fund to the SpokePool: its own value.
+
+    The SpokePool takes a deposit of its wrapped native token in one of two ways: it
+    wraps the transaction's value, which must equal the input amount, or with no value
+    it pulls the token from the depositor by allowance. The signed transaction carries
+    the value, and the deposit event already equals the signed terms. A pull of the
+    wrapped token from the fund in the same receipt would be the other way, so it
+    refuses: the fund's token balance is none of this route's business.
+    """
+    target = operation.target
+    pulled = [
+        log
+        for log in receipt["logs"]
+        if log["address"].lower() == target.route.input_token
+        and len(log["topics"]) == 3
+        and log["topics"][0] == TRANSFER_TOPIC
+        and topic_address(log, 1) == target.fund.address
+    ]
+    if pulled:
+        raise mismatch("a native Across deposit moved the wrapped token from the fund")
+    return operation.value
+
+
 def approved(receipt, operation) -> None:
     target = operation.target
     log = one_log(receipt, target.asset.reference, APPROVAL_TOPIC, 3)
@@ -140,7 +164,8 @@ def movement(receipt, operation, block_timestamp: int) -> tuple[int, dict | None
         approved(receipt, operation)
         return 0, None
     deposit = deposited(receipt, operation, block_timestamp)
-    moved = token_moved(receipt, operation)
+    native = operation.target.route.native
+    moved = value_moved(receipt, operation) if native else token_moved(receipt, operation)
     if moved != operation.amount.amount:
         raise mismatch("the amount that left the fund differs from the signed deposit")
     return moved, deposit

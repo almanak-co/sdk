@@ -51,7 +51,20 @@ class Snapshot(Model):
             raise ValueError("Across snapshot differs from its target's chain or SpokePool")
         if self.payer.chain != chain or self.native_balance.asset != native_asset(chain.chain_id):
             raise ValueError("Across snapshot gas evidence differs from its payer chain")
+        if self.target.route.native:
+            self.native_scope()
         return self
+
+    def native_scope(self):
+        """A native route's sent asset is the payer's own native balance, read once.
+
+        The wallet that sends is the one that pays gas, and the route gives the SpokePool
+        no approval, so no allowance is read or stated.
+        """
+        if self.payer != self.target.fund:
+            raise ValueError("a native Across route is sent by the wallet that pays its gas")
+        if self.allowance or self.wallet_balance != self.native_balance.amount:
+            raise ValueError("a native Across snapshot states the native balance and no allowance")
 
 
 class Ownership(Model):
@@ -142,11 +155,18 @@ def snapshot(backend, name, block) -> Snapshot:
     reader = backend.reader
     fund, pool = target.fund.address, target.route.spoke_pool
     native = int(reader._rpc("eth_getBalance", [profile.submitter.address, pinned(block)]), 16)
+    if target.route.native:
+        # The sent asset is the native balance itself. An allowance of the wrapped token
+        # plays no part in a native deposit and is not read.
+        held, allowance = native, 0
+    else:
+        held = token_read(reader, target, block, "balanceOf(address)", fund)
+        allowance = token_read(reader, target, block, "allowance(address,address)", fund, pool)
     return Snapshot(
         target=target,
         block=block,
-        wallet_balance=token_read(reader, target, block, "balanceOf(address)", fund),
-        allowance=token_read(reader, target, block, "allowance(address,address)", fund, pool),
+        wallet_balance=held,
+        allowance=allowance,
         pool=read_pool(reader, pool, block),
         native_balance=AssetAmount(asset=native_asset(block.chain.chain_id), amount=native),
         payer=profile.submitter,
