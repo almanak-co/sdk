@@ -617,8 +617,8 @@ def unwraps(reader, pool: str, token: str, head) -> bool:
 
 PAID_NATIVE = (
     "Paid in the chain's native asset. The payment itself leaves no log: the amount is"
-    " the fill event's, matched by the SpokePool's unwrap of the same amount of its"
-    " wrapped native token after that event."
+    " the fill event's, matched by the SpokePool's unwrap of exactly that amount of its"
+    " wrapped native token after that event and before its next fill."
 )
 PAID_WRAPPED = (
     "Paid in the wrapped native token, not in the native asset: the SpokePool pays the"

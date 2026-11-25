@@ -753,10 +753,14 @@ between two of Ethereum, Arbitrum, Base, OP Mainnet and Robinhood Chain. BNB Sma
 Chain, Polygon and Avalanche are refused, and so is the native asset on one side
 only. Never state the wrapped token as the sent asset to bridge ETH.
 
-- The action is one step, the deposit, with no approval: `steps` is `["deposit"]`,
-  and `ax revoke-bridge` has nothing to clear.
-- The wallet must hold `--amount` plus `--max-transaction-fee` in ETH. A refusal
-  with `funding_unavailable` names the shortfall: report it and stop.
+- The action is one transaction and no approval: `steps` is `["deposit"]`, and
+  `ax revoke-bridge` has nothing to clear.
+- The wallet must hold `--amount` plus the stated maximum fee,
+  `--max-transaction-fee`, in ETH. A refusal with `funding_unavailable` names the
+  shortfall: report it and stop.
+- The recipient is paid native ETH. In a preview that is what is expected, not a
+  result: `native.paid_as_decided` is `at_fill`, because the bridge contract
+  decides the form when the fill lands.
 - A refusal with `amount_too_low` means Across calls the amount too low for its
   fees. Report it; do not retry with another amount unless the user states one.
 - A refusal with `recipient_is_contract` means the address holds contract code on

@@ -182,7 +182,9 @@ def native_terms(target) -> dict:
             "sent_as": "native_value",
             "sent_asset": str(route.asset),
             "approval": None,
+            # What is expected, not a promise: the pool decides when the fill lands.
             "paid_as": "native",
+            "paid_as_decided": "at_fill",
             "paid_asset": str(route.destination_asset),
             "refund_asset": f"{route.chain.chain_id}/erc20:{route.wrapped[0]}",
         }

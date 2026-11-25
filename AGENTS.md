@@ -719,15 +719,21 @@ independently.
   on-chain enforcement.
 - Proposed, not accepted: the arrival evidence rule of `ax bridge-status`. A
   receipt holds no log of a native value transfer, so a fill of a wrapped
-  native output is read from what the pool did with its wrapped token between
-  the fill event and the pool's next fill. An unwrap of exactly the amount
-  reports the native asset as paid: a `Withdrawal` by the pool on Ethereum,
-  Base and OP Mainnet, or a transfer from the pool to the zero address on
-  Arbitrum and Robinhood Chain. A transfer of the amount to the recipient
-  reports the wrapped token, never the native asset. Neither, both or another
-  amount stops with an integrity cause. The result names the evidence. An
+  native output is read from the pool's outflow of exactly the fill event's
+  amount of its wrapped token between the fill event and the pool's next fill.
+  An unwrap of that amount reports the native asset as paid: a `Withdrawal` by
+  the pool, which the WETH9 source emits and which was captured on Base and OP
+  Mainnet, or a transfer from the pool to the zero address, captured on
+  Arbitrum and Robinhood Chain. A transfer of that amount from the pool to the
+  recipient reports the wrapped token, never the native asset. Outflows of the
+  wrapped token to other parties or of other amounts in that window, such as a
+  refund payment after the fill, are ignored. No outflow of the amount in
+  either form, or both an unwrap and a transfer to the recipient of that
+  amount, stops with an integrity cause. The result names the evidence. An
   unwrap is evidence that the pool paid native value, not a measurement of the
-  recipient's balance.
+  recipient's balance. The rule reads every fill of a pool's wrapped native
+  token in `ax bridge-status`, a token route's included. No fill on Ethereum
+  was captured.
 - Current contract: the native route's path has never been run by anyone with
   this SDK, on a fork or on mainnet. Its readers are held to known answers
   captured read-only on 25 November 2026 and kept in

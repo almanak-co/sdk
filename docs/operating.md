@@ -975,7 +975,7 @@ ETH, name the native asset.
 | Funding | The wallet's native balance must cover `--amount` plus `--max-transaction-fee`. A shorter balance is refused before signing with `funding_unavailable`, naming the shortfall. |
 | Quote | Across is asked with the wrapped tokens of both chains, which each SpokePool names as its own at the pinned block. An amount the venue calls too low for its fees, about 0.0003 ETH when this was written, is refused with `amount_too_low`. |
 | Recipient | Must hold no contract code on the destination chain, or be a plain account that delegates its code. Any other is refused with `recipient_is_contract` before anything is planned: the SpokePool would pay a contract the wrapped token. No option overrides this. |
-| Preview | `native` states `sent_as`, `sent_asset`, `approval` (none), `paid_as`, `paid_asset` and `refund_asset`, and the `note` states the payout and the refund in words. |
+| Preview | `native` states `sent_as`, `sent_asset`, `approval` (none), `paid_as`, `paid_as_decided`, `paid_asset` and `refund_asset`, and the `note` states the payout and the refund in words. `paid_as: native` in a preview is what is expected, not a result: `paid_as_decided` is `at_fill`, because the SpokePool decides the form when the fill lands. |
 | Refund | A refund of an unfilled native bridge is paid in the wrapped token (WETH) on the source chain, to the sending wallet, never in ETH. |
 
 The recipient check is the command's, made once on the destination chain before
@@ -985,21 +985,26 @@ fill is paid the wrapped token. The pool sends native ETH with a plain value
 transfer, so a recipient that rejects ETH leaves the transfer unfilled until its
 refund.
 
-`ax bridge-status` reports a native bridge by what the destination SpokePool did
-with its wrapped token in the fill transaction, between the fill event and the
-pool's next fill:
+`ax bridge-status` reports a native bridge by the destination SpokePool's outflow
+of exactly the fill event's amount of its wrapped token in the fill transaction,
+between the fill event and the pool's next fill:
 
 | `arrival.paid_as` | `arrival.measured_by` | Evidence |
 | --- | --- | --- |
-| `native` | `wrapped_token_withdrawal` | The pool unwrapped the amount: a `Withdrawal` of the wrapped token by the pool, as on Ethereum, Base and OP Mainnet. |
-| `native` | `wrapped_token_burn` | The pool unwrapped the amount: a transfer of the wrapped token from the pool to the zero address, as on Arbitrum and Robinhood Chain. |
-| `wrapped_token` | `wrapped_token_transfer` | The pool transferred the wrapped token to the recipient. `arrival.asset` then names the token, never the native asset. |
+| `native` | `wrapped_token_withdrawal` | The pool unwrapped the amount: a `Withdrawal` of the wrapped token by the pool. The WETH9 contract's source emits it; it was captured on Base and OP Mainnet. |
+| `native` | `wrapped_token_burn` | The pool unwrapped the amount: a transfer of the wrapped token from the pool to the zero address, captured on Arbitrum and Robinhood Chain. |
+| `wrapped_token` | `wrapped_token_transfer` | The pool transferred the amount of the wrapped token to the recipient. `arrival.asset` then names the token, never the native asset. |
 
 `arrival.received` is the fill event's amount, and `arrival.asset` names what was
 paid. An unwrap is evidence that the pool sent native value in that transaction; a
-receipt holds no log of the value transfer itself. A fill with neither form, with
-both, or with another amount stops with an integrity cause and reports nothing as
-received. `deposit.sent_as_native_value` says whether the deposit's own transaction
+receipt holds no log of the value transfer itself. What the pool moved to other
+parties or in other amounts in the same transaction, such as a refund payment after
+the fill, is not the fill's and is ignored. A fill with no outflow of exactly its
+amount in either form, or with both an unwrap and a transfer to the recipient of
+that amount, stops with an integrity cause and reports nothing as received. The
+same rule reads every fill of a pool's wrapped native token, a token route's
+included. No fill on Ethereum was captured: its wrapped token is the WETH9 contract
+itself. `deposit.sent_as_native_value` says whether the deposit's own transaction
 paid the SpokePool its amount as value; the deposit is recorded by the SpokePool in
 the wrapped token, which `deposit.sent.recorded_as` names. For an unfilled native
 bridge, `refund.paid_in` names the wrapped token the scan reads.

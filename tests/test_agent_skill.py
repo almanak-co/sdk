@@ -1803,3 +1803,24 @@ def test_a_released_deposit_is_checked_through_another_endpoint_before_bridging_
         "continue with `--refund-from-block` set to that block plus one",
     ):
         assert statement in stated, statement
+
+
+def test_a_native_bridge_is_stated_with_its_payout_its_refund_and_its_funding():
+    stated = " ".join(subsection("Native ETH").split())
+    for statement in (
+        "name the native asset on both chains",
+        "Never state the wrapped token as the sent asset to bridge ETH",
+        "The action is one transaction and no approval",
+        "The wallet must hold `--amount` plus the stated maximum fee, `--max-transaction-fee`",
+        "The recipient is paid native ETH",
+        "In a preview that is what is expected, not a result",
+        "a refund of an unfilled native bridge is paid in the wrapped token (WETH) on the"
+        " source chain, not in ETH",
+        "report `arrival.asset` as it is stated, never as ETH",
+        "A refusal with `recipient_is_contract`",
+        "Nothing overrides it",
+        "No native bridge has been run by the SDK on a fork or on mainnet",
+    ):
+        assert statement in stated, statement
+    # The subsection is part of the bridge section, under its transports and rules.
+    assert "### Native ETH" in section("Bridges")

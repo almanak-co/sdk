@@ -24,8 +24,10 @@ its changelog is on the `v2` branch.
 - `almanak ax bridge-status` reports what a fill of a wrapped native output paid:
   `arrival.paid_as` is `native` when the destination SpokePool unwrapped the amount
   in the fill transaction and `wrapped_token` when it transferred the token, with
-  the evidence under `arrival.measured_by`. A refund of a wrapped native input
-  names the token under `refund.paid_in`.
+  the evidence under `arrival.measured_by`. The evidence is the pool's outflow of
+  exactly the fill's amount after the fill event; a fill with none, or with both
+  forms, stops with an integrity cause. A refund of a wrapped native input names
+  the token under `refund.paid_in`.
 
 ### Changed
 - A venue refusal of an amount as too low for its fees is the cause

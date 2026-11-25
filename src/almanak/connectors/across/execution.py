@@ -89,13 +89,15 @@ def require_reviewed(before) -> None:
     require_pinned(route.destination_pool, route.destination_chain)
 
 
-def validate_entry(state, operation, before):
-    if not increases_exposure(state.config, operation):
-        return
+def require_open(state) -> None:
     if state.mode != "running" or any(o.accounting_issues for o in state.outcomes):
         raise DataError(
             "entry_unavailable", "a new bridge requires running mode and reconciled accounting"
         )
+
+
+def require_route(state, operation, before) -> None:
+    """The route's pools, payout and pause, before any balance is looked at."""
     require_reviewed(before)
     try:
         state.config.require_payout(operation.allocation)
@@ -103,6 +105,9 @@ def validate_entry(state, operation, before):
         raise DataError("unsupported_route", str(error)) from error
     if before.pool.deposits_paused:
         raise DataError("deposits_paused", "the Across SpokePool has paused deposits")
+
+
+def require_funding(state, operation, before) -> None:
     allocation = state.config.allocation(operation.allocation)
     if before.native_balance.amount < allocation.minimum_native_balance:
         raise DataError("payer_unavailable", "Across gas payer is below its configured minimum")
@@ -114,6 +119,14 @@ def validate_entry(state, operation, before):
             f"the fund holds {before.wallet_balance} of {operation.amount.asset}, "
             f"less than the {operation.amount.amount} to bridge",
         )
+
+
+def validate_entry(state, operation, before):
+    if not increases_exposure(state.config, operation):
+        return
+    require_open(state)
+    require_route(state, operation, before)
+    require_funding(state, operation, before)
 
 
 def fee_ceiling(config, account: str) -> int:

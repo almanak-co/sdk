@@ -52,6 +52,9 @@ from almanak.request_runtime import drop_superseded, release_pending
 from almanak.strategy_api import Memory
 from almanak.triggers import OperatorEvent
 from tests.test_ax_bridge import Ledger, late_gateway, parsed
+from tests.test_ax_bridge import destination as token_destination
+from tests.test_ax_bridge import source as token_source
+from tests.test_ax_bridge import status as token_status
 from tests.test_expired_attempt_release import gateway_service
 
 CAPTURES = json.loads(
@@ -1083,6 +1086,7 @@ def test_the_preview_states_what_is_sent_paid_and_refunded_before_anything_is_si
         "sent_asset": "eip155:1/slip44:60",
         "approval": None,
         "paid_as": "native",
+        "paid_as_decided": "at_fill",
         "paid_asset": "eip155:8453/slip44:60",
         "refund_asset": f"eip155:1/erc20:{WETH.reference}",
     }
@@ -1379,3 +1383,435 @@ def test_a_native_route_is_sent_from_a_plain_wallet_only():
     raw["accounts"]["bindings"][0]["profile"] = json.loads(profile.model_dump_json())
     with pytest.raises(ValidationError, match="from a plain wallet, not a Safe"):
         type(CONFIG).model_validate_json(json.dumps(raw))
+
+
+# The arrival evidence, narrowed: the pool's outflow of exactly the event's amount.
+
+
+def padded(account: str) -> str:
+    return "0x" + account[2:].rjust(64, "0")
+
+
+def appended(capture, *rows) -> dict:
+    """The capture's receipt with more logs after its last one, in the order given."""
+    receipt = capture["receipt"]
+    last = max(int(row["logIndex"], 16) for row in receipt["logs"])
+    block = receipt["logs"][0]["blockNumber"]
+    extra = [
+        {**row, "logIndex": hex(last + 1 + index), "blockNumber": block}
+        for index, row in enumerate(rows)
+    ]
+    return {**receipt, "logs": [*receipt["logs"], *extra]}
+
+
+def token_transfer(token: str, sender: str, payee: str, amount: int) -> dict:
+    return {
+        "address": token,
+        "topics": [chain.TRANSFER_TOPIC, padded(sender), padded(payee)],
+        "data": "0x" + amount.to_bytes(32).hex(),
+    }
+
+
+def unwrap_of(capture) -> dict:
+    (row,) = [
+        log for log in capture["receipt"]["logs"] if log["topics"][0] == chain.WITHDRAWAL_TOPIC
+    ]
+    return row
+
+
+def evidence(capture, receipt) -> str:
+    amount = filled(capture)[1]["updated_output"]
+    return chain.native_payout(
+        receipt, capture["log"], capture["wrapped_native"], capture["recipient"], amount
+    )
+
+
+def test_a_fill_followed_by_other_pool_outflows_still_reports_its_arrival():
+    """A SpokePool can pay a refund or unwrap another amount in the same transaction,
+    after the fill and before any next fill. Neither is this fill's."""
+    capture = FILLS["withdrawal_optimism"]
+    pool, wrapped = capture["spoke_pool"], capture["wrapped_native"]
+    amount = filled(capture)[1]["updated_output"]
+    stranger = "0x" + "55" * 20
+    refund = token_transfer(wrapped, pool, stranger, 123)
+    same_size = token_transfer(wrapped, pool, stranger, amount)
+    other_unwrap = {**unwrap_of(capture), "data": "0x" + (amount + 5).to_bytes(32).hex()}
+    other_burn = token_transfer(wrapped, pool, chain.ZERO, amount + 7)
+    for rows in ((refund,), (same_size,), (other_unwrap,), (other_burn,), (refund, other_unwrap)):
+        assert evidence(capture, appended(capture, *rows)) == chain.WITHDRAWAL
+    burned = FILLS["burn_arbitrum"]
+    paid = token_transfer(burned["wrapped_native"], burned["spoke_pool"], stranger, 9)
+    assert evidence(burned, appended(burned, paid)) == chain.BURN
+    # The status reports the arrival through such a receipt too.
+    far = Destination({**capture, "receipt": appended(capture, refund, other_unwrap)})
+    stated, fill = filled(capture)
+    result = ax_bridge.payout(far, pool, stated, capture["log"], fill, far.head())
+    assert (result["received"], result["paid_as"]) == (str(amount), "native")
+    assert result["measured_by"] == chain.WITHDRAWAL
+
+
+def test_a_token_payment_beside_other_pool_outflows_is_still_the_wrapped_token():
+    capture = FILLS["contract_base"]
+    recipient, amount = paid_contract(capture)
+    other = {**unwrap_of(FILLS["delegating_base"]), "data": "0x" + (amount + 1).to_bytes(32).hex()}
+    receipt = appended(capture, other)
+    assert (
+        chain.native_payout(receipt, capture["log"], BASE_WETH.reference, recipient, amount)
+        == chain.TOKEN_TRANSFER
+    )
+
+
+def test_what_is_not_the_pools_unwrap_of_the_amount_is_no_evidence():
+    capture = FILLS["withdrawal_optimism"]
+    wrapped, recipient = capture["wrapped_native"], capture["recipient"]
+    amount = filled(capture)[1]["updated_output"]
+    unwrap = unwrap_of(capture)
+    bare = without(capture["receipt"], chain.WITHDRAWAL_TOPIC)
+    stripped = {**capture, "receipt": bare}
+    stranger = "0x" + "66" * 20
+    before = {**unwrap, "logIndex": hex(int(capture["log"]["logIndex"], 16) - 1)}
+    cases = {
+        # A `Withdrawal` by the pool, emitted by another token contract.
+        "another token": appended(stripped, {**unwrap, "address": "0x" + "77" * 20}),
+        # A `Withdrawal` of the wrapped token whose source is not the pool.
+        "another source": appended(
+            stripped, {**unwrap, "topics": [unwrap["topics"][0], padded(stranger)]}
+        ),
+        # The pool's unwrap of the amount, before the fill event.
+        "before the event": {**bare, "logs": [before, *bare["logs"]]},
+        # The wrapped token paid to the recipient by anyone but the pool.
+        "another payer": appended(stripped, token_transfer(wrapped, stranger, recipient, amount)),
+        # A burn by anyone but the pool.
+        "another burner": appended(stripped, token_transfer(wrapped, stranger, chain.ZERO, amount)),
+    }
+    for name, receipt in cases.items():
+        with pytest.raises(DataError, match="nothing is reported as received") as error:
+            evidence(capture, receipt)
+        assert error.value.kind == "integrity", name
+
+
+def test_the_next_fills_unwrap_is_not_this_fills_whatever_case_its_topic_is_stated_in():
+    capture = FILLS["withdrawal_optimism"]
+    unwrap = unwrap_of(capture)
+    stripped = {**capture, "receipt": without(capture["receipt"], chain.WITHDRAWAL_TOPIC)}
+    shouted = "0x" + capture["log"]["topics"][0][2:].upper()
+    for topic in (capture["log"]["topics"][0], shouted):
+        following = {**capture["log"], "topics": [topic, *capture["log"]["topics"][1:]]}
+        receipt = appended(stripped, following, unwrap)
+        with pytest.raises(DataError, match="nothing is reported as received"):
+            evidence(capture, receipt)
+        # Read for the second fill, the same unwrap is its evidence.
+        second = [row for row in receipt["logs"] if row["topics"][0] == topic][-1]
+        amount = filled(capture)[1]["updated_output"]
+        assert (
+            chain.native_payout(
+                receipt, second, capture["wrapped_native"], capture["recipient"], amount
+            )
+            == chain.WITHDRAWAL
+        )
+
+
+def test_an_unwrap_and_a_token_payment_of_the_same_amount_stop_the_status():
+    capture = FILLS["withdrawal_optimism"]
+    amount = filled(capture)[1]["updated_output"]
+    paid = token_transfer(
+        capture["wrapped_native"], capture["spoke_pool"], capture["recipient"], amount
+    )
+    with pytest.raises(DataError, match="or shows both") as error:
+        evidence(capture, appended(capture, paid))
+    assert error.value.kind == "integrity"
+    # A token payment of another amount to the recipient is not this fill's.
+    less = token_transfer(
+        capture["wrapped_native"], capture["spoke_pool"], capture["recipient"], amount - 1
+    )
+    assert evidence(capture, appended(capture, less)) == chain.WITHDRAWAL
+
+
+# The recipient rule through the command's own deployment.
+
+
+class Node:
+    """One chain behind `ax bridge`: a head, a genesis, each address's code and the
+    pool's wrapped native token, with every read recorded in order."""
+
+    def __init__(self, block, wrapped, codes, journal):
+        self.chain, self.block, self.wrapped = block.chain, block, wrapped
+        self.codes, self.journal = codes, journal
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *arguments):
+        return None
+
+    def note(self, *event):
+        self.journal.append((str(self.chain.chain_id), *event))
+
+    def pin_block(self, selector):
+        self.note("pin", selector)
+        if selector == 0:
+            genesis = evm_network(self.chain.chain_id).genesis
+            return self.block.model_copy(update={"number": 0, "hash": genesis})
+        return self.block
+
+    def asset(self, token, block):
+        return Asset(chain=self.chain, identifier=token, decimals=18)
+
+    def call(self, to, signature, block, *, inputs=(), args=(), outputs=()):
+        self.note(signature, block.hash)
+        return (self.wrapped,)
+
+    def _rpc(self, method, params, *, allow_none=False):
+        assert method == "eth_getCode"
+        self.note(method, *params)
+        return self.codes.get(params[0], "0x")
+
+
+def bridged(monkeypatch, near_code="0x", far_code="0x"):
+    """`ax_bridge.deployment` of a native bridge, with the resolver and the recipient
+    checks as shipped, over two stand-in chains. Returns the call and its journal."""
+    from almanak.gateway import read_endpoints
+
+    journal: list[tuple] = []
+    near = Node(BLOCK, WETH.reference, {RECIPIENT: near_code}, journal)
+    far = Node(BASE_BLOCK, BASE_WETH.reference, {RECIPIENT: far_code}, journal)
+    pools = {PIN.address: POOL, BASE_PIN.address: BASE_POOL}
+
+    def verified(chain_id, env_file):
+        journal.append((str(chain_id), "verified", str(env_file)))
+        return far
+
+    monkeypatch.setattr(resolution, "read_pool", lambda reader, pool, block: pools[pool])
+    monkeypatch.setattr("almanak.gateway.ethereum.EthereumReader", lambda chain, endpoint: near)
+    monkeypatch.setattr(read_endpoints, "verified_reader", verified)
+    request = ActionRequest("bridge", AMOUNT, recipient=RECIPIENT)
+    wallet = {"account": "fund", "address": SENDER}
+    provider = ax_actions.alchemy(ETHEREUM.chain_id)
+    where = ax_bridge.Far(env_file=Path("providers.env"))
+
+    def run():
+        return ax_bridge.deployment(where, SELECTION, request, wallet, provider, "e", LIMITS)
+
+    return run, journal
+
+
+def test_the_recipients_code_is_read_on_the_proven_destination_at_its_pinned_block(monkeypatch):
+    run, journal = bridged(monkeypatch)
+    assert run() == CONFIG
+    there = [event[1:] for event in journal if event[0] == "eip155:8453"]
+    assert there == [
+        # The destination proof: its verified reader, then its genesis block.
+        ("verified", "providers.env"),
+        ("pin", 0),
+        # The pin of the block the route is completed at.
+        ("pin", "latest"),
+        # The completion holds its anchor before and after it reads the pool's own
+        # wrapped token at that block.
+        ("pin", BASE_BLOCK.number),
+        ("wrappedNativeToken()", BASE_BLOCK.hash),
+        ("pin", BASE_BLOCK.number),
+        # The recipient's code, on the destination reader, by that block's hash.
+        ("eth_getCode", RECIPIENT, {"blockHash": BASE_BLOCK.hash}),
+    ]
+    here = [event[1:] for event in journal if event[0] == "eip155:1"]
+    assert here == [
+        ("pin", "latest"),
+        ("pin", BLOCK.number),
+        ("wrappedNativeToken()", BLOCK.hash),
+        ("pin", BLOCK.number),
+        ("eth_getCode", RECIPIENT, {"blockHash": BLOCK.hash}),
+    ]
+    # Nothing on the destination chain is read before the source chain is resolved.
+    assert journal.index(("eip155:8453", "verified", "providers.env")) == len(here)
+
+
+CONTRACT_CODE = "0x6080604052"
+DELEGATION = "0xef0100" + "ab" * 20
+
+
+@pytest.mark.parametrize(
+    ("near_code", "far_code", "kind"),
+    [
+        ("0x", CONTRACT_CODE, "recipient_is_contract"),
+        (CONTRACT_CODE, CONTRACT_CODE, "recipient_is_contract"),
+        # A contract where the asset leaves and nothing where it arrives keeps the
+        # refusal every route has, on a native route too.
+        (CONTRACT_CODE, "0x", "recipient_not_deployed"),
+        # The delegation prefix on code that is not a 23-byte delegation is a contract.
+        ("0x", "0xef0100" + "ab" * 19, "recipient_is_contract"),
+        ("0x", "0xef0100" + "ab" * 21, "recipient_is_contract"),
+        ("0x", "0xef0100", "recipient_is_contract"),
+    ],
+)
+def test_a_native_bridge_refuses_its_recipient_by_the_code_each_chain_holds(
+    monkeypatch, near_code, far_code, kind
+):
+    run, journal = bridged(monkeypatch, near_code, far_code)
+    with pytest.raises(DataError) as error:
+        run()
+    assert error.value.kind == kind and "nothing was planned or signed" in str(error.value)
+    # Both chains were asked for the code before the refusal.
+    assert [event[0] for event in journal if event[1] == "eth_getCode"] == [
+        "eip155:1",
+        "eip155:8453",
+    ]
+
+
+@pytest.mark.parametrize("far_code", ["0x", DELEGATION, DELEGATION.upper().replace("0X", "0x")])
+def test_a_native_bridge_admits_a_plain_or_delegating_recipient(monkeypatch, far_code):
+    run, _ = bridged(monkeypatch, far_code=far_code)
+    assert run() == CONFIG
+
+
+def test_only_a_23_byte_delegation_is_no_contract():
+    def holds(code) -> bool:
+        reader = SimpleNamespace(_rpc=lambda method, params: code)
+        return ax_bridge.contract_code(reader, RECIPIENT, BASE_BLOCK)
+
+    assert not holds("0x") and not holds(DELEGATION)
+    for code in ("0xef0100", "0xef0100" + "ab" * 19, "0xef0100" + "ab" * 21, CONTRACT_CODE):
+        assert holds(code), code
+    for malformed in (None, "ef0100", 5):
+        with pytest.raises(DataError, match="invalid code response"):
+            holds(malformed)
+
+
+# A native deposit through the gateway's own preparation, plan validation and signing.
+
+# The first public Foundry test key. It holds nothing and signs only in memory here.
+TEST_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+
+
+class Simulating:
+    """The source chain of a preparation: one pinned block and an empty call result."""
+
+    chain = ETHEREUM
+    transport_chain = ETHEREUM.chain_id
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def pin_block(self, selector):
+        return BLOCK
+
+    def _rpc(self, method, params, **options):
+        assert method == "eth_call", method
+        self.calls.append(params[0])
+        return "0x"
+
+
+def native_gateway():
+    """A real `EvmGateway` of the operator deployment, without its transport: the
+    venue answers the captured quote, authority and fee estimation are stand-ins."""
+    import threading
+
+    from almanak.gateway.execution import EvmGateway, VenueAnswers
+
+    asked = CAPTURES["quote"]
+    answer = {**asked["answer"], "timestamp": str(NOW - 60), "fillDeadline": str(NOW + 7140)}
+    answer["exclusivityDeadline"] = 0
+
+    class Gateway(EvmGateway):
+        venue_transports = {venue.QUOTE_VENUE: Venue(answer)}
+
+        def guard(self):
+            return None
+
+    gateway = object.__new__(Gateway)
+    gateway.config, gateway.reader, gateway.clock = CONFIG, Simulating(), lambda: NOW
+    gateway.venue_answers, gateway.signers = VenueAnswers(), {}
+    gateway.audit_history = lambda state: None
+    gateway.verify_authority = lambda manifest, account: None
+    fees = {"gas_estimate": 100_000, "gas": 125_000, "gas_price": 10**9}
+    gateway.estimate_execution = lambda *arguments, **options: (3, fees)
+    gateway.node_readings, gateway.node_readings_lock = {}, threading.Lock()
+    return gateway
+
+
+def prepared(monkeypatch, gateway, balance):
+    before = seen(balance=balance)
+    monkeypatch.setattr(execution, "snapshot", lambda backend, name, block, reference=None: before)
+    created = AcrossLifecycle.initial(CONFIG, None, declared(CONFIG), None)
+    held = created.model_copy(
+        update={"initialized": True, "baseline": (before,), "decision": decision()}
+    )
+    return held, gateway.prepare(held, INTENT, before, "attempt-1")
+
+
+def test_the_gateway_prepares_validates_and_signs_a_native_deposit_with_its_value(monkeypatch):
+    from eth_account import Account
+    from eth_account._utils.legacy_transactions import Transaction
+
+    gateway = native_gateway()
+    held, plan = prepared(monkeypatch, gateway, AMOUNT + FEE_CEILING)
+    assert (plan.operation.kind, plan.operation.value) == ("deposit", AMOUNT)
+    assert (plan.call.to, plan.call.value) == (PIN.address, AMOUNT)
+    assert (plan.execution.to, plan.execution.value) == (PIN.address, AMOUNT)
+    simulated = gateway.reader.calls[-1]
+    assert (simulated["to"], int(simulated["value"], 16)) == (PIN.address, AMOUNT)
+    assert simulated["from"] == SENDER
+    # The service prepares the plan again and admits only the same one.
+    service = gateway_service(held, gateway)
+    service.validate_new_plan(held, plan)
+    for field in ("call", "execution"):
+        emptied = getattr(plan, field).model_copy(update={"value": 0})
+        with pytest.raises(ValueError, match="differs from verified gateway preparation"):
+            service.validate_new_plan(held, plan.model_copy(update={field: emptied}))
+    # A recorded operation that states no value does not load.
+    raw = json.loads(plan.model_dump_json())
+    del raw["operation"]["value"]
+    with pytest.raises(ValidationError, match="carries exactly its amount as value"):
+        type(plan).model_validate_json(json.dumps(raw))
+
+    # The signed envelope pays the pinned pool exactly the amount.
+    class Signer:
+        def sign_transaction(self, transaction):
+            return Account.sign_transaction(transaction, TEST_KEY)
+
+    gateway.signers = {"fund": Signer()}
+    signature = gateway._sign(plan.operation, plan.execution, plan.nonce, plan.gas, plan.gas_price)
+    envelope = Transaction.from_bytes(bytes(signature.raw_transaction))
+    assert (envelope.value, "0x" + envelope.to.hex()) == (AMOUNT, PIN.address)
+    assert envelope.data.hex() == plan.call.data[2:]
+
+
+@pytest.mark.parametrize("balance", [AMOUNT + FEE_CEILING - 1, AMOUNT])
+def test_the_gateway_prepares_no_native_deposit_the_wallet_cannot_fund(monkeypatch, balance):
+    gateway = native_gateway()
+    with pytest.raises(DataError) as error:
+        prepared(monkeypatch, gateway, balance)
+    assert error.value.kind == "funding_unavailable"
+    assert f"{AMOUNT + FEE_CEILING - balance} less" in str(error.value)
+    # Refused before anything was simulated.
+    assert gateway.reader.calls == []
+
+
+# The read of the deposit's own transaction.
+
+
+def test_a_status_of_a_token_route_reads_no_transaction_by_hash(monkeypatch):
+    """`Ledger` serves receipts and logs and fails on any other request, so a status
+    that asked for the deposit's transaction would not return."""
+    near, far = token_source(), token_destination(2)
+    result = token_status(monkeypatch, near, far)
+    assert result["status"] == "arrived"
+    assert "sent_as_native_value" not in result["deposit"]
+    assert "recorded_as" not in result["deposit"]["sent"]
+    assert set(result["arrival"]) == {"transaction", "block", "received", "fill_type"}
+
+
+def test_a_public_endpoint_that_serves_no_transaction_is_named_with_its_chain(monkeypatch):
+    near, far = source_chain(), destination_chain()
+    near.sent = None
+    monkeypatch.setattr("almanak.ax.public_reader", lambda chain_id, name: near)
+    keyless = {"public_rpc": "publicnode", "destination_public_rpc": "base", "env_file": None}
+    with pytest.raises(DataError) as error:
+        status(monkeypatch, near, far, **keyless)
+    message = str(error.value)
+    assert error.value.kind == "unavailable"
+    assert message.startswith("the deposit's transaction is not served by the endpoint; ")
+    assert "the public endpoint publicnode on eip155:1" in message and "--env-file" in message
+    # Through a provider key the refusal keeps its own words.
+    with pytest.raises(DataError) as error:
+        status(monkeypatch, near, far)
+    assert str(error.value) == "the deposit's transaction is not served by the endpoint"
