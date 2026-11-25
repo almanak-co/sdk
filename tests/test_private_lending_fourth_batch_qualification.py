@@ -56,7 +56,9 @@ COMPOSED = {
 }
 LENDING = {"morpho_blue", "compound_v3", "sparklend"}
 # Admitted by its own 20 October 2026 acceptance; tests/test_hyperevm_morpho.py owns it.
-LATER = {"morpho_blue_hyperevm_lending"}
+# The bridge reference lends on Compound V3 after its arrival and joined the rehearsal
+# with the Across production declaration; tests/test_composed_across.py owns it.
+LATER = {"morpho_blue_hyperevm_lending", "arbitrum_base_bridge_and_lend"}
 
 
 @pytest.mark.parametrize(("connector", "chain"), sorted(CELLS))

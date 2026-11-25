@@ -287,9 +287,14 @@ def checkpoint_from_json(value):
     wire = json.loads(value)
     codec = connector_from_wire(wire["config"]).codec
     if wire.get("schema_version") in codec.legacy_schemas:
+        connector = wire["config"].get("connector", "composed")
         raise ValueError(
-            "historical checkpoint is audit-only; execution requires its current codec"
+            f"historical checkpoint is audit-only; execution requires its current codec "
+            f"({connector} schema version {wire['schema_version']} is no longer restored)"
         )
+    from almanak.connectors.across.settlement_types import refuse_earlier_pages
+
+    refuse_earlier_pages(wire.get("external_scans", ()))
     return codec.checkpoint.model_validate_json(value)
 
 

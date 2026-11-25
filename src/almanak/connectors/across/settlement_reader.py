@@ -162,6 +162,12 @@ def receipt_of(reader, row) -> dict:
     return receipt
 
 
+def require_retained(reader, tx_hash: str, retained: dict):
+    """A retained receipt must still be the chain's own."""
+    if reader._rpc("eth_getTransactionReceipt", [tx_hash], allow_none=True) != retained:
+        raise DataError("reorganization", "Across retained settlement receipt has changed")
+
+
 def paid_to(receipt, token: str, payee: str, after: int, sender: str | None) -> int | None:
     """Base units of the first transfer of `token` to `payee` after log index `after`.
 

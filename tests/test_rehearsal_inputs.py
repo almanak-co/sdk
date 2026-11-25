@@ -11,6 +11,7 @@ from almanak.configuration.unresolved import read_inputs
 from almanak.connectors.support import RunMode
 from almanak.gateway.credentials import load_production_signers
 from almanak.gateway.operator_config import read_operator_config
+from almanak.gateway.operator_execution import PolicyRefusal
 from almanak.gateway.policy_resolution import check_policy
 from scripts.ci.check_strategies import CONVERTED
 from tests.strategy_fork import rehearsal
@@ -91,6 +92,7 @@ def test_explicit_production_operator_examples_map_one_to_one_to_rehearsable_ref
         "aave_v4_avalanche_borrowing",
         "aave_v4_multichain_borrowing",
         "aave_v4_weth_supply",
+        "across_usdc_arbitrum_base_bridge",
         "hyperliquid_hyperevm_perp",
         "uniswap_v3_arbitrum_lp",
         "uniswap_v3_base_lp",
@@ -101,6 +103,13 @@ def test_explicit_production_operator_examples_map_one_to_one_to_rehearsable_ref
     assert set(references) - set(SAFE_REHEARSED) <= set(production_references())
     for name, own in SAFE_REHEARSED.items():
         assert name not in production_references() and (ROOT / own).is_file()
+
+
+# Production author files no fork admits: policies on Arbitrum and on Base. A fork refuses
+# authored ceilings on Base, and leaves them unenforced only when every policy is on an
+# OP chain. The rehearsal runs the production gateway, which takes them; fork runs use
+# the reference's config.yaml, which states no gas.
+NO_FORK_GAS = {"across_usdc_arbitrum_base_bridge"}
 
 
 @pytest.mark.parametrize(
@@ -117,6 +126,10 @@ def test_explicit_production_rehearsal_preserves_exact_authored_gas(name, tmp_pa
     assert expected and actual == expected
     operator = read_operator_config(rehearsal_fork_operator(name))
     assert operator.fork is not None
+    if name in NO_FORK_GAS:
+        with pytest.raises(PolicyRefusal, match="no gas ceilings"):
+            operator.fork.check_gas(actual)
+        return
     admitted = operator.fork.check_gas(actual)
     assert admitted is not None and admitted.gas == actual
 

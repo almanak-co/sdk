@@ -5,7 +5,12 @@ amount that was not measured has no figure here, never a zero.
 """
 
 from almanak.connectors.across.models import Parameters
-from almanak.connectors.across.settlement_types import ArrivalOutcome, RefundOutcome
+from almanak.connectors.across.settlement_types import (
+    AWAITING_NOTE,
+    ArrivalOutcome,
+    RefundOutcome,
+    followed_by_unattributed,
+)
 from almanak.dashboard.bound import MAX_TABLE_ROWS
 from almanak.dashboard.models import Column, Context, Ref, Scope, Value
 from almanak.dashboard.projection import snapshot
@@ -20,9 +25,10 @@ COVERAGE = (
     "fork-constructed quote is not the venue's."
 )
 UNATTRIBUTED_COVERAGE = (
-    "Refund-leaf payments to the fund that matched no transfer proven unfilled, each at the "
-    "block that paid it. They are in the wallet and attributed to nothing: not a transfer "
-    "amount and not part of owned cash. Do not add them to either."
+    "Refund-leaf payments to the fund attributed to no transfer, each at the block that paid "
+    "it: one that matched no transfer proven unfilled, or one the SpokePool paid in another "
+    "amount than its leaf names, shown beside it. They are in the wallet and attributed to "
+    "nothing: not a transfer amount and not part of owned cash. Do not add them to either."
 )
 
 
@@ -32,6 +38,18 @@ def status(transfer) -> str:
     if isinstance(transfer.resolution, Refunded):
         return "refunded"
     return "unfilled" if transfer.unfilled else "open"
+
+
+AWAITING = "awaiting"
+AWAITING_AFTER_PAYMENT = "awaiting; an unattributed payment followed its fill deadline"
+
+
+def refund_status(state, transfer) -> str:
+    """Whether a transfer proven unfilled waits for its refund, and whether an
+    unattributed payment that could have been that refund was read meanwhile."""
+    if not (transfer.open and transfer.unfilled):
+        return ""
+    return AWAITING_AFTER_PAYMENT if followed_by_unattributed(state, transfer) else AWAITING
 
 
 def deposits(state) -> dict:
@@ -101,16 +119,22 @@ def transfer_values(state, index, transfer, deposit, settled) -> dict:
     return values
 
 
-def row(index, transfer, deposit) -> dict:
+def row(state, index, transfer, deposit) -> dict:
     return {
         "allocation": transfer.allocation,
         "account": transfer.source.account,
         "destination": transfer.destination.account,
         "status": status(transfer),
+        "refund": refund_status(state, transfer),
         "quote_source": deposit.operation.quote.source if deposit else "not retained",
         "fill_deadline": utc(int(transfer.fill_deadline.timestamp())),
         **{name: Ref(ref=f"transfer-{index}-{name}") for name in AMOUNTS},
     }
+
+
+def coverage(rows) -> str:
+    followed = any(row["refund"] == AWAITING_AFTER_PAYMENT for row in rows)
+    return f"{COVERAGE} {AWAITING_NOTE}" if followed else COVERAGE
 
 
 def transfer_table(state):
@@ -124,7 +148,7 @@ def transfer_table(state):
         values.update(
             transfer_values(state, index, transfer, deposit, ended.get(transfer.reference))
         )
-        rows.append(row(index, transfer, deposit))
+        rows.append(row(state, index, transfer, deposit))
     dataset = accounts_dataset(
         keep=True,
         columns=(
@@ -132,6 +156,7 @@ def transfer_table(state):
             Column(key="account", label="Source account"),
             Column(key="destination", label="Destination account"),
             Column(key="status", label="Status"),
+            Column(key="refund", label="Refund"),
             Column(key="quote_source", label="Quote source"),
             Column(key="fill_deadline", label="Fill deadline"),
             Column(key="sent", label="Sent", kind="value"),
@@ -140,45 +165,75 @@ def transfer_table(state):
             Column(key="returned", label="Returned", kind="value"),
         ),
         rows=tuple(rows),
-        coverage=COVERAGE,
+        coverage=coverage(rows),
         truncated=len(state.transfers) > len(kept),
     )
     return values, dataset
 
 
+LEAF_AGREES = "The refund leaf names the paid amount; no separate leaf amount is retained."
+LEAF_DIFFERS = "What the refund leaf names for the fund; the SpokePool paid another amount."
+
+
+def payment_value(state, page, key, asset, amount, reason) -> Value:
+    target = page.target
+    return Value(
+        id=key,
+        amount=None if amount is None else str(amount),
+        unit="base_units",
+        asset=asset,
+        decimals=decimals_of(state, asset),
+        symbol=symbol_of(state, asset),
+        scope=Scope(account=target.account, fund=state.config.profile(target.account).fund),
+        evidence="recorded",
+        block=page.end if amount is not None else None,
+        reason=reason,
+    )
+
+
+def unattributed_row(state, values, index, page, payment) -> dict:
+    key, paid, leaf = f"unattributed-refund-{index}", payment.amount, payment.leaf_amount
+    values[key] = payment_value(
+        state,
+        page,
+        key,
+        paid.asset,
+        paid.amount,
+        "A refund-leaf payment to the fund attributed to nothing.",
+    )
+    values[f"{key}-leaf"] = payment_value(
+        state,
+        page,
+        f"{key}-leaf",
+        paid.asset,
+        leaf and leaf.amount,
+        LEAF_DIFFERS if leaf else LEAF_AGREES,
+    )
+    return {
+        "allocation": page.target.allocation,
+        "account": page.target.account,
+        "block": str(page.end.number),
+        "transaction": payment.tx_hash,
+        "amount": Ref(ref=key),
+        "leaf_amount": Ref(ref=f"{key}-leaf"),
+    }
+
+
 def unattributed_table(state):
-    """Refund-leaf payments to the fund that matched no transfer, each with its block.
+    """Refund-leaf payments to the fund attributed to no transfer, each with its block.
 
     They are in the wallet and attributed to nothing: no transfer amount and no part of
-    owned cash. The table is absent while there are none.
+    owned cash. One the SpokePool paid in another amount than its leaf names shows the
+    leaf amount beside it. The table is absent while there are none.
     """
-    pages = [p for p in getattr(state, "external_scans", ()) if p.unsolicited is not None]
-    kept = list(enumerate(pages))[-MAX_TABLE_ROWS:]
+    payments = [
+        (page, payment)
+        for page in getattr(state, "external_scans", ())
+        for payment in page.unsolicited
+    ]
+    kept = list(enumerate(payments))[-MAX_TABLE_ROWS:]
     values: dict[str, Value] = {}
-    rows = []
-    for index, page in kept:
-        paid, target, key = page.unsolicited.amount, page.target, f"unattributed-refund-{index}"
-        values[key] = Value(
-            id=key,
-            amount=str(paid.amount),
-            unit="base_units",
-            asset=paid.asset,
-            decimals=decimals_of(state, paid.asset),
-            symbol=symbol_of(state, paid.asset),
-            scope=Scope(account=target.account, fund=state.config.profile(target.account).fund),
-            evidence="recorded",
-            block=page.end,
-            reason="A refund-leaf payment to the fund that matched no transfer proven unfilled.",
-        )
-        rows.append(
-            {
-                "allocation": target.allocation,
-                "account": target.account,
-                "block": str(page.end.number),
-                "transaction": page.unsolicited.tx_hash,
-                "amount": Ref(ref=key),
-            }
-        )
+    rows = [unattributed_row(state, values, index, *entry) for index, entry in kept]
     if not rows:
         return {}, {}
     dataset = accounts_dataset(
@@ -188,11 +243,12 @@ def unattributed_table(state):
             Column(key="account", label="Paid account"),
             Column(key="block", label="Block"),
             Column(key="transaction", label="Transaction"),
-            Column(key="amount", label="Amount", kind="value"),
+            Column(key="amount", label="Paid", kind="value"),
+            Column(key="leaf_amount", label="Leaf names", kind="value"),
         ),
         rows=tuple(rows),
         coverage=UNATTRIBUTED_COVERAGE,
-        truncated=len(pages) > len(kept),
+        truncated=len(payments) > len(kept),
     )
     return values, {"unattributed_refund_payments": dataset}
 

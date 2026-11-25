@@ -1,0 +1,80 @@
+# yaml-language-server: $schema=../../docs/schemas/strategy.schema.json
+# Explicit production example: config.yaml with the gas policy production requires.
+# A fork that includes a Base account refuses authored gas ceilings, and leaving them
+# unenforced is admitted only when every policy is on Base or Optimism, so config.yaml
+# states none and fork runs are gasless. The operator context is
+# examples/operators/across_usdc_arbitrum_base_bridge.production.yaml.
+strategy:
+  decision_interval: 60s
+  parameters:
+    # What the strategy bridges, once, in USDC.
+    bridge_quantity: '100'
+  allocations:
+    move:
+      market: usdc_to_base
+      # The account that sends, on the market's chain.
+      account: arbitrum_fund
+      # The account that receives, on the market's destination chain.
+      destination_account: base_fund
+      capital: '100'
+      minimum_native_balance: '0.0001'
+  gas:
+    # Arbitrum One values, the ceilings of the Uniswap V3 Arbitrum reference; gas ceilings
+    # are chain-specific, never copy them to another chain.
+    # max_transaction_fee >= max_gas_limit x max_gas_price_wei.
+    # Above max_gas_price_wei every transaction waits for gas to fall, the teardown
+    # revoke included; nothing is lost.
+    # A bridge takes 2 transactions, an approval and the deposit. Teardown takes at most
+    # 1, a revoke of an approval whose deposit was never mined, and a later bridge may
+    # first revoke such an approval too. exit_reserve covers 2 fees and total_budget 8:
+    # the entry, the reserve and 4 more for a revoke and replanned steps.
+    # Every bound account has a policy. The receiving account on Base signs nothing
+    # in this strategy, so its policy is a ceiling that is never spent.
+    arbitrum_payer:
+      accounts:
+      - arbitrum_fund
+      chain: eip155:42161
+      source: network_rpc_fee_history
+      reward_percentile: 50
+      base_fee_multiplier_bps: 12500
+      max_gas_price_wei: 150000000
+      max_gas_limit: 1000000
+      max_transaction_fee:
+        base_units: 150000000000000
+      total_budget:
+        base_units: 1200000000000000
+      exit_reserve:
+        base_units: 300000000000000
+    # Base (OP Stack) values.
+    base_payer:
+      accounts:
+      - base_fund
+      chain: eip155:8453
+      source: network_rpc_fee_history
+      reward_percentile: 50
+      base_fee_multiplier_bps: 20000
+      max_gas_price_wei: 150000000
+      max_gas_limit: 1000000
+      max_transaction_fee:
+        base_units: 160000000000000
+      total_budget:
+        base_units: 160000000000000
+      exit_reserve:
+        base_units: 0
+markets:
+  # One direction. Bridging back is another market.
+  usdc_to_base:
+    connector: across
+    chain: eip155:42161
+    asset: eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831
+    destination_chain: eip155:8453
+    destination_asset: eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913
+    # The most the whole bridge may cost, in basis points of the amount sent.
+    max_fee_bps: 10
+    # Where the received amount comes from: Across's own quote. Nothing substitutes it.
+    quote: across_api
+accounts:
+  arbitrum_fund:
+    chain: eip155:42161
+  base_fund:
+    chain: eip155:8453

@@ -87,6 +87,13 @@ def submitted_state(state):
     )
 
 
+AWAITING = (
+    "awaiting_refund",
+    "awaiting_refund_after_unattributed_payment",
+    "awaiting_refund_note",
+)
+
+
 def transfer_evidence(state):
     """Value in flight between the deployment's chains, listed apart from `inventory`:
     an open transfer is in no wallet, and it has no received amount until one is
@@ -100,6 +107,7 @@ def transfer_evidence(state):
     return {
         "transfers": bridge["transfers"],
         "unattributed_refund_payments": bridge["unattributed_refund_payments"],
+        **{key: bridge[key] for key in AWAITING if key in bridge},
         "transfer_scope": (
             "Open transfers are owned value in flight. They are in no inventory balance "
             "and must not be added to one; received and returned amounts are absent "

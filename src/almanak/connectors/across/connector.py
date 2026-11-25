@@ -11,6 +11,7 @@ from almanak.connectors.across.models import Config, Intent, Parameters
 from almanak.connectors.across.observations import Snapshot
 from almanak.connectors.across.permissions import AcrossPermissions
 from almanak.connectors.across.settlement import ExternalEffects
+from almanak.connectors.across.settlement_types import AWAITING_NOTE, followed_by_unattributed
 from almanak.connectors.across.state import (
     Checkpoint,
     Decision,
@@ -63,13 +64,7 @@ class AcrossProjection:
 
     @staticmethod
     def report(state):
-        # A refund-leaf payment that matched no transfer is listed with its evidence:
-        # it is in the wallet, attributed to nothing.
-        unattributed = [
-            {"block": page.end.number, **page.unsolicited.model_dump(mode="json")}
-            for page in getattr(state, "external_scans", ())
-            if page.unsolicited is not None
-        ]
+        unattributed = unattributed_payments(state)
         # The source of each transfer's offered amount, from its retained deposit. A
         # fork-constructed quote is named as one; an unretained deposit states none.
         sources = {
@@ -84,7 +79,33 @@ class AcrossProjection:
                 for t in state.transfers
             ],
             "unattributed_refund_payments": unattributed,
+            **awaiting_refund(state),
         }
+
+
+def unattributed_payments(state) -> list[dict]:
+    """Refund-leaf payments attributed to no transfer, each with its block and evidence:
+    in the wallet, in no inventory. One whose leaf named another amount shows both."""
+    return [
+        {"block": page.end.number, **payment.model_dump(mode="json")}
+        for page in getattr(state, "external_scans", ())
+        for payment in page.unsolicited
+    ]
+
+
+def awaiting_refund(state) -> dict:
+    """Transfers proven unfilled whose refund is not recorded. Each holds its deployment
+    open. Those an unattributed payment followed are named apart: the payment may have
+    been their refund, and it is never applied."""
+    waiting = [t for t in state.transfers if t.open and t.unfilled]
+    if not waiting:
+        return {}
+    listed: dict = {"awaiting_refund": [t.reference for t in waiting]}
+    followed = [t.reference for t in waiting if followed_by_unattributed(state, t)]
+    if followed:
+        listed["awaiting_refund_after_unattributed_payment"] = followed
+        listed["awaiting_refund_note"] = AWAITING_NOTE
+    return listed
 
 
 def connector():
@@ -106,7 +127,9 @@ def connector():
             pending=Pending,
             outcome=Outcome,
             capability=capability_codec(),
-            schema_version=1,
+            schema_version=2,
+            # Version 1 retained one unattributed payment per refund page, not a tuple.
+            legacy_schemas={1: True},
             actions=lambda context: context.config,
         ),
         lifecycle=AcrossLifecycle(),

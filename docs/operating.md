@@ -418,6 +418,77 @@ continues across such an upgrade.
 Production advances on canonical mined receipts and audits recorded canonicality
 before further work. Invalidated history halts with pending evidence retained.
 
+### Bridging through Across in production
+
+Across is declared for production with EOA accounts, for a bridge that leaves
+Arbitrum. `examples/operators/across_usdc_arbitrum_base_bridge.production.yaml`
+is the operator file of the reference, and the reference's
+`config.production.yaml`, selected with `--config`, is its author file with the
+gas policy production requires. A production bridge needs:
+
+- A bound EOA account on each chain of the route. The sending account signs the
+  approval and the deposit and pays their gas. The receiving account signs
+  nothing in a bridge. It still needs a gas policy in the author file, an
+  execution network and a payer ceiling in the operator file, as every bound
+  account does, and the funding block of `almanak check --json` asks its payer
+  for that policy's budget in the native asset.
+- A provider for each chain in the selected `--env-file`. The destination chain
+  is read for the arrival even though nothing is sent there.
+- Network access from the gateway to Across's quote API. The request carries the
+  route, the amount and the two fund addresses. An optional key is read from
+  `ALMANAK_ACROSS_API_KEY` in the gateway's environment. Without an answer, or
+  with one the gateway refuses, nothing is signed.
+
+The gateway keeps the venue's answer for a decision in memory until the deposit
+is recorded. If the gateway is restarted in that window, the run stops with
+`invalid_request` before anything is signed; resume it and the bridge is planned
+afresh.
+
+What a report and a dashboard show for a transfer:
+
+- In flight: the sent and offered amounts and the fill deadline, no received
+  amount. It is in no balance.
+- Arrived: the amount measured on the destination chain.
+- Proven unfilled: the destination chain has read past the fill deadline with no
+  fill. The transfer is still open and is listed under `awaiting_refund`.
+  The dashboard's Refund column shows it as awaiting. When an unattributed
+  payment of the same bridge was paid after its fill deadline, the report also
+  names it under `awaiting_refund_after_unattributed_payment` with a note, and
+  the dashboard says so in that column: the payment may have been its refund.
+- Refunded: the amount measured on the source chain. Several refunds mined in one
+  block are recorded as one refund outcome.
+- `unattributed_refund_payments`: a refund-leaf payment to the fund that was
+  applied to no transfer, with its block and transaction. Either it matched no
+  set of transfers awaiting a refund, or the SpokePool paid another amount than
+  its leaf names, and then `leaf_amount` shows what the leaf names beside the
+  paid `amount`. The tokens are in the fund's wallet and in no inventory. Nothing
+  stops because of one.
+
+A transfer whose refund was paid this way stays open, and its deployment does
+not close. No command resolves it. Run teardown to unwind everything else; the
+fund's owner moves the paid tokens.
+
+A deposit refused with `deployment_changed` names a chain whose SpokePool is no
+longer the one this SDK version pins, or no longer the one the deployment was
+resolved on. Nothing was signed. Transfers already in flight keep settling
+against the pools they were sent through, and `revoke` and teardown still work.
+New deposits need an SDK release that pins the reviewed contract and, for a
+change on the destination chain, a new deployment.
+
+A refund the SpokePool could not pay, because the transfer to the fund failed,
+stops the source chain with `refund_deferred`. Claiming it is not built.
+
+An author file with a gas policy for an Arbitrum account and one for a Base or
+Optimism account has no fork run: a fork refuses authored ceilings on Base and
+Optimism, and `fork.author_gas: unenforced` is admitted only when every policy
+is on one of those two chains. Fork runs of such a strategy use an author file
+without `strategy.gas`, as the reference's `config.yaml` is.
+
+No gas reference exists for a bridge from an EOA, so the gas a bridge uses is
+compared with nothing; the author's gas policy and the operator's payer ceilings
+are the only bounds. `almanak backtest recent` refuses a strategy that bridges
+with `unsupported_connector`.
+
 ## Reporting and advanced commands
 
 Text is the default on terminals; redirected output is JSON. Override with

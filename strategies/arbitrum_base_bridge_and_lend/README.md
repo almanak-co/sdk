@@ -41,9 +41,11 @@ is modeled: it pays the whole `max_fee_bps`, arrives after the
 `arrival_latency_seconds` the file states and is never refunded. The supply
 reads Comet history. Every bridge amount in the report is labeled modeled.
 
-Limits: both accounts are EOAs. Across declares fork runs and economic
-backtests, for an Arbitrum source, and no production support, so this reference
-stays out of the production rehearsal. On a fork no venue is asked: the fork gateway constructs
+Limits: both accounts are EOAs. Across declares fork runs, production and
+economic backtests for an Arbitrum source, and Compound V3 declares production on
+Base, so this reference is part of the production rehearsal. Its operator example
+is the fork file only. In production the gateway signs Across's own quote from its
+API. On a fork no venue is asked: the fork gateway constructs
 the quote from a stated fee and the fork's own block time, and it is retained
 and reported under the source `across_fork_constructed`. A refund on a fork is a
 fork-constructed bundle and proves only how the SDK reads one.
