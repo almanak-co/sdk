@@ -86,13 +86,29 @@ def support_rows() -> dict[str, list[dict]]:
     return support()
 
 
+def declared_without_proof() -> frozenset[Cell]:
+    """Across cells declared on mainnet known answers and offline tests alone.
+
+    An exception accepted for Across only: no reference sends from these chains, so the
+    weekly run has nothing to rehearse there and leaves them out by name, never by an
+    empty selection. Each such cell says so in `almanak support`.
+    """
+    from almanak.connectors.across.support import declared_without_proof as chains
+
+    return frozenset(("across", str(chain)) for chain in chains())
+
+
 def production_cells(rows: dict[str, list[dict]]) -> set[Cell]:
-    return {
-        (name, row["chain"])
-        for name, entries in rows.items()
-        for row in entries
-        if "production" in row["modes"]
-    } - MODEL_VERIFIED
+    return (
+        {
+            (name, row["chain"])
+            for name, entries in rows.items()
+            for row in entries
+            if "production" in row["modes"]
+        }
+        - MODEL_VERIFIED
+        - declared_without_proof()
+    )
 
 
 def reference_scope(config: Path, rows: dict[str, list[dict]]) -> set[Cell]:

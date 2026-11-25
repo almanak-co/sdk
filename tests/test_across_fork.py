@@ -345,8 +345,8 @@ def test_the_in_process_fixture_of_a_bridge_forks_both_chains_of_its_route():
     assert ForkConfig.model_validate(built.model_dump()) == built
     assert ForkConfig.arrays("unchanged") == "unchanged"
     wire = fixture_wire()
-    # The destination chain declares no run mode and is a fork target all the same; a
-    # fixture without it, or with a chain no route names, is refused.
+    # A route's two chains are its fork targets; a fixture without one of them, or
+    # with a chain no route names, is refused.
     for forks in (wire["forks"][:1], wire["forks"][1:]):
         with pytest.raises(ValueError, match="source and destination chain"):
             fixture(forks=forks)

@@ -277,10 +277,27 @@ class Case:
         }
 
 
+def declared_without_proof() -> frozenset[tuple[str, ChainId]]:
+    """Declared cells that owe no proof, by an exception accepted for Across alone.
+
+    Across declares its modes on every pinned chain from read-only mainnet known
+    answers and offline tests. Only the chains a reference lifecycle has left from owe
+    their obligations here; the others are declared with no run behind them, which
+    `almanak support` states on each. No other connector may be added: a cell of any
+    other connector needs its reference proofs.
+    """
+    from almanak.connectors.across.support import declared_without_proof as chains
+
+    return frozenset(("across", chain) for chain in chains())
+
+
 def required(bindings=None):
     result = set()
+    unproven = declared_without_proof()
     for name, connector in installed_connectors() if bindings is None else bindings:
         for support in connector.chain_support:
+            if (str(name), support.chain) in unproven:
+                continue
             result.update(execution_obligations(name, support))
             for model in support.historical:
                 result.update(
