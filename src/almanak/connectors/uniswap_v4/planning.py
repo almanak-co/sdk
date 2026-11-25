@@ -72,87 +72,142 @@ def cleanup(before):
     )
 
 
-def bounded_maximums(intent, before, tolerance_bps):
-    """The most of each token a mint planned at this observation may take.
+def band_edges(price, tolerance_bps):
+    """The square-root prices at `price` less and plus the tolerance.
 
-    A mint is for a fixed liquidity, the most the intent's amounts cover at this
-    observation's price, and the PositionManager reverts one that needs more than a
-    maximum. Each maximum is the intent's amount, trimmed to what that liquidity takes
-    at the edge of the tolerance around this observation's price where it takes the
-    most of that token: the price less the tolerance for the first token, the price
-    plus the tolerance for the second, rounded up as the PoolManager charges it.
-
-    So a mint mined at a price further than the tolerance from the price it was planned
-    at reverts. In the direction that needs more of the token limiting the liquidity
-    it reverts on any move: that token's maximum is the intent's amount, which the
-    liquidity takes whole at the planned price.
-
-    The range bounds what the tolerance cannot. Where an edge of the tolerance lies at
-    or beyond a bound of the range, the maximum is all the range holds of that token at
-    this liquidity, and no price in that direction reverts the mint. A range wholly
-    beside the price takes one token only, the same amount at every price on that side,
-    so no price further from the range reverts it either; a price that enters the range
-    past the tolerance does.
+    The gateway's price-movement checks compare squared prices against the same
+    tolerance, so no square-root price they admit lies outside these two. Unlike
+    `concentrated_math.tolerance_edges` the high edge is exact, not one unit above.
     """
     from math import isqrt
 
+    return tuple(isqrt(price * price * (10000 + sign * tolerance_bps) // 10000) for sign in (-1, 1))
+
+
+def tolerant_liquidity(amount0, amount1, price, lower, upper, tolerance_bps):
+    """The liquidity of an operator's mint of the amounts planned at `price`.
+
+    It is the most the amounts cover at every price within the tolerance of `price`.
+    A fixed liquidity takes the most of the first token at the lowest price and the
+    most of the second at the highest, so the smaller of what the amounts cover at the
+    two edges is covered everywhere between them. It is never more than they cover at
+    `price` itself.
+
+    The exception is one amount stated beside the range: the price is at or beyond a
+    bound, where the range takes one token only, and none of the other token is stated.
+    The liquidity is then what the amount covers at `price`, the same at every price on
+    that side. Nothing is sized for the price entering the range, where the mint would
+    need the token of which it may take none.
+
+    All arguments but the tolerance are square-root prices or base units.
+    """
+    beside = (price <= lower and not amount1) or (price >= upper and not amount0)
+    if beside:
+        return liquidity_for(amount0, amount1, price, lower, upper)
+    return min(
+        liquidity_for(amount0, amount1, edge, lower, upper)
+        for edge in band_edges(price, tolerance_bps)
+    )
+
+
+def bounded_mint(intent, before, tolerance_bps):
+    """The liquidity of an operator's mint planned at this observation, and the most of
+    each token it may take.
+
+    A mint is for a fixed liquidity, and the PositionManager reverts one that needs
+    more of a token than its maximum. The liquidity is `tolerant_liquidity` of the
+    intent's amounts around this observation's price: what they cover at the edge of
+    the tolerance where each is needed most. Each maximum is what that liquidity takes
+    at that edge, the price less the tolerance for the first token and the price plus
+    the tolerance for the second, rounded up as the PoolManager charges it. Neither
+    exceeds the intent's amount.
+
+    So a mint mined at a price within the tolerance of the price it was planned at fits
+    its maximums in both directions, and one mined further away reverts. The liquidity
+    is smaller than the amounts cover at the planned price, by more the narrower the
+    range is against the tolerance, and what the mint does not take stays in the wallet.
+
+    The range bounds what the tolerance cannot. Where an edge of the tolerance lies at
+    or beyond a bound of the range, the liquidity is what the amount covers of the
+    whole range in that token, the maximum is all the range holds of it, and no price
+    in that direction reverts the mint. A range wholly beside the whole tolerance takes
+    one token only, the same amount at every price on that side. Where the tolerance
+    reaches into a range that the price lies beside, both tokens are needed inside it
+    and the liquidity is sized for both. With only the one token stated that the range
+    takes at this price, the mint is for all that amount covers and may take none of
+    the other, so it reverts once the price has entered the range.
+    """
     selected = concrete_range(intent.target, requested=intent.range)
     lower, upper = sqrt_at_tick(selected.lower), sqrt_at_tick(selected.upper)
     price = before.pool.sqrt_price_x96
     stated = intent.maximum0, intent.maximum1
-    liquidity = liquidity_for(stated[0].amount, stated[1].amount, price, lower, upper)
-    # Square-root prices at this observation's price less and plus the tolerance.
-    low, high = (isqrt(price * price * (10000 + sign * tolerance_bps) // 10000) for sign in (-1, 1))
+    liquidity = tolerant_liquidity(
+        stated[0].amount, stated[1].amount, price, lower, upper, tolerance_bps
+    )
+    low, high = band_edges(price, tolerance_bps)
     most = (
         amounts(liquidity, low, lower, upper, up=True)[0],
         amounts(liquidity, high, lower, upper, up=True)[1],
     )
-    return tuple(
+    return liquidity, tuple(
         value.model_copy(update={"amount": min(value.amount, limit)})
         for value, limit in zip(stated, most, strict=True)
     )
 
 
+def bounded_maximums(intent, before, tolerance_bps):
+    """The most of each token an operator's mint planned at this observation may take."""
+    return bounded_mint(intent, before, tolerance_bps)[1]
+
+
 def open_operation(intent, before, *, through=None, tolerance_bps=None):
     """The next step of a mint: an approval it still needs, or the mint itself.
 
-    Given `tolerance_bps`, as only an operator request gives it, the mint and its
-    approvals take `bounded_maximums` of this observation instead of the intent's whole
-    amounts. An approval mined for an earlier observation's smaller maximum is then
-    below what this one needs, and is planned again before the mint: a mint never
-    relies on more than is approved.
+    Given `tolerance_bps`, as only an operator request gives it, the mint takes the
+    liquidity and the maximums of `bounded_mint` at this observation instead of the
+    intent's whole amounts. Its approvals do not follow the observation: a token the
+    mint may take any of is approved for the intent's whole amount, which no later
+    observation's maximum exceeds, so a price that moves between the steps plans no
+    approval again. A standing approval that covers the intent's amount is relied on
+    as it is.
     """
     if before.owned.position is not None:
         raise ValueError("mint cannot replace an owned NFT")
     target = intent.target
-    maximums = (intent.maximum0, intent.maximum1)
+    stated = (intent.maximum0, intent.maximum1)
+    liquidity, maximums = None, stated
     if tolerance_bps is not None:
-        maximums = bounded_maximums(intent, before, tolerance_bps)
-    for maximum in maximums:
+        liquidity, maximums = bounded_mint(intent, before, tolerance_bps)
+    for whole, maximum in zip(stated, maximums, strict=True):
         step = approval(
             before,
-            maximum.asset,
-            maximum.amount,
+            whole.asset,
+            whole.amount if maximum.amount else 0,
             target.contracts.position_manager,
             intent.deadline,
             through=through,
         )
         if step:
             return step
-    return liquidity_operation(intent, before, maximums)
+    return liquidity_operation(intent, before, maximums, liquidity)
 
 
-def liquidity_operation(intent, before, maximums=None):
-    """The mint of the most liquidity the intent's amounts cover at this observation's
-    price, allowed to take at most `maximums`: the intent's whole amounts unless given."""
+def liquidity_operation(intent, before, maximums=None, liquidity=None):
+    """The mint of `liquidity`, allowed to take at most `maximums`.
+
+    Unless given, as only an operator's mint gives them, the liquidity is the most the
+    intent's amounts cover at this observation's price and the maximums are the
+    intent's whole amounts.
+    """
     if maximums is None:
         maximums = (intent.maximum0, intent.maximum1)
     target = intent.target
     selected = concrete_range(target, requested=intent.range)
-    lower, upper = sqrt_at_tick(selected.lower), sqrt_at_tick(selected.upper)
-    liquidity = liquidity_for(
-        intent.maximum0.amount, intent.maximum1.amount, before.pool.sqrt_price_x96, lower, upper
-    )
+    if liquidity is None:
+        lower, upper = sqrt_at_tick(selected.lower), sqrt_at_tick(selected.upper)
+        liquidity = liquidity_for(
+            intent.maximum0.amount, intent.maximum1.amount, before.pool.sqrt_price_x96, lower, upper
+        )
     if not 0 < liquidity < 2**128:
         raise DataError("inventory", "available range inventory cannot mint positive liquidity")
     return Mint(
@@ -212,8 +267,9 @@ def operation(config, state, intent, before):
             deadline=intent.deadline,
         )
     if isinstance(intent, OpenLiquidity):
-        # Only an operator's mint is bounded to its stated slippage on chain: a strategy
-        # plans, and its retained steps replay, with the intent's whole amounts.
+        # Only an operator's mint is sized for and bounded to its stated slippage: a
+        # strategy plans, and its retained steps replay, with the intent's whole amounts
+        # and the liquidity they cover at the observed price.
         tolerance = config.allocation(intent.target.allocation).slippage_bps if strict else None
         return open_operation(intent, before, through=through, tolerance_bps=tolerance)
     if isinstance(intent, (CollectLiquidityFees, CloseLiquidity)):

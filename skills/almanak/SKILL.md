@@ -678,11 +678,21 @@ earns nothing.
   user the exception: where the tolerance reaches an edge of the range, or the
   range lies beside the price, no price beyond that edge reverts the call, which
   takes there only the one currency the range holds, at most what it offered.
+- On Uniswap V4 the slippage also sizes the mint: its liquidity is what the stated
+  amounts cover at both edges of `--slippage-bps`, so it is smaller than they
+  cover at the current price and the rest stays in the wallet. The difference is
+  about half the slippage over a wide range and far more in a narrow one: half
+  the position or more where the slippage reaches both bounds of the range.
+  Tell the user this before an open into a narrow range, and propose the
+  smallest slippage that fits the step. One amount stated for a range beside
+  the price is not reduced: it is a one-sided order for all that amount covers,
+  and its mint reverts once the price has entered the range.
 - Only what a mint offers is approved, and what it does not take of that stays
-  approved: to the position manager, or on Uniswap V4 to Permit2, with no expiry.
-  Tell the user before a Uniswap V4 open that it leaves an approval to Permit2.
-  `ax revoke-exchange` clears it. A Uniswap V4 open can repeat an approval before
-  its mint.
+  approved to the position manager. A Uniswap V4 open approves the stated
+  `--amount0` and `--amount1` instead, once per token, to Permit2 with no expiry
+  and through Permit2 to the position manager until the deadline. Tell the user
+  before a Uniswap V4 open that it leaves an approval to Permit2 of up to the
+  stated amount, also when the mint fails. `ax revoke-exchange` clears it.
 - For a position you have no record of, ask the user for the token ID; the wallet
   must own the NFT, whoever opened it.
 - `ax decrease-liquidity` removes `--liquidity`, in the position's own units and
