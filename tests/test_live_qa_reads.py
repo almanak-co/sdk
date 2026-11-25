@@ -44,7 +44,10 @@ class FakeRpc:
             raise RpcUnavailable("down")
         if signature in self.reverting:
             raise RpcReverted(f"eth_call {signature}: execution reverted")
-        return self.answers[signature]
+        answer = self.answers[signature]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     def reverts(self, to, signature, block):
         if self.down:
@@ -190,7 +193,7 @@ def test_a_reported_value_no_call_can_encode_fails_instead_of_stopping_the_run()
 def test_a_listing_whose_source_is_not_an_object_fails_instead_of_stopping_the_run(source):
     """A null source would raise AttributeError inside the check, past the case boundary."""
     output = {"source": source, "block": BLOCK, "markets": []}
-    for check in (checks.aave_v4_listing, checks.pool_reserve_listing(3)):
+    for check in (checks.aave_v4_listing(ETHEREUM), checks.pool_reserve_listing(ETHEREUM, 3)):
         case = reads.ReadCase("listing", ETHEREUM, ("lending-markets",), check)
         run, _ = scripted(succeeded(output))
         result = reads.run_case(case, "publicnode", run, FakeRpc(), Path("."), sleep=pytest.fail)
@@ -391,7 +394,11 @@ def test_a_check_reports_its_findings_separately_to_the_result():
     )
     issue = reads.KnownIssue("empty Spokes", "revert getReserveCount()")
     case = reads.ReadCase(
-        "listing", AVALANCHE, ("lending-markets",), checks.aave_v4_listing, known_issue=issue
+        "listing",
+        AVALANCHE,
+        ("lending-markets",),
+        checks.aave_v4_listing(ETHEREUM),
+        known_issue=issue,
     )
     wrong_asset = {"getReserve(uint256)": ("0x" + "c3" * 20, HUB, 4, 18)}
     run, _ = scripted(succeeded(listed))
@@ -637,6 +644,7 @@ def test_a_balance_of_another_account_or_asset_fails_before_any_direct_read():
 
 
 MARKET_ASSET = "0x" + "a1" * 20
+LOAN = f"eip155:1/erc20:{MARKET_ASSET}"
 HUB = "0x" + "b2" * 20
 
 
@@ -726,31 +734,34 @@ def test_an_entry_unreadable_for_a_reason_that_is_not_the_endpoint_fails_the_lis
 
 
 OTHER_ASSET = "0x" + "b0" * 20
+THIRD_ASSET = "0x" + "c0" * 20
+FOURTH_ASSET = "0x" + "d0" * 20
+OTHER_LOAN = f"eip155:1/erc20:{OTHER_ASSET}"
 
 
 def test_a_pool_listing_is_held_to_the_reserves_the_pool_itself_lists():
-    check = checks.pool_reserve_listing(3)
+    check = checks.pool_reserve_listing(ETHEREUM, 3)
     output = listing(
         [market(), other_market := market(asset={"asset": f"eip155:1/erc20:{OTHER_ASSET}"})]
     )
     two = FakeRpc({"getReservesList()": ((MARKET_ASSET.upper().replace("0X", "0x"), OTHER_ASSET),)})
     assert check(output, two) == []
-    three = FakeRpc({"getReservesList()": (("0xa", OTHER_ASSET, "0xc"),)})
+    three = FakeRpc({"getReservesList()": ((THIRD_ASSET, OTHER_ASSET, FOURTH_ASSET),)})
     assert check(output, three) == [
         "listed reserves: CLI 2, direct read 3",
         "the listing reports 2 distinct markets, where a limit of 3 on 3 reserves gives 3",
-        f"market 0 asset {MARKET_ASSET} is not on the Pool's reserve list",
+        f"market 0 asset {LOAN} is not on the Pool's reserve list",
     ]
     # A limit below the reserve count is a valid shorter listing.
-    assert checks.pool_reserve_listing(1)(listing([other_market]), two) == []
+    assert checks.pool_reserve_listing(ETHEREUM, 1)(listing([other_market]), two) == []
 
 
 def test_a_pool_listing_that_repeats_an_asset_fails():
     """Three rows of one reserve would pass the count and the membership checks."""
-    reserves = FakeRpc({"getReservesList()": ((MARKET_ASSET, OTHER_ASSET, "0xc"),)})
+    reserves = FakeRpc({"getReservesList()": ((MARKET_ASSET, OTHER_ASSET, FOURTH_ASSET),)})
     output = {**listing([market()] * 3), "source": {"contract": "0xpool", "listed": 3}}
-    assert checks.pool_reserve_listing(3)(output, reserves) == [
-        f"asset {MARKET_ASSET} is reported 3 times",
+    assert checks.pool_reserve_listing(ETHEREUM, 3)(output, reserves) == [
+        f"asset {LOAN} is reported 3 times",
         "the listing reports 1 distinct markets, where a limit of 3 on 3 reserves gives 3",
     ]
 
@@ -760,8 +771,8 @@ def test_an_aave_v4_market_is_held_to_what_its_spoke_records():
     listed = listing([market(spoke="0xspoke", reserve_id=3, hub=HUB)])
     agreeing = FakeRpc({"getReserve(uint256)": (MARKET_ASSET, HUB, 4, 18), "decimals()": (18,)})
     other = FakeRpc({"getReserve(uint256)": ("0x" + "c3" * 20, HUB, 4, 18), "decimals()": (18,)})
-    assert checks.aave_v4_listing(listed, agreeing) == []
-    (difference,) = checks.aave_v4_listing(listed, other)
+    assert checks.aave_v4_listing(ETHEREUM)(listed, agreeing) == []
+    (difference,) = checks.aave_v4_listing(ETHEREUM)(listed, other)
     assert difference.startswith("market 0 asset: CLI")
     reserve = {
         "resolution": {
@@ -773,7 +784,7 @@ def test_an_aave_v4_market_is_held_to_what_its_spoke_records():
         },
         "observation": {"block": BLOCK},
     }
-    requested = checks.aave_v4_reserve("0xspoke", 3)
+    requested = checks.aave_v4_reserve(ETHEREUM, "0xspoke", 3)
     assert requested(reserve, agreeing) == []
     (difference,) = requested(reserve, other)
     assert difference.startswith("asset: CLI")
@@ -795,12 +806,12 @@ def test_a_reserve_or_pool_read_of_another_selector_fails_before_any_direct_read
     }
     cases = (
         (
-            checks.aave_v4_reserve(SPOKE, 0),
+            checks.aave_v4_reserve(ETHEREUM, SPOKE, 0),
             {"resolution": {"selection": {"spoke": SPOKE, "reserve_id": 1}}, "observation": block},
             "reserve_id: CLI 1, requested 0",
         ),
         (
-            checks.aave_v4_reserve(SPOKE, 0),
+            checks.aave_v4_reserve(ETHEREUM, SPOKE, 0),
             {"resolution": {"selection": {"spoke": other, "reserve_id": 0}}, "observation": block},
             f"spoke: CLI {other!r}",
         ),
@@ -820,12 +831,12 @@ def test_a_reserve_or_pool_read_of_another_selector_fails_before_any_direct_read
             f"comet: CLI {other!r}",
         ),
         (
-            checks.morpho_reserve(SPOKE, "0x" + "0d" * 32),
+            checks.morpho_reserve(ETHEREUM, SPOKE, "0x" + "0d" * 32),
             {"resolution": {"core": SPOKE, "market_id": "0x" + "0e" * 32}, "observation": block},
             "market_id: CLI '0x0e0e",
         ),
         (
-            checks.v3_pool(SPOKE),
+            checks.v3_pool(ETHEREUM, SPOKE),
             {"resolution": {"pool": other}, "observation": block},
             f"pool: CLI {other!r}",
         ),
@@ -852,7 +863,143 @@ def test_a_reserve_or_pool_read_of_another_selector_fails_before_any_direct_read
     assert checks.pooled_reserve(SPOKE, USDC)(reserve, read) == []
 
 
-LOAN = f"eip155:1/erc20:{MARKET_ASSET}"
+AVALANCHE_LOAN = f"eip155:43114/erc20:{MARKET_ASSET}"
+UNANSWERED = RpcUnavailable("eth_call decimals(): HTTP 429")
+
+
+def reserve_output(**resolution):
+    """A lending reserve whose every reported fact agrees with `RESERVE_READS`."""
+    fields = {
+        "selection": {"spoke": SPOKE, "reserve_id": 3},
+        "pool": SPOKE,
+        "comet": SPOKE,
+        "core": SPOKE,
+        "market_id": "0x" + "0d" * 32,
+        "asset": LOAN,
+        "a_token": LOAN,
+        "base_asset": LOAN,
+        "loan_asset": LOAN,
+        "collateral_asset": OTHER_LOAN,
+        "hub": HUB,
+        "hub_asset_id": 4,
+        "oracle": "0x" + "0c" * 20,
+        "lltv": 860,
+        "decimals": 18,
+    }
+    return {"resolution": fields | resolution, "observation": {"block": BLOCK}}
+
+
+RESERVE_READS = {
+    "getReserve(uint256)": (MARKET_ASSET, HUB, 4, 18),
+    "getReserveData(address)": (0,) * 8 + (MARKET_ASSET,),
+    "baseToken()": (MARKET_ASSET,),
+    "idToMarketParams(bytes32)": (MARKET_ASSET, OTHER_ASSET, "0x" + "0c" * 20, "0x0", 860),
+    "decimals()": (18,),
+}
+RESERVE_CHECKS = {
+    "asset": checks.aave_v4_reserve(ETHEREUM, SPOKE, 3),
+    "a_token": checks.pooled_reserve(SPOKE, LOAN),
+    "base_asset": checks.comet_reserve(SPOKE, LOAN),
+    "loan_asset": checks.morpho_reserve(ETHEREUM, SPOKE, "0x" + "0d" * 32),
+    "collateral_asset": checks.morpho_reserve(ETHEREUM, SPOKE, "0x" + "0d" * 32),
+}
+
+
+def test_a_reserve_asset_of_another_chain_fails_though_its_address_agrees():
+    """The right contract address under another chain is another CAIP-19 asset."""
+    for field, check in RESERVE_CHECKS.items():
+        assert check(reserve_output(), FakeRpc(RESERVE_READS)) == [], field
+        moved = AssetType(reserve_output()["resolution"][field]).reference
+        output = reserve_output(**{field: f"eip155:43114/erc20:{moved}"})
+        findings = check(output, FakeRpc(RESERVE_READS))
+        assert findings and "eip155:43114/erc20:" in findings[0], (field, findings)
+        # The same asset in another letter case is still the same asset.
+        upper = f"eip155:1/erc20:0x{moved[2:].upper()}"
+        assert check(reserve_output(**{field: upper}), FakeRpc(RESERVE_READS)) == [], field
+    # A Morpho reserve's own asset is the loan asset the core records.
+    morpho = RESERVE_CHECKS["loan_asset"]
+    (finding,) = morpho(reserve_output(asset=OTHER_LOAN), FakeRpc(RESERVE_READS))
+    assert finding.startswith("asset: CLI")
+    # A reported value that is no CAIP-19 reference fails as unreadable output.
+    case = reads.ReadCase("reserve", ETHEREUM, ("lending-reserve",), RESERVE_CHECKS["asset"])
+    verdict = reads.judge_output(case, reserve_output(asset="WETH"), FakeRpc(RESERVE_READS))
+    assert verdict.status == "fail" and "not shaped" in verdict.detail
+
+
+def test_a_listing_or_pool_asset_of_another_chain_fails_though_its_address_agrees():
+    elsewhere = {"asset": AVALANCHE_LOAN, "symbol": "TKN"}
+    spoke = FakeRpc({"getReserve(uint256)": (MARKET_ASSET, HUB, 4, 18)})
+    listed = listing([market(spoke="0xspoke", reserve_id=3, hub=HUB, asset=elsewhere)])
+    (finding,) = checks.aave_v4_listing(ETHEREUM)(listed, spoke)
+    assert finding == f"market 0 asset: CLI {AVALANCHE_LOAN!r}, direct read {LOAN!r}"
+    pool = FakeRpc({"getReservesList()": ((MARKET_ASSET, OTHER_ASSET),)})
+    two = listing([market(asset=elsewhere), market(asset={"asset": OTHER_LOAN})])
+    assert checks.pool_reserve_listing(ETHEREUM, 3)(two, pool) == [
+        f"market 0 asset {AVALANCHE_LOAN} is not on the Pool's reserve list"
+    ]
+    verified = market(market_id="0x" + "0d" * 32, loan_asset=elsewhere)
+    core = FakeRpc({"idToMarketParams(bytes32)": (MARKET_ASSET,)})
+    (finding,) = checks.morpho_listing("0xcore", LOAN)(listing([verified]), core)
+    assert finding == f"loan asset of 0x0d0d0d0d: CLI {AVALANCHE_LOAN!r}, requested {LOAN!r}"
+    pool_state = {
+        "slot0()": (1, 2),
+        "liquidity()": (3,),
+        "token0()": (MARKET_ASSET,),
+        "fee()": (500,),
+    }
+    observation = {
+        "sqrt_price_x96": 1,
+        "tick": 2,
+        "liquidity": 3,
+        "currency0": {"identifier": AVALANCHE_LOAN},
+        "block": BLOCK,
+    }
+    pool_read = {"resolution": {"pool": SPOKE, "fee": 500}, "observation": observation}
+    (finding,) = checks.v3_pool(ETHEREUM, SPOKE)(pool_read, FakeRpc(pool_state))
+    assert finding.startswith(f"currency0: CLI {AVALANCHE_LOAN!r}")
+    observation["currency0"]["identifier"] = LOAN
+    assert checks.v3_pool(ETHEREUM, SPOKE)(pool_read, FakeRpc(pool_state)) == []
+
+
+def test_a_gmx_share_or_index_of_another_chain_fails():
+    share = "0x" + "fb" * 20
+    index = "0x" + "15" * 20
+    check = checks.gmx_market(AVALANCHE, share, "BTC.b")
+    symbol = FakeRpc({"symbol()": ("BTC.b",)})
+    observation = {
+        "share": f"eip155:43114/erc20:{share}",
+        "index": f"eip155:43114/erc20:{index}",
+        "index_symbol": "BTC.b",
+        "block": 7,
+    }
+    assert check({"observation": observation}, symbol) == []
+    for field in ("share", "index"):
+        moved = {**observation, field: observation[field].replace("43114", "1")}
+        (finding,) = check({"observation": moved}, symbol)
+        assert "'eip155:1" in finding, field
+
+
+def test_an_answered_reserve_mismatch_is_kept_when_the_decimals_read_is_unanswered():
+    """A wrong reported Hub the Spoke answered is a failure, not a blocked case."""
+    unanswered = FakeRpc(RESERVE_READS | {"decimals()": UNANSWERED})
+    wrong = {
+        "asset": {"hub": "0x" + "ee" * 20},
+        "a_token": {"a_token": OTHER_LOAN},
+        "base_asset": {"base_asset": OTHER_LOAN},
+        "loan_asset": {"lltv": 945},
+    }
+    for field, changes in wrong.items():
+        check = RESERVE_CHECKS[field]
+        case = reads.ReadCase("reserve", ETHEREUM, ("lending-reserve",), check)
+        verdict = reads.judge_output(case, reserve_output(**changes), unanswered)
+        assert verdict.status == "fail" and verdict.findings, (field, verdict)
+        # Matching reserve data still gets the decimals read, so it blocks when that read
+        # goes unanswered, and fails when the token's own decimals differ.
+        verdict = reads.judge_output(case, reserve_output(), unanswered)
+        assert verdict.status == "transient", (field, verdict)
+        other_decimals = FakeRpc(RESERVE_READS | {"decimals()": (6,)})
+        verdict = reads.judge_output(case, reserve_output(), other_decimals)
+        assert verdict.findings[0] == "decimals: CLI 18, direct read 6", field
 
 
 def test_a_morpho_listing_is_held_to_the_core_and_may_refuse_some_markets_not_all():
@@ -876,9 +1023,7 @@ def test_a_morpho_listing_lends_the_requested_asset():
     )
     core = FakeRpc({"idToMarketParams(bytes32)": (OTHER_ASSET,)})
     (difference,) = checks.morpho_listing("0xcore", LOAN)(listing([other]), core)
-    assert difference == (
-        f"loan asset of 0x0e0e0e0e: CLI {OTHER_ASSET!r}, requested {MARKET_ASSET!r}"
-    )
+    assert difference == (f"loan asset of 0x0e0e0e0e: CLI {OTHER_LOAN!r}, requested {LOAN!r}")
 
 
 def test_a_gmx_lookup_must_name_the_expected_share_and_symbol():
@@ -889,7 +1034,7 @@ def test_a_gmx_lookup_must_name_the_expected_share_and_symbol():
         "index_symbol": "BTC.b",
         "block": 7,
     }
-    check = checks.gmx_market(share, "BTC.b")
+    check = checks.gmx_market(AVALANCHE, share, "BTC.b")
     assert check({"observation": observation}, FakeRpc({"symbol()": ("BTC.b",)})) == []
     assert check({"observation": observation}, FakeRpc({"symbol()": ("WBTC",)})) == [
         "index symbol(): CLI 'BTC.b', direct read 'WBTC'"

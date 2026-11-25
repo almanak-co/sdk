@@ -127,7 +127,7 @@ ETHEREUM_CASES = (
         "lending-reserve/aave_v4/ethereum-weth",
         ETHEREUM,
         aave_v4("lending-reserve", ETHEREUM, AAVE_V4_ETHEREUM_SPOKE, 0),
-        checks.aave_v4_reserve(AAVE_V4_ETHEREUM_SPOKE, 0),
+        checks.aave_v4_reserve(ETHEREUM, AAVE_V4_ETHEREUM_SPOKE, 0),
     ),
     ReadCase(
         "lending-position/aave_v4/ethereum-weth",
@@ -143,7 +143,7 @@ ETHEREUM_CASES = (
         "lending-markets/aave_v4/ethereum",
         ETHEREUM,
         markets("aave_v4", ETHEREUM),
-        checks.aave_v4_listing,
+        checks.aave_v4_listing(ETHEREUM),
     ),
     ReadCase(
         "lending-reserve/aave_v3/ethereum-weth",
@@ -155,7 +155,7 @@ ETHEREUM_CASES = (
         "lending-markets/aave_v3/ethereum",
         ETHEREUM,
         markets("aave_v3", ETHEREUM),
-        checks.pool_reserve_listing(LISTING_LIMIT),
+        checks.pool_reserve_listing(ETHEREUM, LISTING_LIMIT),
     ),
     ReadCase(
         "lending-reserve/sparklend/ethereum-weth",
@@ -167,7 +167,7 @@ ETHEREUM_CASES = (
         "lending-markets/sparklend/ethereum",
         ETHEREUM,
         markets("sparklend", ETHEREUM),
-        checks.pool_reserve_listing(LISTING_LIMIT),
+        checks.pool_reserve_listing(ETHEREUM, LISTING_LIMIT),
     ),
     ReadCase(
         "lending-reserve/compound_v3/ethereum-usdc",
@@ -179,7 +179,7 @@ ETHEREUM_CASES = (
         "lending-reserve/morpho_blue/ethereum-cbbtc-usdc",
         ETHEREUM,
         reserve("morpho_blue", ETHEREUM, "--market-id", MORPHO_CBBTC_USDC, "--leg", "loan"),
-        checks.morpho_reserve(MORPHO_CORE, MORPHO_CBBTC_USDC),
+        checks.morpho_reserve(ETHEREUM, MORPHO_CORE, MORPHO_CBBTC_USDC),
     ),
     ReadCase(
         "lending-markets/morpho_blue/ethereum-usdc",
@@ -191,7 +191,7 @@ ETHEREUM_CASES = (
         "pool/uniswap_v3/ethereum-usdc-weth",
         ETHEREUM,
         v3_pool(ETHEREUM, ETHEREUM_V3_POOL),
-        checks.v3_pool(ETHEREUM_V3_POOL),
+        checks.v3_pool(ETHEREUM, ETHEREUM_V3_POOL),
     ),
     ReadCase(
         "pool-price/uniswap_v4/ethereum-usdc-weth",
@@ -229,7 +229,7 @@ AVALANCHE_CASES = (
         "lending-reserve/aave_v4/avalanche-usdc",
         AVALANCHE,
         aave_v4("lending-reserve", AVALANCHE, AAVE_V4_AVALANCHE_SPOKE, 2),
-        checks.aave_v4_reserve(AAVE_V4_AVALANCHE_SPOKE, 2),
+        checks.aave_v4_reserve(AVALANCHE, AAVE_V4_AVALANCHE_SPOKE, 2),
     ),
     ReadCase(
         "lending-position/aave_v4/avalanche-usdc",
@@ -245,7 +245,7 @@ AVALANCHE_CASES = (
         "lending-markets/aave_v4/avalanche",
         AVALANCHE,
         markets("aave_v4", AVALANCHE),
-        checks.aave_v4_listing,
+        checks.aave_v4_listing(AVALANCHE),
         known_issue=AAVE_V4_EMPTY_SPOKES,
     ),
     ReadCase(
@@ -258,25 +258,25 @@ AVALANCHE_CASES = (
         "pool/uniswap_v3/avalanche-wavax-usdc",
         AVALANCHE,
         v3_pool(AVALANCHE, AVALANCHE_V3_POOL),
-        checks.v3_pool(AVALANCHE_V3_POOL),
+        checks.v3_pool(AVALANCHE, AVALANCHE_V3_POOL),
     ),
     ReadCase(
         "perp-markets/gmx_v2/avalanche-btc-by-address",
         AVALANCHE,
         gmx(GMX_BTC_USDC),
-        checks.gmx_market(GMX_BTC_USDC, "BTC.b"),
+        checks.gmx_market(AVALANCHE, GMX_BTC_USDC, "BTC.b"),
     ),
     ReadCase(
         "perp-markets/gmx_v2/avalanche-btc.b-label",
         AVALANCHE,
         gmx("BTC.b/USD [BTC.b-USDC]"),
-        checks.gmx_market(GMX_BTC_USDC, "BTC.b"),
+        checks.gmx_market(AVALANCHE, GMX_BTC_USDC, "BTC.b"),
     ),
     ReadCase(
         "perp-markets/gmx_v2/avalanche-wavax-label",
         AVALANCHE,
         gmx("WAVAX/USD [WAVAX-USDC]"),
-        checks.gmx_market(GMX_WAVAX_USDC, "WAVAX"),
+        checks.gmx_market(AVALANCHE, GMX_WAVAX_USDC, "WAVAX"),
     ),
     # The venue's own labels. Finding the market or naming the candidates is correct;
     # reporting that nothing matches is the defect.
@@ -284,7 +284,7 @@ AVALANCHE_CASES = (
         "perp-markets/gmx_v2/avalanche-btc-usd-label",
         AVALANCHE,
         gmx("BTC/USD [BTC.b-USDC]"),
-        checks.gmx_market(GMX_BTC_USDC, "BTC.b"),
+        checks.gmx_market(AVALANCHE, GMX_BTC_USDC, "BTC.b"),
         known_issue=GMX_AVALANCHE_LABELS,
     ),
     ReadCase(

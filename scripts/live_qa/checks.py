@@ -11,7 +11,7 @@ from typing import Any
 from eth_abi import encode
 from eth_utils import keccak
 
-from almanak.caip import AssetType
+from almanak.caip import AssetType, ChainId
 from scripts.live_qa.rpc import Rpc, RpcUnavailable, asset_address
 
 Output = dict[str, Any]
@@ -30,6 +30,21 @@ def differences(pairs: Iterable[tuple[str, Any, Any]]) -> list[str]:
         for label, reported, direct in pairs
         if reported != direct
     ]
+
+
+def on_chain(chain: ChainId, address: str) -> str:
+    """The CAIP-19 reference of an ERC-20 contract a direct read returned on the case's chain."""
+    return str(AssetType(f"{chain}/erc20:{address}"))
+
+
+def reported_asset(value: Any) -> str:
+    """A CAIP-19 reference the command reported, validated and in canonical form.
+
+    A reported asset is compared whole, chain included: the right contract address
+    under another chain is another asset. A value that is no CAIP-19 reference raises
+    ValueError, which fails the case as output the check cannot read.
+    """
+    return str(AssetType(value))
 
 
 def same_block(observation: Output, rpc: Rpc) -> tuple[str, Any, Any]:
@@ -117,7 +132,7 @@ def erc20_balance(asset: AssetType, account: str) -> Check:
     return check
 
 
-def v3_pool(pool: str) -> Check:
+def v3_pool(chain: ChainId, pool: str) -> Check:
     """A Uniswap V3 pool read of the requested pool, held to the pool's own state."""
 
     def check(output: Output, rpc: Rpc) -> list[str]:
@@ -129,13 +144,13 @@ def v3_pool(pool: str) -> Check:
         (liquidity,) = rpc.call(pool, "liquidity()", number, ("uint128",))
         (token0,) = rpc.call(pool, "token0()", number, ("address",))
         (fee,) = rpc.call(pool, "fee()", number, ("uint24",))
-        token0_reported = asset_address(observation["currency0"]["identifier"])
+        token0_reported = reported_asset(observation["currency0"]["identifier"])
         return differences(
             (
                 ("sqrt_price_x96", observation["sqrt_price_x96"], slot0[0]),
                 ("tick", observation["tick"], slot0[1]),
                 ("liquidity", observation["liquidity"], liquidity),
-                ("currency0", token0_reported, token0.lower()),
+                ("currency0", token0_reported, on_chain(chain, token0)),
                 ("fee", output["resolution"]["fee"], fee),
                 same_block(observation, rpc),
             )
@@ -207,6 +222,16 @@ def reserve_decimals(output: Output, rpc: Rpc) -> list[str]:
     )
 
 
+def then_decimals(found: list[str], output: Output, rpc: Rpc) -> list[str]:
+    """A reserve's established mismatches, or its decimals check where there are none.
+
+    A mismatch the endpoint already answered is a finding whatever a later read does,
+    so it is returned before the decimals read: an unanswered read cannot turn it into
+    a blocked case. Matching reserve data still gets the decimals check.
+    """
+    return found or reserve_decimals(output, rpc)
+
+
 # The leading static words of a Spoke's reserve record.
 SPOKE_RESERVE = ("address", "address", "uint16", "uint8")
 
@@ -216,8 +241,9 @@ def spoke_reserve(rpc: Rpc, spoke: str, reserve_id: int, block: int) -> tuple[An
     return rpc.call(spoke, "getReserve(uint256)", block, SPOKE_RESERVE, (reserve_id,))
 
 
-def aave_v4_reserve(spoke: str, reserve_id: int) -> Check:
-    """An Aave V4 reserve: what the requested Spoke records under the requested reserve ID."""
+def aave_v4_reserve(chain: ChainId, spoke: str, reserve_id: int) -> Check:
+    """An Aave V4 reserve: what the requested Spoke records under the requested reserve ID,
+    its underlying asset an asset of the requested chain."""
 
     def check(output: Output, rpc: Rpc) -> list[str]:
         resolution, number = output["resolution"], output["observation"]["block"]["number"]
@@ -230,14 +256,15 @@ def aave_v4_reserve(spoke: str, reserve_id: int) -> Check:
         ):
             return other
         underlying, hub, hub_asset_id, decimals = spoke_reserve(rpc, spoke, reserve_id, number)
-        return differences(
+        found = differences(
             (
-                ("asset", asset_address(resolution["asset"]), underlying.lower()),
+                ("asset", reported_asset(resolution["asset"]), on_chain(chain, underlying)),
                 ("hub", resolution["hub"], hub.lower()),
                 ("hub_asset_id", resolution["hub_asset_id"], hub_asset_id),
                 ("spoke decimals", resolution["decimals"], decimals),
             )
-        ) + reserve_decimals(output, rpc)
+        )
+        return then_decimals(found, output, rpc)
 
     return check
 
@@ -261,9 +288,10 @@ def pooled_reserve(pool: str, asset: str) -> Check:
             ("uint256",) * 8 + ("address",),
             (asset_address(asset),),
         )
-        recorded = asset_address(resolution["a_token"])
-        a_token = differences((("a_token", recorded, words[8].lower()),))
-        return a_token + reserve_decimals(output, rpc)
+        chain = AssetType(asset).chain
+        recorded = reported_asset(resolution["a_token"])
+        a_token = differences((("a_token", recorded, on_chain(chain, words[8])),))
+        return then_decimals(a_token, output, rpc)
 
     return check
 
@@ -278,15 +306,20 @@ def comet_reserve(comet: str, asset: str) -> Check:
         ):
             return other
         (base,) = rpc.call(comet, "baseToken()", number, ("address",))
-        recorded = asset_address(resolution["base_asset"])
-        base_asset = differences((("base_asset", recorded, base.lower()),))
-        return base_asset + reserve_decimals(output, rpc)
+        recorded, held = (
+            reported_asset(resolution["base_asset"]),
+            on_chain(AssetType(asset).chain, base),
+        )
+        base_asset = differences((("base_asset", recorded, held),))
+        return then_decimals(base_asset, output, rpc)
 
     return check
 
 
-def morpho_reserve(core: str, market_id: str) -> Check:
-    """A Morpho Blue reserve of the requested market: what the core records under its ID."""
+def morpho_reserve(chain: ChainId, core: str, market_id: str) -> Check:
+    """A Morpho Blue reserve of the loan leg of the requested market: what the core records
+    under its ID, its assets assets of the requested chain. The reserve's own asset is the
+    loan asset, so the decimals read is of the token the core lends."""
 
     def check(output: Output, rpc: Rpc) -> list[str]:
         resolution, number = output["resolution"], output["observation"]["block"]["number"]
@@ -301,14 +334,17 @@ def morpho_reserve(core: str, market_id: str) -> Check:
             ("address", "address", "address", "address", "uint256"),
             (bytes.fromhex(market_id[2:]),),
         )
-        return differences(
+        loan, collateral = on_chain(chain, params[0]), on_chain(chain, params[1])
+        found = differences(
             (
-                ("loan_asset", asset_address(resolution["loan_asset"]), params[0].lower()),
-                ("collateral", asset_address(resolution["collateral_asset"]), params[1].lower()),
+                ("asset", reported_asset(resolution["asset"]), loan),
+                ("loan_asset", reported_asset(resolution["loan_asset"]), loan),
+                ("collateral", reported_asset(resolution["collateral_asset"]), collateral),
                 ("oracle", resolution["oracle"], params[2].lower()),
                 ("lltv", resolution["lltv"], params[4]),
             )
-        ) + reserve_decimals(output, rpc)
+        )
+        return then_decimals(found, output, rpc)
 
     return check
 
@@ -344,8 +380,9 @@ def aave_v4_position(spoke: str, reserve_id: int, account: str) -> Check:
     return check
 
 
-def gmx_market(share: str, symbol: str) -> Check:
-    """A GMX market lookup must name this GM share, and its index token this symbol."""
+def gmx_market(chain: ChainId, share: str, symbol: str) -> Check:
+    """A GMX market lookup must name this GM share on the requested chain, and its index
+    token this symbol."""
 
     def check(output: Output, rpc: Rpc) -> list[str]:
         observation = output["observation"]
@@ -354,7 +391,8 @@ def gmx_market(share: str, symbol: str) -> Check:
         )
         return differences(
             (
-                ("share", asset_address(observation["share"]), share),
+                ("share", reported_asset(observation["share"]), on_chain(chain, share)),
+                ("index chain", str(AssetType(observation["index"]).chain), str(chain)),
                 ("index_symbol", observation["index_symbol"], symbol),
                 ("index symbol()", observation["index_symbol"], onchain),
             )
@@ -443,23 +481,30 @@ def listed_markets(output: Output, rpc: Rpc, found: Sequence[str] = ()) -> list[
     return unless_answered([*found, *findings, *empty, *unverified(markets)], unanswered)
 
 
-def aave_v4_listing(output: Output, rpc: Rpc) -> list[str]:
-    """An Aave V4 listing: each market is the reserve its Spoke records under that ID."""
-    block = output["block"]["number"]
-    pairs = []
-    for index, market in enumerate(output["markets"]):
-        underlying, hub, _, _ = spoke_reserve(rpc, market["spoke"], market["reserve_id"], block)
-        asset = asset_address(market["asset"]["asset"])
-        pairs.append((f"market {index} asset", asset, underlying.lower()))
-        pairs.append((f"market {index} hub", market["hub"], hub.lower()))
-    return listed_markets(output, rpc, differences(pairs))
+def aave_v4_listing(chain: ChainId) -> Check:
+    """An Aave V4 listing: each market is the reserve its Spoke records under that ID, its
+    asset an asset of the requested chain."""
+
+    def check(output: Output, rpc: Rpc) -> list[str]:
+        block = output["block"]["number"]
+        pairs = []
+        for index, market in enumerate(output["markets"]):
+            spoke, reserve_id = market["spoke"], market["reserve_id"]
+            underlying, hub, _, _ = spoke_reserve(rpc, spoke, reserve_id, block)
+            asset = reported_asset(market["asset"]["asset"])
+            pairs.append((f"market {index} asset", asset, on_chain(chain, underlying)))
+            pairs.append((f"market {index} hub", market["hub"], hub.lower()))
+        return listed_markets(output, rpc, differences(pairs))
+
+    return check
 
 
 def morpho_listing(core: str, loan_asset: str) -> Check:
     """A Morpho Blue listing filtered by a loan asset: the connector may refuse some
     markets, never all, and each verified market lends the requested asset, as the
     core itself records under the market's ID."""
-    requested = asset_address(loan_asset)
+    requested = str(AssetType(loan_asset))
+    chain = AssetType(loan_asset).chain
 
     def check(output: Output, rpc: Rpc) -> list[str]:
         findings, unanswered = entry_findings(output, rpc)
@@ -476,7 +521,7 @@ def morpho_listing(core: str, loan_asset: str) -> Check:
         pairs = []
         for market in verified:
             name = f"loan asset of {market['market_id'][:10]}"
-            reported = asset_address(market["loan_asset"]["asset"])
+            reported = reported_asset(market["loan_asset"]["asset"])
             if reported != requested:
                 findings.append(f"{name}: CLI {reported!r}, requested {requested!r}")
                 continue
@@ -487,25 +532,25 @@ def morpho_listing(core: str, loan_asset: str) -> Check:
                 ("address",),
                 (bytes.fromhex(market["market_id"][2:]),),
             )
-            pairs.append((name, reported, loan.lower()))
+            pairs.append((name, reported, on_chain(chain, loan)))
         return unless_answered(findings + differences(pairs), unanswered)
 
     return check
 
 
-def pool_reserve_listing(limit: int) -> Check:
+def pool_reserve_listing(chain: ChainId, limit: int) -> Check:
     """An unfiltered Aave V3 or SparkLend listing from its first reserve, held to the
-    Pool's own reserve list: the same count, every reported market a distinct asset on
-    that list, and as many markets as the limit allows."""
+    Pool's own reserve list: the same count, every reported market a distinct asset of
+    the requested chain on that list, and as many markets as the limit allows."""
 
     def check(output: Output, rpc: Rpc) -> list[str]:
         source = output["source"]
         (reserves,) = rpc.call(
             source["contract"], "getReservesList()", output["block"]["number"], ("address[]",)
         )
-        onchain = {reserve.lower() for reserve in reserves}
+        onchain = {on_chain(chain, reserve) for reserve in reserves}
         counted = differences((("listed reserves", source["listed"], len(reserves)),))
-        assets = [asset_address(market["asset"]["asset"]) for market in output["markets"]]
+        assets = [reported_asset(market["asset"]["asset"]) for market in output["markets"]]
         repeated = [
             f"asset {asset} is reported {assets.count(asset)} times"
             for asset in sorted(set(assets))
