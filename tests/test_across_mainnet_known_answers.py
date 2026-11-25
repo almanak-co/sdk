@@ -261,7 +261,8 @@ def test_a_real_refund_execution_pays_every_named_payee_exactly_its_leaf_amounts
     for payee in {payee for payee, _ in leaves}:
         target = target_for(payee, "0x" + "22" * 20, 1)
         named = sorted(amount for other, amount in leaves if other == payee)
-        assert settlement.refund_total(REFUND["receipt"], target) == sum(named)
+        total = sum(named)
+        assert settlement.refund_payment(REFUND["receipt"], target) == (total, total, True)
         assert (
             sorted(
                 chain.refund_payments(REFUND["receipt"], USDC.reference, POOL_HERE.address, payee)
@@ -282,7 +283,7 @@ def test_one_real_transaction_executes_several_refund_roots():
 
 def test_a_real_refund_execution_names_nothing_for_a_fund_it_does_not_pay():
     stranger = target_for("0x" + "33" * 20, "0x" + "22" * 20, 1)
-    assert settlement.refund_total(REFUND["receipt"], stranger) is None
+    assert settlement.refund_payment(REFUND["receipt"], stranger) is None
 
 
 def test_the_signed_arguments_are_the_relay_the_destination_hashes():
@@ -426,7 +427,7 @@ def test_the_refund_page_attributes_a_real_refund_execution_through_reconciliati
     page = settlement.reconcile(backend(case.config, reader), state)
     refund_block = int(REFUND["receipt"]["blockNumber"], 16)
     assert page.side == "refund" and page.end.number == refund_block
-    assert page.start.timestamp <= reads["mined_at"] - 100 and page.unsolicited is None
+    assert page.start.timestamp <= reads["mined_at"] - 100 and page.unsolicited == ()
     refund = page.outcome
     assert refund.transfers == (case.transfer.reference,)
     assert (refund.returned.asset, refund.returned.amount) == (USDC, reads["total"])
@@ -458,5 +459,6 @@ def test_a_real_refund_of_another_amount_is_retained_as_unattributed():
     reader = Recorded(ARBITRUM, reads)
     page = settlement.reconcile(backend(case.config, reader), deployment(case.config, other))
     assert page.outcome is None
-    assert page.unsolicited.amount.amount == reads["total"]
-    assert page.unsolicited.tx_hash == REFUND["receipt"]["transactionHash"]
+    (stray,) = page.unsolicited
+    assert (stray.amount.amount, stray.leaf_amount) == (reads["total"], None)
+    assert stray.tx_hash == REFUND["receipt"]["transactionHash"]

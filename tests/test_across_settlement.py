@@ -25,6 +25,7 @@ from almanak.connectors.across.relay import (
     relay_hash,
 )
 from almanak.connectors.across.settlement_reader import MAXIMUM_EVENT_BLOCK_SPAN as SPAN
+from almanak.connectors.across.settlement_types import Scan
 from almanak.connectors.across.settlement_reader import decoded_fill
 from almanak.connectors.across.state import Checkpoint
 from almanak.gateway import external_effects as gateway_effects
@@ -317,7 +318,7 @@ def test_a_refund_of_a_proven_unfilled_transfer_is_measured_and_resolves_it(conf
     state = settle(state, config, chain)
     first = state.external_scans[-1]
     assert first.side == "refund" and first.start == chain.block(chain.at(FILL_DEADLINE))
-    assert (first.outcome, first.unsolicited, state.transfers[0].open) == (None, None, True)
+    assert (first.outcome, first.unsolicited, state.transfers[0].open) == (None, (), True)
     refunded(config, chain, chain.head + 100, [AMOUNT])
     state = settle(state, config, chain)
     refund = state.outcomes[0]
@@ -372,12 +373,14 @@ def test_a_refund_leaf_payment_that_matches_nothing_is_retained_and_stops_nothin
     refunded(config, chain, chain.head + 3, [5], tx="0x" + "d0" * 32)
     state = settle(state, config, chain)
     page = state.external_scans[-1]
-    assert (page.unsolicited.amount.amount, page.unsolicited.tx_hash) == (5, "0x" + "d0" * 32)
+    (stray,) = page.unsolicited
+    assert (stray.amount.amount, stray.tx_hash, stray.leaf_amount) == (5, "0x" + "d0" * 32, None)
     # No outcome, so no accounting issue that would stop new exposure on this chain.
     assert (page.outcome, state.outcomes, state.transfers[0].open) == (None, (), True)
     assert page.end == chain.block(chain.head)
     listed = AcrossProjection.report(state)["unattributed_refund_payments"]
-    assert listed == [{"block": page.end.number, **page.unsolicited.model_dump(mode="json")}]
+    assert listed == [{"block": page.end.number, **stray.model_dump(mode="json")}]
+    assert "leaf_amount" not in listed[0]
     # The dashboard lists it too, in a table of its own beside the transfers.
     from almanak.connectors.across.dashboard import project as dashboard
 
@@ -385,6 +388,7 @@ def test_a_refund_leaf_payment_that_matches_nothing_is_retained_and_stops_nothin
     (paid,) = context.datasets["unattributed_refund_payments"].rows
     assert (paid["account"], paid["block"]) == ("arb", str(page.end.number))
     assert context.values[paid["amount"].ref].amount == "5"
+    assert context.values[paid["leaf_amount"].ref].amount is None
     assert len(context.datasets["transfers"].rows) == 1
     assert "unattributed_refund_payments" not in dashboard(proven(config, transfer))[0].datasets
     refunded(config, chain, chain.head + 3, [AMOUNT])
@@ -414,7 +418,7 @@ def test_a_refund_in_the_deadline_block_itself_pays_no_transfer_of_that_deadline
     state = settle(proven(config, flight(config)), config, chain)
     (page,) = state.external_scans
     assert page.start == page.end == chain.block(chain.at(FILL_DEADLINE))
-    assert page.unsolicited.amount.amount == AMOUNT and state.transfers[0].open
+    assert page.unsolicited[0].amount.amount == AMOUNT and state.transfers[0].open
 
 
 def test_only_the_twelve_oldest_transfers_are_considered_for_one_refund(config):
@@ -423,7 +427,7 @@ def test_only_the_twelve_oldest_transfers_are_considered_for_one_refund(config):
     state = settle(proven(config, *transfers), config, chain)
     refunded(config, chain, chain.head + 3, [13 * AMOUNT], tx="0x" + "d1" * 32)
     state = settle(state, config, chain)
-    assert state.external_scans[-1].unsolicited.amount.amount == 13 * AMOUNT
+    assert state.external_scans[-1].unsolicited[0].amount.amount == 13 * AMOUNT
     refunded(config, chain, chain.head + 3, [12 * AMOUNT])
     state = settle(state, config, chain)
     assert state.outcomes[0].transfers == tuple(t.reference for t in transfers[:12])
@@ -458,13 +462,44 @@ def test_the_refund_scan_jumps_to_a_later_deadline_and_waits_for_an_unproven_one
     assert page.start.number > reached.number + SPAN
 
 
-def test_a_refund_whose_leaf_and_payment_differ_is_refused(config):
-    chain = here(FILL_DEADLINE + 50)
-    state = settle(proven(config, flight(config), flight(config, 1)), config, chain)
-    refunded(config, chain, chain.head + 3, [2 * AMOUNT], payments=[AMOUNT])
-    with pytest.raises(DataError, match="did not pay the fund what its leaf names") as error:
-        settle(state, config, chain)
-    assert error.value.kind == "accounting" and state.transfers[0].open
+@pytest.mark.parametrize("leaf, payments", [([2 * AMOUNT], [AMOUNT]), ([AMOUNT], [AMOUNT - 1, 1])])
+def test_a_refund_whose_leaf_and_payment_differ_is_reported_and_attributed_to_nothing(
+    config, leaf, payments
+):
+    """The SpokePool paid the fund another amount than the leaf names, or the same
+    amount in other parts. Nothing is attributed, nothing stops, and the report says
+    that the transfer still waits."""
+    from almanak.connectors.across.connector import AcrossProjection
+    from almanak.connectors.across.dashboard import project as dashboard
+
+    one, two, chain = flight(config), flight(config, 1), here(FILL_DEADLINE + 50)
+    state = settle(proven(config, one, two), config, chain)
+    refunded(config, chain, chain.head + 3, leaf, payments=payments, tx="0x" + "d2" * 32)
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    (stray,) = page.unsolicited
+    assert (stray.amount.amount, stray.leaf_amount.amount) == (sum(payments), sum(leaf))
+    assert (page.outcome, state.outcomes) == (None, ())
+    assert [t.open and t.unfilled for t in state.transfers] == [True, True]
+    report = AcrossProjection.report(state)
+    (listed,) = report["unattributed_refund_payments"]
+    assert (int(listed["amount"]["amount"]), int(listed["leaf_amount"]["amount"])) == (
+        sum(payments),
+        sum(leaf),
+    )
+    assert report["awaiting_refund"] == [one.reference, two.reference]
+    assert "never applied" in report["awaiting_refund_note"]
+    context, _ = dashboard(state)
+    (row,) = context.datasets["unattributed_refund_payments"].rows
+    assert context.values[row["amount"].ref].amount == str(sum(payments))
+    assert context.values[row["leaf_amount"].ref].amount == str(sum(leaf))
+    # The gateway re-derives the page, and the scan goes on to the transfers' own refunds.
+    assert Checkpoint.model_validate_json(state.model_dump_json()) == state
+    settlement.audit(backend(config, chain), project(state, FORK_ARB))
+    refunded(config, chain, chain.head + 3, [2 * AMOUNT])
+    state = settle(state, config, chain)
+    assert state.outcomes[0].transfers == (one.reference, two.reference)
+    assert "awaiting_refund" not in AcrossProjection.report(state)
 
 
 def test_a_payment_from_the_spoke_pool_without_a_refund_leaf_is_not_a_refund(config):
@@ -477,11 +512,11 @@ def test_a_payment_from_the_spoke_pool_without_a_refund_leaf_is_not_a_refund(con
     chain.head += SPAN
     state = settle(state, config, chain)
     page = state.external_scans[-1]
-    assert (page.outcome, page.unsolicited, state.transfers[0].open) == (None, None, True)
+    assert (page.outcome, page.unsolicited, state.transfers[0].open) == (None, (), True)
     assert len(page.events) == 1
 
 
-def test_two_refunds_in_one_block_and_a_deferred_refund_are_refused(config):
+def test_a_deferred_refund_is_refused(config):
     chain = here(FILL_DEADLINE + 50)
     state = settle(proven(config, flight(config)), config, chain)
     chain.views["getRelayerRefund(address,address)"] = AMOUNT
@@ -489,13 +524,62 @@ def test_two_refunds_in_one_block_and_a_deferred_refund_are_refused(config):
     with pytest.raises(DataError, match="unresolved until the fund claims it") as error:
         settle(state, config, chain)
     assert error.value.kind == "refund_deferred"
-    chain.views.clear()
-    number = chain.head - 5
-    refunded(config, chain, number, [AMOUNT])
-    refunded(config, chain, number, [AMOUNT], tx="0x" + "e3" * 32)
-    with pytest.raises(DataError, match="share one block") as error:
-        settle(state, config, chain)
-    assert error.value.kind == "ordering"
+
+
+def test_two_refunds_in_one_block_are_attributed_in_log_order_as_one_outcome(config):
+    """A page ends at its refund's block, so every refund of that block is settled in
+    it: each takes the oldest transfers still waiting, and none is skipped."""
+    one, two, three = (flight(config, serial) for serial in range(3))
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, one, two, three), config, chain)
+    number = chain.head + 3
+    refunded(config, chain, number, [AMOUNT], tx="0x" + "e1" * 32)
+    refunded(config, chain, number, [5], tx="0x" + "e2" * 32)
+    refunded(config, chain, number, [2 * AMOUNT], tx="0x" + "e3" * 32)
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    outcome = page.outcome
+    assert page.end == chain.block(number) and outcome.tx_hash == "0x" + "e1" * 32
+    assert [c.tx_hash for c in outcome.companions] == ["0x" + "e3" * 32]
+    assert outcome.returned.amount == 3 * AMOUNT
+    assert outcome.transfers == (one.reference, two.reference, three.reference)
+    assert [(p.tx_hash, p.amount.amount) for p in page.unsolicited] == [("0x" + "e2" * 32, 5)]
+    assert [t.resolution.returned.amount for t in state.transfers] == [AMOUNT] * 3
+    assert effects(outcome)[0].amount == 3 * AMOUNT
+    assert Checkpoint.model_validate_json(state.model_dump_json()) == state
+    settlement.audit(backend(config, chain), project(state, FORK_ARB))
+    # A companion's receipt is audited like the first one's.
+    chain.receipts["0x" + "e3" * 32] = {**chain.receipts["0x" + "e3" * 32], "status": "0x0"}
+    with pytest.raises(DataError, match="receipt has changed"):
+        settlement.audit(backend(config, chain), project(state, FORK_ARB))
+
+
+def test_a_second_refund_of_a_block_cannot_take_a_transfer_the_first_paid(config):
+    one, chain = flight(config), here(FILL_DEADLINE + 50)
+    state = settle(proven(config, one), config, chain)
+    number = chain.head + 3
+    refunded(config, chain, number, [AMOUNT], tx="0x" + "e1" * 32)
+    refunded(config, chain, number, [AMOUNT], tx="0x" + "e2" * 32)
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    assert (page.outcome.tx_hash, page.outcome.returned.amount) == ("0x" + "e1" * 32, AMOUNT)
+    assert [p.tx_hash for p in page.unsolicited] == ["0x" + "e2" * 32]
+    assert page.outcome.companions == ()
+
+
+def test_a_refund_page_names_each_transaction_of_its_last_block_once(config):
+    one, chain = flight(config), here(FILL_DEADLINE + 50)
+    state = settle(proven(config, one), config, chain)
+    refunded(config, chain, chain.head + 3, [AMOUNT])
+    page = settle(state, config, chain).external_scans[-1]
+    stray = {"tx_hash": page.outcome.tx_hash, "amount": page.outcome.returned}
+    with pytest.raises(ValidationError, match="each transaction of its last block once"):
+        Scan.model_validate({**page.model_dump(), "unsolicited": (stray,)})
+    again = {"tx_hash": page.outcome.tx_hash, "receipt": page.outcome.receipt}
+    with pytest.raises(ValidationError, match="each of its transactions once"):
+        Scan.model_validate(
+            {**page.model_dump(), "outcome": {**page.outcome.model_dump(), "companions": (again,)}}
+        )
 
 
 def test_a_fill_found_for_a_transfer_marked_unfilled_halts_with_both(config):

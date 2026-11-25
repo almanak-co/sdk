@@ -63,13 +63,7 @@ class AcrossProjection:
 
     @staticmethod
     def report(state):
-        # A refund-leaf payment that matched no transfer is listed with its evidence:
-        # it is in the wallet, attributed to nothing.
-        unattributed = [
-            {"block": page.end.number, **page.unsolicited.model_dump(mode="json")}
-            for page in getattr(state, "external_scans", ())
-            if page.unsolicited is not None
-        ]
+        unattributed = unattributed_payments(state)
         # The source of each transfer's offered amount, from its retained deposit. A
         # fork-constructed quote is named as one; an unretained deposit states none.
         sources = {
@@ -84,7 +78,34 @@ class AcrossProjection:
                 for t in state.transfers
             ],
             "unattributed_refund_payments": unattributed,
+            **awaiting_refund(state, unattributed),
         }
+
+
+def unattributed_payments(state) -> list[dict]:
+    """Refund-leaf payments attributed to no transfer, each with its block and evidence:
+    in the wallet, in no inventory. One whose leaf named another amount shows both."""
+    return [
+        {"block": page.end.number, **payment.model_dump(mode="json")}
+        for page in getattr(state, "external_scans", ())
+        for payment in page.unsolicited
+    ]
+
+
+def awaiting_refund(state, unattributed) -> dict:
+    """Transfers proven unfilled whose refund is not recorded. Each holds its deployment
+    open. Beside an unattributed payment the report says that none is ever applied."""
+    waiting = [t.reference for t in state.transfers if t.open and t.unfilled]
+    if not waiting:
+        return {}
+    listed = {"awaiting_refund": waiting}
+    if unattributed:
+        listed["awaiting_refund_note"] = (
+            "An unattributed refund payment is never applied to a transfer. A transfer "
+            "listed here stays open, and its deployment unclosed, until a refund of "
+            "exactly its sent amount is read."
+        )
+    return listed
 
 
 def connector():

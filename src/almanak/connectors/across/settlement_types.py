@@ -7,7 +7,7 @@ SpokePool refunds on the source chain; both are read from bounded canonical page
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from almanak.connectors.across.domain import Target
 from almanak.connectors.identifiers import ConnectorId
@@ -98,13 +98,16 @@ class Settlement(ExternalEffect):
             or self.effective_at != datetime.fromtimestamp(self.block.timestamp, UTC)
         ):
             raise ValueError("Across settlement differs from its exact fund, chain or time")
+        self.require_receipt(self.tx_hash, self.receipt)
+
+    def require_receipt(self, tx_hash, receipt):
         expected = {
-            "transactionHash": self.tx_hash,
+            "transactionHash": tx_hash,
             "blockHash": self.block.hash,
             "blockNumber": hex(self.block.number),
             "status": "0x1",
         }
-        if any(self.receipt.get(key) != value for key, value in expected.items()):
+        if any(receipt.get(key) != value for key, value in expected.items()):
             raise ValueError("Across settlement lacks its canonical successful receipt")
 
 
@@ -138,10 +141,20 @@ class ArrivalOutcome(Settlement):
         )
 
 
+class Companion(Model):
+    """A further refund transaction of the same block, attributed after the first."""
+
+    tx_hash: Hash32
+    receipt: dict
+
+
 class RefundOutcome(Settlement):
     kind: Literal["across_refund"] = "across_refund"
     transfers: tuple[Reference, ...]
+    # The whole amount of every refund transaction of the block that pays a transfer.
     returned: AssetAmount
+    # Refunds mined in one block are one outcome: a page ends at its settlement block.
+    companions: tuple[Companion, ...] = Field(default=(), exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def evidence(self):
@@ -150,6 +163,11 @@ class RefundOutcome(Settlement):
             raise ValueError("a refund is a positive amount of the sent asset")
         if not self.transfers or len(set(self.transfers)) != len(self.transfers):
             raise ValueError("a refund resolves at least one transfer, each once")
+        hashes = [self.tx_hash, *(companion.tx_hash for companion in self.companions)]
+        if len(set(hashes)) != len(hashes):
+            raise ValueError("a refund names each of its transactions once")
+        for companion in self.companions:
+            self.require_receipt(companion.tx_hash, companion.receipt)
         return self
 
     def strategy_result(self):
@@ -165,14 +183,26 @@ class RefundOutcome(Settlement):
 
 
 class Unsolicited(Model):
-    """A refund-leaf payment to the fund that matches no transfer proven unfilled.
+    """A refund-leaf payment to the fund that is attributed to no transfer.
 
-    Retained as evidence and never attributed. It is no outcome and carries no
-    accounting issue of one, so a stranger's payment cannot stop new exposure.
+    Either it matches no set of transfers proven unfilled, or the SpokePool paid the
+    fund another amount than the leaf names. Retained as evidence and never
+    attributed. It is no outcome and carries no accounting issue of one, so a
+    stranger's payment cannot stop new exposure.
     """
 
     tx_hash: Hash32
+    # What the SpokePool paid the fund in the transaction.
     amount: AssetAmount
+    # What the transaction's leaves name for the fund, kept only where the SpokePool's
+    # payments differ from them, entry by entry. Such a payment is never attributed.
+    leaf_amount: AssetAmount | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def one_asset(self):
+        if self.leaf_amount is not None and self.leaf_amount.asset != self.amount.asset:
+            raise ValueError("a leaf and its payment are amounts of one asset")
+        return self
 
 
 class Scan(ExternalScan):
@@ -189,8 +219,8 @@ class Scan(ExternalScan):
     events: tuple[dict, ...] = ()
     # An arrival page that ends past the fill deadline without a fill: none can follow.
     expired: bool = False
-    # A refund page that ends at a payment to the fund it could not attribute.
-    unsolicited: Unsolicited | None = None
+    # Payments to the fund in a refund page's last block that it attributed to nothing.
+    unsolicited: tuple[Unsolicited, ...] = Field(default=(), exclude_if=lambda value: not value)
     outcome: ArrivalOutcome | RefundOutcome | None = None
 
     @model_validator(mode="after")
@@ -208,8 +238,13 @@ class Scan(ExternalScan):
         if arrival != (self.transfer is not None) or (self.expired and not arrival):
             raise ValueError("an arrival page follows one transfer; a refund page follows none")
         outcome = self.outcome
-        if self.unsolicited is not None and (arrival or outcome is not None):
-            raise ValueError("an unattributed payment ends a refund page that settles nothing")
+        if self.unsolicited and arrival:
+            raise ValueError("an unattributed payment ends a refund page")
+        named = [payment.tx_hash for payment in self.unsolicited]
+        if isinstance(outcome, RefundOutcome):
+            named += [outcome.tx_hash, *(companion.tx_hash for companion in outcome.companions)]
+        if len(set(named)) != len(named):
+            raise ValueError("a refund page names each transaction of its last block once")
         if outcome is not None:
             if isinstance(outcome, ArrivalOutcome) != arrival or outcome.block != self.end:
                 raise ValueError("Across scan ends at its own side's settlement block")

@@ -15,6 +15,7 @@ from almanak.connectors.across.settlement_types import (
     CONNECTOR,
     FILL_TYPES,
     ArrivalOutcome,
+    Companion,
     RefundOutcome,
     Scan,
     Unsolicited,
@@ -84,8 +85,8 @@ def bounds(reader, pages, anchor: int, reference):
 
 def committable(page, first: bool) -> bool:
     full = page.end.number - page.start.number + 1 == SPAN
-    settled = page.outcome is not None or page.unsolicited is not None
-    return settled or page.expired or first or full
+    ended = page.outcome is not None or bool(page.unsolicited)
+    return ended or page.expired or first or full
 
 
 def waiting_arrivals(state, reader_chain):
@@ -244,38 +245,68 @@ def attributed(total: int, waiting) -> tuple:
     return tuple(waiting[index] for index in min(matches)) if matches else ()
 
 
-def refund_total(receipt, target) -> int | None:
-    """What the transaction's refund leaves paid the fund; None when it executed none for it."""
+def refund_payment(receipt, target) -> tuple[int, int, bool] | None:
+    """What the transaction's refund leaves name for the fund, what the SpokePool paid
+    it there, and whether the two agree; None when it executed no leaf for the fund."""
     pool, token, fund = target.route.spoke_pool, target.asset.reference, target.fund.address
     entries = chain.refund_entries(receipt, pool, token, fund)
     if not entries:
         return None
-    if sorted(entries) != sorted(chain.refund_payments(receipt, token, pool, fund)):
-        raise DataError(
-            "accounting",
-            f"Across refund {receipt['transactionHash']} did not pay the fund what its leaf names",
-        )
-    return sum(entries)
+    payments = chain.refund_payments(receipt, token, pool, fund)
+    # Equal as lists, not only in sum: each leaf entry is one payment of its amount.
+    return sum(entries), sum(payments), sorted(entries) == sorted(payments)
 
 
-def refund_found(reader, state, target, events):
-    """The first refund-leaf payment to the fund in the page, and the transfers it pays."""
-    seen = set()
-    for row in events:
-        if row["transactionHash"] in seen:
+def leaf_payments(reader, target, events):
+    """Every refund-leaf payment to the fund in the first block that holds one, in the
+    block's own log order, with that block."""
+    found, block, seen = [], None, set()
+    for row in sorted(events, key=chain.position):
+        if row["transactionHash"] in seen or (
+            block is not None and chain.position(row)[0] != block.number
+        ):
             continue
         seen.add(row["transactionHash"])
         receipt = chain.receipt_of(reader, row)
-        total = refund_total(receipt, target)
-        if total is None:
+        amounts = refund_payment(receipt, target)
+        if amounts is None:
             continue
-        block = reader.pin_block(chain.position(row)[0])
-        paid = attributed(total, candidates(state, target, block.timestamp))
-        return row, receipt, block, total, paid
-    return None
+        block = block or reader.pin_block(chain.position(row)[0])
+        found.append((row, receipt, *amounts))
+    return found, block
 
 
-def refund_outcome(target, row, receipt, block, total, paid):
+def unattributed(target, row, named: int, paid: int, exact: bool) -> Unsolicited:
+    leaf = None if exact else AssetAmount(asset=target.asset, amount=named)
+    return Unsolicited(
+        tx_hash=row["transactionHash"],
+        amount=AssetAmount(asset=target.asset, amount=paid),
+        leaf_amount=leaf,
+    )
+
+
+def settled(state, target, block, payments):
+    """Attribute the block's refund payments one after the other, in log order.
+
+    Each exact payment takes the oldest set of the transfers still waiting whose sent
+    amounts sum to it, so a later payment of the block cannot take a transfer an earlier
+    one paid. A payment that matches no set, or that the SpokePool paid in another
+    amount than its leaf names, is attributed to nothing.
+    """
+    waiting = candidates(state, target, block.timestamp)
+    refunds, left = [], []
+    for row, receipt, named, paid, exact in payments:
+        taken = attributed(paid, waiting) if exact else ()
+        if not taken:
+            left.append(unattributed(target, row, named, paid, exact))
+            continue
+        waiting = [transfer for transfer in waiting if transfer not in taken]
+        refunds.append((row, receipt, paid, taken))
+    return refunds, tuple(left)
+
+
+def refund_outcome(target, block, refunds):
+    (row, receipt, _, _), others = refunds[0], refunds[1:]
     return RefundOutcome(
         identity=ExternalIdentity(
             connector=CONNECTOR,
@@ -287,21 +318,13 @@ def refund_outcome(target, row, receipt, block, total, paid):
         block=block,
         tx_hash=row["transactionHash"],
         receipt=receipt,
-        transfers=tuple(t.reference for t in paid),
-        returned=AssetAmount(asset=target.asset, amount=total),
+        transfers=tuple(t.reference for _, _, _, taken in refunds for t in taken),
+        returned=AssetAmount(asset=target.asset, amount=sum(paid for _, _, paid, _ in refunds)),
+        companions=tuple(
+            Companion(tx_hash=other["transactionHash"], receipt=other_receipt)
+            for other, other_receipt, _, _ in others
+        ),
     )
-
-
-def require_single(events, row):
-    """A page ends at its refund's block; a second refund there would be skipped."""
-    block = chain.position(row)[0]
-    others = {
-        e["transactionHash"]
-        for e in events
-        if chain.position(e)[0] == block and e["transactionHash"] != row["transactionHash"]
-    }
-    if others:
-        raise DataError("ordering", "two Across refund payments to the fund share one block")
 
 
 def require_undeferred(reader, target, block):
@@ -355,18 +378,13 @@ def refund_page(backend, state, target, earliest: int, reference=None):
     start, end, first = interval
     pool, token, fund = target.route.spoke_pool, target.asset.reference, target.fund.address
     events = chain.refund_logs(reader, token, pool, fund, start, end)
-    found = refund_found(reader, state, target, events)
-    outcome = unsolicited = None
-    if found is not None:
-        row, receipt, block, total, paid = found
+    payments, block = leaf_payments(reader, target, events)
+    outcome, left = None, ()
+    if block is not None:
         if reference is None and block.number < end.number:
             end, events = block, chain.refund_logs(reader, token, pool, fund, start, block)
-        require_single(events, row)
-        if paid:
-            outcome = refund_outcome(target, row, receipt, block, total, paid)
-        else:
-            amount = AssetAmount(asset=target.asset, amount=total)
-            unsolicited = Unsolicited(tx_hash=row["transactionHash"], amount=amount)
+        refunds, left = settled(state, target, block, payments)
+        outcome = refund_outcome(target, block, refunds) if refunds else None
     if held_back(state, target, end):
         if reference is not None:
             raise chain.integrity("Across refund page passes an unproven fill deadline")
@@ -379,7 +397,7 @@ def refund_page(backend, state, target, earliest: int, reference=None):
         start=start,
         end=end,
         events=events,
-        unsolicited=unsolicited,
+        unsolicited=left,
         outcome=outcome,
     )
     return checked(page, first, reference, lambda: require_undeferred(reader, target, page.end))
@@ -441,6 +459,8 @@ def audit(backend, state):
             )
             if receipt != page.outcome.receipt:
                 raise DataError("reorganization", "Across retained settlement receipt has changed")
+            for companion in getattr(page.outcome, "companions", ()):
+                chain.require_retained(reader, companion.tx_hash, companion.receipt)
 
 
 class ExternalEffects:

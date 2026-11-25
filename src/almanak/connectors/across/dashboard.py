@@ -20,9 +20,10 @@ COVERAGE = (
     "fork-constructed quote is not the venue's."
 )
 UNATTRIBUTED_COVERAGE = (
-    "Refund-leaf payments to the fund that matched no transfer proven unfilled, each at the "
-    "block that paid it. They are in the wallet and attributed to nothing: not a transfer "
-    "amount and not part of owned cash. Do not add them to either."
+    "Refund-leaf payments to the fund attributed to no transfer, each at the block that paid "
+    "it: one that matched no transfer proven unfilled, or one the SpokePool paid in another "
+    "amount than its leaf names, shown beside it. They are in the wallet and attributed to "
+    "nothing: not a transfer amount and not part of owned cash. Do not add them to either."
 )
 
 
@@ -146,39 +147,69 @@ def transfer_table(state):
     return values, dataset
 
 
+LEAF_AGREES = "The refund leaf names the paid amount; no separate leaf amount is retained."
+LEAF_DIFFERS = "What the refund leaf names for the fund; the SpokePool paid another amount."
+
+
+def payment_value(state, page, key, asset, amount, reason) -> Value:
+    target = page.target
+    return Value(
+        id=key,
+        amount=None if amount is None else str(amount),
+        unit="base_units",
+        asset=asset,
+        decimals=decimals_of(state, asset),
+        symbol=symbol_of(state, asset),
+        scope=Scope(account=target.account, fund=state.config.profile(target.account).fund),
+        evidence="recorded",
+        block=page.end if amount is not None else None,
+        reason=reason,
+    )
+
+
+def unattributed_row(state, values, index, page, payment) -> dict:
+    key, paid, leaf = f"unattributed-refund-{index}", payment.amount, payment.leaf_amount
+    values[key] = payment_value(
+        state,
+        page,
+        key,
+        paid.asset,
+        paid.amount,
+        "A refund-leaf payment to the fund attributed to nothing.",
+    )
+    values[f"{key}-leaf"] = payment_value(
+        state,
+        page,
+        f"{key}-leaf",
+        paid.asset,
+        leaf and leaf.amount,
+        LEAF_DIFFERS if leaf else LEAF_AGREES,
+    )
+    return {
+        "allocation": page.target.allocation,
+        "account": page.target.account,
+        "block": str(page.end.number),
+        "transaction": payment.tx_hash,
+        "amount": Ref(ref=key),
+        "leaf_amount": Ref(ref=f"{key}-leaf"),
+    }
+
+
 def unattributed_table(state):
-    """Refund-leaf payments to the fund that matched no transfer, each with its block.
+    """Refund-leaf payments to the fund attributed to no transfer, each with its block.
 
     They are in the wallet and attributed to nothing: no transfer amount and no part of
-    owned cash. The table is absent while there are none.
+    owned cash. One the SpokePool paid in another amount than its leaf names shows the
+    leaf amount beside it. The table is absent while there are none.
     """
-    pages = [p for p in getattr(state, "external_scans", ()) if p.unsolicited is not None]
-    kept = list(enumerate(pages))[-MAX_TABLE_ROWS:]
+    payments = [
+        (page, payment)
+        for page in getattr(state, "external_scans", ())
+        for payment in page.unsolicited
+    ]
+    kept = list(enumerate(payments))[-MAX_TABLE_ROWS:]
     values: dict[str, Value] = {}
-    rows = []
-    for index, page in kept:
-        paid, target, key = page.unsolicited.amount, page.target, f"unattributed-refund-{index}"
-        values[key] = Value(
-            id=key,
-            amount=str(paid.amount),
-            unit="base_units",
-            asset=paid.asset,
-            decimals=decimals_of(state, paid.asset),
-            symbol=symbol_of(state, paid.asset),
-            scope=Scope(account=target.account, fund=state.config.profile(target.account).fund),
-            evidence="recorded",
-            block=page.end,
-            reason="A refund-leaf payment to the fund that matched no transfer proven unfilled.",
-        )
-        rows.append(
-            {
-                "allocation": target.allocation,
-                "account": target.account,
-                "block": str(page.end.number),
-                "transaction": page.unsolicited.tx_hash,
-                "amount": Ref(ref=key),
-            }
-        )
+    rows = [unattributed_row(state, values, index, *entry) for index, entry in kept]
     if not rows:
         return {}, {}
     dataset = accounts_dataset(
@@ -188,11 +219,12 @@ def unattributed_table(state):
             Column(key="account", label="Paid account"),
             Column(key="block", label="Block"),
             Column(key="transaction", label="Transaction"),
-            Column(key="amount", label="Amount", kind="value"),
+            Column(key="amount", label="Paid", kind="value"),
+            Column(key="leaf_amount", label="Leaf names", kind="value"),
         ),
         rows=tuple(rows),
         coverage=UNATTRIBUTED_COVERAGE,
-        truncated=len(pages) > len(kept),
+        truncated=len(payments) > len(kept),
     )
     return values, {"unattributed_refund_payments": dataset}
 
