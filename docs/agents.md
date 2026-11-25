@@ -195,8 +195,10 @@ the agent says so once and stops when the user objects.
 - The agent cannot send funds back. It sends nothing to another address: a bridge
   moves funds only to the wallet's own address on another chain, so funds leave
   the wallet only through its key, which the user should keep a copy of.
-- A bridge needs the user's provider key. No public endpoint serves it, and
-  without the key the agent says so and bridges nothing.
+- A bridge without a provider key reads through two public endpoints, one for
+  each chain, and each sees what the agent reads and sends there. Reading what
+  became of a transfer needs event logs, which no public endpoint serves on BNB
+  Chain; there the agent says that the status cannot be read without a key.
 - An action has no amount ceiling. The fee ceilings and the wallet balance bound
   it, and the confirmation before `--execute` is an instruction to the agent, not
   an enforced control.

@@ -35,11 +35,13 @@ from almanak.connectors.across.relay import deposited_relay
 from almanak.connectors.across.resolution import MarketSelection, ResolvedRoute
 from almanak.connectors.across.state import Checkpoint, DecisionRecord, Outcome, Pending
 from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
+from almanak.gateway import read_endpoints
 from almanak.gateway.accounts import prepare_call
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.execution import EvmGateway, VenueAnswers
+from almanak.gateway.providers import PUBLIC_RPC, PublicProvider
 from almanak.gateway.service import GatewayService
-from almanak.models import Asset, AssetAmount, Block
+from almanak.models import Asset, AssetAmount, Block, Chain
 from almanak.operator_deployment import supports_operator
 from almanak.operator_runtime import OperatorRuntime
 from almanak.request_runtime import release_pending
@@ -679,18 +681,73 @@ def test_the_command_line_states_the_route_the_amount_the_ceiling_and_the_recipi
     capsys.readouterr()
 
 
-def test_a_bridge_takes_an_env_file_and_refuses_a_public_endpoint(capsys):
+def refused(capsys, *extra, base=COMMAND) -> str:
     with pytest.raises(SystemExit):
-        parsed("--public-rpc", "arbitrum", base=COMMAND)
-    assert "it takes --env-file, never --public-rpc" in capsys.readouterr().err
+        parsed(*extra, base=base)
+    return capsys.readouterr().err
+
+
+def keyless_flags(source="arbitrum", destination="base"):
+    return ("--public-rpc", source, "--destination-public-rpc", destination)
+
+
+def test_a_bridge_takes_a_key_or_one_named_public_endpoint_for_each_chain(capsys):
+    keyed = parsed()
+    assert (keyed.env_file, keyed.public_rpc) == (Path(".env"), None)
+    assert keyed.destination_public_rpc is None
+    keyless = parsed(*keyless_flags(), base=COMMAND)
+    assert (keyless.public_rpc, keyless.destination_public_rpc) == ("arbitrum", "base")
+    assert keyless.env_file is None and not keyless.execute
+    assert parsed(*keyless_flags(), "--execute", base=COMMAND).execute
+    # The destination's endpoint is never chosen for the caller.
+    assert "--destination-public-rpc" in ax_bridge.DESTINATION_REQUIRED
+    assert ax_bridge.DESTINATION_REQUIRED in refused(capsys, "--public-rpc", "arbitrum")
+    # A key serves both chains, so a second endpoint beside it names nothing.
+    alone = refused(capsys, "--destination-public-rpc", "base", base=STATED)
+    assert ax_bridge.DESTINATION_ALONE in alone
+    # One transport, as for every direct action, and one is required.
+    assert "not allowed with" in refused(capsys, *keyless_flags(), "--env-file", ".env")
+    assert "one of the arguments" in refused(capsys)
+
+
+def test_an_endpoint_that_does_not_serve_its_chain_is_refused_with_the_names_that_do(capsys):
+    # `base` serves Base only: it is no endpoint of the chain the asset leaves.
+    wrong_source = refused(capsys, *keyless_flags(source="base"))
+    assert "no public endpoint named base serves eip155:42161; choose from arbitrum" in wrong_source
+    wrong_destination = refused(capsys, *keyless_flags(destination="arbitrum"))
+    assert (
+        "no public endpoint named arbitrum serves eip155:8453; choose from base, drpc"
+        in wrong_destination
+    )
+    assert "invalid choice" in refused(capsys, *keyless_flags(destination="unlisted"))
+    # HyperEVM has no public endpoint; Across has no pin there either.
+    to_hyperevm = list(COMMAND)
+    to_hyperevm[to_hyperevm.index("--destination-chain") + 1] = str(HYPEREVM)
+    message = refused(capsys, *keyless_flags(), base=to_hyperevm)
+    assert "serves eip155:999; use a provider key instead" in message
+
+
+def revocation(*transport):
+    index = COMMAND.index("--amount")
+    route = [*COMMAND[:index], *COMMAND[index + 6 :], *transport]
+    route[1] = "revoke-bridge"
+    return route
+
+
+def test_a_revocation_names_the_source_endpoint_only(capsys):
+    args = parse_validated(build_parser(), revocation("--public-rpc", "arbitrum"))
+    assert (args.public_rpc, args.destination_public_rpc) == ("arbitrum", None)
+    # It reads the chain the asset leaves only, so it takes no second endpoint.
     with pytest.raises(SystemExit):
-        parsed(base=COMMAND)
+        parse_validated(build_parser(), revocation(*keyless_flags()))
+    assert "unrecognized arguments: --destination-public-rpc" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        parse_validated(build_parser(), revocation("--public-rpc", "base"))
+    assert "choose from arbitrum" in capsys.readouterr().err
 
 
 def test_a_revocation_names_the_route_only():
-    index = COMMAND.index("--amount")
-    route = [*COMMAND[:index], *COMMAND[index + 6 :], "--env-file", ".env"]
-    route[1] = "revoke-bridge"
+    route = revocation("--env-file", ".env")
     args = parse_validated(build_parser(), route)
     assert ax_actions.action_request(args) == REVOKE
     # The strictest ceiling: no deposit with a fee could be admitted along this route.
@@ -699,11 +756,15 @@ def test_a_revocation_names_the_route_only():
         parse_validated(build_parser(), [*route, "--amount", "5"])
 
 
+TRANSPORT = ax_actions.transport
+
+
 def test_the_command_refuses_an_undeclared_chain_and_passes_the_bridge_on(monkeypatch):
     passed = {}
 
-    def deployment(env_file, market, action, wallet, provider, endpoint, limits):
-        passed.update(env_file=env_file, market=market, action=action, limits=limits)
+    def deployment(far, market, action, wallet, provider, endpoint, limits):
+        passed.update(far=far, market=market, action=action, limits=limits)
+        passed.update(provider=provider, endpoint=endpoint)
         raise StopIteration
 
     monkeypatch.setattr(ax_actions, "read_wallet", lambda directory: {})
@@ -712,10 +773,18 @@ def test_the_command_refuses_an_undeclared_chain_and_passes_the_bridge_on(monkey
     with pytest.raises(StopIteration):
         ax_actions.command(parsed())
     assert (passed["market"], passed["action"]) == (SELECTION, BRIDGE)
-    assert (passed["env_file"], passed["limits"]) == (
-        Path(".env"),
+    assert (passed["far"], passed["limits"]) == (
+        ax_bridge.Far(env_file=Path(".env")),
         ax_actions.FeeLimits(7, 9, None),
     )
+    # Without a key the action runs on the named source endpoint, as every direct
+    # action on a public endpoint does, and hands on the destination's name.
+    monkeypatch.setattr(ax_actions, "transport", TRANSPORT)
+    with pytest.raises(StopIteration):
+        ax_actions.command(parsed(*keyless_flags(), "--execute", base=COMMAND))
+    assert passed["far"] == ax_bridge.Far(public_rpc="base")
+    assert passed["provider"] == PublicProvider(kind="public_rpc", name="arbitrum")
+    assert passed["endpoint"] == PUBLIC_RPC["arbitrum"][ARBITRUM.chain_id]
     monkeypatch.setattr(ax_actions, "read_wallet", pytest.fail)
     undeclared = [*STATED]
     undeclared[undeclared.index("--chain") + 1] = str(HYPEREVM)
@@ -759,12 +828,15 @@ def resolving(
     codes=("0x", "0x"),
     source=SOURCE_ONLY,
     far=None,
+    keyless=None,
 ):
     resolver = ax_actions.resolution("across")
     monkeypatch.setattr(
         "almanak.gateway.ethereum.EthereumReader",
         lambda chain, endpoint: Resolving(chain, BLOCK, code=codes[0]),
     )
+    if keyless is not None:
+        return keyless_deployment(monkeypatch, keyless, request)
     monkeypatch.setattr(
         "almanak.gateway.read_endpoints.verified_reader",
         far or (lambda chain, env_file: Resolving(BASE, BASE_BLOCK, genesis, codes[1])),
@@ -775,9 +847,111 @@ def resolving(
     monkeypatch.setattr(resolver, "complete_market", lambda reader, resolved, block: completed)
     wallet = {"account": WALLET.account, "address": WALLET.address}
     provider = ax_actions.alchemy(ARBITRUM.chain_id)
+    far_transport = ax_bridge.Far(env_file=Path(".env"))
     return lambda: ax_bridge.deployment(
-        Path(".env"), SELECTION, request, wallet, provider, "endpoint", LIMITS
+        far_transport, SELECTION, request, wallet, provider, "endpoint", LIMITS
     )
+
+
+class Proofs(list):
+    """What a keyless deployment did, in order, and what its destination endpoint is."""
+
+    def __init__(self, destination="base", far_genesis=None, far_stale=False):
+        super().__init__()
+        self.destination, self.far_genesis, self.far_stale = destination, far_genesis, far_stale
+
+
+def keyless_deployment(monkeypatch, proofs: Proofs, request):
+    """A deployment through two named public endpoints, with each proof and each
+    resolution step recorded in the order the command made it."""
+    resolver = ax_actions.resolution("across")
+
+    def prove(reader):
+        proofs.append(("chain", str(reader.chain.chain_id)))
+
+    def verify_public(reader):
+        proofs.append(("public", str(reader.chain.chain_id)))
+        if reader.genesis != evm_network(reader.chain.chain_id).genesis:
+            raise DataError("chain_mismatch", "public endpoint has a different genesis")
+        if getattr(reader, "stale", False):
+            raise DataError("stale", "public endpoint head is 500 seconds old")
+
+    def opened(chain, endpoint, **options):
+        reader = Resolving(Chain(chain_id=chain, environment="mainnet"), BASE_BLOCK)
+        reader.genesis = proofs.far_genesis or reader.genesis
+        reader.verify_chain = lambda: prove(reader)
+        reader.stale = proofs.far_stale
+        proofs.append(("open", endpoint))
+        return reader
+
+    def source_proof(reader):
+        prove(reader)
+        verify_public(reader)
+
+    def resolve(reader, selection, block):
+        proofs.append("resolve")
+        return SOURCE_ONLY
+
+    def complete(reader, resolved, block):
+        proofs.append("complete")
+        return ROUTE
+
+    monkeypatch.setattr(ax_actions, "prove_public", source_proof)
+    monkeypatch.setattr(read_endpoints, "mainnet_reader", opened)
+    monkeypatch.setattr(read_endpoints, "verify_public", verify_public)
+    monkeypatch.setattr(read_endpoints, "verified_reader", pytest.fail)
+    monkeypatch.setattr(resolver, "resolve_market", resolve)
+    monkeypatch.setattr(resolver, "complete_market", complete)
+    wallet = {"account": WALLET.account, "address": WALLET.address}
+    provider = PublicProvider(kind="public_rpc", name="arbitrum")
+    far = ax_bridge.Far(public_rpc=proofs.destination)
+    return lambda: ax_bridge.deployment(
+        far, SELECTION, request, wallet, provider, "endpoint", LIMITS
+    )
+
+
+def test_both_public_endpoints_give_the_public_proof_before_their_chain_is_resolved(monkeypatch):
+    proofs = Proofs()
+    config = resolving(monkeypatch, keyless=proofs)()
+    assert proofs == [
+        ("chain", "eip155:42161"),
+        ("public", "eip155:42161"),
+        "resolve",
+        ("open", PUBLIC_RPC["base"][BASE.chain_id]),
+        ("chain", "eip155:8453"),
+        ("public", "eip155:8453"),
+        "complete",
+    ]
+    # The record names the public provider the action ran on, so recovery finds it.
+    network = config.production.networks[0]
+    assert network.provider == PublicProvider(kind="public_rpc", name="arbitrum")
+    assert config.positions == operator_config().positions
+
+
+@pytest.mark.parametrize(
+    ("fault", "kind"),
+    [({"far_stale": True}, "stale"), ({"far_genesis": "0x" + "77" * 32}, "chain_mismatch")],
+)
+def test_a_stale_or_wrong_genesis_destination_endpoint_refuses_before_the_route_completes(
+    monkeypatch, fault, kind
+):
+    proofs = Proofs(**fault)
+    with pytest.raises(DataError) as error:
+        resolving(monkeypatch, keyless=proofs)()
+    assert error.value.kind == kind
+    # Nothing was completed, so no deployment exists and nothing can be planned.
+    assert "complete" not in proofs and proofs[-1] == ("public", "eip155:8453")
+
+
+def test_a_keyless_bridge_without_a_destination_endpoint_opens_nothing(monkeypatch):
+    proofs = Proofs(destination=None)
+    with pytest.raises(ValueError, match="--destination-public-rpc"):
+        resolving(monkeypatch, keyless=proofs)()
+    assert not [step for step in proofs if step[0] == "open"]
+    # A revocation reads the source chain only and needs none.
+    proofs = Proofs(destination=None)
+    assert resolving(monkeypatch, keyless=proofs, request=REVOKE)() is not None
+    assert proofs == [("chain", "eip155:42161"), ("public", "eip155:42161"), "resolve"]
 
 
 def unavailable(chain, env_file):
@@ -939,6 +1113,7 @@ def destination(status, head_after=10, receipts=None, finalized_after=None):
 def status(monkeypatch, near, far, **options):
     readers = {ARBITRUM.chain_id: near, BASE.chain_id: far}
     monkeypatch.setattr("almanak.ax.observation_reader", lambda args, chain: readers[chain])
+    monkeypatch.setattr("almanak.ax.public_reader", lambda chain, name: readers[chain])
     monkeypatch.setattr(
         "almanak.connectors.across.observations.read_pool", lambda reader, pool, block: POOL
     )
@@ -952,6 +1127,7 @@ def status(monkeypatch, near, far, **options):
         "refund_from_block": None,
         "env_file": Path(".env"),
         "public_rpc": None,
+        "destination_public_rpc": None,
         **options,
     }
     return ax_bridge.status(SimpleNamespace(**values))
@@ -1106,13 +1282,31 @@ def test_the_status_reads_a_transfer_whose_recipient_is_not_its_depositor(monkey
         status(monkeypatch, near, misdirected, reference=outcome.transfer.reference)
 
 
-def test_a_bridge_record_is_never_recovered_through_a_public_endpoint():
-    with pytest.raises(ValueError, match="takes no --public-rpc"):
-        ax_actions.require_recovery_transport(operator_config(), "arbitrum")
-    ax_actions.require_recovery_transport(operator_config(), None)
-    # Every other connector keeps the accepted public recovery.
-    ax_actions.require_recovery_transport(SimpleNamespace(connector="aave_v3"), "arbitrum")
-    assert direct.binding("aave_v3").public_recovery and not across_direct.DIRECT.public_recovery
+def test_a_bridge_record_is_recovered_through_a_named_public_endpoint(monkeypatch):
+    """A keyless execution that leaves a record must be recoverable without a key."""
+    proved = []
+    monkeypatch.setattr(
+        ax_actions, "proven_public", lambda chain, endpoint: proved.append(endpoint) or endpoint
+    )
+    own = PUBLIC_RPC["arbitrum"][ARBITRUM.chain_id]
+    keyed = operator_config()
+    network = keyed.production.networks[0].model_copy(
+        update={"provider": PublicProvider(kind="public_rpc", name="arbitrum")}
+    )
+    production = keyed.production.model_copy(update={"networks": (network,)})
+    keyless = keyed.model_copy(update={"production": production})
+    # Its own endpoint with no flag while that is still listed, or the one the caller
+    # names, which gives the public proof first. A record made with a key takes one too.
+    assert ax_actions.record_endpoint(keyless, None) == own
+    assert ax_actions.record_endpoint(keyless, None, "arbitrum") == own
+    assert ax_actions.record_endpoint(keyed, None, "arbitrum") == own
+    assert proved == [own, own]
+    # Only an endpoint of the record's one chain, the chain the asset left.
+    with pytest.raises(ValueError, match="no public endpoint named base serves eip155:42161"):
+        ax_actions.record_endpoint(keyless, None, "base")
+    # No connector's record refuses a named public endpoint.
+    assert not hasattr(across_direct.DIRECT, "public_recovery")
+    assert not hasattr(direct.binding("aave_v3"), "public_recovery")
 
 
 def test_past_the_deadline_the_transfer_is_unfilled_and_no_refund_is_attributed(monkeypatch):
@@ -1222,7 +1416,7 @@ def test_a_filled_status_without_its_fill_reports_nothing_as_received(monkeypatc
     assert error.value.kind == "integrity"
 
 
-def test_the_status_command_takes_a_read_transport_and_no_public_endpoint(monkeypatch):
+def test_the_status_command_takes_a_read_transport_or_two_public_endpoints(monkeypatch, capsys):
     argv = [
         "ax",
         "bridge-status",
@@ -1260,15 +1454,128 @@ def test_the_status_command_takes_a_read_transport_and_no_public_endpoint(monkey
     assert continued.refund_from_block == 12
     with pytest.raises(SystemExit):
         parse_validated(build_parser(), [*argv, "--env-file", ".env", "--refund-from-block", "x"])
-    # No listed public endpoint serves both chains, so the command offers none.
-    with pytest.raises(SystemExit):
-        parse_validated(build_parser(), [*argv, "--public-rpc", "base"])
+    # A public endpoint serves one chain, so the caller names one for each.
+    keyless = parse_validated(build_parser(), [*argv, *keyless_flags()])
+    assert (keyless.public_rpc, keyless.destination_public_rpc) == ("arbitrum", "base")
+    assert (keyless.env_file, keyless.gateway_url, keyless.block) == (None, None, "finalized")
+    capsys.readouterr()
+    for flags, cause in (
+        (("--public-rpc", "arbitrum"), ax_bridge.DESTINATION_REQUIRED),
+        (("--env-file", ".env", "--destination-public-rpc", "base"), ax_bridge.DESTINATION_ALONE),
+        (keyless_flags(source="base"), "choose from arbitrum"),
+        (keyless_flags(destination="optimism"), "choose from base, drpc"),
+        ((*keyless_flags(), "--env-file", ".env"), "not allowed with"),
+        ((*keyless_flags(), "--gateway-auth-file", "t"), "belongs to --gateway-url"),
+    ):
+        with pytest.raises(SystemExit):
+            parse_validated(build_parser(), [*argv, *flags])
+        assert cause in capsys.readouterr().err
     served = parse_validated(
         build_parser(), [*argv, "--gateway-url", "http://127.0.0.1:1", "--gateway-auth-file", "t"]
     )
     assert (served.env_file, served.public_rpc) == (None, None)
+    assert served.destination_public_rpc is None
     from almanak import ax
 
     monkeypatch.setattr(ax_bridge, "status", lambda given: {"status": "in_flight"})
     monkeypatch.setattr(ax, "ax_bridge", ax_bridge)
     assert ax.command(args) == 0
+
+
+KEYLESS = {"env_file": None, "public_rpc": "arbitrum", "destination_public_rpc": "base"}
+
+
+def test_a_keyless_status_reads_each_chain_through_its_own_proven_endpoint(monkeypatch):
+    from almanak import ax
+
+    near, far = source(), destination(2)
+    opened = []
+
+    def public_reader(chain, name):
+        opened.append((str(chain), name))
+        return {ARBITRUM.chain_id: near, BASE.chain_id: far}[chain]
+
+    monkeypatch.setattr(ax, "public_reader", public_reader)
+    monkeypatch.setattr(ax, "verified_reader", pytest.fail)
+    monkeypatch.setattr(
+        "almanak.connectors.across.observations.read_pool", lambda reader, pool, block: POOL
+    )
+    args = SimpleNamespace(
+        connector="across",
+        chain="eip155:42161",
+        destination_chain="eip155:8453",
+        reference=REFERENCE,
+        deposit_tx=None,
+        block="finalized",
+        refund_from_block=None,
+        gateway_url=None,
+        **KEYLESS,
+    )
+    assert ax_bridge.status(args)["status"] == "arrived"
+    # `public_reader` is the reader that proves chain number, genesis and head.
+    assert opened == [("eip155:42161", "arbitrum"), ("eip155:8453", "base")]
+
+
+class Refusing(Ledger):
+    """A chain whose endpoint refuses every log query, as a public endpoint may."""
+
+    def _rpc(self, method, params, *, allow_none=False):
+        if method == "eth_getLogs":
+            raise DataError("http", "eth_getLogs: HTTP 429", code=429, transient=True)
+        return super()._rpc(method, params, allow_none=allow_none)
+
+
+def test_a_public_endpoint_that_refuses_a_status_read_is_named_with_its_chain(monkeypatch):
+    late = FILL_DEADLINE - FILL["block_timestamp"] + 100
+    far = destination(2)
+    far.__class__ = Refusing
+    by_hash = {"reference": None, "deposit_tx": DEPOSIT["receipt"]["transactionHash"]}
+    with pytest.raises(DataError) as error:
+        status(monkeypatch, source(), far, **KEYLESS, **by_hash)
+    message = str(error.value)
+    assert (error.value.kind, error.value.code, error.value.transient) == ("http", 429, True)
+    assert message.startswith("eth_getLogs: HTTP 429; ")
+    assert "the public endpoint base on eip155:8453" in message and "--env-file" in message
+    # The deposit's lookup and the refund scan read the source chain's endpoint.
+    near = source(head_after=late)
+    near.__class__ = Refusing
+    with pytest.raises(DataError) as error:
+        status(monkeypatch, near, destination(0), **KEYLESS)
+    assert "the public endpoint arbitrum on eip155:42161" in str(error.value)
+    unfilled = destination(0, head_after=late, receipts=[])
+    with pytest.raises(DataError) as error:
+        status(monkeypatch, near, unfilled, block="latest", **KEYLESS, **by_hash)
+    assert "the public endpoint arbitrum on eip155:42161" in str(error.value)
+    # A provider key's refusal keeps its own words, and so does a finding of the
+    # command that is no limit of the endpoint.
+    with pytest.raises(DataError) as error:
+        status(monkeypatch, source(), far, **by_hash)
+    assert str(error.value) == "eth_getLogs: HTTP 429"
+    with pytest.raises(DataError) as error:
+        status(monkeypatch, source(receipts=[]), destination(2), **KEYLESS)
+    assert error.value.kind == "not_found" and "public endpoint" not in str(error.value)
+
+
+def test_a_status_scan_pages_by_what_the_named_endpoint_serves_in_one_log_query(monkeypatch):
+    from almanak.gateway import providers
+
+    assert ax_bridge.log_span(None) == ax_bridge.log_span("arbitrum") == 2_000
+    assert ax_bridge.log_span("drpc") == providers.PUBLIC_LOG_SPAN["drpc"] == 100
+    # Only listed endpoints carry a span, and none is wider than a settlement page.
+    assert set(providers.PUBLIC_LOG_SPAN) <= set(PUBLIC_RPC)
+    assert max(providers.PUBLIC_LOG_SPAN.values()) <= 2_000
+    late = FILL_DEADLINE - FILL["block_timestamp"] + 250
+    by_hash = {"reference": None, "deposit_tx": DEPOSIT["receipt"]["transactionHash"]}
+
+    def refund_queries(name):
+        near = source(head_after=late)
+        unfilled = destination(0, head_after=late, receipts=[])
+        options = {**KEYLESS, **by_hash, "public_rpc": name, "block": "latest"}
+        refund = status(monkeypatch, near, unfilled, **options)["refund"]
+        assert refund["complete"] and refund["scanned"]["to"] == near.head
+        return [int(q["toBlock"], 16) - int(q["fromBlock"], 16) + 1 for q in near.queries]
+
+    # The same blocks either way: whole pages, or the fewer blocks one query may span.
+    narrow, wide = refund_queries("drpc"), refund_queries("arbitrum")
+    assert len(wide) == 1 and sum(narrow) == wide[0]
+    assert max(narrow) == 100 and len(narrow) > 1

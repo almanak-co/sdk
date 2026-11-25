@@ -204,5 +204,4 @@ DIRECT = DirectActions(
     position=position,
     note=note,
     details=details,
-    public_recovery=False,
 )
