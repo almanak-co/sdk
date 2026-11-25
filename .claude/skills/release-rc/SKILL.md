@@ -1,6 +1,8 @@
 ---
 name: release-rc
 description: "Create a release candidate for the SDK. Runs the gates and builds and verifies the distributions without publishing them anywhere. Use when the user says 'rc release', 'internal release', 'candidate release', or 'release rc'."
+metadata:
+  internal: true
 ---
 
 # Release RC - Release Candidate
