@@ -539,6 +539,10 @@ def test_the_command_refuses_an_undeclared_chain_and_passes_the_stated_swap_on(
     assert seen["limits"] == ax_actions.FeeLimits(7, 9, None)
     assert (seen["connector"], seen["market"].pool) == (connector, POOLS[connector][1])
     assert (seen["action"].sell, seen["action"].amount) == (arguments(connector).sell, 1000)
+    assert arguments(connector).base_fee_multiplier_bps is None
+    with pytest.raises(StopIteration):
+        ax_actions.command(arguments(connector, "--base-fee-multiplier-bps", "10000"))
+    assert seen["limits"] == ax_actions.FeeLimits(7, 9, None, 10000)
 
     monkeypatch.setattr(ax_actions, "read_wallet", pytest.fail)
     with pytest.raises(ValueError, match=f"{connector} serves no direct swap on eip155:31337"):

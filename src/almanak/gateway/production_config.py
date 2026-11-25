@@ -10,6 +10,13 @@ from almanak.gateway.providers import Provider
 from almanak.models import Account, AssetAmount, Chain, Eoa, Model, SafeRoles, UInt
 
 Positive = Annotated[UInt, Field(gt=0, lt=2**256)]
+# The share of the base fee a bid may state, in basis points: the base fee itself up to
+# five times it. An author gas policy and a direct action's flag take the same range.
+MIN_BASE_FEE_MULTIPLIER_BPS = 10000
+MAX_BASE_FEE_MULTIPLIER_BPS = 50000
+BaseFeeMultiplierBps = Annotated[
+    UInt, Field(ge=MIN_BASE_FEE_MULTIPLIER_BPS, le=MAX_BASE_FEE_MULTIPLIER_BPS)
+]
 
 
 class ProductionNetwork(Model):
@@ -54,7 +61,7 @@ class GasPolicy(Model):
         default="next_block", exclude_if=lambda v: v == "next_block"
     )
     reward_percentile: Annotated[UInt, Field(le=100)]
-    base_fee_multiplier_bps: Annotated[UInt, Field(ge=10000, le=50000)]
+    base_fee_multiplier_bps: BaseFeeMultiplierBps
     max_gas_price_wei: Positive
     max_gas_limit: Positive
     max_transaction_fee: AssetAmount

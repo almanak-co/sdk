@@ -598,6 +598,26 @@ history may not report the next one. The gas limit is the estimate with a 25% bu
 and at most `--max-gas-limit`, 1,200,000 unless stated. Reads are no older than 120
 seconds.
 
+Steps are legacy transactions. On every chain except Arbitrum and Robinhood Chain
+the quoted price is what is paid: the part of the bid above the base fee and the tip
+is spent, not only reserved. Arbitrum and Robinhood Chain charge the base fee and
+refund the rest of the bid.
+
+`--base-fee-multiplier-bps` states the multiple of the base fee in that quote, in
+basis points, within the range an author's `base_fee_multiplier_bps` takes: 10000,
+the base fee itself, to 50000. Without it the chain's default applies, 20000 or
+12500 as above. With 10000 the quoted price is the base fee plus the tip. Nothing
+else in the quote changes: the tip, the gas limit and its buffer stay, on BNB the
+node's `eth_gasPrice` still floors the price, and both ceilings apply as before. On
+Base and Optimism the same multiple also margins the L1 data fee a step is admitted
+against under `--max-transaction-fee`; that margin is reserved, never paid.
+
+A bid closer to the base fee can wait longer, and can stay unmined when the base fee
+rises above it. A direct command never replaces a step at a higher price. The signed
+step then stays pending and its record is kept; `ax recover` sends the same signed
+bytes again at the same price and does not re-price them. The multiplier is kept in
+the record with the rest of the action's gas policy.
+
 | Option | Meaning |
 | --- | --- |
 | market selection | The same flags or `--config` file as `ax lending-reserve`. |
@@ -609,6 +629,7 @@ seconds.
 | `--public-rpc` | A named public endpoint instead of `--env-file`. |
 | `--max-gas-price-wei`, `--max-transaction-fee` | Required ceilings; a step quoted above either is refused. |
 | `--max-gas-limit` | Optional gas limit ceiling per step; a step whose buffered estimate is above it is refused. |
+| `--base-fee-multiplier-bps` | Optional multiple of the base fee a step bids, 10000 to 50000 basis points; without it the chain's default. It moves the bid only, and the ceilings apply unchanged. |
 
 Each connector declares the actions it serves directly, and `almanak support` lists
 them per chain as `direct_actions`. A command for a connector, chain or action that

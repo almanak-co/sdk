@@ -60,6 +60,7 @@ LIMITS = SimpleNamespace(
     max_gas_price_wei=5000 * 10**9,
     max_transaction_fee=10**18,
     max_gas_limit=None,
+    base_fee_multiplier_bps=None,
 )
 
 

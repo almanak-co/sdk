@@ -3,17 +3,29 @@
 The declarations are static: no chain access, signing or strategy code.
 """
 
+import argparse
+import json
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from almanak import ax_actions
 from almanak.caip import ChainId
 from almanak.cli_arguments import build_parser, parse_validated
+from almanak.configuration.gas import DEFAULT_BASE_FEE_MULTIPLIER_BPS, GasInput
 from almanak.connectors import direct
 from almanak.connectors.composition import CONNECTOR_IDS, installed_connectors
 from almanak.connectors.support import ConnectorChainSupport, EconomicAction, RunMode
+from almanak.gateway import production_fees
+from almanak.gateway.ethereum import DataError
 from almanak.gateway.execution import EvmGateway
+from almanak.gateway.production_config import (
+    MAX_BASE_FEE_MULTIPLIER_BPS,
+    MIN_BASE_FEE_MULTIPLIER_BPS,
+    GasPolicy,
+)
+from almanak.models import Block, Chain
 
 INSTALLED = {str(key) for key in CONNECTOR_IDS}
 ETHEREUM, BASE = ChainId("eip155:1"), ChainId("eip155:8453")
@@ -228,3 +240,194 @@ def test_an_operator_may_state_a_gas_limit():
         max_gas_price_wei=7, max_transaction_fee=9, max_gas_limit=2_000_000
     )
     assert ax_actions.gas_policy("treasury", ETHEREUM, limits)["max_gas_limit"] == 2_000_000
+
+
+POLYGON = ChainId("eip155:137")
+
+
+def policy_of(chain, limits) -> GasPolicy:
+    """The typed gas policy of a direct deployment, validated as its wire form is."""
+    document = {"name": "direct", **ax_actions.gas_policy("treasury", chain, limits)}
+    return GasPolicy.model_validate_json(json.dumps(document))
+
+
+def stated_limits(arguments) -> ax_actions.FeeLimits:
+    """The fee limits a parsed command hands to its deployment, with nothing read."""
+    seen = {}
+
+    def deployment(connector, request, action, wallet, provider, endpoint, limits, **options):
+        seen.update(limits=limits)
+        raise StopIteration
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ax_actions, "read_wallet", lambda directory: {})
+        patch.setattr(ax_actions, "transport", lambda args, chain: (None, "endpoint"))
+        patch.setattr(ax_actions, "deployment", deployment)
+        with pytest.raises(StopIteration):
+            ax_actions.command(arguments)
+    return seen["limits"]
+
+
+def test_a_stated_base_fee_multiplier_reaches_the_gas_policy():
+    stated = action_arguments("--chain", "eip155:1", "--base-fee-multiplier-bps", "10000")
+    limits = stated_limits(stated)
+    assert limits == ax_actions.FeeLimits(7, 9, None, 10000)
+    policy = policy_of(ETHEREUM, limits)
+    assert policy.base_fee_multiplier_bps == 10000
+    # Only the multiplier differs from the policy of a command without the flag.
+    default = ax_actions.gas_policy("treasury", ETHEREUM, ax_actions.FeeLimits(7, 9))
+    assert ax_actions.gas_policy("treasury", ETHEREUM, limits) == {
+        **default,
+        "base_fee_multiplier_bps": 10000,
+    }
+    assert policy.replacement is None
+
+
+def test_without_the_flag_the_gas_policy_is_the_chain_default_unchanged():
+    assert action_arguments("--chain", "eip155:1").base_fee_multiplier_bps is None
+    assert stated_limits(action_arguments("--chain", "eip155:1")) == ax_actions.FeeLimits(7, 9)
+    native = "eip155:137/slip44:966"
+    limits = ax_actions.FeeLimits(max_gas_price_wei=7, max_transaction_fee=9)
+    assert ax_actions.gas_policy("treasury", POLYGON, limits) == {
+        "accounts": ["treasury"],
+        "asset": native,
+        "source": "network_rpc_fee_history",
+        "base_fee_basis": "next_block",
+        "reward_percentile": 50,
+        "base_fee_multiplier_bps": 20000,
+        "max_gas_price_wei": 7,
+        "max_gas_limit": 1_200_000,
+        "max_transaction_fee": {"asset": native, "amount": 9},
+        "exit_reserve": {"asset": native, "amount": 0},
+        "gas_limit_buffer_bps": 2500,
+    }
+
+
+@pytest.mark.parametrize("value", ["9999", "50001", "0", "12500.5", "1e4", "-10000", "x", "²"])
+def test_a_base_fee_multiplier_outside_the_author_range_is_refused_before_any_read(
+    value, monkeypatch, capsys
+):
+    monkeypatch.setattr(ax_actions, "read_wallet", pytest.fail)
+    monkeypatch.setattr(ax_actions, "transport", pytest.fail)
+    with pytest.raises(SystemExit) as refusal:
+        action_arguments("--chain", "eip155:1", f"--base-fee-multiplier-bps={value}")
+    assert refusal.value.code == 2
+    error = capsys.readouterr().err
+    assert "--base-fee-multiplier-bps" in error
+    assert "expected a whole number of basis points from 10000 to 50000" in error
+
+
+def test_the_flag_takes_exactly_the_range_an_author_gas_policy_takes():
+    low, high = MIN_BASE_FEE_MULTIPLIER_BPS, MAX_BASE_FEE_MULTIPLIER_BPS
+    assert (low, high) == (10000, 50000)
+    for value in (low, high):
+        assert ax_actions.base_fee_multiplier_bps(str(value)) == value
+        limits = ax_actions.FeeLimits(7, 9, None, value)
+        policy_of(ETHEREUM, limits)
+    author = {
+        "accounts": ["treasury"],
+        "chain": "eip155:1",
+        "max_transaction_fee": "0.01",
+        "exit_reserve": "0",
+    }
+
+    def authored(value):
+        return GasInput.model_validate_json(
+            json.dumps({**author, "base_fee_multiplier_bps": value})
+        )
+
+    for value in (low, high):
+        assert authored(value).base_fee_multiplier_bps == value
+    for value in (low - 1, high + 1):
+        with pytest.raises(argparse.ArgumentTypeError):
+            ax_actions.base_fee_multiplier_bps(str(value))
+        with pytest.raises(ValidationError, match="base_fee_multiplier_bps"):
+            authored(value)
+        with pytest.raises(ValidationError, match="base_fee_multiplier_bps"):
+            policy_of(ETHEREUM, ax_actions.FeeLimits(7, 9, None, value))
+
+
+class FeeHistory:
+    """A reader that answers the one-block fee history a quote asks for."""
+
+    def __init__(self, block, base_fees, tip):
+        self.block, self.base_fees, self.tip = block, base_fees, tip
+
+    def _rpc(self, method, params):
+        assert method == "eth_feeHistory", method
+        return {
+            "oldestBlock": params[1],
+            "baseFeePerGas": [hex(fee) for fee in self.base_fees],
+            "reward": [[hex(self.tip)]],
+        }
+
+    def pin_block(self, number):
+        return self.block
+
+
+# Polygon at block 97834951: the block's base fee, the next block's, the median tip.
+BASE_FEE, NEXT_BASE_FEE, TIP = 248_595_418_034, 248_658_140_102, 78_000_000_000
+
+
+@pytest.mark.parametrize(
+    ("chain", "multiplier", "bid"),
+    [
+        # Without the flag: twice the next base fee plus the tip.
+        ("eip155:137", None, 575_316_280_204),
+        ("eip155:137", 20000, 575_316_280_204),
+        # The base fee itself plus the tip.
+        ("eip155:137", 10000, 326_658_140_102),
+        ("eip155:137", 12500, 388_822_675_128),
+        ("eip155:137", 50000, 1_321_290_700_510),
+        ("eip155:42161", None, 388_822_675_128),
+        ("eip155:42161", 10000, 326_658_140_102),
+    ],
+)
+def test_the_bid_is_the_base_fee_times_the_stated_multiplier_plus_the_tip(chain, multiplier, bid):
+    limits = ax_actions.FeeLimits(10**13, 10**18, None, multiplier)
+    policy = policy_of(ChainId(chain), limits)
+    block = Block(
+        chain=Chain(chain_id=ChainId(chain), environment="mainnet"),
+        number=97834950,
+        hash="0x" + "11" * 32,
+        timestamp=1795458000,
+    )
+    reader = FeeHistory(block, (BASE_FEE, NEXT_BASE_FEE), TIP)
+    price, quote = production_fees.quoted_price(reader, policy, block)
+    assert price == bid
+    assert (quote.market_base_fee, quote.priority_fee) == (NEXT_BASE_FEE, TIP)
+    if multiplier == 10000:
+        assert price == NEXT_BASE_FEE + TIP
+
+
+def test_a_lower_multiplier_lowers_the_bid_and_leaves_the_ceilings_as_stated():
+    block = Block(
+        chain=Chain(chain_id=POLYGON, environment="mainnet"),
+        number=97834950,
+        hash="0x" + "11" * 32,
+        timestamp=1795458000,
+    )
+    reader = FeeHistory(block, (BASE_FEE, NEXT_BASE_FEE), TIP)
+    ceiling = 330 * 10**9
+    for multiplier, admitted in ((None, False), (10000, True)):
+        limits = ax_actions.FeeLimits(ceiling, 10**18, None, multiplier)
+        policy = policy_of(POLYGON, limits)
+        assert policy.max_gas_price_wei == ceiling
+        price, _ = production_fees.quoted_price(reader, policy, block)
+        if admitted:
+            production_fees.validate_fee_limits(policy, 84_004, price)
+            continue
+        with pytest.raises(DataError, match="exceeds the configured price ceiling"):
+            production_fees.validate_fee_limits(policy, 84_004, price)
+
+
+def test_the_help_states_the_multiplier_its_range_and_the_stuck_step(capsys):
+    with pytest.raises(SystemExit):
+        action_arguments("--help")
+    text = " ".join(capsys.readouterr().out.split())
+    assert "--base-fee-multiplier-bps" in text
+    assert f"{MIN_BASE_FEE_MULTIPLIER_BPS} to {MAX_BASE_FEE_MULTIPLIER_BPS}" in text
+    assert f"{DEFAULT_BASE_FEE_MULTIPLIER_BPS}, or 12500 on Arbitrum and Robinhood Chain" in text
+    assert "the whole quoted price is paid" in text
+    assert "The ceilings apply unchanged" in text
+    assert "`ax recover` sends the same bytes again at the same price" in text

@@ -97,6 +97,9 @@ class FeeLimits:
     max_transaction_fee: int
     # None takes the gas limit an author's gas policy defaults to.
     max_gas_limit: int | None = None
+    # The share of the base fee a step bids, in basis points. None takes the chain's
+    # default of an author's gas policy. It moves the bid only, never a ceiling.
+    base_fee_multiplier_bps: int | None = None
 
 
 # The longest a step's observation may age before it is refused;
@@ -305,7 +308,12 @@ def production_backend(config, endpoint, wallet):
 
 def action_config(args, request, action, wallet, provider, endpoint):
     """The operator deployment a command's arguments state."""
-    limits = FeeLimits(args.max_gas_price_wei, args.max_transaction_fee, args.max_gas_limit)
+    limits = FeeLimits(
+        args.max_gas_price_wei,
+        args.max_transaction_fee,
+        args.max_gas_limit,
+        args.base_fee_multiplier_bps,
+    )
     public = args.public_rpc is not None
     return deployment(
         args.connector, request, action, wallet, provider, endpoint, limits, public=public
@@ -375,19 +383,26 @@ def configuration(connector: str, positions: dict, wallet, provider, chain, limi
 
 def gas_policy(account: str, chain, limits: FeeLimits) -> dict:
     """How a step bids, as an author's gas policy defaults on the chain; the ceilings
-    are the operator's own."""
+    are the operator's own, and so is a stated base fee multiplier.
+
+    The policy is retained with the deployment in the action's record. It names no
+    replacement, so a signed step keeps its price: recovery sends the same bytes.
+    """
     from almanak.chains import evm_network
     from almanak.configuration import gas
 
     native = str(evm_network(chain).native_asset)
     scope = {"chain": str(chain)}
+    multiplier = limits.base_fee_multiplier_bps
     return {
         "accounts": [account],
         "asset": native,
         "source": "network_rpc_fee_history",
         "base_fee_basis": gas.chain_base_fee_basis(scope),
         "reward_percentile": gas.DEFAULT_REWARD_PERCENTILE,
-        "base_fee_multiplier_bps": gas.chain_multiplier(scope),
+        "base_fee_multiplier_bps": (
+            gas.chain_multiplier(scope) if multiplier is None else multiplier
+        ),
         "max_gas_price_wei": limits.max_gas_price_wei,
         "max_gas_limit": limits.max_gas_limit or gas.DEFAULT_MAX_GAS_LIMIT,
         "max_transaction_fee": {"asset": native, "amount": limits.max_transaction_fee},
@@ -1020,6 +1035,18 @@ def arguments(commands, lending_source) -> None:
             " (default: an author gas policy's own, 1200000)",
         )
         action.add_argument(
+            "--base-fee-multiplier-bps",
+            type=base_fee_multiplier_bps,
+            help="the share of the base fee a step bids, in basis points, 10000 to 50000:"
+            " the quoted gas price is the base fee times this, plus the tip (default: an"
+            " author gas policy's own on the chain, 20000, or 12500 on Arbitrum and"
+            " Robinhood Chain). Steps are legacy transactions, so outside those two chains"
+            " the whole quoted price is paid. The ceilings apply unchanged. A bid closer to"
+            " the base fee can wait longer, or stay unmined when the base fee rises: the"
+            " signed step then stays pending, and `ax recover` sends the same bytes again"
+            " at the same price",
+        )
+        action.add_argument(
             "--execute",
             action="store_true",
             help="sign and send; without it the first step is planned and nothing is signed",
@@ -1138,6 +1165,23 @@ def slippage_bps(value: str) -> int:
     # 10000 would accept any output at all, which the allocation model refuses.
     if not (value.isascii() and value.isdigit()) or not 1 <= int(value) <= 9999:
         raise argparse.ArgumentTypeError("expected 1 to 9999 basis points")
+    return int(value)
+
+
+def base_fee_multiplier_bps(value: str) -> int:
+    """A base fee multiplier within the range an author's gas policy takes."""
+    import argparse
+
+    from almanak.gateway.production_config import (
+        MAX_BASE_FEE_MULTIPLIER_BPS,
+        MIN_BASE_FEE_MULTIPLIER_BPS,
+    )
+
+    low, high = MIN_BASE_FEE_MULTIPLIER_BPS, MAX_BASE_FEE_MULTIPLIER_BPS
+    if not (value.isascii() and value.isdigit()) or not low <= int(value) <= high:
+        raise argparse.ArgumentTypeError(
+            f"expected a whole number of basis points from {low} to {high}"
+        )
     return int(value)
 
 

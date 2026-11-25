@@ -8,7 +8,12 @@ from almanak.caip import ChainId
 from almanak.configuration.input_values import Duration, Quantity, resolve_quantity
 from almanak.gateway.evm import native_metadata
 from almanak.gateway.operator_config import Name
-from almanak.gateway.production_config import GasPolicy, Positive, ReplacementPolicy
+from almanak.gateway.production_config import (
+    BaseFeeMultiplierBps,
+    GasPolicy,
+    Positive,
+    ReplacementPolicy,
+)
 from almanak.models import AssetAmount, Model, UInt
 
 
@@ -86,9 +91,7 @@ class GasInput(Model):
     source: Literal["network_rpc_fee_history"] = "network_rpc_fee_history"
     base_fee_basis: BaseFeeBasis = Field(default_factory=chain_base_fee_basis)
     reward_percentile: Annotated[UInt, Field(le=100)] = DEFAULT_REWARD_PERCENTILE
-    base_fee_multiplier_bps: Annotated[UInt, Field(ge=10000, le=50000)] = Field(
-        default_factory=chain_multiplier
-    )
+    base_fee_multiplier_bps: BaseFeeMultiplierBps = Field(default_factory=chain_multiplier)
     max_gas_limit: Positive = DEFAULT_MAX_GAS_LIMIT
     max_transaction_fee: Quantity
     # After the fee and the limit, which its default reads. Zero is refused below,
