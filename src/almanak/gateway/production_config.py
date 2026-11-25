@@ -10,7 +10,7 @@ from almanak.gateway.providers import Provider
 from almanak.models import Account, AssetAmount, Chain, Eoa, Model, SafeRoles, UInt
 
 Positive = Annotated[UInt, Field(gt=0, lt=2**256)]
-# The share of the base fee a bid may state, in basis points: the base fee itself up to
+# The multiple of the base fee a bid may state, in basis points: the base fee itself up to
 # five times it. An author gas policy and a direct action's flag take the same range.
 MIN_BASE_FEE_MULTIPLIER_BPS = 10000
 MAX_BASE_FEE_MULTIPLIER_BPS = 50000

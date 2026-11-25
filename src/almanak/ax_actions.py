@@ -97,7 +97,7 @@ class FeeLimits:
     max_transaction_fee: int
     # None takes the gas limit an author's gas policy defaults to.
     max_gas_limit: int | None = None
-    # The share of the base fee a step bids, in basis points. None takes the chain's
+    # The multiple of the base fee a step bids, in basis points. None takes the chain's
     # default of an author's gas policy. It moves the bid only, never a ceiling.
     base_fee_multiplier_bps: int | None = None
 
@@ -1037,7 +1037,7 @@ def arguments(commands, lending_source) -> None:
         action.add_argument(
             "--base-fee-multiplier-bps",
             type=base_fee_multiplier_bps,
-            help="the share of the base fee a step bids, in basis points, 10000 to 50000:"
+            help="the multiple of the base fee a step bids, in basis points, 10000 to 50000:"
             " the quoted gas price is the base fee times this, plus the tip (default: an"
             " author gas policy's own on the chain, 20000, or 12500 on Arbitrum and"
             " Robinhood Chain). Steps are legacy transactions, so outside those two chains"

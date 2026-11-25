@@ -606,17 +606,26 @@ refund the rest of the bid.
 `--base-fee-multiplier-bps` states the multiple of the base fee in that quote, in
 basis points, within the range an author's `base_fee_multiplier_bps` takes: 10000,
 the base fee itself, to 50000. Without it the chain's default applies, 20000 or
-12500 as above. With 10000 the quoted price is the base fee plus the tip. Nothing
+12500 as above. With 10000 the quoted price is the base fee plus the tip; on
+Avalanche that base fee is the observed block's, so the bid can already be below
+the next block's. Nothing
 else in the quote changes: the tip, the gas limit and its buffer stay, on BNB the
 node's `eth_gasPrice` still floors the price, and both ceilings apply as before. On
 Base and Optimism the same multiple also margins the L1 data fee a step is admitted
-against under `--max-transaction-fee`; that margin is reserved, never paid.
+against under `--max-transaction-fee`; that margin is reserved, never paid. At
+10000 it is zero over the pinned L1 fee, so the L1 fee paid can exceed what the
+ceiling admitted.
 
 A bid closer to the base fee can wait longer, and can stay unmined when the base fee
 rises above it. A direct command never replaces a step at a higher price. The signed
 step then stays pending and its record is kept; `ax recover` sends the same signed
-bytes again at the same price and does not re-price them. The multiplier is kept in
-the record with the rest of the action's gas policy.
+bytes again at the same price and does not re-price them. While it is pending the
+wallet stays claimed and every later direct action for it is refused. On Polygon and
+HyperEVM, which state no finality margin, using the step's nonce for another
+transaction does not release it either (see
+[A step whose nonce was used](#a-step-whose-nonce-was-used)), so there the wallet
+waits until the base fee falls back to the bid. The multiplier is kept in the record
+with the rest of the action's gas policy.
 
 | Option | Meaning |
 | --- | --- |
