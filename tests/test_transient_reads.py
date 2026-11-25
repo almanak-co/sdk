@@ -448,7 +448,7 @@ def answering(failures, client="Geth/v1.16.0"):
             failure = failures.pop(0)
             if isinstance(failure, Exception):
                 raise failure
-            return httpx.Response(failure)
+            return failure if isinstance(failure, httpx.Response) else httpx.Response(failure)
         answer = {"jsonrpc": "2.0", "id": body["id"], "result": results[body["method"]]}
         return httpx.Response(200, json=answer)
 
@@ -463,8 +463,8 @@ def answering(failures, client="Geth/v1.16.0"):
 
 @pytest.mark.parametrize(
     "failure",
-    [httpx.ConnectError("refused"), httpx.ReadTimeout("slow"), 503, 429],
-    ids=["connection", "timeout", "http_503", "http_429"],
+    [httpx.ConnectError("refused"), httpx.ReadTimeout("slow"), 503, 429, 408],
+    ids=["connection", "timeout", "http_503", "http_429", "http_408"],
 )
 def test_the_client_version_read_is_sent_again_after_a_transient_failure(no_backoff, failure):
     reader, sent = answering([failure])
@@ -472,7 +472,7 @@ def test_the_client_version_read_is_sent_again_after_a_transient_failure(no_back
     assert sent == ["web3_clientVersion"] * 2 and len(no_backoff) == 1
 
 
-@pytest.mark.parametrize("failure", [httpx.ConnectError("refused"), 503, 429])
+@pytest.mark.parametrize("failure", [httpx.ConnectError("refused"), 503, 429, 408])
 def test_a_client_version_read_that_keeps_failing_is_raised_transient(no_backoff, failure):
     reader, sent = answering([failure] * 20)
     with pytest.raises(DataError) as raised:
@@ -483,6 +483,60 @@ def test_a_client_version_read_that_keeps_failing_is_raised_transient(no_backoff
     with pytest.raises(DataError) as final:
         refused._rpc("web3_clientVersion", [])
     assert final.value.kind == "http" and not final.value.transient and len(sent) == 1
+
+
+def test_a_request_timeout_answer_is_a_provider_fault_like_a_5xx(no_backoff):
+    """HTTP 408: the server gave up waiting for the request, so a repeat may pass."""
+    kept = {}
+    for status in (408, 503):
+        reader, sent = answering([status] * 20)
+        with pytest.raises(ethereum.ProviderFault) as raised:
+            reader._rpc("web3_clientVersion", [])
+        kept[status] = (raised.value.kind, raised.value.code, raised.value.transient, len(sent))
+        assert str(raised.value) == f"web3_clientVersion: HTTP {status}"
+    assert kept[408] == kept[503] and kept[408][:3] == ("http", None, True) and kept[408][3] > 1
+
+
+JSON_RPC_REFUSAL = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "too wide"}}
+
+
+@pytest.mark.parametrize(
+    ("answer", "code"),
+    [
+        (httpx.Response(400), None),
+        # Providers refuse a read with HTTP 400 and a JSON-RPC error; callers read the code.
+        (httpx.Response(400, json=JSON_RPC_REFUSAL), -32602),
+        (httpx.Response(401), None),
+        (httpx.Response(403), None),
+        (httpx.Response(404), None),
+        (httpx.Response(410), None),
+        (httpx.Response(302, headers={"location": "https://elsewhere.invalid"}), None),
+        (httpx.Response(405), None),
+        (httpx.Response(413), None),
+        (httpx.Response(425), None),
+        (httpx.Response(451), None),
+    ],
+    ids=[
+        "http_400",
+        "http_400_json_rpc",
+        "http_401",
+        "http_403",
+        "http_404",
+        "http_410",
+        "http_302",
+        "http_405",
+        "http_413",
+        "http_425",
+        "http_451",
+    ],
+)
+def test_every_other_4xx_answer_is_final_and_sent_once(no_backoff, answer, code):
+    reader, sent = answering([answer] * 20)
+    with pytest.raises(DataError) as final:
+        reader._rpc("web3_clientVersion", [])
+    assert not isinstance(final.value, ethereum.ProviderFault)
+    assert (final.value.kind, final.value.code, final.value.transient) == ("http", code, False)
+    assert sent == ["web3_clientVersion"] and no_backoff == []
 
 
 def test_the_production_guard_passes_when_its_client_version_read_fails_once(no_backoff):
