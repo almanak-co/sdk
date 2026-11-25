@@ -278,11 +278,12 @@ def test_the_author_file_names_a_destination_account_on_the_destination_chain():
         parse_inputs(document(destination_account="nowhere"))
 
 
-def test_the_connector_declares_fork_runs_and_backtests_for_the_proven_source_chain_only():
+def test_the_connector_declares_every_run_mode_for_the_proven_source_chain_only():
     binding = connector_from_wire({"connector": "across"})
     assert connector_for(CONFIG).codec.checkpoint is binding.codec.checkpoint
     source, destination = binding.support_for(ARBITRUM.chain_id), binding.support_for(BASE.chain_id)
-    assert (source.modes, destination.modes) == ((RunMode.FORK, RunMode.BACKTEST), ())
+    declared = (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST)
+    assert (source.modes, destination.modes) == (declared, ())
     (historical,) = source.historical
     # The model keeps no approval, so the historical declaration lists no revoke.
     assert historical.actions == (EconomicAction.BRIDGE,) and not destination.historical
@@ -294,8 +295,13 @@ def test_the_connector_declares_fork_runs_and_backtests_for_the_proven_source_ch
     with pytest.raises(ValueError, match="fork is unsupported"):
         binding.require_target(BASE.chain_id, TARGET, RunMode.FORK)
     binding.require_target(ARBITRUM.chain_id, TARGET, RunMode.BACKTEST, model=historical.model)
+    # Production is declared for EOA accounts on the chain a bridge leaves, and no other.
+    binding.require_target(ARBITRUM.chain_id, TARGET, RunMode.PRODUCTION, account_profile="eoa")
+    with pytest.raises(ValueError, match="unsupported"):
+        binding.require_target(
+            ARBITRUM.chain_id, TARGET, RunMode.PRODUCTION, account_profile="safe_roles"
+        )
     for chain, mode in (
-        (ARBITRUM.chain_id, RunMode.PRODUCTION),
         (BASE.chain_id, RunMode.PRODUCTION),
         (BASE.chain_id, RunMode.BACKTEST),
     ):

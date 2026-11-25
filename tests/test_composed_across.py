@@ -574,15 +574,29 @@ def test_inventory_is_conserved_over_every_sequence_of_settlements(config, fates
     refunded(config, source, source.head + 2, [5], tx="0x" + "d0" * 32)
     state = settle(state, source)
     conserved(state)
+    # So is a payment the SpokePool made in another amount than its leaf names, even
+    # where the leaf names exactly what a waiting transfer sent.
+    refunded(config, source, source.head + 2, [AMOUNT], payments=[AMOUNT - 1], tx="0x" + "d3" * 32)
+    state = settle(state, source)
+    conserved(state)
+    assert inventory(state)[SOURCE] == 0
+    strays = [p.amount.amount for page in state.external_scans for p in page.unsolicited]
+    # A refund is read only while a transfer is proven unfilled.
+    assert strays == ([5, AMOUNT - 1] if "refund" in fates else [])
     refunds = fates.count("refund")
     if refunds:
         # "wait" transfers were proven unfilled too; the leaf pays only the refunded ones.
-        refunded(config, source, source.head + 2, [refunds * AMOUNT])
+        # A second stranger's payment shares the refund's block, ahead of it in log order.
+        number = source.head + 2
+        refunded(config, source, number, [7], tx="0x" + "d4" * 32)
+        refunded(config, source, number, [refunds * AMOUNT])
         held(state, FORK_ARB, SOURCE, "owe", refunds * AMOUNT)
         state = settle(state, source)
         held(state, FORK_ARB, SOURCE, "owe", refunds * AMOUNT)
         conserved(state)
         assert inventory(state)[SOURCE] == refunds * AMOUNT
+        last = state.external_scans[-1]
+        assert [p.amount.amount for p in last.unsolicited] == [7] and last.outcome is not None
     assert inventory(state)[DESTINATION] == arrived * OFFERED
 
 
@@ -680,65 +694,57 @@ def test_a_fork_workspace_provisions_an_account_that_only_receives():
     assert [f.account for f in destination.funds] == ["base"] and destination.allocations == ()
 
 
-def test_the_composed_bridge_reference_stays_out_of_the_production_rehearsal():
-    from tests.strategy_fork.rehearsal import declares_production, production_references
-
-    # Across declares no production support, so no market scope of this reference does.
-    assert not declares_production("arbitrum_base_bridge_and_lend")
-    assert "arbitrum_base_bridge_and_lend" not in production_references()
-
-
-def test_the_declaration_and_a_qualifying_run_select_the_bridge_references(monkeypatch):
-    """Two edits put a bridge reference into the production rehearsal: the source chain's
-    declaration, and leaving UNREHEARSED after a hosted run rehearsed it. The switch
-    alone selects neither for the default rehearsal; the hosted qualification names
-    them as its own subjects."""
+def test_both_bridge_references_are_in_the_production_rehearsal_and_the_weekly_matrix():
+    """The source chain declares production, so both references are rehearsed by default
+    and the hosted qualification holds their cell. The destination chain declares
+    nothing, so it is no cell and owes no reference."""
     from almanak.connectors.across import support
-    from almanak.connectors.support import RunMode
     from scripts.ci import fork_qualification_matrix as matrix
     from tests.strategy_fork import rehearsal
 
     bridges = {"across_usdc_arbitrum_base_bridge", "arbitrum_base_bridge_and_lend"}
-    cell = ("across", "eip155:42161")
-    assert bridges <= rehearsal.UNREHEARSED and support.PRODUCTION_SOURCES == ()
-    assert not bridges & set(rehearsal.production_references())
-    assert cell not in matrix.production_references()
-    with pytest.raises(ValueError, match="no production EOA support declared"):
-        rehearsal.production_references(frozenset(bridges))
-
-    monkeypatch.setattr(support, "PRODUCTION_SOURCES", support.FORK_SOURCES)
-    # The switch alone: declared, and still not in the default rehearsal selection.
+    assert support.PRODUCTION_SOURCES == support.FORK_SOURCES
+    assert not bridges & rehearsal.UNREHEARSED
     assert all(rehearsal.declares_production(name) for name in bridges)
-    assert not bridges & set(rehearsal.production_references())
-    assert bridges <= set(rehearsal.production_references(frozenset(bridges)))
+    assert bridges <= set(rehearsal.production_references())
     weekly = matrix.production_references()
-    assert set(weekly[cell]) == bridges
-    # The destination chain declares nothing, so it is no cell and owes no reference.
+    assert set(weekly[("across", "eip155:42161")]) == bridges
     assert ("across", "eip155:8453") not in weekly
     entries = matrix.matrix(sorted(bridges), rehearsal=True, lifecycle=False)
-    assert all(entry["rehearsal"] and entry["qualify"] and entry["nodes"] for entry in entries)
+    assert all(entry["rehearsal"] and entry["nodes"] for entry in entries)
 
-    # The printed support row is coherent with the modes it now declares.
-    source, destination = support.candidate_support()
-    assert source.modes == (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST)
-    text = " | ".join(source.restrictions)
-    assert "fork runs, production runs and economic backtests only" in text
-    assert "no production run" not in text and "backtests only, as" in text
-    assert "a production run signs the venue's own quote" in text
-    assert "a fork run asks no venue" in text
-    assert destination.modes == () and "no run mode" in " | ".join(destination.restrictions)
-    # Once rehearsed and removed from the list, the default selection holds both.
-    monkeypatch.setattr(rehearsal, "UNREHEARSED", rehearsal.UNREHEARSED - bridges)
-    assert bridges <= set(rehearsal.production_references())
+
+def test_without_the_declaration_no_bridge_reference_is_rehearsed(monkeypatch):
+    """The declaration alone selects them: with it withdrawn, neither is a production
+    reference and the cell leaves the weekly matrix."""
+    from almanak.connectors.across import support
+    from scripts.ci import fork_qualification_matrix as matrix
+    from tests.strategy_fork import rehearsal
+
+    monkeypatch.setattr(support, "PRODUCTION_SOURCES", ())
+    bridges = {"across_usdc_arbitrum_base_bridge", "arbitrum_base_bridge_and_lend"}
+    assert not any(rehearsal.declares_production(name) for name in bridges)
+    assert not bridges & set(rehearsal.production_references())
+    assert ("across", "eip155:42161") not in matrix.production_references()
 
 
 def test_the_support_row_states_the_modes_it_declares_and_no_other(monkeypatch):
     from almanak.connectors.across import support
+    from almanak.connectors.support import RunMode
 
-    source, _ = support.candidate_support()
+    source, destination = support.candidate_support()
+    assert source.modes == (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST)
     text = " | ".join(source.restrictions)
-    assert "fork runs and economic backtests only" in text and "no production run" in text
-    assert "a production run" not in text
+    assert "fork runs, production runs and economic backtests only" in text
+    assert "no production run" not in text
+    assert "a production run signs the venue's own quote" in text
+    assert "a fork run asks no venue" in text and "a backtest models" in text
+    assert destination.modes == () and "no run mode" in " | ".join(destination.restrictions)
+    # Each mode's sentence follows its declaration and nothing else.
+    monkeypatch.setattr(support, "PRODUCTION_SOURCES", ())
+    without = " | ".join(support.candidate_support()[0].restrictions)
+    assert "fork runs and economic backtests only" in without and "no production run" in without
+    assert "a production run" not in without
     monkeypatch.setattr(support, "BACKTEST_STARTS", {})
     alone = " | ".join(support.candidate_support()[0].restrictions)
     assert "fork runs only, as the source of a route to eip155:8453; no production run" in alone

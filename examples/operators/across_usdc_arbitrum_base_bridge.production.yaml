@@ -1,0 +1,71 @@
+# Operator execution context for a production run of strategies/across_usdc_arbitrum_base_bridge.
+# Provider credentials stay in the selected --env-file. The account bindings are
+# placeholders: a production run requires reviewed bindings and signing files outside
+# strategy-readable paths. Both accounts are plain EOAs, because Across deposits are
+# supported from an EOA only. The sending account signs and pays gas on Arbitrum. The
+# receiving account on Base signs nothing in this strategy; it still has an execution
+# network and a payer ceiling, as every bound account does, and spends none of it. The
+# production gateway asks Across's own quote API for each deposit; an optional key is
+# read from ALMANAK_ACROSS_API_KEY in the gateway's environment.
+schema_version: operator-gateway-config-v1
+modes:
+- production
+networks:
+- chain: eip155:42161
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+- chain: eip155:8453
+  provider:
+    kind: alchemy
+    api_key_env: ALCHEMY_API_KEY
+accounts:
+  bindings:
+  - name: arbitrum_fund
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:42161
+          environment: mainnet
+        address: '0x1111111111111111111111111111111111111111'
+  - name: base_fund
+    profile:
+      kind: eoa
+      fund:
+        chain:
+          chain_id: eip155:8453
+          environment: mainnet
+        address: '0x2222222222222222222222222222222222222222'
+production:
+  networks:
+  - chain: eip155:42161
+    max_observation_age_seconds: 180
+  - chain: eip155:8453
+    max_observation_age_seconds: 180
+  payers:
+  - accounts:
+    - arbitrum_fund
+    max_gas_price_wei: 150000000
+    max_gas_limit: 1000000
+    max_transaction_fee:
+      asset: eip155:42161/slip44:60
+      amount: 150000000000000
+    total_budget:
+      asset: eip155:42161/slip44:60
+      amount: 600000000000000
+    allow_replacement: false
+  - accounts:
+    - base_fund
+    max_gas_price_wei: 150000000
+    max_gas_limit: 1000000
+    max_transaction_fee:
+      asset: eip155:8453/slip44:60
+      amount: 160000000000000
+    total_budget:
+      asset: eip155:8453/slip44:60
+      amount: 160000000000000
+    allow_replacement: false
+  signing:
+    key_file: /private/operator/keystores.json
+    password_file: /private/operator/keystore-password

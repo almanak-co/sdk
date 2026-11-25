@@ -384,12 +384,14 @@ independently.
   it leaves. Across is the first connector. It plans, signs and reconciles the
   deposit on the source chain and opens the transfer, and reconciles its arrival
   on the destination chain and its refund on the source chain.
-- Current contract: Across declares fork mode and economic backtests on
-  Arbitrum only, for EOA accounts, as the source of a route to Base. Base
-  declares no run mode: no reference lifecycle sends from it and no fork refund
-  is defined there, so it is a destination only. No chain declares production.
-  The declaration follows the chain a bridge leaves; the destination chain
-  needs only its pinned SpokePool and a bound account.
+- Current contract: Across declares fork mode, production and economic
+  backtests on Arbitrum only, for EOA accounts, as the source of a route to
+  Base. Base declares no run mode: no reference lifecycle sends from it and no
+  fork refund is defined there, so it is a destination only. The declaration
+  follows the chain a bridge leaves; the destination chain needs only its
+  pinned SpokePool and a bound account. The production declaration is ahead of
+  the cell's evidence package; its open gates are listed at the end of this
+  section.
 - Current contract: the reference is
   `strategies/across_usdc_arbitrum_base_bridge`. Its supervised fork proofs
   cover the arrival with a pause and resume, the refund after the destination
@@ -401,7 +403,7 @@ independently.
   around the real commit and the connector's reader over a fake chain record
   the arrival once, with the same page. It is unproven at the supervised level,
   where the commands expose no fault point and no process is killed there.
-- Proposed, not accepted: the fork quote. A gateway declares, by venue name,
+- Accepted: the fork quote. A gateway declares, by venue name,
   the transports its environment lets a connector ask a venue through. The
   production gateway declares what the connector states for production, which
   for Across is the venue's API, and takes no other. A fork gateway declares
@@ -579,7 +581,7 @@ independently.
   An arrival below the offer is a measurement.
 - Current contract: `fillStatuses` is a cross-check only. A fill needs a
   filled status, and a filled status with no fill in the scanned pages halts.
-- Proposed, not accepted: the page rule. An arrival scan starts at the last
+- Accepted: the page rule. An arrival scan starts at the last
   destination block not after the quote's timestamp, and a refund scan at the
   last source block not after the earliest fill deadline among the transfers
   proven unfilled. Nothing is read before the head has passed that time. Later
@@ -588,7 +590,7 @@ independently.
   outcome or an unattributed payment, or ends an arrival scan past the fill
   deadline; a shorter empty page is read again. The gateway re-derives every
   page before it is recorded.
-- Proposed, not accepted: the unfilled proof. A refund alone does not show
+- Accepted: the unfilled proof. A refund alone does not show
   that a transfer was not delivered. The destination chain proves a transfer
   unfilled when its arrival scan has committed contiguous pages past the fill
   deadline with no fill, and records that on the transfer; only the
@@ -601,16 +603,16 @@ independently.
   wait, and the source chain keeps working. The refund scan also waits while
   its page would pass the fill deadline of a transfer of the same allocation
   that is in flight and not yet proven unfilled.
-- Proposed, not accepted: the refund attribution and tie rule. A payment of
-  the sent asset from the SpokePool to the fund counts only in a transaction
-  whose `ExecutedRelayerRefundRoot` leaves name the fund for that asset with
-  the same amounts. Its total is attributed to a set of the allocation's
-  transfers proven unfilled, past their fill deadline at that block, whose
-  sent amounts sum to it exactly. Sets of equal sum are interchangeable, so
-  the one with the oldest fill deadlines is taken, then the lowest references.
-  Consequence: a foreign payment of an equal amount can resolve a transfer,
-  and that transfer's own later refund is then the unattributed one. The
-  totals stay right.
+- Accepted: the refund attribution and tie rule. A payment of the sent asset
+  from the SpokePool to the fund counts only in a transaction whose
+  `ExecutedRelayerRefundRoot` leaves name the fund for that asset with the
+  same amounts, entry by entry. Its total is attributed to a set of the
+  allocation's transfers proven unfilled, past their fill deadline at that
+  block, whose sent amounts sum to it exactly. Sets of equal sum are
+  interchangeable, so the one with the oldest fill deadlines is taken, then
+  the lowest references. Consequence: a foreign payment of an equal amount can
+  resolve a transfer, and that transfer's own later refund is then the
+  unattributed one. The totals stay right.
 - Proposed, not accepted: unsolicited inflow. Anyone can deposit naming the
   fund as depositor and let it expire. A refund-leaf payment that matches no
   set is retained in its committed page with its transaction and amount,
@@ -620,8 +622,26 @@ independently.
   dust would then freeze a strategy.
 - Proposed, not accepted: attribution considers the 12 oldest transfers proven
   unfilled of an allocation.
-- Proposed, not accepted: two refund payments to one fund in one block stop
-  the source chain with an ordering cause.
+- Accepted: several refund payments to one fund in one block are settled in
+  that block's page, in the block's own log order, and stop nothing. Each takes
+  its set from the transfers still waiting after the payments before it, so
+  none takes a transfer another paid. The page's one refund outcome names the
+  first attributed transaction, retains the receipts of the others, resolves
+  every transfer they pay and returns their sum. A payment of the block that
+  matches no set is an unattributed refund payment.
+- Accepted: a refund transaction whose leaves name the fund for other amounts
+  than the SpokePool paid it there is reported and attributed to nothing. It
+  is retained in its committed page with its transaction, the paid amount and
+  the leaf amount, listed in reports and dashboards as an unattributed refund
+  payment with both amounts, and the scan continues. It is no outcome and
+  raises no accounting issue. Nothing is credited: the paid tokens are in the
+  fund's wallet and in no inventory. Consequence, shared with every
+  unattributed payment: a transfer whose refund arrived this way stays proven
+  unfilled and open, so its deployment does not close. The report lists such
+  transfers under `awaiting_refund` and says that no unattributed payment is
+  ever applied. No command resolves the transfer; the operator runs teardown,
+  which unwinds everything else, and the fund's owner moves the paid tokens.
+  Resolving a transfer by an operator's statement is not built.
 - Current contract: an allocation is the only Across allocation of its source
   fund and sent asset. A second one is refused at configuration.
 - Current contract: a refund the SpokePool deferred because its transfer
@@ -720,7 +740,7 @@ independently.
 - Proposed, not accepted: the composed fork keeper used by `almanak test` runs
   settles a composed deployment's transfers in flight beside GMX requests. It
   is covered at component level only; no fork run exercises it.
-- Proposed, not accepted: the venue answer rule. A venue's answer is not
+- Accepted: the venue answer rule. A venue's answer is not
   block-addressable: asked twice, the venue names another relayer, amount or
   time. The gateway verifies a reserved plan by preparing it again, so it keeps
   its own answer in memory, by venue, decision, pinned block, target and
@@ -733,7 +753,9 @@ independently.
   nothing. A refused answer is retained for its block like any other; a
   transport failure is never retained. Without this rule no deposit quoted by
   the venue's API can be recorded. The answer is not authority and is never
-  durable state.
+  durable state. This is the one fact the gateway keeps in memory between two
+  calls of one decision; an operator who restarts the gateway in that window
+  resumes the run.
 - Current contract: the readers are held to known answers from Arbitrum and
   Base mainnet, captured read-only on 24 November 2026 and kept in
   `tests/fixtures/across-mainnet-captures.json`: a venue answer parsed and
@@ -750,24 +772,32 @@ independently.
   searched, so a slow fill is proven against constructed logs only.
 - Current contract: the production EOA rehearsal has an in-process fixture
   for a standalone bridge: one fork per chain of the route and one funded EOA
-  per named account. Both bridge references are listed in
-  `tests/strategy_fork/rehearsal.py::UNREHEARSED`, and `PRODUCTION_SOURCES` in
-  the connector's support declaration is empty. Declaring the source chain
-  selects them for the hosted Fork Qualification as its own subjects; they join
-  the default rehearsal selection only when a hosted run has rehearsed them and
-  they leave that list. No rehearsal of either is retained or hosted.
-- Proposed, not accepted: a rehearsed bridge asks the venue's live API, as the
-  production gateway does, with the fixture's public test addresses. The
-  forks' clocks are moved ten minutes ahead of the present first: the venue
-  stamps a quote some minutes behind the present, a fork mines only when the
-  run sends, and the gateway refuses a quote stamped after its pinned block.
-  The fill is the fixture relayer's, and a refund is not rehearsed. A hosted
-  rehearsal then depends on the venue's API answering.
-- Not built, and required before Across declares production: a recent-window
-  rule, without which `backtest recent` refuses a bridge with
-  `unsupported_connector`; a claim for a deferred refund; and the cell's
-  evidence package. Every rule above marked proposed is one the declaration
-  would rest on.
+  per named account. Both bridge references are in the default rehearsal
+  selection and are subjects of the hosted Fork Qualification for the cell
+  `across` on `eip155:42161`.
+- Accepted: a rehearsed bridge asks the venue's live API, as the production
+  gateway does, with the fixture's public test addresses. The forks' clocks
+  are moved ten minutes ahead of the present first: the venue stamps a quote
+  some minutes behind the present, a fork mines only when the run sends, and
+  the gateway refuses a quote stamped after its pinned block. The fill is the
+  fixture relayer's, and a refund is not rehearsed. A rehearsal, local or
+  hosted, therefore depends on the venue's API answering: an outage or a
+  refused request fails the run, and a failed run is not proof of support.
+- Open gates of the production cell `across` on `eip155:42161`, none of which
+  may be described as complete: no hosted Fork Qualification run has rehearsed
+  either reference; no reverse-fault case exists for the cell, so a hosted
+  cell QA run reports that gap and does not pass; the recovery-foundation
+  nodes, the global offline and CRAP gates over retained evidence, and the
+  evidence review are open; a refund and a slow fill have been measured
+  against constructed logs only, never against a transfer of this repository
+  on mainnet; no gas reference exists for an EOA bridge, so `almanak check`
+  compares a bridge's gas with nothing; and no mainnet transaction of this
+  connector has been sent.
+- Not built: a recent-window rule, without which `backtest recent` refuses a
+  bridge with `unsupported_connector`; a claim for a deferred refund, which
+  stops the source chain as unresolved; and an operator's resolution of a
+  transfer whose refund was paid unattributed. The rules above still marked
+  proposed are ones the production declaration rests on.
 
 ## Hyperliquid
 
@@ -948,8 +978,10 @@ independently.
   cell that declares production support, with the Safe/Roles lifecycle and the
   production EOA rehearsal. An empty selection or a declared cell no reference
   exercises fails the run. It uses identified Anvil forks and public Foundry
-  test keys only. A failed run is not proof of support, and a passing run does
-  not complete a cell's evidence package.
+  test keys only. Accepted exception: the rehearsal of an Across bridge asks
+  the venue's live quote API, keyless and with public test addresses, so a
+  venue outage fails that run. A failed run is not proof of support, and a
+  passing run does not complete a cell's evidence package.
 - The daily QA bench derives required coverage from connector declarations.
   Missing proofs, skipped required tests and unavailable providers never
   produce a green run. See `docs/qa.md`.

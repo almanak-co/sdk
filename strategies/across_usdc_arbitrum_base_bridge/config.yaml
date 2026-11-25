@@ -15,6 +15,45 @@ strategy:
       destination_account: base_fund
       capital: '100'
       minimum_native_balance: '0.0001'
+  gas:
+    # Arbitrum One values; gas ceilings are chain-specific, never copy them to another chain.
+    # A bridge takes 2 transactions, an approval and the deposit, and teardown at most 1,
+    # a revoke of an approval whose deposit was never mined:
+    # max_transaction_fee >= max_gas_limit x max_gas_price_wei;
+    # exit_reserve >= 1 fee; total_budget >= 2 entry fees + exit_reserve.
+    # Every bound account has a policy. The receiving account on Base signs nothing
+    # in this strategy, so its policy is a ceiling that is never spent.
+    arbitrum_payer:
+      accounts:
+      - arbitrum_fund
+      chain: eip155:42161
+      source: network_rpc_fee_history
+      reward_percentile: 50
+      base_fee_multiplier_bps: 12500
+      max_gas_price_wei: 150000000
+      max_gas_limit: 1000000
+      max_transaction_fee:
+        base_units: 150000000000000
+      total_budget:
+        base_units: 600000000000000
+      exit_reserve:
+        base_units: 150000000000000
+    # Base (OP Stack) values.
+    base_payer:
+      accounts:
+      - base_fund
+      chain: eip155:8453
+      source: network_rpc_fee_history
+      reward_percentile: 50
+      base_fee_multiplier_bps: 20000
+      max_gas_price_wei: 150000000
+      max_gas_limit: 1000000
+      max_transaction_fee:
+        base_units: 160000000000000
+      total_budget:
+        base_units: 160000000000000
+      exit_reserve:
+        base_units: 0
 markets:
   # One direction. Bridging back is another market.
   usdc_to_base:
