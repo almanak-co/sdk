@@ -41,14 +41,17 @@ slippage of the price the command decided at, and does not send it once the pric
 left the slippage around the planned price; those two are its own checks, not the
 chain's.
 
-Each step approves Permit2 for exactly that most of a token as its own observation
-gives it, and gives the PositionManager a Permit2 allowance of it that expires at the
-mint's deadline. An approval mined at an earlier price for less than the mint now needs
-is planned again before the mint. The mint takes at most what is approved, and what it
-does not take stays approved: the Permit2 allowance until it expires, the ERC-20
-approval to Permit2 without limit of time. An approval the wallet already gave that
-covers the amount is used as it stands. No mint revokes either; the result lists
-both. A collection and a close approve nothing.
+A token the mint may take any of is approved for its stated amount, whatever the price
+of the step's observation: Permit2 by the token, and the PositionManager by a Permit2
+allowance that expires at the mint's deadline. No observation's most exceeds the stated
+amount, so a price that moves between the steps plans no approval again: a wallet with
+no allowance sends two approvals per token, then the mint. A token the mint may take
+none of is not approved. An approval the wallet already gave that covers the stated
+amount is used as it stands. The mint takes at most its own most, and what it does not
+take stays approved: the Permit2 allowance until it expires, the ERC-20 approval to
+Permit2 without limit of time. After a request that ended before its mint, that is the
+whole stated amount, to the same two spenders and no other. No mint revokes either;
+the result lists both. A collection and a close approve nothing.
 
 `revoke-exchange` is its own command, for a swap's allowances as well as a mint's. Its
 allocation states no range, no inventory and no NFT, and its steps are the connector's

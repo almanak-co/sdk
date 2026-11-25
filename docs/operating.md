@@ -876,12 +876,17 @@ the price the command decided at, and does not send it once the price has left t
 slippage around the planned price; these two are the gateway's checks, not the
 chain's.
 
-Each step approves what its own observation allows the mint to take: Permit2 for
-that most of each token, and for the position manager a Permit2 allowance that
-expires at the mint's deadline. An approval mined at an earlier price for less than
-the mint now needs is made again before the mint. What the mint does not take stays
+The approvals are for the stated amounts, not for what one observation allows the
+mint to take: for each token the mint may take any of, Permit2 is approved for
+`--amount0` or `--amount1`, and the position manager gets a Permit2 allowance of the
+same amount that expires at the mint's deadline. A price that moves between the steps
+adds no approval, so a wallet with no allowance sends two approvals per token and then
+the mint, and an approval that already covers the stated amount is used as it stands.
+The mint itself takes at most the trimmed amounts above. What it does not take stays
 approved: the Permit2 allowance until it expires, the ERC-20 approval to Permit2
-without limit of time. A collection and a close approve nothing.
+without limit of time. After a command that ended before its mint, that is the whole
+stated amount, to the same two spenders. `revoke-exchange` clears it. A collection and
+a close approve nothing.
 `ax liquidity-position --connector uniswap_v4` takes the key flags and `--token-id`.
 
 On Uniswap V4 `revoke-exchange` takes the key flags and clears what a swap or a mint

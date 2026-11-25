@@ -870,6 +870,13 @@ independently.
   it. The statement lives in the allocation's `adopt` field, which only an
   operator deployment may carry. An adopting allocation quotes and admits no
   swap.
+- Proposed, not accepted: a direct Uniswap V4 mint approves the stated amounts
+  of its allocation, once: the ERC-20 approval to Permit2 and the Permit2
+  allowance to the position manager, for each currency the mint may take any
+  of. The mint keeps the maximums of its own observation. Consequence:
+  the approval standing after a request that ended before its mint is the
+  stated amount, to the same spenders, until `ax revoke-exchange` clears it.
+  These are planning and gateway rules, not on-chain enforcement.
 - Declare a direct action on a cell only after its fork rehearsal passed there.
   Morpho Blue on HyperEVM declares none: the provider runs head-pinned reads at
   a later block, which the reader refuses.

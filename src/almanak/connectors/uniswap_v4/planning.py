@@ -116,23 +116,25 @@ def bounded_maximums(intent, before, tolerance_bps):
 def open_operation(intent, before, *, through=None, tolerance_bps=None):
     """The next step of a mint: an approval it still needs, or the mint itself.
 
-    Given `tolerance_bps`, as only an operator request gives it, the mint and its
-    approvals take `bounded_maximums` of this observation instead of the intent's whole
-    amounts. An approval mined for an earlier observation's smaller maximum is then
-    below what this one needs, and is planned again before the mint: a mint never
-    relies on more than is approved.
+    Given `tolerance_bps`, as only an operator request gives it, the mint takes
+    `bounded_maximums` of this observation instead of the intent's whole amounts. Its
+    approvals do not follow the observation: a token the mint may take any of is
+    approved for the intent's whole amount, which no later observation's maximum
+    exceeds, so a price that moves between the steps plans no approval again. A
+    standing approval that covers the intent's amount is relied on as it is.
     """
     if before.owned.position is not None:
         raise ValueError("mint cannot replace an owned NFT")
     target = intent.target
-    maximums = (intent.maximum0, intent.maximum1)
+    stated = (intent.maximum0, intent.maximum1)
+    maximums = stated
     if tolerance_bps is not None:
         maximums = bounded_maximums(intent, before, tolerance_bps)
-    for maximum in maximums:
+    for whole, maximum in zip(stated, maximums, strict=True):
         step = approval(
             before,
-            maximum.asset,
-            maximum.amount,
+            whole.asset,
+            whole.amount if maximum.amount else 0,
             target.contracts.position_manager,
             intent.deadline,
             through=through,

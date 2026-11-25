@@ -502,9 +502,10 @@ def test_an_open_is_two_approvals_per_token_then_the_mint():
     assert (second.amount, second.expiration) == (AMOUNT0, deadline)
     half = ((AMOUNT0, deadline), (0, 0))
     third = step(observed(config, owned, market, tokens=(AMOUNT0, 0), permits=half))
-    assert (third.kind, str(third.asset), third.amount) == ("approve_erc20", WETH, MOST1)
-    both = ((AMOUNT0, deadline), (MOST1, deadline))
-    mint = step(observed(config, owned, market, tokens=(AMOUNT0, MOST1), permits=both))
+    # Each approval is for the stated amount, not for what this observation's mint may take.
+    assert (third.kind, str(third.asset), third.amount) == ("approve_erc20", WETH, AMOUNT1)
+    both = ((AMOUNT0, deadline), (AMOUNT1, deadline))
+    mint = step(observed(config, owned, market, tokens=(AMOUNT0, AMOUNT1), permits=both))
     assert (mint.kind, mint.maximum0.amount, mint.maximum1.amount) == ("mint", AMOUNT0, MOST1)
     assert mint.liquidity == MINTED > 0
 
@@ -571,22 +572,163 @@ def test_a_mint_planned_at_a_drifted_price_is_bounded_around_the_price_it_was_pl
     assert (decided >= takes(99)[1]) == (drift < 0)
 
 
-def test_an_approval_mined_for_an_earlier_price_is_planned_again_before_a_larger_mint():
+def walked(config, state, market, step, prices, *, wallets, tokens=(0, 0), permits=None):
+    """Plan and mine one step per observed price, as a direct command does, up to the mint.
+
+    Returns the planned steps. An approval is mined into the allowances the next
+    observation reads; the walk ends at the mint or with the last price.
+    """
+    assets = [str(asset) for asset in config.target(ALLOCATION).assets]
+    tokens, permits, steps = list(tokens), list(permits or ((0, 0), (0, 0))), []
+    for price in prices:
+        granted = {"tokens": tuple(tokens), "permits": tuple(permits)}
+        seen = observed(
+            config, state.owned[0], market, wallets=wallets, sqrt_price=price, **granted
+        )
+        steps.append(step(seen))
+        planned = steps[-1]
+        if planned.kind == "mint":
+            break
+        index = assets.index(str(planned.asset))
+        if planned.kind == "approve_erc20":
+            tokens[index] = planned.amount
+        else:
+            permits[index] = (planned.amount, planned.expiration)
+    return steps
+
+
+def one_way(steps=8, bps=5):
+    """Prices that only rise, each step further from the decision's, inside the slippage."""
+    return [shifted(2**96, bps * turn) for turn in range(steps)]
+
+
+def random_walk(seed, steps=12, bps=2, within=48):
+    """A walk of `bps` per step that stays within `within` of the decision's price."""
+    from random import Random
+
+    choose, offset, prices = Random(seed), 0, []
+    for _ in range(steps):
+        prices.append(shifted(2**96, offset))
+        offset = max(-within, min(within, offset + choose.choice((-bps, bps))))
+    return prices
+
+
+DRIFTS = [one_way(), one_way(bps=-5), *(random_walk(seed) for seed in range(20))]
+
+
+@pytest.mark.parametrize("prices", DRIFTS)
+def test_a_price_that_drifts_between_the_steps_plans_no_approval_again(prices):
+    surplus = AMOUNT1 * 1000
     market, config, state, seen, intent = surplus_deployment()
     _, step = validating(config, state, intent, seen)
-    deadline, surplus = intent.deadline, AMOUNT1 * 1000
-    mined = {"tokens": (AMOUNT0, MOST1), "permits": ((AMOUNT0, deadline), (MOST1, deadline))}
-    wallets = (AMOUNT0, surplus)
-    assert step(observed(config, state.owned[0], market, wallets=wallets, **mined)).kind == "mint"
-    # At a higher price the same first-token amount covers more liquidity, which takes
-    # more of the second token than was approved: the approval is planned again first.
-    higher = shifted(2**96, 49)
-    drifted = observed(config, state.owned[0], market, wallets=wallets, sqrt_price=higher, **mined)
-    again = step(drifted)
-    liquidity = liquidity_for(AMOUNT0, surplus, higher, sqrt_at_tick(LOWER), sqrt_at_tick(UPPER))
-    larger = needed(liquidity, 50, price=higher)[1]
-    assert (again.kind, str(again.asset), again.amount) == ("approve_erc20", WETH, larger)
-    assert larger > MOST1
+    steps = walked(config, state, market, step, prices, wallets=(AMOUNT0, surplus))
+    manager = config.target(ALLOCATION).contracts.position_manager
+    # One approval to Permit2 and one Permit2 allowance per token, each for the stated
+    # amount, then the mint: no observation's maximum exceeds the stated amount.
+    assert [(s.kind, str(s.asset), s.amount) for s in steps[:-1]] == [
+        ("approve_erc20", USDC, AMOUNT0),
+        ("approve_permit2", USDC, AMOUNT0),
+        ("approve_erc20", WETH, surplus),
+        ("approve_permit2", WETH, surplus),
+    ]
+    assert {s.spender for s in steps[:-1] if s.kind == "approve_permit2"} == {manager}
+    mint = steps[-1]
+    assert mint.kind == "mint"
+    assert mint.maximum0.amount <= AMOUNT0 and mint.maximum1.amount < surplus
+
+
+def test_standing_approvals_of_the_stated_amounts_plan_no_approval_at_any_admitted_price():
+    surplus = AMOUNT1 * 1000
+    market, config, state, seen, intent = surplus_deployment()
+    _, step = validating(config, state, intent, seen)
+    standing = {
+        "tokens": (AMOUNT0, surplus),
+        "permits": ((AMOUNT0, intent.deadline), (surplus, intent.deadline)),
+    }
+    for bps in (-49, -1, 0, 1, 49):
+        steps = walked(
+            config,
+            state,
+            market,
+            step,
+            [shifted(2**96, bps)],
+            wallets=(AMOUNT0, surplus),
+            **standing,
+        )
+        assert [s.kind for s in steps] == ["mint"]
+    # One base unit less than the stated amount is approved again, for the stated amount.
+    short = {**standing, "tokens": (AMOUNT0, surplus - 1)}
+    (again,) = walked(config, state, market, step, [2**96], wallets=(AMOUNT0, surplus), **short)
+    assert (again.kind, str(again.asset), again.amount) == ("approve_erc20", WETH, surplus)
+
+
+def test_a_token_the_mint_may_take_none_of_is_not_approved():
+    ticks = {"tick_lower": 600, "tick_upper": 1200}
+    market, config, state, seen, intent = surplus_deployment(amount1=AMOUNT1, **ticks)
+    _, step = validating(config, state, intent, seen)
+    steps = walked(config, state, market, step, [2**96] * 4, wallets=(AMOUNT0, AMOUNT1))
+    # The range lies above the price and beyond the slippage: the mint takes the first
+    # token only, so the stated amount of the second is approved to nobody.
+    assert [(s.kind, str(getattr(s, "asset", ""))) for s in steps] == [
+        ("approve_erc20", USDC),
+        ("approve_permit2", USDC),
+        ("mint", ""),
+    ]
+    assert steps[0].amount == steps[1].amount == AMOUNT0
+
+
+def test_the_gateway_refuses_an_approval_of_another_amount_than_the_stated_one():
+    market, config, state, seen, intent = surplus_deployment()
+    _, step = validating(config, state, intent, seen)
+    owned, wallets, surplus = state.owned[0], (AMOUNT0, AMOUNT1 * 1000), AMOUNT1 * 1000
+    first = step(observed(config, owned, market, wallets=wallets))
+    assert (first.kind, first.amount) == ("approve_erc20", AMOUNT0)
+    half = {"tokens": (AMOUNT0, 0), "permits": ((AMOUNT0, intent.deadline), (0, 0))}
+    before = observed(config, owned, market, wallets=wallets, **half)
+    stated_step = step(before)
+    assert (str(stated_step.asset), stated_step.amount) == (WETH, surplus)
+    # Above the stated amount, and the observation's own smaller maximum, are both
+    # another operation than the one the gateway derives from the retained intent.
+    for amount in (surplus + 1, MOST1, UNLIMITED_TOKEN):
+        with pytest.raises(ValueError, match="operation differs from its retained economic"):
+            step(before, stated_step.model_copy(update={"amount": amount}))
+    permit = step(
+        observed(
+            config,
+            owned,
+            market,
+            wallets=wallets,
+            tokens=(AMOUNT0, surplus),
+            permits=half["permits"],
+        )
+    )
+    assert (permit.kind, permit.amount) == ("approve_permit2", surplus)
+    with pytest.raises(ValueError, match="operation differs from its retained economic"):
+        step(before, permit.model_copy(update={"amount": surplus + 1}))
+
+
+# What a strategy's planning gave for these walks before an operator's approvals and
+# liquidity took rules of their own: the liquidity of the mint at the fifth price.
+STRATEGY_MINTS = [(one_way(), 175103), (one_way(bps=-5), 163641), (random_walk(7), 169187)]
+
+
+@pytest.mark.parametrize(("prices", "liquidity"), STRATEGY_MINTS)
+def test_a_strategys_mint_still_approves_and_offers_its_whole_amounts(prices, liquidity):
+    surplus = AMOUNT1 * 1000
+    market, config, state, seen, intent = surplus_deployment()
+    _, step = validating(config, state, intent, seen, operator=False)
+    steps = walked(config, state, market, step, prices, wallets=(AMOUNT0, surplus))
+    assert [(s.kind, str(s.asset), s.amount) for s in steps[:-1]] == [
+        ("approve_erc20", USDC, AMOUNT0),
+        ("approve_permit2", USDC, AMOUNT0),
+        ("approve_erc20", WETH, surplus),
+        ("approve_permit2", WETH, surplus),
+    ]
+    mint = steps[-1]
+    assert (mint.kind, mint.liquidity) == ("mint", liquidity)
+    assert (mint.maximum0.amount, mint.maximum1.amount) == (AMOUNT0, surplus)
+    bounds = sqrt_at_tick(LOWER), sqrt_at_tick(UPPER)
+    assert liquidity == liquidity_for(AMOUNT0, surplus, prices[4], *bounds)
 
 
 def test_a_tolerance_that_reaches_a_range_bound_leaves_the_range_as_the_only_bound():

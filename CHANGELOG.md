@@ -28,6 +28,16 @@ its changelog is on the `v2` branch.
   state reads older than about 100 seconds unanswered (#42).
 
 ### Fixed
+- `almanak ax open-liquidity` on Uniswap V4 approves the stated `--amount0` and
+  `--amount1` once: the ERC-20 approval to Permit2 and the Permit2 allowance to the
+  position manager. Each step approved the most its own observation let the mint take,
+  an amount that follows the pool price, so a price that moved between two steps
+  planned another approval, without a bound of its own: one mint was reported after 29
+  approvals. A wallet with no allowance now sends two approvals per token and the mint.
+  The mint's own maximums are unchanged. The approval left standing after a command
+  that ended before its mint is the stated amount, where it was that observation's
+  smaller maximum; the spenders are the same, and `ax revoke-exchange` clears it.
+  Strategy runs are unchanged (#62).
 - The provider guard's `web3_clientVersion` read is sent again after a transient
   failure, as its `eth_chainId` read already was. The method was missing from the
   reads the execution reader may send again, so one refused connection, timeout, HTTP
