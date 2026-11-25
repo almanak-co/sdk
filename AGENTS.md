@@ -789,11 +789,16 @@ independently.
   either reference; no reverse-fault case exists for the cell, so a hosted
   cell QA run reports that gap and does not pass; the recovery-foundation
   nodes, the global offline and CRAP gates over retained evidence, and the
-  evidence review are open; a refund and a slow fill have been measured
-  against constructed logs only, never against a transfer of this repository
-  on mainnet; no gas reference exists for an EOA bridge, so `almanak check`
-  compares a bridge's gas with nothing; and no mainnet transaction of this
-  connector has been sent.
+  evidence review are open; a refund has been read from another party's
+  mainnet refund execution and from fork-constructed bundles, and a slow fill
+  from constructed logs only, never for a transfer of this repository; no gas
+  reference exists for an EOA bridge, so `almanak check` compares a bridge's
+  gas with nothing; an author file with gas policies on Arbitrum and on Base
+  has no fork run, because a fork refuses authored ceilings on Base and leaves
+  them unenforced only when every policy is on an OP chain, so the standalone
+  reference keeps its production gas policy in `config.production.yaml` and
+  its fork runs are gasless; and no mainnet transaction of this connector has
+  been sent.
 - Not built: a recent-window rule, without which `backtest recent` refuses a
   bridge with `unsupported_connector`; a claim for a deferred refund, which
   stops the source chain as unresolved; and an operator's resolution of a
