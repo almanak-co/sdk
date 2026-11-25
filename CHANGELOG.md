@@ -9,6 +9,10 @@ its changelog is on the `v2` branch.
 ## [Unreleased]
 
 ### Changed
+- The agent skill is named `almanak-defi` and lives in `skills/almanak-defi/`. It was
+  `almanak` in `skills/almanak/`. An agent finds a skill by its name and description,
+  and the name now says what the skill is for.
+
 - `--public-rpc blastapi` is the public endpoint for BNB Chain (`eip155:56`), and
   `bnbchain` is no longer a name. BNB Chain's own endpoint keeps less than a minute of
   state, so a direct action that took longer than that between a mined step and its
