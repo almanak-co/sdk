@@ -204,7 +204,12 @@ When it exits 1, read what it printed and report it exactly. Do not run it again
 - A message that the supplied amount is still in the market means the withdrawal
   was not run or its preview was refused. Tell the user plainly that their funds
   are still supplied, and that `almanak ax withdraw` for that market returns them;
-  run it only if they ask, preview first, as the `almanak` skill describes.
+  run it only if they ask, preview first, as the `almanak` skill describes. When
+  the message says the position changed after the supply, that withdrawal takes
+  whatever reached the position too: say so, with the difference it names.
+- A run that was interrupted still writes its report, and its verdict names the
+  command that was running. If signing had begun, treat it as a withdrawal that
+  did not complete, below.
 - A withdrawal that was executed but did not complete has an unknown outcome: the
   funds may still be supplied, or the withdrawal may have been mined. Do not
   withdraw again. List the kept records with `almanak ax recover` and tell the

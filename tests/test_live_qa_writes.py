@@ -368,6 +368,70 @@ def test_a_position_that_appeared_after_the_preview_is_never_withdrawn(wallet, t
     assert "THE SUPPLIED AMOUNT IS STILL IN THE MARKET" in said
 
 
+def test_shares_that_reached_the_position_after_the_supply_are_never_withdrawn(wallet, tmp_path):
+    """The full withdrawal takes what the wallet holds; the confirmation covered the supply."""
+    request = request_for(wallet, execute=True, confirm=PHRASE)
+    grown = {"supplied_shares": "150", "debt_shares": "0"}
+    borrowed = {"supplied_shares": "99", "debt_shares": "7"}
+    for before_withdrawal, named in (
+        (grown, "supplied_shares 99 after the supply, 150 now"),
+        (borrowed, "debt_shares 0 after the supply, 7 now"),
+        ({}, "lacks its shares"),
+    ):
+        almanak = round_trip(withdraw_preview=preview(before_withdrawal))
+        code, said, output = check(request, SPEND, almanak, tmp_path)
+        assert code == 1 and almanak.sent == ["supply"] and len(almanak.commands) == 3
+        assert named in said and "THE SUPPLIED AMOUNT IS STILL IN THE MARKET" in said
+        assert named in json.loads((output / "writes.json").read_text())["verdict"]
+    # A supply that reported no position after it is not taken to agree either.
+    supplied = executed(["approve", "supply"], None)
+    almanak = round_trip(supply_execute=supplied)
+    code, said, _ = check(request, SPEND, almanak, tmp_path)
+    assert code == 1 and almanak.sent == ["supply"] and "lacks its shares" in said
+
+
+def interrupting(almanak, at):
+    """A runner that raises KeyboardInterrupt instead of answering the command `at`."""
+
+    def run(arguments, timeout=cli.READ_TIMEOUT_SECONDS):
+        key = arguments[1] + ("_execute" if "--execute" in arguments else "_preview")
+        if key == at:
+            raise KeyboardInterrupt
+        return almanak(arguments, timeout)
+
+    return run
+
+
+def test_an_interrupted_run_keeps_the_steps_it_had_sent_in_its_report(wallet, tmp_path):
+    """Ctrl-C during the withdrawal must not leave only the run marker behind."""
+    request = request_for(wallet, execute=True, confirm=PHRASE)
+    output = tmp_path / "report"
+    said = []
+    run = interrupting(round_trip(), "withdraw_execute")
+    with pytest.raises(KeyboardInterrupt):
+        writes.run_writes(request, SPEND, run, output, say=said.append)
+    report = json.loads((output / "writes.json").read_text())
+    assert [step["step"] for step in report["steps"]] == [
+        "supply preview",
+        "supply",
+        "withdraw preview",
+    ]
+    assert report["verdict"].startswith("interrupted while running `ax withdraw")
+    assert "--execute` (KeyboardInterrupt)" in report["verdict"]
+    assert "THE SUPPLIED AMOUNT MAY STILL BE IN THE MARKET" in report["verdict"]
+    summary = (output / "summary.md").read_text()
+    assert "supply 0x" + b"supply".hex() + " (succeeded)" in summary
+    assert "almanak ax recover" in said[-1]
+    # Stopped before anything signed, the report says so.
+    output = tmp_path / "early"
+    with pytest.raises(KeyboardInterrupt):
+        writes.run_writes(
+            request, SPEND, interrupting(round_trip(), "supply_preview"), output, say=said.append
+        )
+    verdict = json.loads((output / "writes.json").read_text())["verdict"]
+    assert verdict.endswith("(KeyboardInterrupt); nothing was signed")
+
+
 def test_a_refused_preview_stops_before_the_confirmation(wallet, tmp_path):
     almanak = round_trip(supply_preview=None)
     request = request_for(wallet, execute=True, confirm=PHRASE)

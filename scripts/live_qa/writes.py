@@ -13,6 +13,7 @@ The check never creates a wallet and never opens a keystore or a password file;
 
 import json
 import os
+import shlex
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -294,6 +295,29 @@ def holds_nothing(position: object) -> bool:
     return position.get("supplied_shares") == "0" and position.get("debt_shares") == "0"
 
 
+# The fields of a position report that a full withdrawal takes, as `almanak ax` prints them.
+SHARE_FIELDS = ("supplied_shares", "debt_shares")
+
+
+def share_changes(supplied: object, before_withdrawal: object) -> list[str]:
+    """How the position the withdrawal would take differs from the one the supply left.
+
+    Empty only when both reports carry every share field and they agree; a report that
+    is missing or carries no shares is a difference, never assumed to agree.
+    """
+    after, now = (
+        {name: report.get(name) for name in SHARE_FIELDS} if isinstance(report, dict) else {}
+        for report in (supplied, before_withdrawal)
+    )
+    if None in (*after.values(), *now.values()) or not (after and now):
+        return [f"a position report lacks its shares: after the supply {after}, now {now}"]
+    return [
+        f"{name} {after[name]} after the supply, {now[name]} now"
+        for name in SHARE_FIELDS
+        if after[name] != now[name]
+    ]
+
+
 class WriteCheck:
     """One round trip. `steps` holds every command it ran, in order, for the report."""
 
@@ -302,15 +326,39 @@ class WriteCheck:
         self.run = run
         self.say = say
         self.steps: list[Step] = []
+        # The command running now, and whether it signs; kept so that an interrupted
+        # run's report can name a command that returned nothing.
+        self.running: tuple[str, bool] | None = None
 
     def step(self, name: str, action_name: str, *, execute: bool) -> Step:
         # An executing command waits for its transactions; it is never timed out or killed.
         arguments = action(self.request, action_name, execute=execute)
+        self.running = (shlex.join(arguments), execute)
         invocation = self.run(arguments, None) if execute else self.run(arguments)
+        self.running = None
         step = Step(name, invocation)
         self.steps.append(step)
         self.say(f"\n$ {invocation.command}\n{invocation.stdout}{invocation.stderr}".rstrip())
         return step
+
+    def signing_started(self) -> bool:
+        """Whether an executing command has started, so a transaction may have been sent."""
+        executing = [step for step in self.steps if "--execute" in step.invocation.arguments]
+        return bool(executing) or (self.running is not None and self.running[1])
+
+    def interrupted(self, error: BaseException) -> str:
+        """The verdict of a run stopped by an exception, such as the operator's Ctrl-C."""
+        where = f" while running `{self.running[0]}`" if self.running else ""
+        verdict = f"interrupted{where} ({type(error).__name__})"
+        if not self.signing_started():
+            return f"{verdict}; nothing was signed"
+        return (
+            f"{verdict}, after signing began: transactions may have been sent, and the"
+            " outcome of an executing command that returned nothing is not known."
+            " THE SUPPLIED AMOUNT MAY STILL BE IN THE MARKET. Do not run this again: read"
+            " the steps above, resolve a kept record with `almanak ax recover`, then read"
+            " the position"
+        )
 
     def preview(self) -> str | None:
         """Plan the supply. Returns why the round trip may not go on, or None."""
@@ -341,10 +389,25 @@ class WriteCheck:
                 " withdrawal was not run: it would withdraw more than this check supplied."
                 " THE SUPPLIED AMOUNT IS STILL IN THE MARKET, with what was there before"
             )
-        if not planned(self.step("withdraw preview", "withdraw", execute=False)):
+        withdraw_preview = self.step("withdraw preview", "withdraw", execute=False)
+        if not planned(withdraw_preview):
             return (
                 "the withdrawal preview was refused. THE SUPPLIED AMOUNT IS STILL IN THE"
                 " MARKET; withdraw it with `almanak ax withdraw` once the reason is resolved"
+            )
+        # A full withdrawal takes whatever the wallet holds when it is planned, and the
+        # confirmation covered only this check's supply. Something that reached the
+        # position after the supply is not withdrawn here. The position can still change
+        # between this preview and the withdrawal; that window is not closed.
+        changed = share_changes(
+            supply.output.get("position_after"), withdraw_preview.output.get("position_before")
+        )
+        if changed:
+            return (
+                "the wallet's position changed after the supply, so the withdrawal was not"
+                " run: it would withdraw more than this check supplied ("
+                + "; ".join(changed)
+                + "). THE SUPPLIED AMOUNT IS STILL IN THE MARKET, with what reached it since"
             )
         withdrawal = self.step("withdraw", "withdraw", execute=True)
         if not completed(withdrawal):
@@ -422,6 +485,25 @@ def run_writes(
         return 2
     say(WARNING)
     check = WriteCheck(request, run, say)
+    try:
+        return finish(request, check, output, ask, say)
+    except BaseException as error:
+        # Ctrl-C or a crash after a transaction was sent must not lose its record: the
+        # steps already returned, and the command that was running, go into the report.
+        verdict = check.interrupted(error)
+        write_report(output, request, check, verdict)
+        say(f"\n{verdict}\nReport: {output}")
+        raise
+
+
+def finish(
+    request: WriteRequest,
+    check: WriteCheck,
+    output: Path,
+    ask: Callable[[str], str] | None,
+    say: Callable[[str], None],
+) -> int:
+    """Preview, confirm and run the round trip, then write the report."""
     problem = check.preview()
     if problem is None and request.execute:
         if not confirmed(request, ask):
