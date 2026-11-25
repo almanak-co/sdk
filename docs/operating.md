@@ -1452,7 +1452,9 @@ given instead. Strategy runs, forks, checks and backtests do not accept a public
 endpoint and need a provider key or an operator RPC URL.
 
 A pair is listed only after it passed every check of the
-[qualification tool](qa.md#public-endpoint-qualification) in repeated full runs.
+[qualification tool](qa.md#public-endpoint-qualification) in repeated full runs,
+except `publicnode` on Avalanche, which does not meet the state-age check as
+stated above.
 The tool samples the reads an observation and a direct action make: the identity
 proof, pinned state, the fee quote and the receipt reads. It sends nothing, so it
 proves neither every method a connector calls nor that an endpoint accepts a

@@ -250,16 +250,19 @@ def aged_block(reader: EthereumReader, head: Block, seconds: int) -> Block:
     """The youngest block found whose timestamp is at least `seconds` behind the head's.
 
     Block times come from the timestamps the endpoint itself reports, never from a
-    stated block time of the chain. The search reads at most `STATE_AGE_LOOKUPS`
-    headers and stops at the first block within `STATE_AGE_SLACK_SECONDS` of the age.
-    The returned block is the reader's last pin, which takes one more header read when
-    the search did not end on it. On a chain with very uneven block times the block
-    can be much older than the slack allows for.
+    stated block time of the chain. The search stops at the first block within
+    `STATE_AGE_SLACK_SECONDS` of the age. The returned block is the reader's last pin,
+    which takes a header read of its own when the search did not end on it; with that
+    read, at most `STATE_AGE_LOOKUPS` headers are read. On a chain with very uneven
+    block times the block can be much older than the slack allows for.
     """
     near, far, last = head, None, head
     candidate: int | None = max(0, head.number - NUMBER_DEPTH)
-    for _ in range(STATE_AGE_LOOKUPS):
+    for lookup in range(STATE_AGE_LOOKUPS):
         if candidate is None:
+            break
+        if far is not None and lookup == STATE_AGE_LOOKUPS - 1:
+            # The last read is kept for pinning the reader back to the block found.
             break
         last = reader.pin_block(candidate)
         age = head.timestamp - last.timestamp

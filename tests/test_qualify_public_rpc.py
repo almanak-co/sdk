@@ -293,7 +293,7 @@ def test_the_search_for_an_aged_block_is_bounded_and_takes_the_youngest_found():
     head = reader.pin_block("latest")
     found = tool.aged_block(reader, head, tool.STATE_AGE_SECONDS)  # type: ignore[arg-type]
     lookups = reader.pinned[1:]
-    assert len(lookups) <= tool.STATE_AGE_LOOKUPS + 1
+    assert len(lookups) == tool.STATE_AGE_LOOKUPS
     old_enough = [number for number in lookups if PACED_HEAD - number >= 500]
     assert found.number == max(old_enough) == reader.pinned[-1]
     # A chain whose timestamps never reach the age ends the check as unavailable.
