@@ -33,7 +33,7 @@ its changelog is on the `v2` branch.
   reads the execution reader may send again, so one refused connection, timeout, HTTP
   5xx or HTTP 429 on that read before a privileged gateway request ended a direct
   action run with `--execute`, even with a signed step waiting, and left the record to
-  `ax recover`. A failure that outlasts the 8 second budget is now marked transient
+  `ax recover`. A failure that outlasts the reader's retry bounds is now marked transient
   like any other read. Other HTTP 4xx answers are unchanged (#64).
 - A direct action run with `--execute` no longer ends over one failed read between two
   of its steps once a step is mined. A transient provider or storage failure was held
