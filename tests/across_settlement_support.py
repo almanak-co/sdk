@@ -33,12 +33,14 @@ class FakeChain:
     def __init__(self, chain, genesis, step, head):
         self.chain, self.genesis, self.step, self.head = chain, genesis, step, head
         self.logs, self.receipts, self.views, self.pins = [], {}, {}, 0
+        # Block numbers the chain replaced: each has another hash than first served.
+        self.replaced = set()
 
     def block(self, number) -> Block:
         return Block(
             chain=self.chain,
             number=number,
-            hash="0x" + (number + 1).to_bytes(32).hex(),
+            hash="0x" + (number + 1 + (number in self.replaced) * 2**200).to_bytes(32).hex(),
             timestamp=self.genesis + number * self.step,
         )
 

@@ -215,10 +215,10 @@ def test_a_destination_anchor_is_held_before_and_after_its_reads(monkeypatch, at
         ({"destination_chain": ARBITRUM.chain_id, "destination_asset": USDC}, "two different"),
         (
             {
-                "destination_chain": "eip155:1",
-                "destination_asset": "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                "destination_chain": "eip155:999",
+                "destination_asset": "eip155:999/erc20:0xb88339cb7199b77e23db6e890353e22632ba630f",
             },
-            "no pinned SpokePool on eip155:1",
+            "no pinned SpokePool on eip155:999",
         ),
         ({"quote": "other"}, "across_api"),
     ],
@@ -278,36 +278,56 @@ def test_the_author_file_names_a_destination_account_on_the_destination_chain():
         parse_inputs(document(destination_account="nowhere"))
 
 
-def test_the_connector_declares_every_run_mode_for_the_proven_source_chain_only():
+def test_every_pinned_chain_declares_its_modes_and_only_one_rests_on_a_lifecycle():
+    from almanak.caip import ChainId
+    from almanak.connectors.across import support
+    from almanak.connectors.across.domain import SPOKE_POOLS
+
     binding = connector_from_wire({"connector": "across"})
     assert connector_for(CONFIG).codec.checkpoint is binding.codec.checkpoint
-    source, destination = binding.support_for(ARBITRUM.chain_id), binding.support_for(BASE.chain_id)
     declared = (RunMode.FORK, RunMode.PRODUCTION, RunMode.BACKTEST)
-    assert (source.modes, destination.modes) == (declared, ())
-    (historical,) = source.historical
-    # The model keeps no approval, so the historical declaration lists no revoke.
-    assert historical.actions == (EconomicAction.BRIDGE,) and not destination.historical
-    assert historical.backtest_start_at.isoformat() == "2026-08-15T00:00:00+00:00"
-    assert source.account_profiles == destination.account_profiles == ("eoa",)
-    assert any("constructs the quote" in text for text in source.restrictions)
-    assert any("no run mode" in text for text in destination.restrictions)
+    rows = {chain: binding.support_for(chain) for chain in SPOKE_POOLS}
+    assert len(rows) == 8 and ChainId("eip155:999") not in rows
+    for row in rows.values():
+        assert row.modes == declared and row.account_profiles == ("eoa",)
+        (historical,) = row.historical
+        # The model keeps no approval, so the historical declaration lists no revoke.
+        assert historical.actions == (EconomicAction.BRIDGE,)
+        assert historical.backtest_start_at.isoformat() == "2026-08-15T00:00:00+00:00"
+        assert any("constructs the quote" in text for text in row.restrictions)
+    # One chain's modes rest on a reference lifecycle; every other says it has none,
+    # and that no fork refund is defined for a transfer it sends.
+    unproven = {c for c, row in rows.items() if support.WITHOUT_PROOF[0] in row.restrictions}
+    assert unproven == set(support.declared_without_proof()) == set(rows) - {ARBITRUM.chain_id}
+    refunds = {c for c, row in rows.items() if support.FORK_REFUND[True] in row.restrictions}
+    assert refunds == {ARBITRUM.chain_id}
+    assert all(support.FORK_REFUND[False] in rows[c].restrictions for c in unproven)
+    source = rows[ARBITRUM.chain_id]
     binding.require_target(ARBITRUM.chain_id, TARGET, RunMode.FORK, account_profile="eoa")
-    with pytest.raises(ValueError, match="fork is unsupported"):
-        binding.require_target(BASE.chain_id, TARGET, RunMode.FORK)
-    binding.require_target(ARBITRUM.chain_id, TARGET, RunMode.BACKTEST, model=historical.model)
-    # Production is declared for EOA accounts on the chain a bridge leaves, and no other.
+    model = source.historical[0].model
+    binding.require_target(ARBITRUM.chain_id, TARGET, RunMode.BACKTEST, model=model)
     binding.require_target(ARBITRUM.chain_id, TARGET, RunMode.PRODUCTION, account_profile="eoa")
     with pytest.raises(ValueError, match="unsupported"):
         binding.require_target(
             ARBITRUM.chain_id, TARGET, RunMode.PRODUCTION, account_profile="safe_roles"
         )
-    for chain, mode in (
-        (BASE.chain_id, RunMode.PRODUCTION),
-        (BASE.chain_id, RunMode.BACKTEST),
-    ):
-        with pytest.raises(ValueError, match="is unsupported"):
-            binding.require_target(chain, TARGET, mode)
+    # A chain with no pin declares nothing and serves no run.
+    with pytest.raises(ValueError):
+        binding.require_target(ChainId("eip155:999"), TARGET, RunMode.FORK)
     assert binding.codec.actions(SimpleNamespace(config=CONFIG)) is CONFIG
+
+
+def test_a_backtest_start_waits_for_every_pinned_installation(monkeypatch):
+    from datetime import UTC, datetime
+
+    from almanak.connectors.across import support
+
+    assert set(support.PIN_INSTALLED) == set(support.FORK_SOURCES)
+    assert support.backtest_start(ARBITRUM.chain_id) == datetime(2026, 8, 15, tzinfo=UTC)
+    # A chain whose installation was not read dates no route, from any source.
+    monkeypatch.delitem(support.PIN_INSTALLED, BASE.chain_id)
+    assert support.backtest_start(ARBITRUM.chain_id) is None
+    assert support.backtest_start(BASE.chain_id) is None
 
 
 class ForkReader(Reader):

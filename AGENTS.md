@@ -361,7 +361,9 @@ independently.
   Provider availability is a separate fact.
 - A candidate deployment does not establish support. A supported pair needs a
   prepared offline backtest and an actual reference lifecycle proof for every
-  advertised core intent.
+  advertised core intent. Accepted exception, for Across only and stated under
+  "Bridges": its chains other than Arbitrum are declared on read-only mainnet
+  facts and offline tests. No other connector may declare a cell this way.
 - Several cells declare production support ahead of their complete evidence
   package. Do not describe the open gates as complete: the full QA matrix with
   its reverse-fault case, the recovery-foundation nodes, the global offline and
@@ -385,13 +387,49 @@ independently.
   deposit on the source chain and opens the transfer, and reconciles its arrival
   on the destination chain and its refund on the source chain.
 - Current contract: Across declares fork mode, production and economic
-  backtests on Arbitrum only, for EOA accounts, as the source of a route to
-  Base. Base declares no run mode: no reference lifecycle sends from it and no
-  fork refund is defined there, so it is a destination only. The declaration
-  follows the chain a bridge leaves; the destination chain needs only its
-  pinned SpokePool and a bound account. The production declaration is ahead of
-  the cell's evidence package; its open gates are listed at the end of this
-  section.
+  backtests, for EOA accounts, on every chain with a pinned SpokePool:
+  Arbitrum, Base, Ethereum, OP Mainnet, BNB Smart Chain, Polygon, Robinhood
+  Chain and Avalanche. Each is the source of routes to the others. The
+  declarations are derived from the pin table, never listed per chain. The
+  declaration follows the chain a bridge leaves; the destination chain needs
+  only its pinned SpokePool and a bound account. Every production declaration
+  is ahead of its cell's evidence package; the open gates are listed at the
+  end of this section.
+- Accepted, for Across only: a chain is declared without a reference
+  lifecycle, refund proof, production rehearsal or prepared backtest of its
+  own. Arbitrum is the one source chain with those proofs. Every other pinned
+  chain is declared on read-only mainnet facts and offline tests: its
+  SpokePool's proxy, implementation and code hash read on chain, that code
+  holding every selector, event and view the connector uses, `chainId()`
+  equal to the chain, the pool's wrapped native token equal to the network
+  definition's, and the installation block of the pinned implementation.
+  `scripts/across_pins.py` produces these facts and sends nothing. Accepted
+  risk: such a cell's path has never been run by anyone, on a fork or on
+  mainnet, so a first bridge from it is that path's first run. `almanak
+  support` states this on each such row. The QA catalog and the hosted Fork
+  Qualification selection leave these cells out by name, from the connector's
+  own list, with the reason in the code; they never pass on an empty
+  selection. This excepts no other connector and no other rule.
+- Current contract: HyperEVM is the one network the SDK defines that Across
+  serves and that has no pin. Its SpokePool passes the same checks. A deposit
+  is prepared at the head, and so is the status read that closes an arrival
+  page. The chain's one provider runs a read pinned near its head at a later
+  block, which the reader refuses as `provider_context`: measured read-only on
+  25 November 2026, the SpokePool read was refused at the head six times of
+  six and 64 blocks behind it, and served 140 blocks behind it and deeper,
+  where the venue's quote is stamped after the pinned block and admission
+  refuses it. So no deposit can be prepared there and no arrival recorded. A
+  pin would also make HyperEVM a destination of production routes from every
+  other chain, whose arrival could then not be recorded. A fork run and a
+  backtest do not read the provider's head and could be declared once a route
+  to a chain without production support is refused; that refusal is not
+  built.
+- Current contract: routes are author configuration and no chain carries a
+  token list. USDC and USDT have 18 decimals on BNB Smart Chain and 6 on the
+  other chains, so a route between them is refused at resolution, and the
+  gateway refuses such a quote before signing. The venue serves those routes
+  only on request with `allowUnmatchedDecimals`, which the connector never
+  sends.
 - Current contract: the reference is
   `strategies/across_usdc_arbitrum_base_bridge`. Its supervised fork proofs
   cover the arrival with a pause and resume, the refund after the destination
@@ -503,8 +541,10 @@ independently.
   venue's fee exists to tell, so this too is reported as an assumption.
 - Built under the proposed rule above, which this does not accept: the model
   `across-full-fee-ceiling-fixed-latency-v1` is declared for `bridge` on
-  Arbitrum from 15 August 2026, the first whole day after the pinned SpokePool
-  implementation was installed there. It reads no history and asks no venue.
+  every pinned chain from 15 August 2026, the first whole day after the last
+  pinned SpokePool implementation was installed, on any of them. A pinned
+  chain whose installation was not read would leave every chain without a
+  start. It reads no history and asks no venue.
   Its dataset is the frozen statement of the routes, the window and the
   latency, prepared with no provider call. The backtest file states
   `data.arrival_latency_seconds` and `execution.models.bridge_model`; neither
@@ -790,6 +830,21 @@ independently.
   the transfer it is attributed to is constructed, because no deposit of this
   repository was ever refunded. No slow fill was found in the Base blocks
   searched, so a slow fill is proven against constructed logs only.
+- Current contract: routes that leave Base and Ethereum are held to known
+  answers captured read-only on 25 November 2026 and kept in
+  `tests/fixtures/across-route-captures.json`: Base to Ethereum and Ethereum
+  to Arbitrum, each with a venue answer admitted at its own block against both
+  pinned pools, a plain `deposit` whose calldata the planner reproduces up to
+  the sender's trailing tag, its receipt, the relay hash computed from that
+  receipt read as unfilled and then filled by the destination SpokePool's
+  `fillStatuses`, and the fill measured from its receipt; and one execution
+  of refund roots on Ethereum and on Base, kept to the logs of the SpokePool
+  and of the asset. The venue states exclusivity as an offset in some
+  answers and as an absolute time in others, whatever the source chain; both
+  forms occur and both are admitted. No
+  settlement page was replayed for these routes. OP Mainnet, BNB Smart Chain,
+  Polygon, Robinhood Chain and Avalanche have no known answer of a deposit, a
+  fill or a refund: only the facts of the accepted exception above.
 - Current contract: the production EOA rehearsal has an in-process fixture
   for a standalone bridge: one fork per chain of the route and one funded EOA
   per named account. Both bridge references are in the default rehearsal
@@ -803,6 +858,17 @@ independently.
   fixture relayer's, and a refund is not rehearsed. A rehearsal, local or
   hosted, therefore depends on the venue's API answering: an outage or a
   refused request fails the run, and a failed run is not proof of support.
+- Open gates of every Across cell declared under the accepted exception,
+  stated once and holding for each of them: no reference sends from the chain;
+  no fork lifecycle, refund proof, production rehearsal, prepared backtest or
+  Fork Qualification run exists for it; no fork refund is defined for a
+  transfer it sends, so a fork run from it that is not filled stays open; a
+  fork refuses authored gas ceilings on Base and OP Mainnet; a signed step
+  whose nonce was consumed is never released on Polygon, which states no
+  finality margin; its
+  QA obligations are left out of the catalog rather than proven; the page span
+  and the provider's log ranges were not exercised on its block time; and
+  every gate of the Arbitrum cell below is open for it too.
 - Open gates of the production cell `across` on `eip155:42161`, none of which
   may be described as complete: no hosted Fork Qualification run has rehearsed
   either reference; no reverse-fault case exists for the cell, so a hosted
@@ -834,11 +900,39 @@ independently.
   payment fails validation. Such checkpoints exist on forks only.
 - Known limit: a full empty scan page is retained, and every retained page of
   a chain is audited, two block reads and one log query each, whenever that
-  chain's history is audited. GMX liquidation pages share this. A refund scan
-  on Arbitrum commits a full page every 2,000 blocks, about eight minutes, so
-  a transfer that waits for a refund that never comes grows the checkpoint by
-  about 170 pages a day and the audit by as many log queries. Nothing bounds
-  it; pages are not dropped.
+  chain's history is audited. GMX liquidation pages share this. A scan that
+  waits commits a full page every 2,000 blocks, so a transfer that waits for a
+  refund that never comes grows the checkpoint, and the audit by as many log
+  queries, at a rate set by the chain's block time. From the block times read
+  on 25 November 2026:
+
+  | Chain | Block time | One page spans | Pages a day |
+  | --- | --- | --- | --- |
+  | Robinhood Chain | 0.105 s | 3.5 min | 411 |
+  | Base | 0.2 s | 6.7 min | 216 |
+  | Arbitrum | 0.285 s | 9.5 min | 152 |
+  | BNB Smart Chain | 0.451 s | 15 min | 96 |
+  | Avalanche | 0.995 s | 33 min | 43 |
+  | Polygon | 1.5 s | 50 min | 29 |
+  | OP Mainnet | 2 s | 67 min | 22 |
+  | Ethereum | 12 s | 6.7 h | 4 |
+
+  An arrival scan grows the same way on the destination chain until the fill
+  or the fill deadline. After a pause a scan catches up one page per tick,
+  before signed work is admitted on that chain. Nothing bounds the growth;
+  pages are not dropped.
+- Current contract: a page may end at the head, and the first page of a scan
+  is committed at once, so a chain whose head can be replaced, Ethereum and
+  Polygon among them, can replace a committed page's last block. A scan never
+  continues after a block that is no longer the chain's: the coordinator's
+  audit before each tick of the chain, the scan's own next page and the
+  gateway's commit each stop with `reorganization`, never with the status
+  cross-check's accounting cause. The halt is of that chain only. The page is
+  retained, nothing is recorded and the transfer stays open and owned; a fill
+  mined in the replacement block is on chain and in the fund's wallet, in no
+  inventory. No command drops a page that is no longer canonical, so the
+  transfer is not resolved by the SDK after such a halt. A head replaced
+  before its page was committed leaves nothing stale and is read again.
 
 ## Hyperliquid
 
@@ -1018,7 +1112,8 @@ independently.
 - Hosted Fork Qualification runs weekly on `main` over every reference on a
   cell that declares production support, with the Safe/Roles lifecycle and the
   production EOA rehearsal. An empty selection or a declared cell no reference
-  exercises fails the run. It uses identified Anvil forks and public Foundry
+  exercises fails the run, except the Across cells declared without proof
+  under "Bridges", which the selection leaves out by name. It uses identified Anvil forks and public Foundry
   test keys only. Accepted exception: the rehearsal of an Across bridge asks
   the venue's live quote API, keyless and with public test addresses, so a
   venue outage fails that run. A failed run is not proof of support, and a

@@ -944,6 +944,50 @@ def test_an_audit_refuses_retained_pages_that_are_no_longer_canonical(config):
         settlement.audit(fake, state)
 
 
+def test_a_fill_in_the_replacement_of_a_committed_head_block_halts_as_a_reorganization(config):
+    """The first page is committed at once and ends at the head. The chain then replaces
+    that block and the fill is mined in the replacement, so no later page can hold it.
+    Each of the three places that could meet it first stops with the reorganization
+    cause: the tick's audit, the scan's own next page, and the gateway's commit. None
+    reaches the status cross-check, which would read as filled outside the scan."""
+    chain = there()
+    state = settle(flying(config, flight(config)), config, chain)
+    (first,) = state.external_scans
+    assert first.end.number == chain.head
+    chain.replaced.add(chain.head)
+    filled(config, chain, chain.head)
+    chain.head = chain.at(FILL_DEADLINE) + 1
+    local, fake = project(state, FORK_BASE), backend(config, chain)
+    # The coordinator audits committed history before every tick of a chain.
+    with pytest.raises(DataError, match="boundaries are no longer canonical") as audited:
+        fake.audit_history(local)
+    # A caller that scans without that audit is stopped by the scan itself.
+    with pytest.raises(DataError, match="boundaries are no longer canonical") as scanned:
+        settlement.reconcile(fake, local)
+    assert audited.value.kind == scanned.value.kind == "reorganization"
+    with pytest.raises(DataError, match="no longer canonical"):
+        settle(state, config, chain)
+    # Nothing was recorded: the page is retained as evidence and the transfer is still
+    # open, neither arrived nor proven unfilled.
+    assert state.external_scans == (first,)
+    assert state.transfers[0].open and not state.transfers[0].unfilled
+    # The source chain is another history and is not stopped by it.
+    settlement.audit(backend(config, here()), project(state, FORK_ARB))
+
+
+def test_a_replaced_head_that_was_never_committed_is_simply_read_again(config):
+    """A short empty page is not committed, so a head replaced before the next tick
+    leaves nothing stale: the fill in the replacement is found by the next page."""
+    chain = there()
+    state = settle(flying(config, flight(config)), config, chain)
+    chain.head += 3
+    assert settle(state, config, chain) == state
+    chain.replaced.add(chain.head)
+    filled(config, chain, chain.head)
+    state = settle(state, config, chain)
+    assert state.external_scans[-1].outcome is not None and not state.transfers[0].open
+
+
 def test_a_scan_page_keeps_one_side_and_its_own_settlement(config):
     chain = there()
     state = settle(flying(config, flight(config)), config, chain)

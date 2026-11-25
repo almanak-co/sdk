@@ -420,8 +420,33 @@ before further work. Invalidated history halts with pending evidence retained.
 
 ### Bridging through Across in production
 
-Across is declared for production with EOA accounts, for a bridge that leaves
-Arbitrum. `examples/operators/across_usdc_arbitrum_base_bridge.production.yaml`
+Across is declared for production with EOA accounts, for a bridge between any
+two of the chains with a pinned SpokePool: Arbitrum, Base, Ethereum, OP Mainnet,
+BNB Smart Chain, Polygon, Robinhood Chain and Avalanche. HyperEVM is not among
+them. `almanak support` lists each chain.
+
+Only a bridge that leaves Arbitrum has been run: its reference has fork
+lifecycle, refund and production rehearsal proofs. Every other source chain is
+declared on read-only mainnet reads and offline tests alone, and `almanak
+support` says so on its row. Nobody has run a deposit, an arrival or a refund
+from those chains, on a fork or on mainnet. Treat a first bridge from one of
+them as the first run of that path, and send a small amount first. On a fork, a
+refund is defined for a transfer sent from Arbitrum only, and a fork refuses
+authored gas ceilings on Base and OP Mainnet, so a fork run of a strategy with an
+account there uses an author file without `strategy.gas`. On Polygon, which
+states no finality margin, a signed step whose nonce another transaction consumed
+is never released.
+
+Ethereum and Polygon can replace their head block. A destination chain that
+replaces the last block of a recorded scan page stops with `reorganization`; the
+transfer stays open, and a fill mined in the replacement block is in the fund's
+wallet but is not recorded.
+
+A route needs both assets to have the same decimals. USDC and USDT have 18
+decimals on BNB Smart Chain and 6 elsewhere, so a route between them is refused
+at resolution.
+
+`examples/operators/across_usdc_arbitrum_base_bridge.production.yaml`
 is the operator file of the reference, and the reference's
 `config.production.yaml`, selected with `--config`, is its author file with the
 gas policy production requires. A production bridge needs:
