@@ -786,15 +786,17 @@ class EvmGateway:
         that lags shows no receipt and an unused nonce, another shows a head past the
         deadline. A block past the deadline whose own state still has the nonce unused shows
         that the transaction was not mined up to that block, and after it the protocol
-        reverts it. A node that does not hold that block refuses the read.
+        reverts it. The nonce is read by that block's hash, required canonical, so a node on
+        another history at the same height, or one that does not hold the block, refuses.
         """
         expired = self.connector.execution.expired
         submitter = self.config.accounts.binding(pending.operation.account).profile.submitter
         with self.reader.retained_pin():
             block = self.reader.pin_block("latest")
+            # By hash, never by number: two nodes can hold different blocks at one height.
+            selector = {"blockHash": block.hash, "requireCanonical": True}
             count = int(
-                self.reader._rpc("eth_getTransactionCount", [submitter.address, hex(block.number)]),
-                16,
+                self.reader._rpc("eth_getTransactionCount", [submitter.address, selector]), 16
             )
         if not expired(pending.operation, block):
             raise ValueError(

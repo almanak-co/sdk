@@ -1277,7 +1277,8 @@ independently.
   recovery", and a bridge stated again would then send twice. No connector
   refuses a public endpoint for its records any more. Nodes behind one
   load-balanced endpoint can disagree, so the expiry release reads the nonce
-  again at the pinned block that shows the deadline passed: an unused nonce in
+  again at the pinned block that shows the deadline passed, named by its hash
+  and required canonical: an unused nonce in
   that block's own state shows the deposit was not mined up to it, and a node
   that does not hold the block refuses the read. The receipt and the
   provider's copy stay separate reads. This holds for every connector and

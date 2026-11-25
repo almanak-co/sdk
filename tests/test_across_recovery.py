@@ -66,7 +66,12 @@ def test_a_release_holds_the_nonce_and_the_deadline_to_one_block(config):  # noq
     plain = late.reader._rpc
 
     def disagreeing(method, params, **keywords):
-        pinned = method == "eth_getTransactionCount" and params[1] == hex(FORK_BLOCK.number)
+        if method != "eth_getTransactionCount":
+            return plain(method, params, **keywords)
+        # The deadline's block is named by its hash, so another block at that height,
+        # which a read by number would accept, cannot answer for it.
+        assert params[1] != hex(FORK_BLOCK.number)
+        pinned = params[1] == {"blockHash": FORK_BLOCK.hash, "requireCanonical": True}
         return hex(attempt.nonce + 1) if pinned else plain(method, params, **keywords)
 
     late.reader._rpc = disagreeing
