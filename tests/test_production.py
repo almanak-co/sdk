@@ -869,6 +869,72 @@ def test_explicit_observed_fee_basis_is_the_same_on_anvil_and_avalanche():
         FeeQuote(block=block, next_base_fee=1, observed_base_fee=2, priority_fee=0)
 
 
+def provider_answering_a_send(pending, statuses):
+    """A provider that answers the first submissions with `statuses`, then accepts."""
+    import httpx
+
+    statuses, calls = list(statuses), []
+
+    def respond(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        if body["method"] == "eth_sendRawTransaction" and statuses:
+            return httpx.Response(statuses.pop(0))
+        result = {
+            "eth_getTransactionByHash": None,
+            "eth_getCode": "0x",
+            "eth_getTransactionCount": hex(pending.nonce),
+            "eth_sendRawTransaction": pending.tx_hash,
+        }[body["method"]]
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+    return httpx.Client(transport=httpx.MockTransport(respond)), calls
+
+
+def failed_send(production_attempt, status):
+    """What a submission answered with `status` raises and leaves, then a second tick's send."""
+    from almanak.gateway.ethereum import EXECUTION_RETRY_BUDGET, EthereumReader
+
+    state, pending, _ = production_attempt
+    backend = backend_for(state.config, pending.before.position.reserve.block)
+    backend.validate_pending = lambda _: None
+    backend.validate_current = lambda p: p.before
+    retained = pending.model_dump_json()
+    client, calls = provider_answering_a_send(pending, [status])
+    with client:
+        backend.reader = EthereumReader(
+            pending.call.fund.chain,
+            "https://fixture.invalid",
+            client=client,
+            retry_budget=EXECUTION_RETRY_BUDGET,
+        )
+        with pytest.raises(DataError) as error:
+            backend.broadcast(pending)
+        first = [r["params"] for r in calls if r["method"] == "eth_sendRawTransaction"]
+        # The signed step is kept as it was; a later tick sends the same bytes.
+        assert pending.model_dump_json() == retained
+        assert backend.broadcast(pending)
+    sends = [r["params"] for r in calls if r["method"] == "eth_sendRawTransaction"]
+    assert pending.model_dump_json() == retained
+    failure = error.value
+    return (type(failure), failure.kind, failure.code, failure.transient), first, sends
+
+
+def test_a_send_answered_408_is_handled_as_a_send_answered_503(production_attempt):
+    """The outcome of either is unknown: sent once, not transient, the same bytes kept."""
+    from almanak.gateway.ethereum import ProviderFault
+    from almanak.transaction_family import CURRENT_REFUSALS
+
+    _, pending, _ = production_attempt
+    timed_out, first, sends = failed_send(production_attempt, 408)
+    assert timed_out == failed_send(production_attempt, 503)[0]
+    assert timed_out == (ProviderFault, "http", None, False)
+    # Not a current-state refusal, so the runtime never releases the step as not sent.
+    assert timed_out[1] not in CURRENT_REFUSALS
+    assert first == [[pending.raw_transaction]]
+    assert sends == [[pending.raw_transaction]] * 2
+
+
 def test_rate_limited_broadcast_retains_identity_for_retry(production_attempt, monkeypatch):
     import httpx
 
