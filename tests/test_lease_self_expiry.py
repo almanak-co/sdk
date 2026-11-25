@@ -227,9 +227,41 @@ def test_the_renewal_ends_when_another_coordinator_took_the_lease(
         while gateway.lease_error is None and real_time.monotonic() < deadline:
             real_time.sleep(0.02)
         assert "superseded" in str(gateway.lease_error)
-        with pytest.raises(RuntimeError, match="heartbeat failed"):
+        # The command's own error names the gateway's cause.
+        with pytest.raises(
+            RuntimeError, match="heartbeat failed: coordinator lease is superseded"
+        ) as ended:
             gateway.scoped("observe")
+        assert ended.value.__cause__ is gateway.lease_error
         assert lease_row(gateway.service.journal)[0] == "successor"
+    finally:
+        gateway.close()
+
+
+@pytest.mark.parametrize("clocks", ["wall", "both"])
+def test_a_transient_failure_of_the_first_renewal_after_a_stall_is_retried(
+    tmp_path, recorded, clock, clocks
+):
+    """The lapsed deadline is not the retry window: unavailability gets one lease
+    from its first failure, and only a gateway refusal ends the renewal."""
+    gateway = ax_actions.LocalGateway(Desk(tmp_path, recorded).service)
+    request = gateway.request
+    failures = []
+
+    def flaky(method, **fields):
+        if method == "renew" and not failures:
+            failures.append(clock.time())
+            raise gateway_client.DataError("gateway_unavailable", "journal lock timed out")
+        return request(method, **fields)
+
+    gateway.acquire()
+    try:
+        # Admitted before the stall; the first renewal after it fails once.
+        gateway.request = flaky
+        clock.stall(LONG, clocks)
+        assert renewed_after(gateway, clock, clock.time())
+        assert len(failures) == 1 and gateway.lease_error is None
+        gateway.scoped("renew")
     finally:
         gateway.close()
 

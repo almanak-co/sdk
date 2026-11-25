@@ -96,7 +96,7 @@ are not served. A failed read at a decision records a hold for that decision;
 teardown decisions read no series.
 
 The gateway holds the journal's write lock only to commit a request. Provider
-reads and remote signing run against the checkpoint read under the current lease;
+reads and remote signing run against the checkpoint read as the lease's holder;
 the commit re-checks the lease and refuses a recording whose checkpoint changed
 meanwhile, and a broadcast re-checks its envelope, hash and nonce and sends only
 under the lock. Renewals therefore never wait behind a slow plan or signature.
@@ -131,6 +131,19 @@ takes the lease for its full duration again. Once another coordinator has been
 admitted, the former one is refused at its next read and, under the lock, at every
 commit and broadcast: `coordinator lease is superseded`, or `coordinator lease is
 absent` after a release. This is the journal's fence, not on-chain enforcement.
+
+A broadcast's checks before the lock (authority, simulation, fees, a calldata
+deadline) are not repeated under it, so they are held to the lease's duration
+instead: when they are older than one lease at the lock where the bytes would be
+recorded as sent or sent, nothing is sent and the broadcast is refused as
+transient (`stale_checks`). The coordinator asks again, and the next attempt runs
+every check afresh. After a stall the coordinator also continues from its durable
+checkpoint, as every tick does: a plan is signed only while its observation is
+within `max_observation_age_seconds` in production and after its current state,
+simulation and fees are checked at a fresh block, and a signed step is sent only
+after the checks above ran again. A strategy decision that was evaluated before
+the stall and committed after it keeps the observations it was evaluated on; it
+is executed only through those checks.
 
 Fork fixtures fund each declared asset with simulated capital. The chain's
 wrapped native asset is funded by wrapping and transfer, and nothing else is

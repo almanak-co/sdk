@@ -33,10 +33,23 @@ its changelog is on the `v2` branch.
   takes the lease again. A coordinator that was replaced is refused as before, at its
   read and under the journal lock at every commit and broadcast. The renewal thread
   asks the gateway after a stall instead of giving up on its own clock, which ended the
-  same stall with `gateway coordinator heartbeat failed` (#60).
+  same stall with `gateway coordinator heartbeat failed`. A renewal that meets an
+  unavailable gateway is retried for one lease from its first failure, so one journal
+  lock timeout or loopback error on the first renewal after a stall no longer ends the
+  command either; only a gateway refusal, or unavailability that outlasts both that
+  window and the confirmed lease, ends it (#60).
+- With the lease no longer ending at its expiry, the age of a broadcast's own checks
+  is bounded instead: it sends only while the checks it made before the journal lock
+  (authority, simulation, fees, a calldata deadline) are no older than the coordinator
+  lease. After a stall longer than the lease between those checks and the send, as on
+  a machine suspended during `ax swap --execute` on Curve, whose calldata carries no
+  deadline, that attempt sends nothing and is refused as transient with
+  `stale_checks`; the coordinator asks again, and the next attempt checks afresh (#60).
 - The lease refusal names its cause: `coordinator lease is superseded: another
   coordinator took it`, or `coordinator lease is absent: it was released or never
-  taken`.
+  taken`. When the renewal thread meets it first, the command's error carries it too:
+  `gateway coordinator heartbeat failed: coordinator lease is superseded: ...`, instead
+  of a fixed message that said to resume, which a direct command cannot.
 
 ## [3.4.2] - 2026-11-26
 

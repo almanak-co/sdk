@@ -174,8 +174,8 @@ class GatewayClient:
         if self.lease_error is not None:
             cause = self.lease_error
             raise RuntimeError(
-                "gateway coordinator heartbeat failed: the lease was not renewed and is "
-                f"expired or lost ({type(cause).__name__}: {cause}); {self.lease_recovery()}"
+                f"gateway coordinator heartbeat failed: {cause}; the lease was not renewed "
+                f"and may be lost; {self.lease_recovery()}"
             ) from cause
         try:
             with nullcontext() if method == "renew" or method in UNFENCED else self.fenced:
@@ -264,39 +264,43 @@ class GatewayClient:
         self.fenced.covered(self.fenced.count())
 
         def renew():
-            period = lease["lease_seconds"] / 3
-            deadline = admitted_at + lease["lease_seconds"]
+            seconds = lease["lease_seconds"]
+            period = seconds / 3
+            deadline = admitted_at + seconds
             delay = period
+            failing_since = None
 
             def confirmed(deadline):
                 # Read every time: a fenced request can confirm the lease while a renewal waits.
                 if self.lease_confirmed is None:
                     return deadline
-                return max(deadline, self.lease_confirmed + lease["lease_seconds"])
+                return max(deadline, self.lease_confirmed + seconds)
 
             while not self.stopped.wait(delay):
                 started = time.monotonic()
                 answered = self.fenced.count()
-                deadline = confirmed(deadline)
                 try:
                     # Asked even past the deadline: after a stall this clock cannot tell
                     # whether another coordinator was admitted. The gateway can, and it
                     # refuses a lease that was released or superseded.
                     self.scoped("renew")
-                    deadline = started + lease["lease_seconds"]
-                    delay = period
+                    deadline, delay, failing_since = started + seconds, period, None
                     # Requests answered before this renewal was sent are covered by it.
                     self.fenced.covered(answered)
                 except Exception as exc:
                     # Retry only temporary unavailability for this same lease, never admission
                     # under a new identity or signing/broadcasting an economic operation.
+                    # Unavailability is retried for one lease from its first failure, or for
+                    # as long as the lease is confirmed if that is later: after a stall the
+                    # lapsed deadline says nothing about how long the gateway was away.
                     if isinstance(exc, DataError) and exc.kind == "gateway_unavailable":
-                        deadline = confirmed(deadline)
-                        remaining = deadline - time.monotonic()
+                        failing_since = started if failing_since is None else failing_since
+                        until = max(confirmed(deadline), failing_since + seconds)
+                        remaining = until - time.monotonic()
                         if remaining > 0:
                             delay = min(period / 2, remaining)
                             continue
-                        if self.fenced.progressed(deadline):
+                        if self.fenced.progressed(until):
                             # This coordinator's own request was running when the lease ran
                             # out, or was answered while the renewal waited. It may hold the
                             # journal lock for a whole send, and the gateway extends the
