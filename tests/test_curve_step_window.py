@@ -14,6 +14,8 @@ it is not fork or process recovery evidence.
 from types import SimpleNamespace
 
 import pytest
+from eth_abi import decode
+from eth_utils import keccak
 
 from almanak.connectors.composition import connector_from_wire
 from almanak.connectors.curve import direct as curve_direct
@@ -58,9 +60,21 @@ def test_a_slow_approval_does_not_spend_the_window_of_the_swap_it_precedes():
     assert swap.operation.amount == intent.amount
     assert swap.operation.minimum == intent.minimum_output
     assert intent.minimum_output.amount == MINIMUM
-    data = swap.call.data
-    words = {int(data[10:][index : index + 64], 16) for index in range(0, len(data) - 10, 64)}
-    assert {AMOUNT, MINIMUM} <= words and swap.operation.deadline not in words
+    # The calldata is decoded against the stable pool's own `exchange`, stated here
+    # rather than taken from the encoder: each argument is checked in its position, and
+    # the call has no deadline argument.
+    signature = "exchange(int128,int128,uint256,uint256,address)"
+    data = bytes.fromhex(swap.call.data.removeprefix("0x"))
+    assert data[:4] == keccak(text=signature)[:4]
+    arguments = decode(["int128", "int128", "uint256", "uint256", "address"], data[4:])
+    assert len(data) == 4 + 5 * 32
+    assert arguments == (
+        MARKET.sell,
+        MARKET.buy,
+        AMOUNT,
+        MINIMUM,
+        swap.operation.target.fund.address.lower(),
+    )
     assert swap.strategy_result().complete and chain.allowance == 0
     assert ended(chain) == (None, None, None)
 
