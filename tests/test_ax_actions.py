@@ -466,6 +466,7 @@ def test_a_withdrawal_is_complete_only_once_no_allowance_remains(recorded):
         operation=SimpleNamespace(kind="revoke"),
         success=True,
         tx_hash="0x1",
+        receipt={"blockNumber": "0x10"},
         strategy_result=lambda: SimpleNamespace(complete=True),
     )
     # The final step of a withdrawal can be the revocation, and it completes it.
@@ -875,6 +876,31 @@ def test_an_outcome_reports_a_wallet_movement_it_does_not_explain(recorded):
     assert "accounting_issues" not in ax_actions.outcome_summary(supply)
     flagged = supply.model_copy(update={"accounting_issues": ("unexplained transfer",)})
     assert ax_actions.outcome_summary(flagged)["accounting_issues"] == ["unexplained transfer"]
+
+
+@pytest.mark.usefixtures("named")
+def test_an_outcome_states_the_block_its_step_was_mined_in(recorded):
+    approve, supply = outcomes_of(recorded, "approve", "supply")
+    for outcome in (approve, supply):
+        mined = int(outcome.receipt["blockNumber"], 16)
+        assert mined > 0
+        assert ax_actions.outcome_summary(outcome) == {
+            "operation": outcome.operation.kind,
+            "success": True,
+            "transaction": outcome.tx_hash,
+            "block": mined,
+        }
+    # The block comes from the retained receipt, not from the observation that followed.
+    later = supply.model_copy(update={"receipt": {**supply.receipt, "blockNumber": "0x2a"}})
+    assert ax_actions.outcome_summary(later)["block"] == 42
+    # A receipt that states no block reports none, never a zero.
+    bare = {key: value for key, value in supply.receipt.items() if key != "blockNumber"}
+    assert "block" not in ax_actions.outcome_summary(supply.model_copy(update={"receipt": bare}))
+    # Every outcome of an action's result carries it.
+    result = finished(recorded, [approve, supply])
+    assert [item["block"] for item in result["outcomes"]] == [
+        int(item.receipt["blockNumber"], 16) for item in (approve, supply)
+    ]
 
 
 def test_the_in_process_gateway_takes_renews_and_releases_the_services_lease(tmp_path, recorded):

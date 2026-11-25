@@ -135,10 +135,16 @@ def block(value: str) -> int | str:
     )
 
 
-BLOCK_HELP = (
+BLOCK_FORMS = (
     "block to pin: a decimal block number, 'finalized' or 'latest'; the output"
     " names the resolved number and hash"
 )
+# Each default is stated beside its own parser default below; the two differ.
+AX_BLOCK_HELP = (
+    f"{BLOCK_FORMS}; default 'finalized', which can trail the head by minutes on a"
+    " rollup, so a position just opened is read with --block latest"
+)
+MARKETS_BLOCK_HELP = f"{BLOCK_FORMS}; default 'latest'"
 
 
 def execution_mode(parser, *, required=False):
@@ -499,7 +505,7 @@ def advanced(products):
 
 
 def block_option(command):
-    command.add_argument("--block", type=block, default="finalized", help=BLOCK_HELP)
+    command.add_argument("--block", type=block, default="finalized", help=AX_BLOCK_HELP)
 
 
 def discovery(commands):
@@ -965,7 +971,7 @@ def markets(products):
     parser.set_defaults(product="markets")
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     parser.add_argument("--out", type=Path, default=Path(".almanak/markets.json"))
-    parser.add_argument("--block", type=block, default="latest", help=BLOCK_HELP)
+    parser.add_argument("--block", type=block, default="latest", help=MARKETS_BLOCK_HELP)
     observation_transport(parser)
 
 

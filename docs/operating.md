@@ -600,7 +600,8 @@ An executed action reports `completed`, true only when the whole request finishe
 and the command exits 1 when it is false. A supply is not atomic: its approval can
 be mined and the supply then be refused, for example on a fee quote above the
 ceiling, or revert. The position is then unchanged and the allowance stays on chain;
-`outcomes` lists the steps that ran and `refused` names the refusal. A failure that
+`outcomes` lists the steps that ran, each with its `transaction` hash and the
+`block` it was mined in, and `refused` names the refusal. A failure that
 is not a refusal prints the steps already sent as one
 `{"event": "steps_sent", "outcomes": ...}` line on standard error before its error.
 A step that was signed and has no reconciled outcome yet is reported apart from
@@ -1178,7 +1179,13 @@ Slipstream NFT held by its pool's gauge is reported with `staked: true`, and its
 `owed` is only what the manager recorded, since a staked position earns no trading
 fees. It takes
 the same transports and `--block` as the other reads; `--block` defaults to
-`finalized`, so read a position that was just opened at `--block latest`.
+`finalized`, so read a position that was just opened at `--block latest`. A token ID
+the position manager does not hold at the pinned block is refused with `holds no NFT
+<token id> at block <number>`. When the selector was `finalized` the message adds
+that this block can trail the head by minutes and that a position just opened is read
+with `--block latest`; the `block` of the outcome that opened the position says which
+block the read must reach. A direct action pins the head and its refusal names the
+block only.
 
 `position_before` and `position_after` of a liquidity action hold the `position`
 (its `token_id`, `range` and `liquidity`, or null), what `moved` in and out of the
@@ -1557,7 +1564,7 @@ is listed under `skipped`. It takes the session's read gateway like `almanak ax`
 `almanak ax` reads one protocol observation at one pinned block. Every
 subcommand but `portfolio` takes one transport and its own request arguments
 after the subcommand, and every one but `portfolio` and the two HyperCore
-subcommands takes `--block` (default `finalized`):
+subcommands takes `--block` (default `finalized`, which `--help` states):
 
 | Subcommand | `--connector` | Request |
 | --- | --- | --- |
@@ -1585,6 +1592,15 @@ header's hash with `requireCanonical`, so the output's `block` records the
 concrete number and hash all values came from. A `latest` observation can be
 reorganized away; a later read against a block that is no longer canonical
 fails instead of mixing blocks.
+
+The finalized block trails the head by minutes, on a rollup by a quarter of an hour
+or more. A position read at it does not show what was opened since: `lending-position`
+and `perp-position` then report an empty position with exit 0 and no error, and
+`liquidity-position` refuses an NFT minted since as not held at that block. The three
+position reads therefore state `read_at`, whose `block` is the selector that chose
+the block (`finalized`, `latest` or the stated number), beside the resolved number
+and hash. An empty position with `"read_at": {"block": "finalized"}` may only be older
+than the action; read it again with `--block latest`.
 
 On HyperEVM (`eip155:999`), `finalized` is the head, and Alchemy runs a read
 pinned within about 128 to 192 blocks of its head at the next block. There a

@@ -211,7 +211,10 @@ almanak ax lending-position --connector <connector> --chain <chain> <market> --a
 
 A balance is `observations[0].amount` in base units; divide by 10 to the power of
 its `decimals`. A chain with no native balance cannot be used until the user sends
-gas; say which chains are usable. A lending position is under `observation`. Each
+gas; say which chains are usable. A lending position is under `observation`, and
+`read_at.block` names the selector that chose its block. Read at `finalized`, which
+is the default and can trail the head by minutes, a position just opened shows as
+empty with no error: keep `--block latest` after an action. Each
 figure is in base units of the asset whose decimals the last column names, which
 is not always the entry's own asset:
 
@@ -514,7 +517,7 @@ position again and report both:
 | Field | Means |
 | --- | --- |
 | `completed` | True only when the whole action happened. A recover result has `resolved` instead and no `completed`. |
-| `outcomes` | Each step that was mined, with its `transaction` hash. `success` false is a step that failed on chain and still cost its fee; no `refused` goes with it. `accounting_issues` lists wallet movements the step does not explain: report them. |
+| `outcomes` | Each step that was mined, with its `transaction` hash and the `block` it was mined in. `success` false is a step that failed on chain and still cost its fee; no `refused` goes with it. `accounting_issues` lists wallet movements the step does not explain: report them. |
 | `refused` | The kind and message of the refusal that stopped a later step. |
 | `released_expired` | A signed step the endpoint used reports as past its deadline and not mined. The step was released and the wallet is free; `ax recover` exits 1 for it although `resolved` is true. The release rests on the report of the endpoint used: were that report false, the step may have been mined, and repeating the action could then execute it twice. Report the step's transaction hash and tell the user this before they repeat the action; for a bridge deposit, run the check under "Bridges" first, and say that it may have been mined when no second endpoint can be asked. |
 | `released_consumed_nonce` | A signed step that was never mined and whose `nonce` another transaction of the wallet used, named under `consumed_by` with its `block`. The step was released and the wallet is free; `ax recover` exits 1 for it although `resolved` is true. The release rests on the report of the endpoint used: were that report false, the released step could still execute, and repeating the action could then execute it twice. Report both hashes and tell the user this before they repeat the action. |
@@ -829,7 +832,13 @@ earns nothing.
 - In the read, `pool.in_range` says whether the position earns now, and an
   `owner` other than your wallet means the position was moved. `staked` true is
   an Aerodrome Slipstream NFT held by its gauge: it earns no trading fees there,
-  and `owed` is only what was recorded.
+  and `owed` is only what was recorded. `read_at.block` names the selector that
+  chose the block.
+- A read refused with `holds no NFT <token id> at block <number>` found no such
+  NFT at that block. Without `--block latest` the block is the finalized one, which
+  can trail the head by minutes, and the message then says so: read a position
+  just opened with `--block latest`, and compare the block with the `block` of
+  the open's outcome.
 
 ### A position held as LP tokens
 

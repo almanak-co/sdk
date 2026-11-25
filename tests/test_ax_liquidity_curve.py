@@ -882,7 +882,8 @@ def test_the_read_command_pins_its_block_and_reads_the_curve_position(monkeypatc
     monkeypatch.setattr(ax, "observation_reader", lambda args, chain: Reader())
     monkeypatch.setattr(position_request, "read_liquidity_position", read)
     assert ax.liquidity_position(position_arguments("--block", "latest")) == {
-        "product": "liquidity_position"
+        "product": "liquidity_position",
+        "read_at": {"block": "latest"},
     }
     assert (seen["selector"], seen["block"], seen["request"].account) == (
         "latest",

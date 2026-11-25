@@ -22,6 +22,7 @@ from almanak.connectors.aerodrome.position_request import (
     PositionRequest as AerodromePositionRequest,
 )
 from almanak.connectors.curve.position_request import PositionRequest as CurvePositionRequest
+from almanak.connectors.direct import NftNotHeld
 from almanak.connectors.discovery import pool_connectors
 from almanak.connectors.gmx_v2.market_request import GmxMarketRequest, read_gmx_market
 from almanak.connectors.gmx_v2.position_request import GmxPositionRequest, read_gmx_position
@@ -132,7 +133,23 @@ def lending_position(args):
     request = lending_request(args)
     account = Account(chain=live_chain(mainnet(request.chain)), address=args.account)
     with observation_reader(args, request.chain) as reader:
-        return read_lending_position(reader, request, account, reader.pin_block(args.block))
+        block = reader.pin_block(args.block)
+        return {**read_lending_position(reader, request, account, block), **read_at(args)}
+
+
+FINALIZED_HINT = (
+    "; that is the 'finalized' block, which can trail the head by minutes on a rollup,"
+    " so a position just opened is read with --block latest"
+)
+
+
+def read_at(args) -> dict:
+    """The selector that chose a position read's block, beside the block it resolved to.
+
+    An empty position at an old block is a valid answer with no error; the selector is
+    what tells it apart from an empty position at the head.
+    """
+    return {"read_at": {"block": args.block}}
 
 
 def lending_request(args):
@@ -172,7 +189,7 @@ def perp_position(args):
     account = Account(chain=chain, address=args.account)
     with observation_reader(args, chain.chain_id) as reader:
         block = reader.pin_block(args.block)
-        return read_gmx_position(reader, request, account, block)
+        return {**read_gmx_position(reader, request, account, block), **read_at(args)}
 
 
 def perp_markets(args):
@@ -203,9 +220,18 @@ def liquidity_position(args):
     support_level(args.connector, request.chain)
     with observation_reader(args, chain.chain_id) as reader:
         block = reader.pin_block(args.block)
-        if not isinstance(request, PositionRequest):
-            return account_position_read(args.connector)(reader, request, block)
-        return read_liquidity_position(reader, args.connector, request, block)
+        try:
+            if not isinstance(request, PositionRequest):
+                position = account_position_read(args.connector)(reader, request, block)
+            else:
+                position = read_liquidity_position(reader, args.connector, request, block)
+        except NftNotHeld as exc:
+            # Only this read knows the selector; a direct action pins the head and
+            # shares the connector's refusal, which therefore carries no hint.
+            if args.block != "finalized":
+                raise
+            raise NftNotHeld(f"{exc}{FINALIZED_HINT}") from None
+        return {**position, **read_at(args)}
 
 
 def account_position_read(connector: str):
