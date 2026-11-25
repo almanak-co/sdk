@@ -12,6 +12,7 @@ runtime and direct-action record. Only the chain adapter is a double. It is not 
 process recovery evidence.
 """
 
+import threading
 import time as real_time
 
 import pytest
@@ -189,6 +190,24 @@ def test_a_refusal_names_its_cause(store, clock):
 # The renewal thread, through the client a direct action uses (2 s lease).
 
 
+def gated(gateway):
+    """A lock that holds the renewal thread's requests while the test holds it.
+
+    A renewal between the stall and the successor's admission would extend the lease on
+    the advanced clock, which is correct, and the successor would then be refused."""
+    renewals = threading.Lock()
+    request = gateway.request
+
+    def held(method, **fields):
+        if method == "renew":
+            with renewals:
+                return request(method, **fields)
+        return request(method, **fields)
+
+    gateway.request = held
+    return renewals
+
+
 def renewed_after(gateway, clock, moment, budget=5.0):
     """Wait, in real time, for a renewal the gateway wrote after `moment`."""
     deadline = real_time.monotonic() + budget
@@ -219,10 +238,12 @@ def test_the_renewal_ends_when_another_coordinator_took_the_lease(
     tmp_path, recorded, clock, clocks
 ):
     gateway = ax_actions.LocalGateway(Desk(tmp_path, recorded).service)
+    renewals = gated(gateway)
     gateway.acquire()
     try:
-        clock.stall(LONG, clocks)
-        gateway.service.journal.acquire("successor", 2)
+        with renewals:
+            clock.stall(LONG, clocks)
+            gateway.service.journal.acquire("successor", 2)
         deadline = real_time.monotonic() + 5
         while gateway.lease_error is None and real_time.monotonic() < deadline:
             real_time.sleep(0.02)
@@ -266,6 +287,37 @@ def test_a_transient_failure_of_the_first_renewal_after_a_stall_is_retried(
         gateway.close()
 
 
+def test_a_renewal_that_stalls_inside_its_request_then_fails_is_still_retried(
+    tmp_path, recorded, clock
+):
+    """The retry window opens when the failure is seen. A renewal request that was not
+    scheduled for longer than the lease, then failed as unavailable, still gets one
+    lease from that failure; counted from the request's start it would get none."""
+    gateway = ax_actions.LocalGateway(Desk(tmp_path, recorded).service)
+    request = gateway.request
+    failures = []
+
+    def stalled_then_unavailable(method, **fields):
+        if method == "renew" and not failures:
+            failures.append(clock.time())
+            clock.stall(LONG, "both")
+            raise gateway_client.DataError("gateway_unavailable", "journal lock timed out")
+        return request(method, **fields)
+
+    gateway.acquire()
+    try:
+        gateway.request = stalled_then_unavailable
+        deadline = real_time.monotonic() + 5
+        while not failures and real_time.monotonic() < deadline:
+            real_time.sleep(0.02)
+        assert failures
+        assert renewed_after(gateway, clock, failures[0] + LONG)
+        assert len(failures) == 1 and gateway.lease_error is None
+        gateway.scoped("renew")
+    finally:
+        gateway.close()
+
+
 # A direct action: record, in-process gateway (30 s lease), operator runtime.
 
 
@@ -301,6 +353,9 @@ class Direct:
         self.backend = Adapter(Journal(self.database), recorded)
         self.stalled = False
         self.client = None
+        # Held while the stall advances the clocks and a successor is admitted, as in
+        # `gated`; the renewal thread waits on it.
+        self.renewals = threading.Lock()
         # The capture's allocation is not named as a direct command names its own.
         monkeypatch.setattr(ax_actions, "position", lambda state: None)
         monkeypatch.setattr(OperatorRuntime, "poll", 0)
@@ -310,10 +365,11 @@ class Direct:
 
     def stall(self, seconds, clocks, successor):
         self.stalled = True
-        assert lease_row(Journal(self.database))[0] == self.client.coordinator
-        self.clock.stall(seconds, clocks)
-        if successor:
-            Journal(self.database).acquire("successor", 30)
+        with self.renewals:
+            assert lease_row(Journal(self.database))[0] == self.client.coordinator
+            self.clock.stall(seconds, clocks)
+            if successor:
+                Journal(self.database).acquire("successor", 30)
 
     def run(self, *, at, seconds, clocks="wall", execute=True, successor=False):
         """`at` is `preview`, before the request is admitted with nothing signed, or the
@@ -328,6 +384,9 @@ class Direct:
 
         class Client(ax_actions.LocalGateway):
             def scoped(self, method, **fields):
+                if method == "renew":
+                    with direct.renewals:
+                        return scoped(self, method, **fields)
                 due = isinstance(at, int) and method not in ("acquire", "renew")
                 if due and not direct.stalled and direct.mined() >= at:
                     direct.stall(seconds, clocks, successor)
@@ -395,9 +454,32 @@ def test_an_execution_without_a_stall_completes(direct):
     completed(direct, direct.run(at="never", seconds=0), stalled=False)
 
 
-@pytest.mark.parametrize("at", ["preview", 1, 2])
-def test_a_stalled_execution_whose_lease_another_coordinator_took_is_refused(direct, at):
+def test_a_stalled_preview_whose_lease_another_coordinator_took_is_refused(direct):
     with pytest.raises(RuntimeError, match="superseded"):
-        direct.run(at=at, seconds=LONG, successor=True)
+        direct.run(at="preview", seconds=LONG, successor=True)
     # Nothing was signed or sent after the takeover.
-    assert direct.stalled and direct.sent() == (0 if at == "preview" else at)
+    assert direct.stalled and direct.sent() == 0
+
+
+@pytest.mark.parametrize("at", [1, 2])
+def test_a_stalled_execution_whose_lease_another_coordinator_took_keeps_its_result(direct, at):
+    """After a recorded outcome the refusal is part of the result, built from the
+    record: the mined steps, `completed` and the position. `at=2` had already closed
+    the request, so the command completed although its last acknowledgement failed."""
+    result = direct.run(at=at, seconds=LONG, successor=True)
+    # Nothing was signed or sent after the takeover.
+    assert direct.stalled and direct.sent() == at
+    assert [item["operation"] for item in result["outcomes"]] == ["approve", "supply"][:at]
+    assert all(item["success"] for item in result["outcomes"])
+    assert result["executed"] and "position_after" in result
+    assert result["completed"] == (at == 2)
+    if at == 2:
+        assert "refused" not in result
+    else:
+        # The main thread's request or, first, the renewal thread meets the successor.
+        assert result["refused"]["kind"] == "runtime"
+        assert result["refused"]["message"].endswith(
+            "coordinator lease is superseded: another coordinator took it"
+        )
+    assert "record_kept" not in result and "unresolved" not in result
+    assert not direct.directory.exists() and ax_actions.kept_records() == []

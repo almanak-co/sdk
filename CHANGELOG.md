@@ -39,12 +39,22 @@ its changelog is on the `v2` branch.
   command either; only a gateway refusal, or unavailability that outlasts both that
   window and the confirmed lease, ends it (#60).
 - With the lease no longer ending at its expiry, the age of a broadcast's own checks
-  is bounded instead: it sends only while the checks it made before the journal lock
-  (authority, simulation, fees, a calldata deadline) are no older than the coordinator
-  lease. After a stall longer than the lease between those checks and the send, as on
-  a machine suspended during `ax swap --execute` on Curve, whose calldata carries no
-  deadline, that attempt sends nothing and is refused as transient with
-  `stale_checks`; the coordinator asks again, and the next attempt checks afresh (#60).
+  is bounded instead. The checks it made before the journal lock (authority,
+  simulation, fees, a calldata deadline) are held to the coordinator lease under that
+  lock, before the attempt is marked as possibly sent and again in `submit_prepared`
+  just before the chain adapter is asked to send. After a stall longer than the lease
+  between those checks and that point, as on a machine suspended during `ax swap
+  --execute` on Curve, whose calldata carries no deadline, that attempt sends nothing
+  and is refused as transient with `stale_checks`; the coordinator asks again, and the
+  next attempt checks afresh. A stall inside the adapter's own send, after the last
+  check, is not bounded by it (#60).
+- A direct `almanak ax` action that fails with an error the command names, such as a
+  lost coordinator lease, after an outcome of its request was recorded no longer ends
+  with only that error. It prints the result built from the record, with the mined
+  steps, `completed` and `position_after`, and the failure under `refused`. A request
+  the record already shows closed reports `completed: true` and exits 0. An interrupt,
+  an unexpected failure, or a failure before any outcome still prints the
+  `steps_sent` event and the error (#60).
 - The lease refusal names its cause: `coordinator lease is superseded: another
   coordinator took it`, or `coordinator lease is absent: it was released or never
   taken`. When the renewal thread meets it first, the command's error carries it too:

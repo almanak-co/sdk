@@ -292,9 +292,12 @@ class GatewayClient:
                     # under a new identity or signing/broadcasting an economic operation.
                     # Unavailability is retried for one lease from its first failure, or for
                     # as long as the lease is confirmed if that is later: after a stall the
-                    # lapsed deadline says nothing about how long the gateway was away.
+                    # lapsed deadline says nothing about how long the gateway was away. The
+                    # window opens when the failure is seen, not when its request began, so
+                    # a request that stalled for longer than the lease still gets one.
                     if isinstance(exc, DataError) and exc.kind == "gateway_unavailable":
-                        failing_since = started if failing_since is None else failing_since
+                        if failing_since is None:
+                            failing_since = time.monotonic()
                         until = max(confirmed(deadline), failing_since + seconds)
                         remaining = until - time.monotonic()
                         if remaining > 0:

@@ -57,7 +57,10 @@ class Writes:
 
         Checks made before the lock (authority, simulation, fees, a protocol deadline)
         are not repeated under it. The holder's lease no longer ends at its expiry, so
-        this bounds instead how old those checks may be when signed bytes leave. The
+        this bounds instead how old those checks may be when the broadcast is admitted:
+        it is called under the journal lock, in `record_send` before the never-sent mark
+        is cleared and in `submit_prepared` just before the adapter is asked to send. A
+        stall after that call, inside the adapter's own send, is not bounded by it. The
         same request asked again checks afresh.
         """
         age = time.time() - self.started

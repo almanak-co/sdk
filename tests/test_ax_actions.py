@@ -574,21 +574,69 @@ def test_a_fee_refusal_on_a_later_step_still_reports_the_steps_sent(desk):
     }
 
 
-def test_an_unexpected_failure_reports_the_steps_already_sent(desk, capsys):
+def failing_after_the_approval(desk, failure):
     prepare = desk.gateway.prepare
 
     def broken(state, intent, *arguments, **options):
         if desk.kinds() == ["approve"]:
-            raise OSError("disk")
+            raise failure
         return prepare(state, intent, *arguments, **options)
 
     desk.gateway.prepare = broken
-    amount = desk.intent("supply").amount.amount
-    with pytest.raises(OSError):
-        ax_actions.perform(desk.service, ActionRequest("supply", amount), execute=True)
+    return ActionRequest("supply", desk.intent("supply").amount.amount)
+
+
+def test_an_unexpected_failure_reports_the_steps_already_sent(desk, capsys):
+    request = failing_after_the_approval(desk, KeyError("bug"))
+    with pytest.raises(KeyError):
+        ax_actions.perform(desk.service, request, execute=True)
     event = json.loads(capsys.readouterr().err)
     assert event["event"] == "steps_sent"
     assert [item["operation"] for item in event["outcomes"]] == ["approve"]
+
+
+def test_a_named_failure_after_a_mined_step_is_refused_in_the_result(desk, capsys, monkeypatch):
+    """The command's own error after an outcome is recorded does not drop the result:
+    the mined approval, `completed` and the position are reported, and the failure is
+    under `refused` with the kind the command's error document would name."""
+    request = failing_after_the_approval(desk, OSError("disk"))
+    result = ax_actions.perform(desk.service, request, execute=True)
+    assert [item["operation"] for item in result["outcomes"]] == ["approve"]
+    assert result["outcomes"][0]["transaction"]
+    assert result["executed"] and not result["completed"]
+    assert "position_after" in result
+    assert result["refused"] == {"kind": "invalid_input", "message": "disk"}
+    assert "steps_sent" not in capsys.readouterr().err
+    assert command_status(monkeypatch, result) == 1
+
+
+def test_a_failure_after_the_request_closed_exits_0_with_the_result(recorded, monkeypatch, capsys):
+    """Every step mined and recorded, then the command's error, as a lost lease on the
+    acknowledgement of the last outcome: the request is complete and the command says so."""
+
+    def lost(interrupt):
+        raise RuntimeError("coordinator lease is superseded: another coordinator took it")
+
+    monkeypatch.setattr(ax_actions, "position", lambda state: {"held": True})
+    runtime = SimpleNamespace(
+        execute=lost, journal=SimpleNamespace(load=lambda: recorded), refused=None
+    )
+    # The capture's last request, the withdrawal, is closed in the record.
+    start = len(recorded.outcomes) - 1
+    assert recorded.outcomes[start].operation.kind == "withdraw"
+    result = ax_actions.executed(runtime, start, lambda: None)
+    assert [item["operation"] for item in result["outcomes"]] == ["withdraw"]
+    assert result["executed"] and result["completed"] and "refused" not in result
+    assert result["position_after"] == {"held": True}
+    assert capsys.readouterr().err == ""
+    assert command_status(monkeypatch, result) == 0
+    # Without an outcome of this request there is nothing to report but the failure.
+    with pytest.raises(RuntimeError, match="superseded"):
+        ax_actions.executed(runtime, len(recorded.outcomes), lambda: None)
+    # An unreadable record reports nothing and keeps the failure.
+    runtime.journal = SimpleNamespace(load=lambda: (_ for _ in ()).throw(OSError("disk")))
+    with pytest.raises(RuntimeError, match="superseded"):
+        ax_actions.executed(runtime, 0, lambda: None)
 
 
 def test_a_refusal_is_raised_when_the_record_cannot_be_read_afterwards():
@@ -633,13 +681,8 @@ def test_local_gateway_reports_storage_failures_as_the_loopback_server_does():
     assert gateway.coordinator is None
 
 
-@pytest.mark.parametrize(
-    ("execute", "completed", "status"),
-    [(False, None, 0), (True, True, 0), (True, False, 1)],
-)
-def test_exit_status_follows_completion_only_when_executing(
-    monkeypatch, capsys, execute, completed, status
-):
+def command_status(monkeypatch, result, execute=True):
+    """The exit status `ax_actions.command` gives for `result`, with its inputs stubbed."""
     monkeypatch.setattr("almanak.ax.lending_request", lambda args: SimpleNamespace(chain="c"))
     monkeypatch.setattr("almanak.connectors.direct.require_direct", lambda *a: None)
     monkeypatch.setattr(ax_actions, "read_wallet", lambda directory: {})
@@ -647,7 +690,6 @@ def test_exit_status_follows_completion_only_when_executing(
     monkeypatch.setattr(ax_actions, "action_config", lambda *a: "config")
     backend = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr(ax_actions, "production_backend", lambda *a: backend)
-    result = {"executed": execute} if completed is None else {"completed": completed}
     monkeypatch.setattr(ax_actions, "run", lambda *a, **k: result)
     args = SimpleNamespace(
         wallet=None,
@@ -657,7 +699,18 @@ def test_exit_status_follows_completion_only_when_executing(
         amount=1,
         execute=execute,
     )
-    assert ax_actions.command(args) == status
+    return ax_actions.command(args)
+
+
+@pytest.mark.parametrize(
+    ("execute", "completed", "status"),
+    [(False, None, 0), (True, True, 0), (True, False, 1)],
+)
+def test_exit_status_follows_completion_only_when_executing(
+    monkeypatch, capsys, execute, completed, status
+):
+    result = {"executed": execute} if completed is None else {"completed": completed}
+    assert command_status(monkeypatch, result, execute) == status
     assert json.loads(capsys.readouterr().out) == result
 
 

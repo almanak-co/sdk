@@ -134,10 +134,12 @@ absent` after a release. This is the journal's fence, not on-chain enforcement.
 
 A broadcast's checks before the lock (authority, simulation, fees, a calldata
 deadline) are not repeated under it, so they are held to the lease's duration
-instead: when they are older than one lease at the lock where the bytes would be
-recorded as sent or sent, nothing is sent and the broadcast is refused as
-transient (`stale_checks`). The coordinator asks again, and the next attempt runs
-every check afresh. After a stall the coordinator also continues from its durable
+instead. Their age is checked under the journal lock, before the attempt is
+marked as possibly sent and again just before the chain adapter is asked to send:
+when they are older than one lease there, nothing is sent and the broadcast is
+refused as transient (`stale_checks`). A stall after that last check, inside the
+adapter's own send, is not bounded by it. The coordinator asks again, and the
+next attempt runs every check afresh. After a stall the coordinator also continues from its durable
 checkpoint, as every tick does: a plan is signed only while its observation is
 within `max_observation_age_seconds` in production and after its current state,
 simulation and fees are checked at a fresh block, and a signed step is sent only
@@ -656,8 +658,13 @@ and the command exits 1 when it is false. A supply is not atomic: its approval c
 be mined and the supply then be refused, for example on a fee quote above the
 ceiling, or revert. The position is then unchanged and the allowance stays on chain;
 `outcomes` lists the steps that ran, each with its `transaction` hash and the
-`block` it was mined in, and `refused` names the refusal. A failure that
-is not a refusal prints the steps already sent as one
+`block` it was mined in, and `refused` names the refusal. So does a failure
+the command names as its own error, such as a lost coordinator lease, once an
+outcome of the request is recorded: the result is built from the record, with the
+failure under `refused` as its error document would name it (`kind` `runtime` for
+a lease). A request the record already shows closed reports `completed` true and
+the command exits 0. An interrupt, an unexpected failure, or one before any outcome
+prints the steps already sent as one
 `{"event": "steps_sent", "outcomes": ...}` line on standard error before its error.
 A step that was signed and has no reconciled outcome yet is reported apart from
 `outcomes`, as `unresolved` with its operation and transaction hash; it may or may
