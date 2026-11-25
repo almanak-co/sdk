@@ -462,9 +462,13 @@ reserve is held to what its Pool, Spoke, Comet or Morpho core records for it, an
 each listed market to the same record: an Aave V4 market to its Spoke's reserve
 under that ID, an Aave V3 or SparkLend market to the Pool's reserve list, with no
 asset reported twice and as many markets as the limit allows, a Morpho market to
-the requested loan asset and the core's parameters for its ID. A balance or a
-position is held to the asset, account, Spoke and reserve the case requested
-before any direct read, and a native balance to 18 decimals. That a market is `verified` is the
+the requested loan asset and the core's parameters for its ID. A balance, a
+position, a reserve and a pool are held to what the case requested before any
+direct read: the asset and account, the Spoke and reserve ID, the Comet, the
+Morpho core and market ID, the pool's address or its Uniswap V4 key, and for an
+Aave V3 or SparkLend reserve the Pool the connector pins on the chain, since the
+request names none. A read of another reserve or pool fails, however well its
+data agrees with the chain. A native balance is held to 18 decimals. That a market is `verified` is the
 SDK's own statement; the direct reads check the identity it reports, not every
 fact the SDK verified. The GMX bare-label cases and the HyperCore case have no
 direct read.
@@ -477,7 +481,8 @@ Outcomes. Each case on each endpoint ends as one of:
   timeout, an unanswered direct read, or a command that exited 0 but reported an
   endpoint refusal for part of its output (`observation_error`). A listing entry
   the endpoint did not answer blocks a case only when nothing the endpoint did
-  answer fails it. Such a case is tried three times, 5 and
+  answer fails it; an empty listing beside such an entry blocks too, since the
+  entry may hold the markets, and an empty listing without one fails. Such a case is tried three times, 5 and
   then 15 seconds apart, with 90 seconds per command (`--attempts`,
   `--backoff-seconds`, `--timeout-seconds`). After three consecutive blocked cases
   on one chain, the endpoint's remaining cases on that chain are reported blocked
@@ -638,12 +643,26 @@ It stops and exits 1, leaving the rest to you, when:
 - the withdrawal preview was refused. Nothing more was signed and the supplied
   amount is still in the market; `almanak ax withdraw` for that market returns it
   once the reason is resolved.
+- the withdrawal preview's `position_before` does not report the same
+  `supplied_shares` and `debt_shares` as the supply's `position_after`, or either
+  report lacks them. Something reached the position after the supply, and a full
+  withdrawal would take it too, without the confirmation covering it. The
+  withdrawal is not run, the report names the difference, and the supplied amount
+  is still in the market. The position can still change between that preview and
+  the withdrawal; the check does not close that window.
 - the withdrawal was executed but did not complete. Its outcome is not known:
   the amount may still be supplied, or the withdrawal may have been mined. Do
   not request another withdrawal yet. A signed step left unresolved keeps its
   record, which refuses later actions for the wallet: list the kept records with
   `almanak ax recover`, resolve one if kept, then read the position with
   `ax lending-position` before deciding anything.
+
+A run stopped by an exception, Ctrl-C included, still writes `summary.md` and
+`writes.json` before it ends: every command that returned, with its transactions,
+and a verdict that names the command that was running. Once an executing command
+has started, the verdict says that its outcome is not known and that the supplied
+amount may still be in the market; resolve it as for a withdrawal that did not
+complete.
 
 Only the gates and the flow have tests, offline and against a fake command
 (`tests/test_live_qa_writes.py`). No test and no workflow runs the write level for
