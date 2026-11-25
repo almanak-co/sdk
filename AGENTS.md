@@ -630,18 +630,21 @@ independently.
   and the scan continues. It is no outcome and raises no accounting issue of
   one, because such an issue stops new exposure on the chain and a stranger's
   dust would then freeze a strategy.
-- Proposed, not accepted: attribution considers the 12 oldest transfers proven
-  unfilled of an allocation.
+- Proposed, not accepted: attribution of one payment considers the 12 oldest
+  transfers proven unfilled of an allocation that no other payment of the
+  block took.
 - Accepted: a refund page ends at the first block that holds a refund-leaf
   payment to the fund, and the payments it names are in that block. The
   gateway refuses a page that runs past it, so no scan continues beyond a
   refund it never read.
 - Accepted: several refund payments to one fund in one block are settled in
-  that block's page and stop nothing. They are assigned together: when some
-  assignment gives every payment its own disjoint set of the transfers
-  waiting, the first such in the tie rule's order, payment by payment in log
-  order, is taken. Otherwise each payment in log order takes the oldest set
-  the earlier ones left. No payment takes a transfer another paid. The page's one refund outcome names the
+  that block's page and stop nothing. The payments that fit some set on their
+  own are assigned together: when some assignment gives each of them its own
+  disjoint set of the transfers waiting, the first such in the tie rule's
+  order, payment by payment in log order, is taken, and the other payments
+  then take in log order what is left. Without such an assignment, or past
+  the search's fixed budget of 10,000 sets tried, each payment in log order
+  takes the oldest set the earlier ones left. No payment takes a transfer another paid. The page's one refund outcome names the
   first attributed transaction, retains the receipts of the others, resolves
   every transfer they pay and returns their sum. A payment of the block that
   matches no set is an unattributed refund payment.
@@ -824,6 +827,11 @@ independently.
   stops the source chain as unresolved; and an operator's resolution of a
   transfer whose refund was paid unattributed. The rules above still marked
   proposed are ones the production declaration rests on.
+- Current contract: the Across checkpoint is schema version 2. A version 1
+  checkpoint, which retained one unattributed payment per refund page, is
+  audit-only and refused for execution. A composed checkpoint carries no
+  version of its components: one written before with an unattributed Across
+  payment fails validation. Such checkpoints exist on forks only.
 - Known limit: a full empty scan page is retained, and every retained page of
   a chain is audited, two block reads and one log query each, whenever that
   chain's history is audited. GMX liquidation pages share this. A refund scan

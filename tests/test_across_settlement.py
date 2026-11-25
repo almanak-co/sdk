@@ -436,6 +436,58 @@ def test_only_the_twelve_oldest_transfers_are_considered_for_one_refund(config):
     assert [t.open for t in state.transfers] == [False] * 12 + [True]
 
 
+def test_a_transfer_beyond_the_twelve_oldest_is_eligible_once_others_are_taken(config):
+    """Thirteen equal transfers, one block paying twelve of them and then one: the
+    second payment's window is the oldest transfers the first left."""
+    transfers = [flight(config, serial) for serial in range(13)]
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, *transfers), config, chain)
+    number = chain.head + 3
+    refunded(config, chain, number, [12 * AMOUNT], tx="0x" + "e1" * 32)
+    refunded(config, chain, number, [AMOUNT], tx="0x" + "e3" * 32)
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    assert (page.unsolicited, page.outcome.returned.amount) == ((), 13 * AMOUNT)
+    assert not any(t.open for t in state.transfers)
+
+
+def test_a_stray_payment_in_the_block_does_not_undo_the_joint_assignment(config):
+    a, b, c, d = four_sized(config)
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, a, b, c, d), config, chain)
+    number = chain.head + 3
+    refunded(config, chain, number, [30], tx="0x" + "e1" * 32)
+    refunded(config, chain, number, [7], tx="0x" + "e2" * 32)
+    refunded(config, chain, number, [35], tx="0x" + "e3" * 32)
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    assert page.outcome.transfers == (c.reference, b.reference, d.reference)
+    assert [p.amount.amount for p in page.unsolicited] == [7]
+
+
+def test_a_joint_search_past_its_budget_takes_the_payments_one_by_one(config, monkeypatch):
+    monkeypatch.setattr(settlement, "JOINT_SEARCH_STEPS", 1)
+    a, b, c, d = four_sized(config)
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(proven(config, a, b, c, d), config, chain)
+    number = chain.head + 3
+    refunded(config, chain, number, [30], tx="0x" + "e1" * 32)
+    refunded(config, chain, number, [35], tx="0x" + "e3" * 32)
+    state = settle(state, config, chain)
+    page = state.external_scans[-1]
+    assert page.outcome.transfers == (a.reference, b.reference)
+    assert [p.amount.amount for p in page.unsolicited] == [35]
+
+
+def test_a_checkpoint_of_the_earlier_schema_is_refused_as_audit_only(config):
+    from almanak.connectors.composition import checkpoint_from_json
+
+    current = checkpoint(config).model_dump_json()
+    assert checkpoint_from_json(current).schema_version == 2
+    with pytest.raises(ValueError, match="audit-only"):
+        checkpoint_from_json(current.replace('"schema_version":2', '"schema_version":1'))
+
+
 def test_two_allocations_of_one_source_fund_and_asset_are_refused_at_configuration():
     from tests.across_support import allocation, parameters
 

@@ -127,7 +127,9 @@ def connector():
             pending=Pending,
             outcome=Outcome,
             capability=capability_codec(),
-            schema_version=1,
+            schema_version=2,
+            # Version 1 retained one unattributed payment per refund page, not a tuple.
+            legacy_schemas={1: True},
             actions=lambda context: context.config,
         ),
         lifecycle=AcrossLifecycle(),

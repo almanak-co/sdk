@@ -30,6 +30,9 @@ from almanak.models import AssetAmount
 SPAN = chain.MAXIMUM_EVENT_BLOCK_SPAN
 # One refund can pay several transfers. Attribution enumerates their subsets, so it is bounded.
 MAXIMUM_REFUND_CANDIDATES = 12
+# How many sets the joint assignment of one block's payments may try before it falls back
+# to taking the payments one by one.
+JOINT_SEARCH_STEPS = 10_000
 
 
 def seconds(instant) -> int:
@@ -215,7 +218,7 @@ def checked(page, first, reference, cross_check):
 def candidates(state, target, timestamp: int):
     """The transfers a refund mined at `timestamp` may pay: this allocation's, proven
     unfilled by the destination chain, past their fill deadline. Oldest deadline first,
-    then by reference, and only the oldest few: attribution enumerates their subsets."""
+    then by reference."""
     waiting = [
         transfer
         for transfer in state.transfers
@@ -226,7 +229,7 @@ def candidates(state, target, timestamp: int):
         and seconds(transfer.fill_deadline) < timestamp
     ]
     waiting.sort(key=lambda transfer: (transfer.fill_deadline, transfer.reference))
-    return waiting[:MAXIMUM_REFUND_CANDIDATES]
+    return waiting
 
 
 def refund_payment(receipt, target) -> tuple[int, int, bool] | None:
@@ -270,54 +273,80 @@ def unattributed(target, row, named: int, paid: int, exact: bool) -> Unsolicited
 
 
 def matching_sets(total: int, waiting, free):
-    """Index sets of the free transfers whose sent amounts sum to `total`, oldest first."""
+    """Index sets of the free transfers whose sent amounts sum to `total`, oldest first.
+
+    Only the oldest few free transfers are considered, because their subsets are
+    enumerated. A transfer another payment of the block took is not free, so a younger
+    one moves into the window.
+    """
+    window = free[:MAXIMUM_REFUND_CANDIDATES]
     return sorted(
         subset
-        for size in range(1, len(free) + 1)
-        for subset in combinations(free, size)
+        for size in range(1, len(window) + 1)
+        for subset in combinations(window, size)
         if sum(waiting[index].sent.amount for index in subset) == total
     )
 
 
-def joint(totals, waiting, free):
+def joint(totals, waiting, free, budget):
     """Disjoint sets of waiting transfers, one per total, or None when there are none.
 
     The first complete assignment in the tie rule's order: the first payment takes its
-    oldest possible set, the next the oldest of what that leaves, and so on.
+    oldest possible set, the next the oldest of what that leaves, and so on. The search
+    is bounded: past its budget of steps it gives up, as if there were none.
     """
     if not totals:
         return ()
     for subset in matching_sets(totals[0], waiting, free):
-        rest = joint(totals[1:], waiting, tuple(i for i in free if i not in subset))
+        budget[0] -= 1
+        if budget[0] < 0:
+            return None
+        rest = joint(totals[1:], waiting, tuple(i for i in free if i not in subset), budget)
         if rest is not None:
             return (subset, *rest)
     return None
 
 
-def one_by_one(totals, waiting):
+def one_by_one(totals, waiting, free):
     """Each payment in log order takes its oldest set of what the earlier ones left."""
-    free, taken = tuple(range(len(waiting))), []
+    taken = []
     for total in totals:
         matches = matching_sets(total, waiting, free)
         taken.append(matches[0] if matches else ())
         free = tuple(i for i in free if i not in taken[-1])
-    return tuple(taken)
+    return taken
+
+
+def assigned(totals, waiting):
+    """One set of waiting transfers per payment total, empty where none is taken.
+
+    Payments that fit some set on their own are assigned together, so that none of
+    them is left without one where a complete assignment exists; a stranger's payment
+    that fits nothing does not enter that search. The others then take, in log order,
+    what is left. Without a complete assignment every payment is taken one by one.
+    """
+    everything = tuple(range(len(waiting)))
+    fitting = [n for n, total in enumerate(totals) if matching_sets(total, waiting, everything)]
+    together = joint([totals[n] for n in fitting], waiting, everything, [JOINT_SEARCH_STEPS])
+    if together is None:
+        return one_by_one(totals, waiting, everything)
+    sets = dict(zip(fitting, together, strict=True))
+    used = {index for subset in together for index in subset}
+    rest = [n for n in range(len(totals)) if n not in sets]
+    left = tuple(i for i in everything if i not in used)
+    sets.update(zip(rest, one_by_one([totals[n] for n in rest], waiting, left), strict=True))
+    return [sets[n] for n in range(len(totals))]
 
 
 def settled(state, target, block, payments):
     """Attribute the block's refund payments to disjoint sets of waiting transfers.
 
-    All payments of a block are known at once, so they are assigned together: when
-    some assignment gives every exact payment a set whose sent amounts sum to it, the
-    first such in the tie rule's order is taken. Otherwise each payment in log order
-    takes the oldest set the earlier ones left, and one that fits none is attributed to
-    nothing. A payment the SpokePool paid in another amount than its leaf names is
-    never attributed.
+    All payments of a block are known at once, so they are assigned together, under
+    `assigned`. A payment that fits no set is attributed to nothing, and one the
+    SpokePool paid in another amount than its leaf names is never attributed.
     """
     waiting = candidates(state, target, block.timestamp)
-    exact = [paid for _, _, _, paid, agrees in payments if agrees]
-    assigned = joint(exact, waiting, tuple(range(len(waiting))))
-    sets = iter(assigned if assigned is not None else one_by_one(exact, waiting))
+    sets = iter(assigned([paid for _, _, _, paid, agrees in payments if agrees], waiting))
     refunds, left = [], []
     for row, receipt, named, paid, agrees in payments:
         taken = tuple(waiting[index] for index in next(sets)) if agrees else ()
