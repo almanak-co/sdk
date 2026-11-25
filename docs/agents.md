@@ -121,7 +121,9 @@ it never picks one silently:
   reported with its accounting issues, not as a failure.
 - **The fee ceilings.** Each applies to one step, and an action takes several;
   the agent states the ceiling for one step, states no total it cannot count, and
-  never raises a ceiling itself.
+  never raises a ceiling itself. It states `--base-fee-multiplier-bps` only when the
+  user chose a value: a lower one pays less on chains where the whole bid is paid,
+  and a step can then stay unmined when the base fee rises.
 
 When a command ends without a result, the agent does not repeat it: it lists the
 kept records, reads the position and reports. It resolves with `ax recover` only a

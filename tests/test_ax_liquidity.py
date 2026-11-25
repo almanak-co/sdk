@@ -1078,7 +1078,7 @@ def test_the_command_refuses_an_undeclared_chain_and_passes_the_request_on(conne
     seen = {}
 
     def deployment(name, market, action, wallet, provider, endpoint, limits, **options):
-        seen.update(connector=name, market=market, action=action)
+        seen.update(connector=name, market=market, action=action, limits=limits)
         raise StopIteration
 
     monkeypatch.setattr(ax_actions, "read_wallet", lambda directory: {})
@@ -1088,6 +1088,12 @@ def test_the_command_refuses_an_undeclared_chain_and_passes_the_request_on(conne
         ax_actions.command(arguments(connector, "decrease-liquidity"))
     assert (seen["connector"], seen["market"].pool) == (connector, POOLS[connector][1])
     assert (seen["action"].token_id, seen["action"].liquidity) == (TOKEN, 250)
+    assert seen["limits"] == ax_actions.FeeLimits(7, 9, None)
+    for command in COMMANDS:
+        stated = arguments(connector, command, "--base-fee-multiplier-bps", "15000")
+        with pytest.raises(StopIteration):
+            ax_actions.command(stated)
+        assert seen["limits"] == ax_actions.FeeLimits(7, 9, None, 15000)
 
     monkeypatch.setattr(ax_actions, "read_wallet", pytest.fail)
     for command in COMMANDS:

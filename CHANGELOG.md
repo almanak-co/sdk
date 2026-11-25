@@ -8,6 +8,18 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Added
+- Every direct `almanak ax` action takes an optional `--base-fee-multiplier-bps`, the
+  multiple of the base fee a step bids, within the range an author's
+  `base_fee_multiplier_bps` takes (10000 to 50000). Without it the chain's default
+  applies as before: 20000, or 12500 on Arbitrum and Robinhood Chain. Steps are legacy
+  transactions, so on every other chain the whole quoted price is paid, and the default
+  costs about one base fee more than the base fee plus the tip; the operating guide now
+  says so. The flag moves the bid only: the fee ceilings apply unchanged, and
+  transactions stay legacy. A bid closer to the base fee can stay unmined when the base
+  fee rises; the signed step then stays pending and `ax recover` sends the same bytes
+  again without re-pricing them (#63).
+
 ### Changed
 - `--public-rpc blastapi` is the public endpoint for BNB Chain (`eip155:56`), and
   `bnbchain` is no longer a name. BNB Chain's own endpoint keeps less than a minute of

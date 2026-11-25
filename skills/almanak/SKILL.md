@@ -408,6 +408,12 @@ preview a repayment: its refusal states the amount missing.
   in `settings.json` for the chain. If there are none, propose values to the user,
   for example 20 gwei and 0.01 ETH on Ethereum, record what they accept, and reuse
   them. Never raise a ceiling yourself.
+- **Base fee multiplier.** `--base-fee-multiplier-bps` (10000 to 50000) is optional
+  and the user's decision; never state it yourself. Without it a step bids twice
+  the base fee plus the tip (1.25 times on Arbitrum and Robinhood Chain), and
+  outside those two chains the whole bid is paid. A lower value pays less, but a
+  step can stay unmined when the base fee rises, and `ax recover` sends the same
+  bytes again without re-pricing them.
 - **Health floor, slippage, tick range and payout.** These are the user's
   decisions; the sections on borrowing, swaps and liquidity say what to ask. You
   may suggest a value and say why. Never choose one silently.

@@ -876,6 +876,11 @@ independently.
 - Operator actions have no amount ceiling or cumulative budget; the required
   fee ceilings and the wallet balance bound them. An operator-managed action
   policy is proposed, not accepted.
+- Proposed, not accepted: a direct action may state its base fee multiplier
+  (`--base-fee-multiplier-bps`) within the range an author's gas policy takes.
+  The default is the network's. It lowers or raises the bid only; the fee
+  ceilings are unchanged. Steps stay legacy transactions, and a signed step is
+  never re-priced.
 - Accepted: `ax revoke-exchange` on Uniswap V4 sets the wallet's ERC-20
   approval of each pool token to Permit2 to zero, beside the Permit2
   allowances to the router and the position manager. That approval is shared

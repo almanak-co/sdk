@@ -506,6 +506,7 @@ def test_a_preview_on_a_public_endpoint_proves_the_endpoint_before_resolving(mon
         max_gas_price_wei=5,
         max_transaction_fee=9,
         max_gas_limit=None,
+        base_fee_multiplier_bps=None,
     )
     request = SimpleNamespace(chain=ETHEREUM)
     wallet = {"account": "wallet", "address": "0x" + "ab" * 20}
