@@ -1433,9 +1433,9 @@ block and a head no older than 120 seconds; otherwise the command is refused wit
 `chain_mismatch` or `stale`. One endpoint serves a command, and a failure fails the
 read: nothing falls back to another endpoint. A single execution read of the gateway,
 and the proof `ax recover` runs on a named public endpoint, is sent again after a
-transient failure, for at most 8 seconds: a refused connection, a timeout, an HTTP
-5xx, an HTTP 429, or an HTTP 408, which says the server gave up waiting for the
-request. One whose first attempt ran into the 15 second provider timeout is sent
+transient failure, for at most 8 seconds, such as a refused connection, a timeout,
+an HTTP 5xx, an HTTP 429, or an HTTP 408, which says the server gave up waiting for
+the request. One whose first attempt ran into the 15 second provider timeout is sent
 once more, with an 8 second timeout. A failure that outlasts these bounds is marked
 transient, and the holds for a signed step and
 [between two steps](#a-failure-between-two-steps) apply to it. Every other HTTP 4xx

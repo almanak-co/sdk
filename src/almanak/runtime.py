@@ -53,8 +53,8 @@ TIMEOUT_BACKOFF_CAP_SECONDS = 60
 # stops for timeouts: stopping could only leave its positions unmanaged, while a retry
 # exits them as soon as the host has CPU again.
 WORKER_TIMEOUT_HORIZON_SECONDS = 30 * 60
-# A provider read the gateway marked transient (a throttle, transport failure, HTTP 5xx or
-# a block a lagging backend does not yet serve) holds the tick and backs off like a worker
+# A provider read the gateway marked transient (a throttle, transport failure, HTTP 5xx or 408,
+# or a block a lagging backend does not yet serve) holds the tick and backs off like a worker
 # timeout. A running deployment stops only after every tick for this long was held; one in
 # teardown never stops for it.
 TRANSIENT_HOLD_HORIZON_SECONDS = 30 * 60

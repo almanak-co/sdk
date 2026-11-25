@@ -510,8 +510,25 @@ JSON_RPC_REFUSAL = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "messag
         (httpx.Response(403), None),
         (httpx.Response(404), None),
         (httpx.Response(410), None),
+        (httpx.Response(302, headers={"location": "https://elsewhere.invalid"}), None),
+        (httpx.Response(405), None),
+        (httpx.Response(413), None),
+        (httpx.Response(425), None),
+        (httpx.Response(451), None),
     ],
-    ids=["http_400", "http_400_json_rpc", "http_401", "http_403", "http_404", "http_410"],
+    ids=[
+        "http_400",
+        "http_400_json_rpc",
+        "http_401",
+        "http_403",
+        "http_404",
+        "http_410",
+        "http_302",
+        "http_405",
+        "http_413",
+        "http_425",
+        "http_451",
+    ],
 )
 def test_every_other_4xx_answer_is_final_and_sent_once(no_backoff, answer, code):
     reader, sent = answering([answer] * 20)
