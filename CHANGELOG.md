@@ -15,7 +15,7 @@ its changelog is on the `v2` branch.
   timestamp. No extra read is made for it. `ax bridge-status` keeps its own
   `read_at`.
 - A direct action's preview states `steps_note`: how many transactions the request
-  sends, in order by kind, and that only the first step's gas is quoted, because a
+  plans, in order by kind, as the sequence it sends when nothing is refused, and that only the first step's gas is quoted, because a
   later step cannot be simulated before the earlier one is mined. Aave V4, Aave V3
   and SparkLend now list `steps` as Across does, where the planned block decides
   every step; a full repayment and the other connectors list none and say that
