@@ -665,6 +665,33 @@ def test_an_unattributed_refund_payment_has_its_own_dashboard_table(config):  # 
     assert (listed["block"], listed["amount"]["amount"]) == (page.end.number, 5)
 
 
+def test_a_refund_paid_in_another_amount_than_its_leaf_is_listed_with_both(config):  # noqa: F811
+    """The composed report and dashboard show the paid and the leaf amount, credit no
+    inventory and keep the transfer among those awaiting a refund."""
+    from almanak.connectors.composed.dashboard import project as dashboard
+    from almanak.connectors.composed.reporting import report
+
+    unfilled = flight(config).model_copy(update={"unfilled": True})
+    state = checkpoint(composed(config), transfers=(unfilled,), inventory=balances(source=0))
+    chain = here(FILL_DEADLINE + 50)
+    state = settle(state, chain)
+    refunded(config, chain, chain.head + 2, [AMOUNT], tx="0x" + "d3" * 32, payments=[AMOUNT - 1])
+    state = settle(state, chain)
+    assert state.transfers[0].open and state.external_scans[-1].outcome is None
+    listed = report(state)
+    (payment,) = listed["unattributed_refund_payments"]
+    assert (payment["amount"]["amount"], payment["leaf_amount"]["amount"]) == (AMOUNT - 1, AMOUNT)
+    assert listed["awaiting_refund"] == [unfilled.reference]
+    assert "never applied" in listed["awaiting_refund_note"]
+    assert listed["inventory"][0]["amount"] == "0"
+    context, _ = dashboard(state)
+    (paid,) = context.datasets["unattributed_refund_payments"].rows
+    assert context.values[paid["amount"].ref].amount == str(AMOUNT - 1)
+    assert context.values[paid["leaf_amount"].ref].amount == str(AMOUNT)
+    cash = [context.values[r["amount"].ref].amount for r in context.datasets["fund_inventory"].rows]
+    assert cash == ["0", "0"]
+
+
 def test_a_composed_fork_names_the_constructed_quote_on_the_source_chain_only(config):  # noqa: F811
     from almanak.connectors.across.fork import QUOTE_VENUE, ForkTransport, route_transports
     from almanak.connectors.composed.fork import ComposedFork
