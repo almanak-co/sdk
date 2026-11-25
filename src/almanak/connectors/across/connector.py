@@ -98,7 +98,7 @@ def awaiting_refund(state, unattributed) -> dict:
     waiting = [t.reference for t in state.transfers if t.open and t.unfilled]
     if not waiting:
         return {}
-    listed = {"awaiting_refund": waiting}
+    listed: dict = {"awaiting_refund": waiting}
     if unattributed:
         listed["awaiting_refund_note"] = (
             "An unattributed refund payment is never applied to a transfer. A transfer "

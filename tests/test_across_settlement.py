@@ -25,8 +25,8 @@ from almanak.connectors.across.relay import (
     relay_hash,
 )
 from almanak.connectors.across.settlement_reader import MAXIMUM_EVENT_BLOCK_SPAN as SPAN
-from almanak.connectors.across.settlement_types import Scan
 from almanak.connectors.across.settlement_reader import decoded_fill
+from almanak.connectors.across.settlement_types import Scan
 from almanak.connectors.across.state import Checkpoint
 from almanak.gateway import external_effects as gateway_effects
 from almanak.gateway.ethereum import DataError

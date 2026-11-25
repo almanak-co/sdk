@@ -719,11 +719,12 @@ independently.
 - Current contract: the composed reference is
   `strategies/arbitrum_base_bridge_and_lend`: Across from Arbitrum to Base,
   then a Compound V3 supply of exactly the measured arrival, EOA accounts,
-  fork runs and an economic backtest. Its supervised fork proofs cover the lifecycle with a pause
-  and resume, each stage with owned inventory asserted, and the refund with
+  fork runs and an economic backtest. Its supervised fork proofs cover the
+  lifecycle with a pause and resume, each stage with owned inventory asserted, and the refund with
   nothing supplied. Its economic backtest models the bridge under the proposed
-  model rule and reads Comet history for the supply. It stays out of the production rehearsal because
-  Across declares no production support.
+  model rule and reads Comet history for the supply. It is part of the
+  production rehearsal: Across declares production on Arbitrum and Compound V3
+  on Base.
 - Current contract: a runtime process killed around the arrival commit is
   proven on the composed reference with real processes and fork nodes
   (`tests/fork/test_composed_bridge_fault.py`): killed at the runtime's

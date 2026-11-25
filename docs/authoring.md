@@ -558,9 +558,8 @@ ask it: no relayer quotes a fork. A fork gateway constructs the quote instead,
 from a stated fee of one basis point and the fork's own block time, and the
 same checks admit it. Reports and dashboards show its source as
 `across_fork_constructed` beside each transfer. Such a quote says nothing about
-what the venue would have quoted. Across declares fork runs and economic
-backtests today, and no production run, so every transaction an author can
-sign carries a constructed quote. A backtest asks no venue either: it
+what the venue would have quoted. A production run signs the venue's own
+quote from its API, shown as `across_api`. A backtest asks no venue either: it
 [models the bridge](backtesting.md#bridges).
 
 A backtest calls `decide` once with the observations of every chain, where a
@@ -586,6 +585,11 @@ for nothing, as the composed bridge reference does.
 - A `RefundResult` when nobody filled it. `returned` is measured on the source
   chain. A refund is read only after the destination chain has shown that no
   fill can follow, which is after the quote's fill deadline.
+  One result can name several transfers: a refund pays whole sent amounts, and
+  refunds mined in one block arrive as one result with their sum. A payment
+  that fits no transfer, or that the venue paid in another amount than its
+  refund leaf names, is no result: it is listed in the report as an
+  unattributed refund payment and the transfer stays in flight.
 
 Between the deposit and one of the last two, the source account holds a transfer
 in flight. It is not a balance on either chain, and a missing outcome never
