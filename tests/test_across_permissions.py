@@ -348,12 +348,22 @@ def test_a_safe_beside_an_eoa_generates_one_partition_and_its_owner_bundle(monke
     assert selectors(partition) == [scope_target] * 2 + [scope_function] * 2 + [assign]
     assert {transaction.to for transaction in partition.transactions} == {ROLES}
     # Execution options 0 on every function: no native value and no delegate call.
-    for transaction in partition.transactions[2:4]:
-        *_, options = decode(
+    # The Safe executes this calldata, so each field is read back from it, not from the
+    # in-memory grant the manifest check compares.
+    role = bytes.fromhex(PROFILE.role_key[2:])
+    for transaction, grant in zip(partition.transactions[2:4], partition.grants, strict=True):
+        key, target, chosen, conditions, options = decode(
             ("bytes32", "address", "bytes4", "(uint8,uint8,uint8,bytes)[]", "uint8"),
             bytes.fromhex(transaction.data[10:]),
         )
-        assert options == 0
+        assert (key, target.lower(), options) == (role, grant.target, 0)
+        assert chosen == grant.selector == keccak(text=grant.signature)[:4]
+        assert list(conditions) == [tuple(c.abi()) for c in grant.conditions]
+    operator, keys, enabled = decode(
+        ("address", "bytes32[]", "bool[]"), bytes.fromhex(partition.transactions[4].data[10:])
+    )
+    assert operator.lower() == PROFILE.operator.address
+    assert (list(keys), list(enabled)) == ([role], [True])
     permissions.validate_manifest(CONFIG, manifest, connector=AcrossPermissions)
 
 
