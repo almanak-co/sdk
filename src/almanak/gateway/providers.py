@@ -36,14 +36,14 @@ ALCHEMY_NETWORKS = {
 #
 # A pair is listed only after it passed every check of `scripts/qualify_public_rpc.py`
 # in repeated full runs, with the one exception stated below: the pinned genesis, state
-# at `finalized`, `latest`, a numbered block and a block at least 360 seconds behind
-# the head, and the fee quote and receipt reads of a direct action. Those seconds are the floor the tool checks, the accepted
-# observation age plus an allowance for one step, not the oldest state a command can
-# read. A pass is a point-in-time result, and a transient refusal fails a run as it
-# would fail a command, so a listed endpoint can still refuse a read. A shared provider
-# is absent from a chain where its keyless tier refused one of those reads in those
-# runs, and a chain operator's own endpoint is listed under the operator's name.
-# HyperEVM has no entry.
+# at `finalized`, `latest`, a numbered block and a block at least 360 seconds behind the
+# head, and the fee quote and receipt reads of a direct action. Those seconds are the
+# floor the tool checks, the accepted observation age plus an allowance for one step,
+# not the oldest state a command can read. A pass is a point-in-time result, and a
+# transient refusal fails a run as it would fail a command, so a listed endpoint can
+# still refuse a read. A shared provider is absent from a chain where its keyless tier
+# refused one of those reads in those runs, and a chain operator's own endpoint is
+# listed under the operator's name. HyperEVM has no entry.
 #
 # One listed pair does not meet the 360 seconds: `publicnode` on Avalanche answered
 # state reads 64 blocks behind its head and left reads 128 blocks (106 seconds) and
