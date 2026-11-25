@@ -316,6 +316,13 @@ independently.
   refusal or a throttle is reported as such and nothing is substituted. The
   backend is the vendor's own, undocumented, and sees every address asked
   about.
+- Accepted: no string of the vendor's leaves `ax portfolio` unbounded. A
+  symbol, a name and a label are short runs of letters, digits and a few marks,
+  an identifier is ASCII, and no link is reported. A value that is not is
+  absent, never shortened or rewritten. The agent skill reads the overview only
+  when the user asks, never while it loads or as a step of an action, and
+  treats its text as data. Never describe the bounds as making the text
+  trustworthy.
 
 ## Backtesting
 
