@@ -1174,6 +1174,10 @@ def test_a_refund_leaf_payment_is_listed_and_never_tied_to_the_transfer():
     assert other["scanned"]["from"] == number - 10
     # The pool's own transfer is reported beside the leaf, and both must equal the amount.
     assert payment["paid"] == [str(page["total"])]
+    # A head not yet past the deadline leaves an empty range that still names where to go on.
+    at = near.pin_block(refund["scanned"]["from"] - 1)
+    empty = ax_bridge.read_refunds(near, ARB_POOL, deposit_of(7), at, None)
+    assert empty["scanned"] == {"from": at.number + 1, "to": at.number} and empty["complete"]
     # A cursor before the fill deadline is moved to the first block after it.
     early = ax_bridge.read_refunds(near, ARB_POOL, deposit_of(7), head, 1)
     assert early["scanned"]["from"] == refund["scanned"]["from"] > 1

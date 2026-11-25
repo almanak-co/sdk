@@ -487,7 +487,9 @@ def read_refunds(reader, pool: str, deposit: Deposit, head, start: int | None) -
     # in that block or an earlier one. A stated cursor continues a scan and never precedes it.
     expired = chain.block_at_or_before(reader, deposit.fill_deadline, head).number + 1
     start = expired if start is None else max(start, expired)
-    payments, scanned_to = [], None
+    # An empty range, a start past the head, has scanned up to the block before it.
+    payments: list[dict] = []
+    scanned_to = start - 1
     seen: set[str] = set()
     for first, end in pages(reader, start, head.number, MAXIMUM_REFUND_PAGES):
         rows = chain.refund_logs(reader, deposit.input_token, pool, deposit.depositor, first, end)
