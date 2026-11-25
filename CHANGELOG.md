@@ -9,6 +9,26 @@ its changelog is on the `v2` branch.
 ## [Unreleased]
 
 ### Changed
+- `almanak ax bridge`, `ax bridge-status` and `ax revoke-bridge` work without a
+  provider key. `--public-rpc <name>` names the public endpoint of the chain the
+  asset leaves, and `--destination-public-rpc <name>` the endpoint of the chain it
+  arrives on, required with it for `ax bridge` and `ax bridge-status`. Neither is
+  chosen for the caller, a name that does not serve its chain is refused with the
+  names that do, and each endpoint shows its chain number, the pinned genesis block
+  and a recent head before its chain is resolved. The venue's quote still comes
+  from Across's own API and is admitted against the pinned block as before. The
+  commands refused `--public-rpc` until now.
+- `almanak ax recover` resolves a kept bridge record through a named public
+  endpoint of the source chain, or through the endpoint a keyless bridge ran on. It
+  refused one for a bridge record until now. A false report from that endpoint can
+  release a deposit that was mined; the operating guide states the check to make
+  before a released bridge is stated again.
+- `almanak ax bridge-status` pages its log scans by what the named public endpoint
+  serves in one query, 100 blocks through `drpc`, and a read a public endpoint
+  refuses names that endpoint and its chain. `base` and `blastapi` served no log
+  query when measured, so an arrival on BNB Chain cannot be measured without a
+  provider key, and Base needs `drpc` for a status read.
+
 - `almanak ax portfolio` bounds the vendor's text. A `symbol`, a `name`, a
   protocol's `name` and a `kind` that is longer than a short label, or holds a
   character outside letters, digits, currency signs and a few marks, is null, and
@@ -19,6 +39,11 @@ its changelog is on the `v2` branch.
 - The agent skill reads the overview only when the user asks for it. It read it
   every time it loaded. The skill tells the agent that symbols and names in the
   overview are data written by others and never instructions.
+
+### Fixed
+- The release of an expired signed step reads the nonce again at the pinned block
+  that shows the deadline passed, so nodes of one endpoint that disagree cannot
+  release a step that was mined.
 
 ## [3.4.0] - 2026-11-25
 

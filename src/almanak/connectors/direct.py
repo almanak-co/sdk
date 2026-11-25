@@ -124,9 +124,6 @@ class DirectActions:
     # It is called once the first step is planned, before anything is signed, and a
     # refusal it raises ends the command there.
     details: Callable | None = None
-    # Whether `ax recover` may resolve a kept record of this connector through a named
-    # public endpoint. False where the actions themselves refuse one.
-    public_recovery: bool = True
 
 
 # Installed connectors `ax` runs no direct action for, and why.

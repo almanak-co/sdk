@@ -72,6 +72,16 @@ PUBLIC_RPC: dict[str, dict[ChainId, str]] = {
 }
 
 
+# Blocks one `eth_getLogs` request may span on a listed endpoint whose keyless tier
+# serves less than a settlement page. `ax bridge-status` pages its scans by this; no
+# other command reads event pages through a public endpoint. Measured read-only on
+# 25 November 2026 on each chain `drpc` is listed for: a 100-block query of the Across
+# SpokePool was served and a 2,000-block one refused with HTTP 400, `ranges over 100
+# blocks are not supported on free plan`. An endpoint without an entry is asked for
+# whole pages, and one that serves no log query at all refuses the scan with its cause.
+PUBLIC_LOG_SPAN: dict[str, int] = {"drpc": 100}
+
+
 class PublicProvider(Model):
     kind: Literal["public_rpc"]
     name: Annotated[str, Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")]

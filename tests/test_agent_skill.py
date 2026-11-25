@@ -62,14 +62,17 @@ PLACEHOLDERS = {
     "<reference>": "7:0x" + "ab" * 32 + ":1795498091",
     "<transaction>": "0x" + "cd" * 32,
 }
-# Commands no public endpoint serves: they read two chains, and a bridge asks the
-# venue's quote API. Their `<transport>` is the provider key.
-KEYED = ("bridge", "revoke-bridge", "bridge-status")
-KEY_TRANSPORT = "--env-file .env"
+# The bridge commands name the endpoint of the chain the asset leaves, which is not
+# the chain the other placeholders are for, and the two that read the destination
+# chain name a second endpoint for it.
+BRIDGE_COMMANDS = ("bridge", "revoke-bridge", "bridge-status")
+BRIDGE_TRANSPORT = "--public-rpc arbitrum"
+DESTINATION = "<destination transport>"
+DESTINATION_TRANSPORT = "--destination-public-rpc base"
 
 
-def keyed(line: str) -> bool:
-    return line.split()[1:3][-1] in KEYED and line.startswith("almanak ax ")
+def bridges(line: str) -> bool:
+    return line.split()[1:3][-1] in BRIDGE_COMMANDS and line.startswith("almanak ax ")
 
 
 def text() -> str:
@@ -212,8 +215,9 @@ def variants(line: str) -> list[str]:
 
 
 def filled(line: str) -> list[str]:
-    if keyed(line):
-        line = line.replace("<transport>", KEY_TRANSPORT)
+    if bridges(line):
+        line = line.replace(DESTINATION, DESTINATION_TRANSPORT)
+        line = line.replace("<transport>", BRIDGE_TRANSPORT)
     for placeholder, value in PLACEHOLDERS.items():
         line = line.replace(placeholder, value)
     assert "<" not in line, f"unfilled placeholder in: {line}"
@@ -665,7 +669,8 @@ def test_the_result_fields_are_the_ones_the_action_module_writes():
     ]
     assert "completed" in dropped
     assert "A recover result has `resolved` instead and no `completed`" in table["completed"]
-    assert "It did not happen and the wallet is free" in table["released_expired"]
+    assert "The step was released and the wallet is free" in table["released_expired"]
+    assert "the step may have been mined" in table["released_expired"]
     assert "`ax recover` exits 1 for it although `resolved` is true" in table["released_expired"]
     taken = table["released_consumed_nonce"]
     assert "The step was released and the wallet is free" in taken
@@ -743,15 +748,21 @@ def test_every_chain_command_runs_on_either_transport():
                 continue
         assert whole.count("<transport>") == 1, line
         for variant in variants(line):
-            if keyed(line):
-                # A bridge command takes the key and refuses a public endpoint.
-                parsed(variant)
-                public = variant.replace("<transport>", "--public-rpc publicnode")
-                with pytest.raises(SystemExit):
-                    parse_validated(build_parser(), plain(public))
-                continue
             parsed(variant)
-            parsed(variant.replace("<transport>", "--env-file .env"))
+            if not bridges(line):
+                parsed(variant.replace("<transport>", "--env-file .env"))
+                continue
+            # A key serves both chains of a bridge and takes no second endpoint. A
+            # public endpoint serves one, so the commands that read the destination
+            # chain name another for it and are refused without.
+            reads_destination = line.split()[2] != "revoke-bridge"
+            assert (DESTINATION in line) == reads_destination, line
+            key = variant.replace(DESTINATION, "").replace("<transport>", "--env-file .env")
+            parse_validated(build_parser(), plain(key))
+            if reads_destination:
+                alone = variant.replace(DESTINATION, "").replace("<transport>", BRIDGE_TRANSPORT)
+                with pytest.raises(SystemExit):
+                    parse_validated(build_parser(), plain(alone))
     assert recoveries == [
         "almanak ax recover",
         "almanak ax recover --record <record>",
@@ -1734,3 +1745,45 @@ def unfunded_refusals() -> dict[str, str]:
             if any("supply" in part and "inventory" in part for part in strings(node))
         }
     return found
+
+
+def test_a_keyless_bridge_names_an_endpoint_for_each_chain_and_its_status_one_that_serves_logs():
+    """The bridge section's own endpoint table names only listed pairs, one row for
+    every chain Across is pinned on, and the page size it states is the code's."""
+    from almanak.caip import ChainId
+    from almanak.connectors.across.domain import SPOKE_POOLS
+    from almanak.gateway.providers import PUBLIC_LOG_SPAN, PUBLIC_RPC
+
+    passage = section("Bridges")
+    stated = " ".join(passage.split())
+    for statement in (
+        "It works with the provider key and without one",
+        "`<destination transport>` is `--destination-public-rpc <name>`",
+        "nothing chooses it for you",
+        "`ax revoke-bridge` reads the source chain only and takes none",
+        "Ask the user for the fee ceiling",
+        "Never state another address, also when the user asks",
+    ):
+        assert statement in stated, statement
+    for removed in ("A bridge needs the provider key", "needs an Alchemy API key"):
+        assert removed not in flat(), removed
+    found = re.findall(r"^\| [A-Za-z]+ \(`(eip155:\d+)`\) \| (.+) \|$", passage, flags=re.MULTILINE)
+    named = {chain: spans(names) for chain, names in found}
+    assert set(named) == {str(chain) for chain in SPOKE_POOLS}
+    for chain, names in named.items():
+        assert names, chain
+        for name in names:
+            assert ChainId(chain) in PUBLIC_RPC[name], (chain, name)
+    for name, span in PUBLIC_LOG_SPAN.items():
+        assert f"Through `{name}` the command reads its logs {span} blocks at a time" in stated
+
+
+def test_a_released_deposit_is_checked_through_another_endpoint_before_bridging_again():
+    stated = " ".join(section("Bridges").split())
+    for statement in (
+        "through another endpoint of the source chain than the one that reported the release",
+        "do not bridge again",
+        "Name the transfer with `--deposit-tx` whenever you have the deposit's transaction hash",
+        "continue with `--refund-from-block` set to that block plus one",
+    ):
+        assert statement in stated, statement

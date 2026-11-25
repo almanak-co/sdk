@@ -2,12 +2,15 @@
 
 `ax bridge` and `ax revoke-bridge` run through `ax_actions` as every direct action does.
 What differs is here: a route names two chains, so the deployment is resolved on the
-chain it sends from and completed on the destination chain with a second reader from the
-same env file. After that the deployment has one chain. Nothing is read or signed on the
-destination chain while the action runs.
+chain it sends from and completed on the destination chain with a second reader. After
+that the deployment has one chain. Nothing is read or signed on the destination chain
+while the action runs.
 
-A bridge asks the venue's own quote API, which a public RPC endpoint cannot stand in
-for, and it reads two chains, so these commands take `--env-file` only.
+The second reader comes from the same env file, or, without a provider key, from a
+second named public endpoint: `--public-rpc` names the endpoint of the chain the asset
+leaves and `--destination-public-rpc` the endpoint of the chain it arrives on. Neither
+is ever chosen for the caller, and each gives the public proof before anything is
+resolved. The venue's quote is asked from the venue's own API either way.
 
 `ax bridge-status` reads what became of one transfer, named by the reference `ax bridge`
 reported. It keeps no state: the deposit is read again from the source SpokePool and
@@ -15,17 +18,28 @@ held to the reference's relay hash, and everything else follows from that deposi
 plans and signs nothing.
 """
 
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 from almanak.gateway.ethereum import DataError
+
+# What a provider answers when it will not or cannot serve a read: a refusal of the
+# request, a throttle, no answer, or data it does not hold.
+PROVIDER_REFUSALS = frozenset({"rpc", "http", "transport", "unavailable"})
 
 # Pages of the source chain a refund scan reads at most in one command. A refund is paid
 # in a later bundle, hours after the fill deadline; the scan says where it stopped, and
 # `--refund-from-block` continues it.
 MAXIMUM_REFUND_PAGES = 200
-PUBLIC_REFUSAL = (
-    "a bridge reads two chains and asks the venue's quote API; it takes --env-file,"
-    " never --public-rpc"
+DESTINATION_REQUIRED = (
+    "--public-rpc names the endpoint of the chain the asset leaves, and this command also"
+    " reads the chain it arrives on: name that chain's public endpoint with"
+    " --destination-public-rpc"
+)
+DESTINATION_ALONE = (
+    "--destination-public-rpc names the second endpoint of --public-rpc; with another"
+    " transport that transport serves both chains"
 )
 UNATTRIBUTED = (
     "A refund payment names the wallet and the token, never the deposit it pays back, and"
@@ -48,8 +62,10 @@ def arguments(name: str, action) -> None:
         "--destination-asset", type=asset, required=True, help="CAIP-19 asset received"
     )
     if name != "bridge":
-        action.set_defaults(amount=None, max_fee_bps=0, recipient=None)
+        # A revocation reads the chain the asset leaves only.
+        action.set_defaults(amount=None, max_fee_bps=0, recipient=None, destination_public_rpc=None)
         return
+    destination_public_rpc_option(action)
     action.add_argument(
         "--amount", type=base_units, required=True, help="base units of the asset sent"
     )
@@ -102,9 +118,49 @@ def transaction_hash(value: str) -> str:
     return "0x" + body
 
 
+def destination_public_rpc_option(command) -> None:
+    from almanak.gateway.providers import PUBLIC_RPC
+
+    command.add_argument(
+        "--destination-public-rpc",
+        choices=sorted(PUBLIC_RPC),
+        help="with --public-rpc: the public endpoint of the chain the asset arrives on,"
+        " from the same list; required then, and never chosen for the caller",
+    )
+
+
+def public_refusal(args, reads_destination: bool) -> str | None:
+    """Why the public endpoints a command names cannot serve its route, or None.
+
+    Each chain's endpoint is named by the caller and must be a listed pair; nothing is
+    chosen or substituted for a missing or unlisted one.
+    """
+    from almanak.caip import ChainId
+    from almanak.gateway.providers import public_endpoint
+
+    source, destination = args.public_rpc, args.destination_public_rpc
+    if source is None:
+        return None if destination is None else DESTINATION_ALONE
+    if reads_destination and destination is None:
+        return DESTINATION_REQUIRED
+    named = [(source, args.chain)]
+    if reads_destination:
+        named.append((destination, args.destination_chain))
+    try:
+        for name, chain in named:
+            public_endpoint(name, ChainId(chain))
+    except ValueError as error:
+        return str(error)
+    return None
+
+
 def validate(parser, args) -> None:
-    if args.public_rpc is not None:
-        parser.error(PUBLIC_REFUSAL)
+    """Refuse a public transport that does not name a listed endpoint for each chain
+    the command reads, before any endpoint is opened. Only a revocation reads the
+    source chain alone."""
+    refusal = public_refusal(args, args.ax_command != "revoke-bridge")
+    if refusal is not None:
+        parser.error(refusal)
 
 
 def market_request(args):
@@ -170,17 +226,47 @@ def require_receivable(recipient: str, on_source: bool, on_destination: bool, ch
         )
 
 
-def completed(connector: str, env_file, resolved, recipient: str, on_source: bool):
+@dataclass(frozen=True)
+class Far:
+    """The transport of the chain the asset arrives on: the env file of the action, or
+    the public endpoint the caller named for that chain."""
+
+    env_file: Path | None = None
+    public_rpc: str | None = None
+
+
+def destination_reader(chain, far: Far):
+    """The destination chain's reader, proven before the route is completed on it.
+
+    A provider key's endpoint shows its chain number and the pinned genesis block. A
+    named public endpoint shows both and a recent head, the proof every public reader
+    gives: nobody answers for it, so it is held to no less than the source's.
+    """
+    from almanak.gateway import read_endpoints
+
+    if far.public_rpc is not None:
+        with proof_cause(far.public_rpc, chain):
+            return read_endpoints.public_reader(chain, far.public_rpc)
+    if far.env_file is None:
+        raise ValueError(DESTINATION_REQUIRED)
+    reader = read_endpoints.verified_reader(chain, far.env_file)
+    try:
+        prove_genesis(reader)
+    except Exception:
+        reader.__exit__()
+        raise
+    return reader
+
+
+def completed(connector: str, far: Far, resolved, recipient: str, on_source: bool):
     """The route completed on its destination chain, at that chain's own anchor, and
     held to the reviewed SpokePool pins on both chains. The recipient is checked there
     too, under `require_receivable`."""
     from almanak.ax_actions import resolution
-    from almanak.gateway.read_endpoints import verified_reader
 
     resolver = resolution(connector)
     selection = resolved.selection
-    with verified_reader(selection.destination_chain, env_file) as reader:
-        prove_genesis(reader)
+    with destination_reader(selection.destination_chain, far) as reader:
         block = reader.pin_block("latest")
         route = resolver.complete_market(reader, resolved, block)
         on_destination = contract_code(reader, recipient, block)
@@ -227,11 +313,16 @@ def revocation_route(resolved) -> SourceRoute:
     )
 
 
-def deployment(env_file, request, action, wallet, provider, endpoint, limits):
-    """The operator deployment of one wallet along one route, on the chain it leaves."""
-    from almanak.ax_actions import configuration, resolution
+def deployment(far: Far, request, action, wallet, provider, endpoint, limits):
+    """The operator deployment of one wallet along one route, on the chain it leaves.
+
+    A named public endpoint gives the public proof before the route is resolved through
+    it, on the source chain here and on the destination chain in `destination_reader`.
+    """
+    from almanak.ax_actions import configuration, prove_public, resolution
     from almanak.connectors.direct import Wallet, binding
     from almanak.gateway.ethereum import EthereumReader
+    from almanak.gateway.providers import PublicProvider
     from almanak.models import Chain
 
     connector = request.connector
@@ -239,11 +330,14 @@ def deployment(env_file, request, action, wallet, provider, endpoint, limits):
     account = Wallet(account=wallet["account"], address=wallet["address"].lower())
     stated = None if action.recipient is None else action.recipient.lower()
     with EthereumReader(chain, endpoint) as reader:
+        if isinstance(provider, PublicProvider):
+            with proof_cause(provider.name, chain.chain_id):
+                prove_public(reader)
         block = reader.pin_block("latest")
         resolved = resolution(connector).resolve_market(reader, request, block)
         on_source = stated is not None and contract_code(reader, stated, block)
     if action.action == "bridge" and stated is not None:
-        route = completed(connector, env_file, resolved, stated, on_source)
+        route = completed(connector, far, resolved, stated, on_source)
     else:
         route = revocation_route(resolved)
     positions = binding(connector).positions(None, block, route, account, action)
@@ -270,13 +364,28 @@ def account(word: bytes) -> str:
     return "0x" + word[12:].hex()
 
 
-def pages(reader, first: int, last: int, limit: int | None = None):
-    """Bounded block ranges from `first` to `last`, each pinned at both ends."""
-    from almanak.connectors.across.settlement_reader import MAXIMUM_EVENT_BLOCK_SPAN
+def log_span(public_rpc: str | None) -> int:
+    """Blocks one page of a status scan spans: a settlement page, or the fewer a named
+    public endpoint serves in one log query.
 
+    A status read commits no page, so the span changes no fact a completed scan
+    reports. It changes what a command costs, and how far a refund scan reaches in one
+    command: that scan is capped in pages (`MAXIMUM_REFUND_PAGES`), one request each,
+    so through a narrower endpoint it stops earlier with `complete` false and is
+    continued from `scanned.to` + 1."""
+    from almanak.connectors.across.settlement_reader import MAXIMUM_EVENT_BLOCK_SPAN
+    from almanak.gateway.providers import PUBLIC_LOG_SPAN
+
+    served = PUBLIC_LOG_SPAN.get(public_rpc or "", MAXIMUM_EVENT_BLOCK_SPAN)
+    return min(MAXIMUM_EVENT_BLOCK_SPAN, served)
+
+
+def pages(reader, first: int, last: int, limit: int | None = None, span: int | None = None):
+    """Bounded block ranges from `first` to `last`, each pinned at both ends."""
+    span = span or log_span(None)
     count = 0
     while first <= last and (limit is None or count < limit):
-        end = min(first + MAXIMUM_EVENT_BLOCK_SPAN - 1, last)
+        end = min(first + span - 1, last)
         yield reader.pin_block(first), reader.pin_block(end)
         first, count = end + 1, count + 1
 
@@ -323,7 +432,7 @@ def decoded_deposit(row, origin: int, deposit_id: int) -> tuple[tuple, Deposit]:
     )
 
 
-def read_deposit(reader, pool, destination: int, reference, head) -> Deposit:
+def read_deposit(reader, pool, destination: int, reference, head, span=None) -> Deposit:
     """The deposit the reference names, found by its identifier and held to its relay hash.
 
     A deposit is mined no earlier than its quote and no later than the SpokePool's quote
@@ -344,7 +453,7 @@ def read_deposit(reader, pool, destination: int, reference, head) -> Deposit:
         chain.uint_topic(destination),
         chain.uint_topic(reference.deposit_id),
     ]
-    for start, end in pages(reader, first.number, last.number):
+    for start, end in pages(reader, first.number, last.number, span=span):
         for row in chain.logs(reader, pool, topics, start, end):
             if len(row["topics"]) != 4:
                 continue
@@ -421,7 +530,9 @@ def deposit_of(reader, pool: str, destination: int, tx_hash: str):
     return reference, deposit
 
 
-def read_arrival(reader, pool, origin: int, deposit: Deposit, reference, head) -> dict | None:
+def read_arrival(
+    reader, pool, origin: int, deposit: Deposit, reference, head, span=None
+) -> dict | None:
     """The fill of the deposit's relay and the amount it paid the recipient, or None
     while the destination SpokePool does not hold the relay as filled."""
     from almanak.connectors.across import settlement
@@ -434,7 +545,7 @@ def read_arrival(reader, pool, origin: int, deposit: Deposit, reference, head) -
     destination = chain_number(reader.chain.chain_id)
     first = chain.block_at_or_before(reader, reference.quoted_at, head)
     last = chain.block_at_or_before(reader, deposit.fill_deadline, head)
-    for start, end in pages(reader, first.number, last.number):
+    for start, end in pages(reader, first.number, last.number, span=span):
         rows = chain.fill_logs(reader, pool, origin, reference.deposit_id, start, end)
         found = settlement.matching_fill(rows, reference.relay_hash, destination)
         if found is None:
@@ -476,7 +587,7 @@ def leaf_payment(reader, pool: str, deposit: Deposit, row) -> dict | None:
     }
 
 
-def read_refunds(reader, pool: str, deposit: Deposit, head, start: int | None) -> dict:
+def read_refunds(reader, pool: str, deposit: Deposit, head, start: int | None, span=None) -> dict:
     """Refund-leaf payments of the sent asset to the depositor since the fill deadline.
 
     Nothing here says which deposit a payment returns; see `UNATTRIBUTED`.
@@ -487,18 +598,20 @@ def read_refunds(reader, pool: str, deposit: Deposit, head, start: int | None) -
     # in that block or an earlier one. A stated cursor continues a scan and never precedes it.
     expired = chain.block_at_or_before(reader, deposit.fill_deadline, head).number + 1
     start = expired if start is None else max(start, expired)
+    # Read first, while the block read is young: a public endpoint can leave state of an
+    # older block unanswered, and the scan below can take minutes.
+    held = chain.deferred_refund(reader, pool, deposit.input_token, deposit.depositor, head)
     # An empty range, a start past the head, has scanned up to the block before it.
     payments: list[dict] = []
     scanned_to = start - 1
     seen: set[str] = set()
-    for first, end in pages(reader, start, head.number, MAXIMUM_REFUND_PAGES):
+    for first, end in pages(reader, start, head.number, MAXIMUM_REFUND_PAGES, span):
         rows = chain.refund_logs(reader, deposit.input_token, pool, deposit.depositor, first, end)
         # A payment record covers its whole transaction, so each is decoded once.
         fresh = {row["transactionHash"]: row for row in rows if row["transactionHash"] not in seen}
         seen.update(fresh)
         payments += [p for row in fresh.values() if (p := leaf_payment(reader, pool, deposit, row))]
         scanned_to = end.number
-    held = chain.deferred_refund(reader, pool, deposit.input_token, deposit.depositor, head)
     return {
         "payments": payments,
         "scanned": {"from": start, "to": scanned_to},
@@ -528,7 +641,9 @@ IN_FLIGHT = (
 )
 
 
-def outcome(near, far, pools, deposit: Deposit, reference, tag: str, refund_from) -> dict:
+def outcome(
+    near, far, pools, deposit: Deposit, reference, tag: str, refund_from, public=(None, None)
+) -> dict:
     """What became of the deposit as of each chain's `tag` block. A received amount
     appears only when a fill was measured; an open transfer states none, never zero.
 
@@ -538,22 +653,26 @@ def outcome(near, far, pools, deposit: Deposit, reference, tag: str, refund_from
     """
     from almanak.gateway.evm import chain_number
 
-    far_head = far.pin_block(tag)
+    with public_cause(public[1], far.chain.chain_id):
+        far_head = far.pin_block(tag)
+        origin = chain_number(near.chain.chain_id)
+        span = log_span(public[1])
+        arrival = read_arrival(far, pools[1], origin, deposit, reference, far_head, span)
     read_at = {"block": tag, "destination_block": far_head.number}
-    origin = chain_number(near.chain.chain_id)
-    arrival = read_arrival(far, pools[1], origin, deposit, reference, far_head)
     if arrival is not None:
         return {"read_at": read_at, "status": "arrived", "arrival": arrival}
     if far_head.timestamp <= deposit.fill_deadline:
         return {"read_at": read_at, "status": "in_flight", "note": IN_FLIGHT.format(tag=tag)}
     # The refund is paid to the depositor on the source chain, in a later bundle.
-    near_head = near.pin_block(tag)
-    refund = read_refunds(near, pools[0], deposit, near_head, refund_from)
+    with public_cause(public[0], near.chain.chain_id):
+        near_head = near.pin_block(tag)
+        span = log_span(public[0])
+        refund = read_refunds(near, pools[0], deposit, near_head, refund_from, span)
     read_at["source_block"] = near_head.number
     return {"read_at": read_at, "status": "unfilled", "refund": refund}
 
 
-def named_deposit(reader, pool: str, destination: int, args):
+def named_deposit(reader, pool: str, destination: int, args, span=None):
     """The deposit a command names, by reference or by its transaction, read at the
     source chain's latest block.
 
@@ -567,20 +686,95 @@ def named_deposit(reader, pool: str, destination: int, args):
     if args.deposit_tx is not None:
         return deposit_of(reader, pool, destination, args.deposit_tx)
     reference = parse_reference(args.reference)
-    return reference, read_deposit(reader, pool, destination, reference, head)
+    return reference, read_deposit(reader, pool, destination, reference, head, span)
+
+
+def status_reader(args, chain, public_rpc: str | None):
+    """One chain's reader of a status read: the command's one transport, or the public
+    endpoint the caller named for that chain, which gives the public proof first."""
+    from almanak import ax
+
+    if args.public_rpc is None:
+        return ax.observation_reader(args, chain)
+    if public_rpc is None:
+        # Never the source endpoint's name for the destination chain.
+        raise ValueError(DESTINATION_REQUIRED)
+    with proof_cause(public_rpc, chain):
+        return ax.public_reader(chain, public_rpc)
+
+
+def named(error: DataError, note: str):
+    """The same refusal with a note after its own words. Its class, kind, code and
+    whatever else it carries, such as a throttle's requested wait, are unchanged."""
+    error.args = (f"{error}; {note}",)
+    return error
+
+
+PROOF_FAILED = (
+    "the public endpoint {name} on {chain} did not give the proof every public endpoint"
+    " must: its chain number, the pinned genesis block and a recent head. Nothing was"
+    " read through it"
+)
+
+
+@contextmanager
+def proof_cause(name: str | None, chain):
+    """Name the public endpoint and its chain when its proof fails. A bridge command
+    proves two endpoints, and a bare `stale` or `chain_mismatch` says neither which."""
+    try:
+        yield
+    except DataError as error:
+        if name is None:
+            raise
+        raise named(error, PROOF_FAILED.format(name=name, chain=chain)) from None
+
+
+PUBLIC_LIMIT = (
+    "read through the public endpoint {name} on {chain}: a public endpoint promises"
+    " neither state of an older block nor event logs, and can refuse such a read or"
+    " leave it unanswered. Nothing is reported from a partial read. Run the command"
+    " again, name another endpoint listed for the chain, or name a provider key with"
+    " --env-file"
+)
+
+
+@contextmanager
+def public_cause(name: str | None, chain):
+    """Name the public endpoint and its chain on a read it refused.
+
+    A status read asks for state at a block that can be minutes old and for log pages
+    of the scan's full span. A provider key serves both; a public endpoint may not, and
+    its bare refusal names neither the endpoint nor the chain of the two the command
+    reads. The kind and the endpoint's own words are kept.
+    """
+    try:
+        yield
+    except DataError as error:
+        # A contract's own revert is an answer, not a limit of the endpoint.
+        if name is None or error.reverted or error.kind not in PROVIDER_REFUSALS:
+            raise
+        raise named(error, PUBLIC_LIMIT.format(name=name, chain=chain)) from None
 
 
 def status(args) -> dict:
-    from almanak.ax import observation_reader
     from almanak.caip import ChainId
     from almanak.connectors.across.domain import spoke_pool
     from almanak.gateway.evm import chain_number
 
     source, destination = ChainId(args.chain), ChainId(args.destination_chain)
     pools = (spoke_pool(source).address, spoke_pool(destination).address)
-    with observation_reader(args, source) as near, observation_reader(args, destination) as far:
-        reference, deposit = named_deposit(near, pools[0], chain_number(destination), args)
-        result = outcome(near, far, pools, deposit, reference, args.block, args.refund_from_block)
+    names = (args.public_rpc, args.destination_public_rpc)
+    with (
+        status_reader(args, source, names[0]) as near,
+        status_reader(args, destination, names[1]) as far,
+    ):
+        with public_cause(names[0], source):
+            reference, deposit = named_deposit(
+                near, pools[0], chain_number(destination), args, log_span(names[0])
+            )
+        result = outcome(
+            near, far, pools, deposit, reference, args.block, args.refund_from_block, names
+        )
     return {
         "product": "bridge_status",
         "connector": args.connector,
@@ -593,8 +787,7 @@ def status(args) -> dict:
 
 
 def status_arguments(commands) -> None:
-    from pathlib import Path
-
+    from almanak.cli_arguments import observation_transport
     from almanak.connectors.direct import connectors_for
 
     text = (
@@ -638,19 +831,10 @@ def status_arguments(commands) -> None:
         " found at the source chain's latest block (default: finalized, which trails"
         " the head by minutes, so a recent fill reads as in_flight until then)",
     )
-    # A provider key or the read gateway, which serve both chains. No listed public
-    # endpoint does, so none is offered.
-    command.set_defaults(public_rpc=None)
-    transport = command.add_mutually_exclusive_group()
-    transport.add_argument(
-        "--env-file", type=Path, help="private provider credentials read by this process"
-    )
-    transport.add_argument(
-        "--gateway-url", help="read-only observation gateway on loopback (service read-gateway)"
-    )
-    command.add_argument(
-        "--gateway-auth-file", type=Path, help="authentication token file for --gateway-url"
-    )
+    # A provider key or the read gateway serves both chains. A public endpoint serves
+    # one, so the caller names a second for the destination chain.
+    observation_transport(command)
+    destination_public_rpc_option(command)
 
 
 def block_number(value: str) -> int:

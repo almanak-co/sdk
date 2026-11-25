@@ -879,6 +879,10 @@ def parse_validated(parser, argv=None):
         from almanak.ax_actions import validate_arguments
 
         validate_arguments(parser, args)
+    if product == "ax-bridge-status":
+        from almanak.ax_bridge import validate as validate_bridge
+
+        validate_bridge(parser, args)
     from almanak.ax_actions import LENDING_ACTIONS
 
     lending = (*LENDING_REQUESTS, *LENDING_ACTIONS)

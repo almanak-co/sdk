@@ -72,8 +72,8 @@ Say which chains or protocols you can act on, and do not offer a strategy, a Saf
 or anything else as a way around it. You may read a balance or a position of an
 address other than your wallet only when the user gives you that address unasked.
 A public endpoint serves reads and direct actions on every supported chain except
-HyperEVM (`eip155:999`), which has none. A bridge is the one action no public
-endpoint serves: it needs the provider key. The limits:
+HyperEVM (`eip155:999`), which has none. A bridge reads two chains, so it names one
+public endpoint for each, as "Bridges" says. The limits:
 
 - The wallet is a plain account (EOA) that holds the funds itself. A Safe with
   delegated permissions is not available for these actions. If the user asks for a
@@ -161,7 +161,7 @@ command:
   a public endpoint's operator can see the wallet address being read and each
   transaction you send.
 
-A public endpoint serves everything here but a bridge, executing included, so
+A public endpoint serves everything here, executing and bridging included, so
 never ask the user for a provider key. Nobody answers for what a public endpoint reports, and an
 action signs what its reads show, including which contract it approves or pays;
 say this once, before the first execution. If the user offers their own Alchemy
@@ -516,7 +516,7 @@ position again and report both:
 | `completed` | True only when the whole action happened. A recover result has `resolved` instead and no `completed`. |
 | `outcomes` | Each step that was mined, with its `transaction` hash. `success` false is a step that failed on chain and still cost its fee; no `refused` goes with it. `accounting_issues` lists wallet movements the step does not explain: report them. |
 | `refused` | The kind and message of the refusal that stopped a later step. |
-| `released_expired` | A signed step whose deadline passed before it was mined. It did not happen and the wallet is free; `ax recover` exits 1 for it although `resolved` is true. |
+| `released_expired` | A signed step the endpoint used reports as past its deadline and not mined. The step was released and the wallet is free; `ax recover` exits 1 for it although `resolved` is true. The release rests on the report of the endpoint used: were that report false, the step may have been mined, and repeating the action could then execute it twice. Report the step's transaction hash and tell the user this before they repeat the action; for a bridge deposit, run the check under "Bridges" first, and say that it may have been mined when no second endpoint can be asked. |
 | `released_consumed_nonce` | A signed step that was never mined and whose `nonce` another transaction of the wallet used, named under `consumed_by` with its `block`. The step was released and the wallet is free; `ax recover` exits 1 for it although `resolved` is true. The release rests on the report of the endpoint used: were that report false, the released step could still execute, and repeating the action could then execute it twice. Report both hashes and tell the user this before they repeat the action. |
 | `unresolved` | A step that was signed and may have been sent but has no result yet: neither done nor failed. |
 | `record_kept` | The wallet is now blocked; follow "A blocked wallet". |
@@ -628,18 +628,59 @@ decides so; then offer `ax revoke-exchange` for the allowance.
 ## Bridges
 
 `ax bridge` sends exactly `--amount` of one asset from the wallet to the same
-wallet address on another chain, through Across. A bridge needs the provider key:
-in every command of this section `<transport>` is
-`--env-file ~/.almanak/agent/.env`, and a public endpoint is refused. When that
-file does not exist, say that a bridge needs an Alchemy API key, which the user may
-give as "2. Provider" describes, and stop.
+wallet address on another chain, through Across. It works with the provider key
+and without one.
 
 ```bash
-almanak ax bridge --connector <connector> --chain <source chain> <market> --amount <base units> --max-fee-bps <bps> --recipient <address> <wallet and ceilings>
-almanak ax bridge-status --connector <connector> --chain <source chain> --destination-chain <destination chain> --reference <reference> <transport>
-almanak ax bridge-status --connector <connector> --chain <source chain> --destination-chain <destination chain> --deposit-tx <transaction> <transport>
+almanak ax bridge --connector <connector> --chain <source chain> <market> --amount <base units> --max-fee-bps <bps> --recipient <address> <destination transport> <wallet and ceilings>
+almanak ax bridge-status --connector <connector> --chain <source chain> --destination-chain <destination chain> --reference <reference> <destination transport> <transport>
+almanak ax bridge-status --connector <connector> --chain <source chain> --destination-chain <destination chain> --deposit-tx <transaction> <destination transport> <transport>
 almanak ax revoke-bridge --connector <connector> --chain <source chain> <market> <wallet and ceilings>
 ```
+
+A bridge reads two chains. In this section `<transport>` is the transport of the
+source chain, and `<destination transport>` depends on it:
+
+- **`<transport>` is `--env-file ~/.almanak/agent/.env`.** The key serves both
+  chains: leave `<destination transport>` out.
+- **`<transport>` is `--public-rpc <name>`.** That endpoint serves the source chain
+  only. `<destination transport>` is `--destination-public-rpc <name>`, with the
+  name "Public endpoints" lists for the destination chain. It is required, and
+  nothing chooses it for you: without it the command is refused. `ax revoke-bridge`
+  reads the source chain only and takes none.
+
+Two public endpoints see a keyless bridge, one per chain, and what "2. Provider"
+says of one holds for each. When one of them fails, "Public endpoints" applies to
+it alone: keep the other, and preview again before executing.
+
+`ax bridge-status` also reads event logs, which not every public endpoint serves.
+For that command only, name the endpoint this table gives the chain:
+
+| Chain | `ax bridge-status` endpoint |
+| --- | --- |
+| Ethereum (`eip155:1`) | `publicnode`, then `drpc` |
+| Avalanche (`eip155:43114`) | `publicnode` |
+| Base (`eip155:8453`) | `drpc` |
+| Optimism (`eip155:10`) | `optimism`, then `drpc` |
+| Arbitrum (`eip155:42161`) | `arbitrum` |
+| Polygon (`eip155:137`) | `drpc` |
+| Robinhood (`eip155:4663`) | `drpc` |
+| BNB (`eip155:56`) | none serves event logs; `blastapi` for the rest |
+
+Through `drpc` the command reads its logs 100 blocks at a time. Name the transfer
+with `--deposit-tx` whenever you have the deposit's transaction hash: it needs no
+log read on the source chain, where finding a deposit by `--reference` can take up
+to 180 requests on Base and 343 on Robinhood. With `--deposit-tx` a read took about
+a minute; give it the time limit of an execution. An `unfilled` result whose
+`refund.complete` is false stopped its scan at the block `refund.scanned.to`:
+nothing later was read, so say that the list of payments ends there, and continue
+with `--refund-from-block` set to that block plus one. A read refused with a message that names `the public
+endpoint <name> on <chain>` was refused by that endpoint: nothing was read, the
+transfer is unchanged, and you state no status. Try the chain's other name in the
+table once; when there is none, say that the status of this transfer cannot be read
+on that chain without a provider key, and leave it to the user to offer one. On BNB
+that is the case whenever the read needs logs there: to report a transfer that
+arrives on BNB as `arrived`, or one that left BNB as refunded.
 
 `--recipient` is required and has no default. State your own wallet's address,
 which the same key controls on every chain here, copied from `wallet.json` and not
@@ -685,10 +726,17 @@ only once the read without `--block` says `arrived`. Report by its `status`:
 
 When a bridge ends with `completed` false after its approval was mined, the
 allowance stands; `ax revoke-bridge` clears it, and a bridge of the same amount
-uses it. A deposit listed under `released_expired` was never sent to the other
-chain: nothing is in flight, and the user decides whether to bridge again. A kept
-record of a bridge is resolved by `ax recover` with the provider key as its
-transport, never a public endpoint, which it refuses.
+uses it. A deposit listed under `released_expired` is one the endpoint used reports
+as past its deadline and not mined. That report does not show that nothing is in
+flight: follow the check below before the user decides whether to bridge again. A kept
+record of a bridge is resolved by `ax recover` as any other record is, under
+"A blocked wallet", through an endpoint of the source chain only: a recovery names
+no destination endpoint. A release rests on the report of the endpoint used. Before
+the user decides to bridge again after one, read `ax bridge-status` with
+`--deposit-tx` and the released step's `transaction`, through another endpoint of
+the source chain than the one that reported the release where the table above
+names one, and say so when it names none: when the read finds a deposit, the
+deposit was mined after all, so report that status and do not bridge again.
 
 A bridge refused with `recipient_not_deployed` named an address that is a contract
 on the source chain and nothing on the destination chain. Your own wallet is never

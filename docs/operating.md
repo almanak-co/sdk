@@ -866,15 +866,57 @@ almanak ax bridge --connector across --chain eip155:42161 \
 The output amount is Across's own quote, asked from its API by the command's gateway
 and named in the result as `across_api`. Only the gateway holds the quote to
 `--max-fee-bps`: the SpokePool checks no price, so the ceiling is a gateway check and
-not on-chain enforcement. A direct bridge takes `--env-file` only. `--public-rpc` is
-refused: the command reads two chains and asks the venue's API, and no public
-endpoint stands in for either.
+not on-chain enforcement.
+
+A bridge reads two chains. `--env-file` serves both. Without a provider key the
+caller names one [public endpoint](#public-endpoints) for each:
+
+```bash
+almanak ax bridge --connector across --chain eip155:42161 \
+  --asset eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831 \
+  --destination-chain eip155:8453 \
+  --destination-asset eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913 \
+  --amount 25000000 --max-fee-bps 10 \
+  --recipient <your-address-on-base> \
+  --wallet /private/operator \
+  --public-rpc arbitrum --destination-public-rpc base \
+  --max-gas-price-wei 1000000000 --max-transaction-fee 200000000000000
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--public-rpc` | The public endpoint of the chain the asset leaves. The route is resolved through it, and with `--execute` the approval and the deposit are signed from its reads and sent through it. |
+| `--destination-public-rpc` | The public endpoint of the chain the asset arrives on. Required with `--public-rpc` for `ax bridge` and `ax bridge-status`; `ax revoke-bridge` reads the source chain only and takes none. It is refused beside `--env-file` or the read gateway, which serve both chains. |
+
+Neither endpoint is chosen for the caller and nothing falls back to another. A name
+that does not serve its chain is refused before anything is read, with the names
+that do. HyperEVM has no public endpoint and Across has no pinned SpokePool there.
+Each endpoint gives the public proof before its chain is resolved: the chain's
+number, its pinned genesis block and a head no older than 120 seconds. The venue's
+quote is asked from Across's API by the command's own gateway on either transport;
+the API needs no key.
+
+Two endpoints are trusted, one per chain, and each operator sees the addresses the
+command reads there; the source endpoint's operator sees each transaction before
+it is mined. The [risk of a public endpoint](#public-endpoints) holds for each. A
+false report from the source endpoint can lose up to the amount of the bridge. A
+false report from the destination endpoint moves nothing by itself, but it can pass
+a received asset or a recipient that the checks at the start would have refused,
+within the same amount.
+
+A quote is admitted against the block the gateway pinned on the source chain, and
+one stamped after that block is refused with `quote_time`. Across stamps a quote
+behind the present: 79 to 269 seconds behind in five answers read on 25 November
+2026. A public endpoint may serve a head up to 120 seconds old, so a lagging one
+can pin a block older than the quote. The bridge is then refused before the step
+is signed, and nothing is lost: state it again, or name another endpoint of the
+chain. The check is not loosened for a public endpoint.
 
 The route is resolved on the chain it leaves and completed on the destination chain,
-with a second reader from the same env file held to that chain's number and genesis
-block. Both SpokePools must run their reviewed implementations. After that the
-deployment has one chain: nothing is read, planned or signed on the destination chain
-while the command runs.
+with a second reader: from the same env file, held to that chain's number and genesis
+block, or the named destination endpoint, held to the public proof. Both SpokePools
+must run their reviewed implementations. After that the deployment has one chain:
+nothing is read, planned or signed on the destination chain while the command runs.
 
 The command checks the recipient before anything is planned. An address that is a
 contract on the source chain and holds no code on the destination chain is refused
@@ -912,8 +954,9 @@ almanak ax bridge-status --connector across --chain eip155:42161 \
   --env-file /private/providers.env
 ```
 
-It takes `--env-file` or the read gateway. The transfer is named by `--reference`,
-or by `--deposit-tx` with the deposit's transaction hash on the source chain: the
+It takes `--env-file`, the read gateway, or `--public-rpc` with
+`--destination-public-rpc`, [as stated below](#bridge-status-through-public-endpoints).
+The transfer is named by `--reference`, or by `--deposit-tx` with the deposit's transaction hash on the source chain: the
 command then reads the one deposit that transaction made through the reviewed
 SpokePool towards the destination chain, and the result states its `reference`. A
 signed deposit has no reference before it is mined, because the SpokePool assigns
@@ -942,8 +985,9 @@ transferred them, and `equals_sent` where both hold the amount sent. A refund
 names the wallet and the token, never a deposit, and one payment can cover several
 deposits, so the command attributes none of them to the transfer: a payment equal to
 the sent amount is consistent with its refund and may be another deposit's. The scan
-reads at most 200 pages of 2,000 blocks; `refund.complete` says whether it reached
-the block read, and `--refund-from-block` continues it. `deferred_in_spoke_pool` is
+reads at most 200 pages, of 2,000 blocks unless a public endpoint serves fewer;
+`refund.complete` says whether it reached the block read, and `--refund-from-block`
+continues it from `refund.scanned.to` plus one. `deferred_in_spoke_pool` is
 what the SpokePool holds for the wallet because a refund transfer to it failed;
 claiming it is not built.
 
@@ -963,20 +1007,105 @@ almanak ax revoke-bridge --connector across --chain eip155:42161 \
   --max-gas-price-wei 1000000000 --max-transaction-fee 200000000000000
 ```
 
-`ax recover` resolves an interrupted bridge as it does any action, through
-`--env-file` only: a kept bridge record refuses `--public-rpc`, as the bridge itself
-does. A signed deposit
+Without a provider key it takes `--public-rpc <name>` for the source chain and no
+destination endpoint.
+
+`ax recover` resolves an interrupted bridge as it does any action: through the
+endpoint the bridge ran on, which for a keyless bridge is its source endpoint while
+that pair is still listed, or through `--env-file` or `--public-rpc <name>` of the
+source chain. A recovery reads the source chain only and names no destination
+endpoint. Recovery releases a signed deposit on the endpoint's word that it was not
+mined and cannot be. A false word from a public endpoint can release a deposit that
+was mined, and a bridge stated again would then send twice: before stating a
+released bridge again, read `ax bridge-status --deposit-tx` with the released
+step's transaction hash, through another endpoint where one is listed. A signed
+deposit
 carries its quote's timestamp, and the SpokePool reverts it once mined later than
 that timestamp plus its quote buffer. Past that deadline, with no receipt, no copy at
 the provider and the nonce unused, `ax recover` releases the deposit and lists it
-under `released_expired`: nothing was sent to the other chain, the approval before it
-stands until `ax revoke-bridge` or a later bridge of the same amount, and the bridge
-is stated again.
+under `released_expired`. The nonce is read again at the block that shows the deadline
+passed, so the two facts come from one block. The release still rests on the
+endpoint's report: the approval before it stands until `ax revoke-bridge` or a later
+bridge of the same amount, and the bridge is stated again only after the check above.
 
 The Across direct actions are declared on offline tests and read-only mainnet
 checks. No fork rehearsal of the direct command has run, so the signed approval and
 deposit of a direct bridge, its receipt reconciliation and its recovery are proven
 at component level only.
+
+##### Bridge status through public endpoints
+
+```bash
+almanak ax bridge-status --connector across --chain eip155:42161 \
+  --destination-chain eip155:8453 --deposit-tx <transaction> \
+  --public-rpc arbitrum --destination-public-rpc drpc
+```
+
+`--public-rpc` names the endpoint of the chain the asset left and
+`--destination-public-rpc` the endpoint of the chain it arrives on, each proven as
+every public reader is. The status read asks more of an endpoint than a bridge
+does: state at the block `--block` names, which at `finalized` was 15 to 25 minutes
+old on Ethereum, Base, OP Mainnet, Arbitrum and Robinhood Chain, and event logs.
+The deposit is found from its receipt with `--deposit-tx` and from the source
+SpokePool's logs with `--reference`; an arrival is measured from the destination
+SpokePool's logs; a refund is listed from the sent asset's logs on the source
+chain. A transfer that is `in_flight` reads no logs on the destination chain.
+
+Measured read-only on 25 November 2026, with one `eth_getLogs` query of each
+chain's SpokePool per row and a `fillStatuses` call at the `finalized` block,
+which every listed pair served:
+
+| Endpoint | Chains | Event logs |
+| --- | --- | --- |
+| `arbitrum` | `eip155:42161` | Pages of 2,000 blocks served at the head, at `finalized`, 2 hours back and 24 hours back. |
+| `optimism` | `eip155:10` | The same. |
+| `publicnode` | `eip155:43114` | The same. |
+| `publicnode` | `eip155:1` | Pages of 2,000 blocks served at the head, at `finalized` and 2 hours back; refused 24 hours back with `HTTP 403`. |
+| `drpc` | `eip155:1`, `eip155:8453`, `eip155:10`, `eip155:137`, `eip155:4663` | Refused over 2,000 blocks with `HTTP 400`, `ranges over 100 blocks are not supported on free plan`; served over 100 blocks. |
+| `base` | `eip155:8453` | Refused at every span tried, down to one block, with `HTTP 429`, `request limit reached`. |
+| `blastapi` | `eip155:56` | Refused at every span tried, down to one block, with `HTTP 429`. |
+
+So the command pages by what the named endpoint serves: 2,000 blocks, or 100
+through `drpc`, a span stated in code beside the endpoint list. An endpoint with
+no entry is asked for whole pages. The command keeps no page, so the span changes
+no fact a completed scan reports. It changes what a read costs and how far a refund
+scan reaches in one command. Through `drpc` a status read sends twenty times the
+log queries: an arrival on Base a day old was read through `arbitrum` and `drpc` in
+68 seconds. The refund scan is capped at 200 pages, one request each, whatever the
+span: 400,000 blocks with whole pages and 20,000 through `drpc`, about an hour of
+Base. A scan that stops at the cap reports `refund.complete` false, and
+`refund.scanned.to` is the last block it read: nothing after that block was read,
+so the payments listed are those up to it and no more. Run the command again with
+`--refund-from-block` set to `scanned.to` plus one, as often as it takes to reach
+`complete` true.
+
+Finding a deposit by `--reference` scans the source SpokePool's logs from the
+quote's timestamp for at most the quote buffer, an hour: through `drpc` that is up
+to 180 queries on Base and 343 on Robinhood Chain, fewer when the deposit is found
+early. `--deposit-tx` reads the deposit's receipt instead and sends none of them,
+so prefer it through `drpc`.
+
+An endpoint that refuses a read, or leaves it unanswered, ends the command with the
+endpoint's own refusal followed by `read through the public endpoint <name> on
+<chain>`: the kind is unchanged, nothing is reported from the part that was read,
+and nothing falls back. An endpoint that fails its proof is named the same way,
+by every bridge command: `stale` or `chain_mismatch`, followed by `the public
+endpoint <name> on <chain> did not give the proof every public endpoint must`. That is what `base` and `blastapi` answer whenever the read
+needs logs there, so through public endpoints:
+
+- Base as either chain of the route needs `drpc` for the status read.
+- No arrival on BNB Chain can be measured, and no refund of a transfer that left
+  it listed; `in_flight` is still read there, and so is a deposit named with
+  `--deposit-tx`. The rest needs a provider key.
+- `publicnode` on Ethereum refused logs a day old, so a refund scan that starts
+  that far back is refused there; `drpc` or a provider key reads it.
+- `publicnode` on Avalanche leaves state older than about 100 seconds unanswered,
+  [as stated below](#public-endpoints). Its `finalized` block is seconds old, and the
+  command reads the SpokePool's state before it scans, so the read was served; a
+  refusal there is named like any other.
+
+A pair that served a read on that day can refuse it on another, as every public
+endpoint can.
 
 #### Liquidity
 
@@ -1649,8 +1778,10 @@ provider at the latest block.
 
 `--public-rpc <name>` reads through one named public endpoint that needs no key.
 It is for `ax` reads, for every direct action, previewed or executed, and for
-`ax recover`. The reviewed list is in code, and each command's `--help` prints
-it:
+`ax recover`. A bridge reads two chains and names a second endpoint for the chain
+the asset arrives on with `--destination-public-rpc <name>`, from the same list;
+[Bridges](#bridges) states its rules and which endpoints serve a status read. The
+reviewed list is in code, and each command's `--help` prints it:
 
 | Name | Operator | Chains |
 | --- | --- | --- |

@@ -197,7 +197,8 @@ independently.
   signed work: a recorded attempt past its connector-declared, calldata-enforced
   deadline, with no canonical receipt, no provider copy and an unused submitter
   nonce, is released and planned afresh at that nonce after the gateway
-  re-proves all four facts. An attempt the gateway durably retains as never sent
+  re-proves all four facts. The deadline and the unused nonce are read at one
+  pinned block. An attempt the gateway durably retains as never sent
   is released on a current-state refusal. A maybe-sent attempt with no calldata
   deadline that current validation refuses stops with
   `signed_attempt_unsendable`.
@@ -1155,20 +1156,54 @@ independently.
 - Current contract: Across declares its direct actions on every chain it declares
   production on as the source of a route, from the same list in code.
 - Accepted: a direct bridge asks Across's quote API from the command's own
-  gateway, under the quote rules of "Bridges". It takes `--env-file` only.
-  `ax bridge` and `ax revoke-bridge` refuse `--public-rpc` with the cause, and
-  `ax bridge-status` offers none: the commands read two chains, and no public
-  endpoint stands in for the venue's API.
+  gateway, under the quote rules of "Bridges", on every transport. The API
+  needs no key, and no RPC endpoint stands in for it.
+- Accepted on 25 November 2026, in the maintainer's words "I want it to work
+  without a key yes, both quote and execution": the direct bridge commands take
+  named public endpoints. The maintainer asked for the keyless quote and
+  execution of `ax bridge`. `ax bridge-status` and `ax revoke-bridge` are
+  included as the read and the cleanup an execution needs, a transfer's outcome
+  and a standing approval, and were not named. A bridge reads two chains, so
+  the caller names two endpoints: `--public-rpc` for the chain the
+  asset leaves and `--destination-public-rpc` for the chain it arrives on,
+  required with it for `ax bridge` and `ax bridge-status`. `ax revoke-bridge`
+  reads the source chain only and takes the first alone. Neither is a default
+  and neither is a fallback; a (name, chain) pair outside the reviewed list is
+  refused before any read with the names that serve the chain, and HyperEVM has
+  none. Each endpoint gives the full public proof before its chain is resolved:
+  chain number, pinned genesis block and a recent head. The destination reader
+  of a keyed bridge is still held to chain number and genesis.
+- Accepted consequence of the entry above: a direct bridge previewed, executed
+  or queried through public endpoints trusts two endpoints, one per chain. The
+  accepted public-endpoint risk extends to it: the bridge signs what the source
+  endpoint's reads resolve, that endpoint's operator sees each transaction
+  before it is mined, each operator sees the addresses read on its chain, and a
+  false report can lose up to the amount of the action. A false destination
+  report sends nothing by itself. At a bridge's start it can pass a received
+  asset or a recipient that the checks there would refuse, within the amount of
+  the action. At a status read it can misstate an arrival and moves no funds.
+  The fee ceiling, the SpokePool pins and the recipient check stay checks of the
+  command and its gateway over what the endpoints report. Never describe them
+  as on-chain enforcement.
+- Current contract: quote admission is the same on a public endpoint. A quote
+  stamped after the block the gateway pinned on the source chain is refused
+  with `quote_time` before the step is signed. The venue stamped its quotes 79
+  to 269 seconds behind the present in five answers read on 25 November 2026,
+  and a public head may be up to 120 seconds old, so a lagging endpoint can
+  cause that refusal. It costs the attempt and signs nothing. Never loosen the
+  check to admit a lagging endpoint.
 - Current contract: a direct bridge deployment has one chain, the one it sends
   from, and binds only the wallet. The operator states the recipient as an
   address on the destination chain with the required `--recipient`; no default
   chooses it, and the wallet's own address is stated to keep the funds. The
   statement lives in the allocation's `adopt` field, which only an operator
   deployment may carry. The route is resolved on the source chain and completed
-  on the destination chain before the deployment exists, through a second reader
-  from the same env file held to that chain's number and pinned genesis block,
-  and both SpokePools are held to their pins. The deployment sends exactly the
-  stated amount, under the operator's required `--max-fee-bps`.
+  on the destination chain before the deployment exists, through a second
+  reader: from the same env file, held to that chain's number and pinned genesis
+  block, or the named destination endpoint, held to the public proof. Both
+  SpokePools are held to their pins. The deployment sends exactly the stated
+  amount, under the operator's required `--max-fee-bps`. A bridge, its
+  revocation and its recovery read no event logs.
 - Current contract: `ax revoke-bridge` reads the source chain only and holds
   neither SpokePool to its pin, so a destination outage or a pin difference never
   keeps an approval standing. Its route takes the sent token and the SpokePool
@@ -1236,11 +1271,54 @@ independently.
 - Current contract: `ax recover` releases an expired signed deposit of a direct
   bridge under the expiry rule of "Execution and recovery". The approval before
   it stands until `ax revoke-bridge` or a later bridge of the same amount.
-- Proposed, not accepted: `ax recover` refuses `--public-rpc` for a kept bridge
-  record, as the bridge itself does. A false report from the endpoint could
-  release a deposit that was mined, and a bridge stated again would then send
-  twice. Consequence: a kept bridge record is resolved with `--env-file` only.
-  The maintainer has not decided recovery of a bridge through a public endpoint.
+- Proposed, not accepted: `ax recover` resolves a kept bridge record through a
+  public endpoint of its source chain, on the footing of every other direct
+  action: the endpoint the bridge ran on while that pair is listed, or the one
+  the caller names with `--public-rpc`, which gives the public proof first. It
+  is built as a consequence of the keyless execution accepted above: a keyless
+  bridge that leaves a record must be resolvable without a key, or the wallet's
+  claim is stranded. The maintainer named the quote and the execution, not the
+  recovery, and has not decided it. Risk, which the decision would accept: a
+  false report from the source endpoint can release a deposit that was mined,
+  under the expiry rule or the consumed-nonce proof of "Execution and
+  recovery", and a bridge stated again would then send twice. No connector
+  refuses a public endpoint for its records any more. Nodes behind one
+  load-balanced endpoint can disagree, so the expiry release reads the nonce
+  again at the pinned block that shows the deadline passed, named by its hash
+  and required canonical: an unused nonce in
+  that block's own state shows the deposit was not mined up to it, and a node
+  that does not hold the block refuses the read. The receipt and the
+  provider's copy stay separate reads. This holds for every connector and
+  every endpoint, and is a gateway check, not on-chain enforcement. Recovery
+  through the record's own endpoint, with no flag, is held to the chain number
+  and genesis only, not to a recent head, as for every direct action.
+- Proposed, not accepted: `ax bridge-status` pages its log scans by what the
+  named public endpoint serves in one query. The span is stated in code beside
+  the reviewed list (`PUBLIC_LOG_SPAN`): 100 blocks through `drpc`, and a
+  settlement page of 2,000 through an endpoint with no entry. The command keeps
+  no page, so the span changes no fact a completed scan reports. It changes
+  what a read costs, and how far a refund scan reaches in one command: that
+  scan is capped at 200 pages, one request each, so it covers 400,000 blocks
+  with whole pages and 20,000 through `drpc`, then stops with `complete` false
+  and is continued with `--refund-from-block` at `scanned.to` plus one. A block
+  budget instead of the page cap would make one `drpc` command 4,000 requests.
+  Strategy scans never use it: they refuse a public endpoint. A read a public
+  endpoint refuses or leaves unanswered ends the command with the endpoint's
+  own refusal, its kind unchanged, and the endpoint and chain named; nothing is
+  reported from a partial read and nothing falls back.
+- Current contract: what the listed pairs served a status read was measured
+  read-only on 25 November 2026 against each chain's SpokePool, and is stated
+  with its refusals in the operating guide. `arbitrum`, `optimism` and
+  `publicnode` on Avalanche served 2,000-block log pages up to a day back;
+  `publicnode` on Ethereum served them two hours back and refused them a day
+  back; `drpc` refused 2,000 blocks and served 100 on its five chains; `base`
+  and `blastapi` refused every log query, down to one block. Every pair served
+  `fillStatuses` at its `finalized` block. So through public endpoints Base
+  needs `drpc` for a status read, and on BNB Smart Chain no arrival can be
+  measured and no refund listed. A measurement is a point-in-time result.
+- Known limit: no listed pair was added or removed for bridges, and
+  `scripts/qualify_public_rpc.py` does not sample a log query, so a pair's
+  listing says nothing about what it serves a status read.
 - Proposed, not accepted: the agent skill bridges only to its own wallet's
   address and refuses any other recipient, although the command takes one.
 - Operator actions have no amount ceiling or cumulative budget; the required
