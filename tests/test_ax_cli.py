@@ -99,6 +99,7 @@ def test_ax_config_subcommands_require_connector(tmp_path):
 def test_parser_connector_choices_match_the_handler_table():
     from almanak.ax import CONNECTOR_REQUESTS
     from almanak.ax_lending_markets import LISTINGS
+    from almanak.connectors.direct import connectors_for
     from almanak.connectors.lending_lookup import LENDING_CONNECTORS
 
     parser = build_parser()
@@ -126,7 +127,9 @@ def test_parser_connector_choices_match_the_handler_table():
         for connector in LENDING_CONNECTORS
     }
     listed = {("ax-lending-markets", connector) for connector in LISTINGS}
-    assert choices == set(CONNECTOR_REQUESTS) | lending | listed
+    # The status of a bridge transfer is read for the connectors that bridge.
+    bridges = {("ax-bridge-status", connector) for connector in connectors_for("bridge")}
+    assert choices == set(CONNECTOR_REQUESTS) | lending | listed | bridges
 
 
 def test_lending_requests_accept_inline_selectors(tmp_path):

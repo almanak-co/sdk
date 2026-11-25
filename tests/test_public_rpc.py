@@ -501,6 +501,7 @@ def test_a_preview_on_a_public_endpoint_proves_the_endpoint_before_resolving(mon
         lambda *arguments: pytest.fail("resolved a market from an unproven endpoint"),
     )
     args = SimpleNamespace(
+        ax_command="supply",
         public_rpc="publicnode",
         connector="aave_v4",
         max_gas_price_wei=5,

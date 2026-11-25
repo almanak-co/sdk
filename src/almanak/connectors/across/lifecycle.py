@@ -25,6 +25,17 @@ def validate_initial(state, observations):
         raise DataError("existing_exposure", "a new deployment cannot adopt a SpokePool allowance")
 
 
+def adopt_owned(owned, observed):
+    """Ownership of an operator deployment at its start. A bridge owns nothing in the
+    venue, and an allowance the wallet already gave the SpokePool is cleared by the
+    request's own first step, so nothing is taken over."""
+    if tuple(o.target for o in observed) != tuple(o.target for o in owned):
+        raise DataError(
+            "ownership_mismatch", "observations must cover every configured Across route"
+        )
+    return owned
+
+
 def commit_owned(retained, outcome):
     return retained
 
@@ -96,6 +107,7 @@ class AcrossLifecycle:
     validate_initial = staticmethod(validate_initial)
     validate_owned = staticmethod(validate_owned)
     commit_owned = staticmethod(commit_owned)
+    adopt = staticmethod(adopt_owned)
     validate_closure = staticmethod(validate_closure)
 
     @staticmethod
@@ -116,5 +128,6 @@ class AcrossLifecycle:
             permissions=permissions,
             mode="running",
             initialized=False,
+            operator=strategy is None,
             owned=tuple(Ownership(target=config.target(a.name)) for a in config.positions),
         )

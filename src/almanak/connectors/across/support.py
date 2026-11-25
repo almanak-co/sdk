@@ -23,6 +23,10 @@ FORK_SOURCES = tuple(SPOKE_POOLS)
 # production EOA rehearsal and the hosted Fork Qualification select a bridge reference
 # from this declaration. No cell's evidence package is complete.
 PRODUCTION_SOURCES: tuple[ChainId, ...] = FORK_SOURCES
+# What `almanak ax` runs directly from every production source chain. Declared on
+# offline evidence: no fork rehearsal of the direct command has run on any cell.
+DIRECT_ACTIONS = (EconomicAction.BRIDGE, EconomicAction.REVOKE_BRIDGE)
+
 # The one chain a reference lifecycle, a refund proof and a production rehearsal have
 # left from. Every other chain declares its modes on read-only mainnet known answers
 # and offline tests alone, an exception accepted for this connector only: nobody has
@@ -185,6 +189,7 @@ def candidate_support():
             modes=modes(chain),
             actions=(EconomicAction.BRIDGE, EconomicAction.REVOKE_BRIDGE),
             account_profiles=("eoa",),
+            direct_actions=DIRECT_ACTIONS if chain in PRODUCTION_SOURCES else (),
             restrictions=restrictions(chain),
             historical=historical(chain),
         )

@@ -96,6 +96,10 @@ def validate_entry(state, operation, before):
             "entry_unavailable", "a new bridge requires running mode and reconciled accounting"
         )
     require_reviewed(before)
+    try:
+        state.config.require_payout(operation.allocation)
+    except ValueError as error:
+        raise DataError("unsupported_route", str(error)) from error
     if before.pool.deposits_paused:
         raise DataError("deposits_paused", "the Across SpokePool has paused deposits")
     allocation = state.config.allocation(operation.allocation)

@@ -11,8 +11,15 @@ from almanak.connectors.across.domain import Route, Target, Uint256, refuse_nati
 from almanak.gateway.environments import ForkBinding, validate_environments
 from almanak.gateway.evm import native_asset
 from almanak.gateway.production_config import ProductionExecution
-from almanak.models import AssetAmount, AssetMetadata, Model, StrategyAccounts
+from almanak.models import Account, AssetAmount, AssetMetadata, Model, StrategyAccounts
 from almanak.triggers import IntervalTrigger
+
+
+class Recipient(Model):
+    """The receiving fund an operator states directly: an address on the destination
+    chain that the deployment binds no account for and never reads or signs with."""
+
+    fund: Account
 
 
 class Allocation(Model):
@@ -26,6 +33,10 @@ class Allocation(Model):
     capital: Uint256 = 0
     native_asset: AssetType
     minimum_native_balance: Uint256
+    # A direct action's operator deployment only: the recipient, stated as a fund. Its
+    # `destination_account` is then a label bound to no account, so the deployment has
+    # one chain, the one it sends from. A strategy allocation names a bound account.
+    adopt: Recipient | None = Field(default=None, exclude_if=lambda v: v is None)
 
     @property
     def chain(self):
@@ -37,6 +48,11 @@ class Allocation(Model):
             raise ValueError("Across payer asset differs from its source chain")
         if self.account == self.destination_account:
             raise ValueError("an Across allocation requires two different named accounts")
+        if self.adopt is not None and (
+            self.adopt.fund.chain.chain_id != self.route.destination_chain
+            or self.adopt.fund.chain.environment != self.route.chain.environment
+        ):
+            raise ValueError("a stated Across recipient is on the route's destination chain")
         return self
 
 
@@ -63,6 +79,12 @@ class Parameters(AuthorGas):
         except KeyError:
             raise ValueError(f"Across allocation references unbound account {account}") from None
 
+    def recipient(self, allocation: Allocation) -> Account:
+        """The fund that receives: the bound destination account's, or the stated one."""
+        if allocation.adopt is not None:
+            return allocation.adopt.fund
+        return self.profile(allocation.destination_account).fund
+
     def target(self, name: str) -> Target:
         allocation = self.allocation(name)
         return Target(
@@ -70,7 +92,7 @@ class Parameters(AuthorGas):
             account=allocation.account,
             fund=self.profile(allocation.account).fund,
             destination_account=allocation.destination_account,
-            destination_fund=self.profile(allocation.destination_account).fund,
+            destination_fund=self.recipient(allocation),
             route=allocation.route,
         )
 
@@ -83,7 +105,9 @@ class Parameters(AuthorGas):
         for allocation in self.allocations:
             self.target(allocation.name)
             self.require_profiles(allocation)
-            used |= {allocation.account, allocation.destination_account}
+            used.add(allocation.account)
+            if allocation.adopt is None:
+                used.add(allocation.destination_account)
             # A refund names the fund and the token, never the deposit it pays back.
             source = (allocation.account, allocation.route.asset)
             if source in sources:
@@ -98,13 +122,24 @@ class Parameters(AuthorGas):
 
     def require_profiles(self, allocation: Allocation):
         source = self.profile(allocation.account)
-        recipient = self.profile(allocation.destination_account)
         # The Roles grants of a bridge are not built yet; without them a Safe cannot deposit.
         # A backtest's hypothetical account signs nothing and stands for an EOA.
         if source.kind not in ("eoa", "simulation"):
             raise ValueError("Across deposits are supported from an EOA account only")
-        recipient_kind = "eoa" if recipient.kind == "simulation" else recipient.kind
-        refuse_native_output(allocation.route, recipient_kind)
+        kind = self.recipient_kind(allocation)
+        # An operator's allocation may only revoke, which pays nobody: its payout rule is
+        # held where a deposit is asked for and again where the gateway admits one.
+        if allocation.adopt is None:
+            refuse_native_output(allocation.route, kind)
+
+    def recipient_kind(self, allocation: Allocation) -> str:
+        # A stated recipient is an address of unknown kind, held to the stricter rule.
+        if allocation.adopt is not None:
+            if allocation.destination_account in {b.name for b in self.accounts.bindings}:
+                raise ValueError("a stated Across recipient names no bound account")
+            return "eoa"
+        kind = self.profile(allocation.destination_account).kind
+        return "eoa" if kind == "simulation" else kind
 
     def bridge(self, name: str, amount: int) -> BridgeIntent[Target]:
         """Send `amount` base units of the allocation's asset to its destination account.
@@ -114,9 +149,15 @@ class Parameters(AuthorGas):
         destination chain; until then the fund holds a transfer, not a balance.
         """
         target = self.target(name)
+        self.require_payout(name)
         return BridgeIntent[Target](
             target=target, amount=AssetAmount(asset=target.asset, amount=amount)
         )
+
+    def require_payout(self, name: str) -> None:
+        """Refuse a deposit whose recipient Across would pay in the native asset."""
+        allocation = self.allocation(name)
+        refuse_native_output(allocation.route, self.recipient_kind(allocation))
 
     def revoke(self, name: str) -> RevokeBridgeIntent[Target]:
         """Clear the SpokePool approval an unfinished bridge left on the source account.

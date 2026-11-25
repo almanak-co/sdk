@@ -9,7 +9,7 @@ name the time each answer was received.
 
 import json
 
-from almanak import ax_discovery, ax_hypercore, ax_lending_markets, ax_portfolio
+from almanak import ax_bridge, ax_discovery, ax_hypercore, ax_lending_markets, ax_portfolio
 from almanak.balances import parse_balance_request, read_balance
 from almanak.caip import AssetType, ChainId
 from almanak.cli_arguments import (
@@ -92,6 +92,7 @@ def command(args) -> int:
         "ax-hypercore-markets": hypercore_markets,
         "ax-hypercore-account": hypercore_account,
         "ax-portfolio": portfolio,
+        "ax-bridge-status": ax_bridge.status,
     }
     print(json.dumps(handlers[args.product](args), indent=2))
     return 0

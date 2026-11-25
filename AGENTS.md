@@ -1038,6 +1038,103 @@ independently.
 - Declare a direct action on a cell only after its fork rehearsal passed there.
   Morpho Blue on HyperEVM declares none: the provider runs head-pinned reads at
   a later block, which the reader refuses.
+- Accepted: the Across direct actions, `ax bridge` and `ax revoke-bridge`, are the
+  one exception to the rule above. They are declared on offline tests and
+  read-only mainnet checks, with no fork rehearsal of the direct command on any
+  cell. Unproven at process level: the signed approval and deposit of a direct
+  bridge, their receipt reconciliation, the record kept for an unresolved step
+  and `ax recover` on it. The exception covers no other connector.
+- Current contract: Across declares its direct actions on every chain it declares
+  production on as the source of a route, from the same list in code.
+- Accepted: a direct bridge asks Across's quote API from the command's own
+  gateway, under the quote rules of "Bridges". It takes `--env-file` only.
+  `ax bridge` and `ax revoke-bridge` refuse `--public-rpc` with the cause, and
+  `ax bridge-status` offers none: the commands read two chains, and no public
+  endpoint stands in for the venue's API.
+- Current contract: a direct bridge deployment has one chain, the one it sends
+  from, and binds only the wallet. The operator states the recipient as an
+  address on the destination chain with the required `--recipient`; no default
+  chooses it, and the wallet's own address is stated to keep the funds. The
+  statement lives in the allocation's `adopt` field, which only an operator
+  deployment may carry. The route is resolved on the source chain and completed
+  on the destination chain before the deployment exists, through a second reader
+  from the same env file held to that chain's number and pinned genesis block,
+  and both SpokePools are held to their pins. The deployment sends exactly the
+  stated amount, under the operator's required `--max-fee-bps`.
+- Current contract: `ax revoke-bridge` reads the source chain only and holds
+  neither SpokePool to its pin, so a destination outage or a pin difference never
+  keeps an approval standing. Its route takes the sent token and the SpokePool
+  from the source read; the destination pool is the pin as written in code and
+  the received asset is as stated, both unread and unused. The spender it clears
+  is the proxy address the pins name today, whatever implementation it runs. It
+  takes no other spender, as `ax revoke-exchange` takes none: an allowance to a
+  proxy address the pins no longer name is not cleared by this command.
+- Known limit: a revocation, direct or a strategy's, observes the source
+  SpokePool as every Across step does, reading its quote buffer, fill deadline
+  buffer and deposit pause. It is held to no pin, but a proxy whose
+  implementation no longer serves those views refuses the observation, and the
+  approval then stands until the owner clears it with another tool.
+- Accepted: the recipient checks of a direct bridge. The preview
+  and the result state `recipient` and `recipient_is_sender` beside the quote.
+  The `note` says when the recipient is not the sending wallet, and when it was
+  stated in one case, which carries no checksum. A recipient that is a contract
+  on the source chain and holds no code on the destination chain is refused
+  with `recipient_not_deployed` before anything is planned, since a contract
+  account of one chain does not exist at the same address on another. A plain
+  account that delegates its code (EIP-7702) is not a contract here. The refusal
+  has no override. It is a check of the command at its start, never on-chain
+  enforcement, and shows nothing about who controls the address.
+- Current contract: a direct bridge ends with its deposit's receipt and does not
+  wait for the arrival. Its result names the transfer by its reference and
+  states no received amount. Nothing is kept of a finished command. A preview
+  states the gateway's admitted quote with its source, fee and ceiling; the
+  deposit signs a later quote under the same ceiling.
+- Current contract: a transfer has two handles. The reference exists once the
+  deposit is mined, because the SpokePool assigns the deposit identifier then.
+  The deposit's transaction hash exists from signing: every outcome names it,
+  and so do the `unresolved` step of a kept record and of the `steps_sent`
+  event. `ax bridge-status --deposit-tx` rebuilds the reference from the one
+  deposit that transaction made through the pinned SpokePool towards the
+  destination chain, in a block that is still canonical.
+- Current contract: `ax bridge-status` is a read. It finds the deposit on the
+  source SpokePool by its identifier and holds it to the reference's relay hash
+  and to the deposit event's own quote timestamp, which the hash does not cover,
+  then reports `arrived` with the amount measured in the fill transaction,
+  `in_flight`, or `unfilled`. For an unfilled transfer it lists the refund-leaf
+  payments the depositor received since and attributes none: a refund names the
+  fund and the token, never a deposit. It never reports an unmeasured amount as
+  zero.
+- Accepted: the blocks of `ax bridge-status`. The deposit is found
+  at the source chain's latest block, because the operator holds its receipt and
+  it decides no outcome. The outcome is read at the block `--block` names on each
+  chain, `finalized` by default or `latest`; the command takes no block number,
+  since one number names no block of two chains. A fill is therefore reported
+  as `in_flight` until its block is final, unless the operator asks for `latest`,
+  and the result names the tag and the blocks read.
+- Current contract: `unfilled` is a destination block stamped after the fill
+  deadline in which `fillStatuses` does not hold the relay as filled. It rests on
+  the SpokePool refusing a late fill: `fillRelay` reverts with
+  `ExpiredFillDeadline` when the relay's fill deadline is before the block's
+  time. That was read from the pinned implementations on Arbitrum and Base by a
+  simulated call on 25 November 2026: a relay one second past its deadline
+  reverted with that error, and the same relay with its deadline at the block's
+  time, or later, passed that check and failed further on for another cause. A
+  block stamped with the deadline itself can still fill, so it reads as
+  `in_flight`. Unproven here, and accepted as such: that a slow fill,
+  `executeSlowRelayLeaf`, takes the same check. It needs a proof against a relayed root and was not simulated; it
+  rests on the published contract source, where both paths share one internal
+  fill function. A read at `latest` is as good as that block: a replaced block
+  can still bring a fill stamped before the deadline.
+- Current contract: `ax recover` releases an expired signed deposit of a direct
+  bridge under the expiry rule of "Execution and recovery". The approval before
+  it stands until `ax revoke-bridge` or a later bridge of the same amount.
+- Proposed, not accepted: `ax recover` refuses `--public-rpc` for a kept bridge
+  record, as the bridge itself does. A false report from the endpoint could
+  release a deposit that was mined, and a bridge stated again would then send
+  twice. Consequence: a kept bridge record is resolved with `--env-file` only.
+  The maintainer has not decided recovery of a bridge through a public endpoint.
+- Proposed, not accepted: the agent skill bridges only to its own wallet's
+  address and refuses any other recipient, although the command takes one.
 - Operator actions have no amount ceiling or cumulative budget; the required
   fee ceilings and the wallet balance bound them. An operator-managed action
   policy is proposed, not accepted.
