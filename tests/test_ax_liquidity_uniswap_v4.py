@@ -25,6 +25,7 @@ from almanak.connectors.uniswap_v4 import (
     abi,
     liquidity_direct,
     observations,
+    planning,
     position_request,
     reconciliation,
 )
@@ -448,10 +449,20 @@ def needed(liquidity, bps, *, price=2**96, ticks=(LOWER, UPPER)):
     return principal_of(liquidity, shifted(price, bps), *bounds, up=True)
 
 
+def fitted(amount0, amount1, *, price=2**96, ticks=(LOWER, UPPER), bps=50):
+    """The most liquidity the amounts cover at both edges of `bps` around `price`."""
+    bounds = sqrt_at_tick(ticks[0]), sqrt_at_tick(ticks[1])
+    edges = shifted(price, -bps), shifted(price, bps)
+    return min(liquidity_for(amount0, amount1, edge, *bounds) for edge in edges)
+
+
 # The liquidity the tested amounts cover at the observed price, limited by the first
-# token, and the most of the second the mint may take: its need at the +50 bps edge.
+# token: what a strategy mints. An operator's mint is for FITTED, what they cover at
+# both edges of the 50 bps slippage, and may take at most what FITTED needs there: of
+# the first token at the low edge, of the second at the high edge.
 MINTED = liquidity_for(AMOUNT0, AMOUNT1, 2**96, sqrt_at_tick(LOWER), sqrt_at_tick(UPPER))
-MOST1 = needed(MINTED, 50)[1]
+FITTED = fitted(AMOUNT0, AMOUNT1)
+MOST0, MOST1 = needed(FITTED, -50)[0], needed(FITTED, 50)[1]
 WHOLE = ((UNLIMITED_PERMIT, FAR), (UNLIMITED_PERMIT, FAR))
 
 
@@ -469,8 +480,9 @@ def test_the_open_intent_states_the_whole_inventory_and_its_mint_takes_a_bounded
     assert intent.deadline == market.block.timestamp + 300
     _, step = validating(config, state, intent, seen)
     mint = step(approved(config, state, market))
-    assert (mint.maximum0.amount, mint.maximum1.amount) == (AMOUNT0, MOST1)
-    assert needed(MINTED, 0)[1] < MOST1 < AMOUNT1
+    assert (mint.liquidity, mint.maximum0.amount, mint.maximum1.amount) == (FITTED, MOST0, MOST1)
+    assert needed(FITTED, 0)[1] < MOST1 < AMOUNT1
+    assert needed(FITTED, 0)[0] < MOST0 <= AMOUNT0
     with pytest.raises(ValueError, match="does not own the position the command names"):
         liquidity_direct.intent(config, (seen,), stated("close-liquidity"))
     # A range beside the price takes one token only; stating only the other adds nothing.
@@ -506,8 +518,8 @@ def test_an_open_is_two_approvals_per_token_then_the_mint():
     assert (third.kind, str(third.asset), third.amount) == ("approve_erc20", WETH, AMOUNT1)
     both = ((AMOUNT0, deadline), (AMOUNT1, deadline))
     mint = step(observed(config, owned, market, tokens=(AMOUNT0, AMOUNT1), permits=both))
-    assert (mint.kind, mint.maximum0.amount, mint.maximum1.amount) == ("mint", AMOUNT0, MOST1)
-    assert mint.liquidity == MINTED > 0
+    assert (mint.kind, mint.maximum0.amount, mint.maximum1.amount) == ("mint", MOST0, MOST1)
+    assert MINTED > mint.liquidity == FITTED > 0
 
 
 def surplus_deployment(amount0=AMOUNT0, amount1=AMOUNT1 * 1000, **ticks):
@@ -533,43 +545,91 @@ def test_a_mint_cannot_take_the_stated_surplus_beyond_the_price_tolerance():
     assert (loose.liquidity, loose.maximum1.amount) == (MINTED, surplus)
     assert needed(MINTED, 10**6)[1] < surplus
 
-    # An operator's mint of the same intent mints the same liquidity with the second
-    # token's maximum at the edge of the tolerance: inside it the mint fits, beyond it
-    # the mint reverts.
+    # An operator's mint of the same intent is for the liquidity the amounts cover at
+    # both edges of the slippage, and may take what that needs there: inside the
+    # slippage the mint fits in both directions, beyond it the mint reverts. In this
+    # range of about 6% either side, a slippage of 50 bps costs about 7% of the liquidity.
     _, step = validating(config, state, intent, seen)
     mint = step(ready)
-    assert (mint.liquidity, mint.maximum0.amount, mint.maximum1.amount) == (MINTED, AMOUNT0, MOST1)
-    assert needed(MINTED, 49)[1] <= MOST1 < needed(MINTED, 51)[1]
-    # The first token limits the liquidity: any price below the observed one needs more
-    # of it than its maximum, so that direction reverts as well.
-    assert needed(MINTED, 0)[0] <= AMOUNT0 < needed(MINTED, -1)[0]
+    assert (mint.liquidity, mint.maximum0.amount, mint.maximum1.amount) == (FITTED, MOST0, MOST1)
+    assert MINTED * 92 // 100 < FITTED < MINTED * 93 // 100
+    assert needed(FITTED, 50)[1] <= MOST1 < needed(FITTED, 51)[1]
+    assert needed(FITTED, -50)[0] <= MOST0 < needed(FITTED, -51)[0]
+    assert MOST0 <= AMOUNT0 and MOST1 < surplus
 
 
-@pytest.mark.parametrize("drift", [-49, 49])
-def test_a_mint_planned_at_a_drifted_price_is_bounded_around_the_price_it_was_planned_at(drift):
+def fits(mint, bps, *, price=2**96, ticks=(LOWER, UPPER)):
+    """Whether the PositionManager would let the mint settle at `price` moved by `bps`."""
+    need = needed(mint.liquidity, bps, price=price, ticks=ticks)
+    return need[0] <= mint.maximum0.amount and need[1] <= mint.maximum1.amount
+
+
+# The first token limits the liquidity, then the second, then neither has a surplus.
+LIMITED = [(AMOUNT0, AMOUNT1 * 1000), (AMOUNT0 * 1000, AMOUNT1), (10**18, 10**18)]
+
+
+@pytest.mark.parametrize("amounts", LIMITED)
+@pytest.mark.parametrize("planned_at", [-49, 0, 49])
+def test_a_mint_fits_its_stated_amounts_at_every_price_within_the_slippage(amounts, planned_at):
     # The decision is observed at one price and the mint step planned at another, at
-    # the edge of what the gateway's price-movement check still admits.
-    amounts = 10**18, 50 * 10**18
+    # most at the edge of what the gateway's price-movement check still admits.
     market, config, state, seen, intent = surplus_deployment(*amounts)
-    planned = shifted(2**96, drift)
+    price = shifted(2**96, planned_at)
     _, step = validating(config, state, intent, seen)
-    mint = step(approved(config, state, market, wallets=amounts, sqrt_price=planned))
+    mint = step(approved(config, state, market, wallets=amounts, sqrt_price=price))
+    # Neither maximum exceeds what the operator stated, and the liquidity is no more
+    # than a mint for the whole amounts at the planned price would have had.
+    assert mint.maximum0.amount <= amounts[0] and mint.maximum1.amount <= amounts[1]
     bounds = sqrt_at_tick(LOWER), sqrt_at_tick(UPPER)
-    liquidity = liquidity_for(*amounts, planned, *bounds)
-    assert mint.liquidity == liquidity
+    whole = liquidity_for(*amounts, price, *bounds)
+    assert whole * 90 // 100 < mint.liquidity == fitted(*amounts, price=price) < whole
+    # A move of the price towards either token inside the slippage fits the maximums,
+    # around the price the step was planned at, not the one the command decided at.
+    assert all(fits(mint, bps, price=price) for bps in range(-50, 51))
+    # Past the slippage the mint reverts, in both directions: each maximum is the need
+    # at its own edge. A whole basis point further always needs more than the maximum.
+    assert not fits(mint, -52, price=price) and not fits(mint, 52, price=price)
 
-    def takes(bps):
-        return needed(liquidity, bps, price=planned)
 
-    # Each maximum is the need at the edge of the tolerance around the planned price,
-    # not around the price the command decided at.
-    assert (mint.maximum0.amount, mint.maximum1.amount) == (amounts[0], takes(50)[1])
-    assert takes(49)[1] <= mint.maximum1.amount < takes(51)[1]
-    assert takes(0)[0] <= mint.maximum0.amount < takes(-1)[0]
-    # Trimmed at the decision's price instead, a mint planned at the low edge would
-    # still have fitted a whole tolerance further up.
-    decided = needed(liquidity_for(*amounts, 2**96, *bounds), 50)[1]
-    assert (decided >= takes(99)[1]) == (drift < 0)
+def test_a_price_beyond_the_slippage_of_the_decision_is_refused_before_the_mint():
+    market, config, state, seen, intent = surplus_deployment()
+    _, step = validating(config, state, intent, seen)
+    wallets = (AMOUNT0, AMOUNT1 * 1000)
+    for bps in (-51, 51):
+        moved = approved(config, state, market, wallets=wallets, sqrt_price=shifted(2**96, bps))
+        with pytest.raises(DataError, match="pool price moved beyond the retained mint tolerance"):
+            step(moved)
+
+
+def test_one_stated_amount_beside_a_range_inside_the_slippage_plans_no_mint():
+    # The range starts ten ticks, about ten basis points, above the price: inside the
+    # slippage of 50 the price can enter it, where it takes both tokens.
+    ticks = {"tick_lower": 10, "tick_upper": 600}
+    market = swaps.resolved()
+    one = {"amount0": AMOUNT0, "amount1": 0, **ticks}
+    config = config_for(market, "open-liquidity", **one)
+    state = swaps.created(config)
+    seen = observed(config, state.owned[0], market, wallets=(AMOUNT0, 0))
+    with pytest.raises(ValueError, match="within 50 basis points of the pool's price"):
+        liquidity_direct.intent(config, (seen,), stated("open-liquidity", **one))
+    # Stated with both amounts the same range is minted, sized for the price entering it.
+    both = {**one, "amount1": AMOUNT1}
+    config = config_for(market, "open-liquidity", **both)
+    state = swaps.created(config)
+    seen = observed(config, state.owned[0], market, wallets=(AMOUNT0, AMOUNT1))
+    intent = liquidity_direct.intent(config, (seen,), stated("open-liquidity", **both))
+    _, step = validating(config, state, intent, seen)
+    mint = step(approved(config, state, market, wallets=(AMOUNT0, AMOUNT1)))
+    assert mint.liquidity > 0
+    assert all(fits(mint, bps, ticks=(10, 600)) for bps in range(-50, 51))
+    # A price that drifts until one stated amount covers nothing is refused at the
+    # step, before any approval: the planner approves only what a mint may take.
+    one_config = config_for(market, "open-liquidity", amount0=AMOUNT0, amount1=0, **ticks)
+    owned = swaps.created(one_config).owned[0]
+    bare = observed(one_config, owned, market, wallets=(AMOUNT0, 0))
+    lone = intent.model_copy(update={"maximum1": intent.maximum1.model_copy(update={"amount": 0})})
+    with pytest.raises(DataError, match="cannot mint positive liquidity"):
+        planning.open_operation(lone, bare, through=lone.deadline, tolerance_bps=50)
 
 
 def walked(config, state, market, step, prices, *, wallets, tokens=(0, 0), permits=None):
@@ -738,13 +798,19 @@ def test_a_tolerance_that_reaches_a_range_bound_leaves_the_range_as_the_only_bou
     _, step = validating(config, state, intent, seen)
     mint = step(approved(config, state, market, wallets=(AMOUNT0, AMOUNT1 * 1000)))
     span = (-10, 10)
-    # The second token's maximum is all the range holds of it at this liquidity, which
-    # is what the mint takes at every price at or above the range: none reverts it.
+    # Both edges of the slippage lie beyond the range, so the liquidity is what the
+    # first token covers of the whole range, about half of what it covers at the price
+    # in the middle of it.
+    assert mint.liquidity == fitted(AMOUNT0, AMOUNT1 * 1000, ticks=span)
+    whole = liquidity_for(AMOUNT0, AMOUNT1 * 1000, 2**96, sqrt_at_tick(-10), sqrt_at_tick(10))
+    assert whole * 49 // 100 < mint.liquidity < whole * 51 // 100
+    # Each maximum is all the range holds of that token at this liquidity, which is
+    # what the mint takes at every price beyond that bound: no price reverts it.
     assert mint.maximum1.amount == needed(mint.liquidity, 50, ticks=span)[1]
     assert mint.maximum1.amount == needed(mint.liquidity, 10**6, ticks=span)[1]
     assert mint.maximum1.amount < AMOUNT1 * 1000
-    # The first token still limits the liquidity, so a lower price reverts the mint.
-    assert mint.maximum0.amount == AMOUNT0 < needed(mint.liquidity, -1, ticks=span)[0]
+    assert mint.maximum0.amount == needed(mint.liquidity, -(10**4) + 1, ticks=span)[0] <= AMOUNT0
+    assert all(fits(mint, bps, ticks=span) for bps in (-9999, -50, 0, 50, 10**6))
 
 
 def test_a_range_beside_the_price_takes_one_token_and_reverts_only_once_the_price_enters():

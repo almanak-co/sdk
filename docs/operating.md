@@ -860,21 +860,34 @@ position, so `increase-liquidity` and `decrease-liquidity` refuse it. A key may 
 the chain's native coin: the wallet provides and receives the wrapped token, and
 `--amount0` and `--amount1` follow the key's order.
 
-A Uniswap V4 mint is for a fixed liquidity: the most the stated amounts cover at the
-price observed when the mint step is planned. The most it may take of each currency
-is the stated amount, trimmed to what that liquidity takes at the edge of
-`--slippage-bps` around that same price: the price less the slippage for currency0,
-the price plus the slippage for currency1. The position manager reverts a mint that
-needs more, so a mint mined at a price further than `--slippage-bps` from the price
-it was planned at reverts, and against the currency that limits the liquidity it
-reverts on any move. The range bounds what the slippage cannot. Where an edge of the
-slippage lies at or beyond a bound of the range, the mint may take all the range
-holds of that currency, and no price in that direction reverts it. A range wholly
-beside the price takes one currency only, the same amount at every price on that
-side. The gateway plans the mint only while the price is within `--slippage-bps` of
-the price the command decided at, and does not send it once the price has left the
-slippage around the planned price; these two are the gateway's checks, not the
-chain's.
+A Uniswap V4 mint is for a fixed liquidity: the most the stated amounts cover at
+every price within `--slippage-bps` of the price observed when the mint step is
+planned. That is what they cover at the edge of the slippage where each currency is
+needed most: the price less the slippage for currency0, the price plus the slippage
+for currency1. The most the mint may take of each currency is what that liquidity
+takes at that edge, never more than the stated amount. The position manager reverts a
+mint that needs more, so a mint mined at a price within `--slippage-bps` of the price
+it was planned at fits in both directions, and one mined further away reverts.
+
+The slippage therefore costs position size. The liquidity is less than the stated
+amounts cover at the planned price, and the rest of the stated amounts stays in the
+wallet. In a range much wider than the slippage the difference is about half the
+slippage: about 0.5% at `--slippage-bps 100` over the full range. A narrow range needs
+more of a currency for each move of the price, so the difference grows: about 7% at
+`--slippage-bps 50` in a range of 6% either side of the price, and half or
+more where the slippage reaches both bounds of the range. State the smallest slippage the step
+needs to mint closest to the stated amounts.
+
+The range bounds what the slippage cannot. Where an edge of the slippage lies at or
+beyond a bound of the range, the mint may take all the range holds of that currency,
+and no price in that direction reverts it. A range wholly beside the price and the
+whole slippage takes one currency only, the same amount at every price on that side.
+Where the slippage reaches into a range the price lies beside, the range takes both
+currencies there, and a command that states only one is refused: state both, or a
+slippage that stays outside the range. The gateway plans the mint only while the price
+is within `--slippage-bps` of the price the command decided at, and does not send it
+once the price has left the slippage around the planned price; these two are the
+gateway's checks, not the chain's.
 
 The approvals are for the stated amounts, not for what one observation allows the
 mint to take: for each token the mint may take any of, Permit2 is approved for
@@ -882,7 +895,7 @@ mint to take: for each token the mint may take any of, Permit2 is approved for
 same amount that expires at the mint's deadline. A price that moves between the steps
 adds no approval, so a wallet with no allowance sends two approvals per token and then
 the mint, and an approval that already covers the stated amount is used as it stands.
-The mint itself takes at most the trimmed amounts above. What it does not take stays
+The mint itself takes at most the amounts above. What it does not take stays
 approved: the Permit2 allowance until it expires, the ERC-20 approval to Permit2
 without limit of time. After a command that ended before its mint, that is the whole
 stated amount, to the same two spenders. `revoke-exchange` clears it. A collection and

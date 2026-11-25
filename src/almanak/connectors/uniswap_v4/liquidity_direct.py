@@ -25,21 +25,28 @@ token, and receives the wrapped token back: the PositionManager unwraps and wrap
 inside the call, and no call carries value. `--amount0` and `--amount1` follow the
 key's order, with the wrapped token in the native coin's place.
 
-A mint is for a fixed liquidity: the most the stated amounts cover at the price of the
-observation its step is planned with. The most it may take of each token is the stated
-amount, trimmed to what that liquidity takes at the edge of the stated slippage around
-that same price (`planning.bounded_maximums`, which only an operator request's planning
-applies). The PositionManager reverts a mint that needs more than that, so a mint mined
-at a price further than the stated slippage from the price it was planned at reverts,
-instead of spending the amount stated beyond the range's ratio. Against the token that
-limits the liquidity it reverts on any move. The range bounds what the slippage cannot:
-where an edge of the slippage lies at or beyond a bound of the range, the mint may take
-all the range holds of that token and no price in that direction reverts it, and a
-range wholly beside the price takes one token only, the same amount at every price on
-that side. The gateway plans the mint only while the price is within the stated
-slippage of the price the command decided at, and does not send it once the price has
-left the slippage around the planned price; those two are its own checks, not the
-chain's.
+A mint is for a fixed liquidity: the most the stated amounts cover at every price
+within the stated slippage of the price of the observation its step is planned with,
+which is what they cover at the edge of the slippage where each token is needed most.
+The most it may take of each token is what that liquidity takes at that edge, never
+more than the stated amount (`planning.bounded_mint`, which only an operator request's
+planning applies). The PositionManager reverts a mint that needs more than that. So a
+mint mined at a price within the stated slippage of the price it was planned at fits
+in both directions, and one mined further away reverts, instead of spending the amount
+stated beyond the range's ratio. The liquidity is less than the stated amounts cover
+at the planned price: by about half the slippage in a range much wider than the
+slippage, and by more the narrower the range is against it, down to what one stated
+amount covers of the whole range. What the mint does not take stays in the wallet.
+
+The range bounds what the slippage cannot: where an edge of the slippage lies at or
+beyond a bound of the range, the mint may take all the range holds of that token and no
+price in that direction reverts it, and a range wholly beside the whole slippage takes
+one token only, the same amount at every price on that side. Where the slippage reaches
+into a range the price lies beside, the range takes both tokens there, and a command
+that states only one is refused: it states both, or a slippage that stays outside the
+range. The gateway plans the mint only while the price is within the stated slippage of
+the price the command decided at, and does not send it once the price has left the
+slippage around the planned price; those two are its own checks, not the chain's.
 
 A token the mint may take any of is approved for its stated amount, whatever the price
 of the step's observation: Permit2 by the token, and the PositionManager by a Permit2
@@ -211,7 +218,7 @@ def intent(config, observed, request: ActionRequest):
     """The command's one intent, built from the observation it is admitted with.
 
     A mint states the whole attributed inventory, which is the stated amounts; the
-    planner bounds what each of its steps may take of it. A close's minimum outputs are
+    planner sizes the mint to them and bounds what it may take. A close's minimum outputs are
     the principal at the observed price less the stated slippage. Each deadline is the
     observed block time plus the allocation's seconds.
     """
@@ -233,19 +240,33 @@ def require_named(allocation, seen, request: ActionRequest) -> None:
 def open_liquidity(allocation, seen):
     from almanak.connectors.uniswap_v4.authoring import open_liquidity as build
 
-    require_liquidity(seen)
+    require_liquidity(seen, allocation.slippage_bps)
     return build(allocation, seen)
 
 
-def require_liquidity(seen) -> None:
-    """Refuse amounts that add nothing at the observed price, naming what the range takes."""
+def require_liquidity(seen, slippage_bps: int) -> None:
+    """Refuse amounts that add nothing, naming what the range takes.
+
+    Refused are amounts that cover no liquidity at the observed price, and amounts
+    that cover some there and none at an edge of the slippage, which is what the
+    planner sizes the mint for.
+    """
     from almanak.connectors.uniswap_v4.math import liquidity_for
+    from almanak.connectors.uniswap_v4.planning import tolerant_liquidity
     from almanak.connectors.uniswap_v4.reader import sqrt_bounds
 
     owned, tick, selected = seen.owned, seen.pool.tick, seen.target.range
     held = owned.inventory0.amount, owned.inventory1.amount
-    if liquidity_for(*held, seen.pool.sqrt_price_x96, *sqrt_bounds(seen.target)):
-        return
+    price, (lower, upper) = seen.pool.sqrt_price_x96, sqrt_bounds(seen.target)
+    if liquidity_for(*held, price, lower, upper):
+        if tolerant_liquidity(held[0], held[1], price, lower, upper, slippage_bps):
+            return
+        raise ValueError(
+            f"the stated amounts add no liquidity at every price within {slippage_bps} "
+            f"basis points of the pool's price: inside that slippage the range "
+            f"{selected.lower} to {selected.upper} takes both tokens. State both amounts, "
+            "or a --slippage-bps that stays outside the range"
+        )
     if tick < selected.lower:
         takes = "only the first token"
     elif tick >= selected.upper:
