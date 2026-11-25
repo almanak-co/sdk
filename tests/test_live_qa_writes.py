@@ -192,7 +192,27 @@ def test_the_report_directory_exists_before_the_first_command(wallet, tmp_path):
         return round_trip()(arguments, timeout)
 
     assert writes.run_writes(request_for(wallet), SPEND, run, output, say=lambda text: None) == 0
-    assert seen == [True]
+    assert seen == [True] and (output / writes.RUN_MARKER).is_file()
+
+
+def test_of_two_runs_that_found_the_directory_empty_only_one_proceeds(wallet, tmp_path):
+    """The emptiness gate cannot see a run that passed it a moment earlier; the marker can."""
+    output = tmp_path / "report"
+    output.mkdir()
+    gates = writes.gates
+
+    def raced(*arguments, **options):
+        refusals = gates(*arguments, **options)
+        # The other run claims the directory after this one found it empty.
+        assert writes.reserve_output(output) is None
+        return refusals
+
+    said = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(writes, "gates", raced)
+        code = writes.run_writes(request_for(wallet), SPEND, never, output, say=said.append)
+    assert code == 2 and "is claimed by another run" in said[-1]
+    assert sorted(path.name for path in output.iterdir()) == [writes.RUN_MARKER]
 
 
 @pytest.mark.parametrize(

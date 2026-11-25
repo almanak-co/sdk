@@ -12,6 +12,7 @@ The check never creates a wallet and never opens a keystore or a password file;
 """
 
 import json
+import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -131,6 +132,28 @@ def wallet_gates(request: WriteRequest, interactive: bool) -> list[str]:
             " with `almanak wallet create --generate-password` or `--password-file`"
         ]
     return []
+
+
+# Created with exclusive creation once the gates pass, so of two runs that found the
+# same directory empty, only one proceeds; the other would overwrite its report.
+RUN_MARKER = "run.lock"
+
+
+def reserve_output(output: Path) -> str | None:
+    """Make the output directory and claim it for this run, or say why not."""
+    try:
+        # Made before the first command, so a report can be written whatever follows.
+        output.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return f"--output {output} cannot be created: {exc}"
+    try:
+        marker = os.open(output / RUN_MARKER, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return f"--output {output} is claimed by another run; use a new output directory"
+    except OSError as exc:
+        return f"--output {output} cannot be claimed for this run: {exc}"
+    os.close(marker)
+    return None
 
 
 def output_gates(output: Path | None) -> list[str]:
@@ -394,11 +417,8 @@ def run_writes(
     if refusals:
         say("The write check refuses to start:\n" + "\n".join(f"- {line}" for line in refusals))
         return 2
-    try:
-        # Made before the first command, so a report can be written whatever follows.
-        output.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        say(f"The write check refuses to start:\n- --output {output} cannot be created: {exc}")
+    if (problem := reserve_output(output)) is not None:
+        say(f"The write check refuses to start:\n- {problem}")
         return 2
     say(WARNING)
     check = WriteCheck(request, run, say)

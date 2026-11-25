@@ -569,6 +569,9 @@ these hold. Every unmet gate is named at once.
 6. Neither `CI` nor `GITHUB_ACTIONS` is set, to any value, an empty one included.
 7. `--output` is a new or empty directory that can be created. A report is never written over an
    earlier one, which may hold the only record of the transactions a run sent.
+   Once the gates pass, the check claims the directory by creating `run.lock` in
+   it exclusively, before the first command, so of two runs started on one empty
+   directory only one proceeds.
 
 | `--market` | Chain | Asset | Suggested `--amount` | Largest accepted |
 | --- | --- | --- | --- | --- |
