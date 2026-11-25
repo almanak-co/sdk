@@ -8,7 +8,47 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-11-25
+
 ### Added
+- A bridge is an economic intent between two named fund accounts of one strategy on
+  different chains. A strategy asks for it with `config.bridge(name, amount)`; the
+  deposit is planned, signed and reconciled on the chain it leaves. A transfer in
+  flight is owned state, in neither wallet's balance and never a measured zero, and
+  its arrival and its refund are reconciled as external effects on their own chains
+  and reach `on_outcome` (#49).
+- Across is the first bridge connector (`across`). A market is one direction: the
+  sent asset, the received asset on the destination chain, the author's fee ceiling
+  `max_fee_bps` and the quote source `across_api`. The output amount is the venue's
+  own quote, and the gateway refuses to sign a deposit whose fee exceeds the
+  ceiling; the SpokePool checks no price. The SpokePool is pinned per chain by proxy
+  address, implementation and code hash, and a difference refuses new deposits only.
+  Routes need the same decimals on both sides (#50).
+- An Across transfer is settled by its measured arrival on the destination chain or
+  its measured refund on the source chain. A transfer is proven unfilled only by the
+  destination chain, after its fill deadline; a refund payment that cannot be
+  attributed is reported as such, credited to nothing, and stops nothing. A missing
+  outcome never sends again (#52, #68).
+- Reference strategies `across_usdc_arbitrum_base_bridge` and
+  `arbitrum_base_bridge_and_lend`, which bridges and then supplies exactly the
+  measured arrival to Compound V3. A bridge allocation composes with allocations of
+  other connectors (#55, #59).
+- Economic backtests model a bridge with `across-full-fee-ceiling-fixed-latency-v1`:
+  the whole fee ceiling is charged and the arrival is credited after
+  `data.arrival_latency_seconds`, both stated in the backtest file and reported as
+  model assumptions. No refund is modeled (#65).
+- Across declares fork runs, production and economic backtests on Arbitrum, Base,
+  Ethereum, OP Mainnet, BNB Smart Chain, Polygon, Robinhood Chain and Avalanche.
+  Only Arbitrum has a reference lifecycle, a refund proof and a production
+  rehearsal, all on forks; the other chains are declared on read-only mainnet facts
+  and offline tests, and `almanak support` says so on each row. No mainnet
+  transaction of this connector has been sent (#66, #68, #72).
+- `almanak ax bridge` sends an exact amount to a stated recipient on another chain
+  through Across, under a required `--max-fee-bps`, and ends when the deposit is
+  mined. `almanak ax bridge-status` reads what became of a transfer from its
+  reference or its deposit transaction, and `almanak ax revoke-bridge` clears a
+  standing SpokePool approval. A bridge takes a provider key and refuses
+  `--public-rpc` (#73).
 - An Across bridge may send from a Safe with Zodiac Roles, and either account of a
   bridge may be an EOA or a Safe. The connector derives two scope-only grants for a
   Safe that sends: an approval of the sent asset to the route's SpokePool only, for
