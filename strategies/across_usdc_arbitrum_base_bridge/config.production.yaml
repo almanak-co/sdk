@@ -19,15 +19,17 @@ strategy:
       capital: '100'
       minimum_native_balance: '0.0001'
   gas:
-    # Arbitrum One values; gas ceilings are chain-specific, never copy them to another chain.
-    # A bridge takes 2 transactions, an approval and the deposit, and teardown at most 1,
-    # a revoke of an approval whose deposit was never mined:
-    # max_transaction_fee >= max_gas_limit x max_gas_price_wei;
-    # exit_reserve >= 1 fee; total_budget >= 2 entry fees + exit_reserve.
+    # Arbitrum One values, the ceilings of the Uniswap V3 Arbitrum reference; gas ceilings
+    # are chain-specific, never copy them to another chain.
+    # max_transaction_fee >= max_gas_limit x max_gas_price_wei.
+    # Above max_gas_price_wei every transaction waits for gas to fall, the teardown
+    # revoke included; nothing is lost.
+    # A bridge takes 2 transactions, an approval and the deposit. Teardown takes at most
+    # 1, a revoke of an approval whose deposit was never mined, and a later bridge may
+    # first revoke such an approval too. exit_reserve covers 2 fees and total_budget 8:
+    # the entry, the reserve and 4 more for a revoke and replanned steps.
     # Every bound account has a policy. The receiving account on Base signs nothing
     # in this strategy, so its policy is a ceiling that is never spent.
-    # A fork with a Base account runs gasless: its operator file sets
-    # fork.author_gas: unenforced, and this policy is retained but not enforced there.
     arbitrum_payer:
       accounts:
       - arbitrum_fund
@@ -40,9 +42,9 @@ strategy:
       max_transaction_fee:
         base_units: 150000000000000
       total_budget:
-        base_units: 600000000000000
+        base_units: 1200000000000000
       exit_reserve:
-        base_units: 150000000000000
+        base_units: 300000000000000
     # Base (OP Stack) values.
     base_payer:
       accounts:

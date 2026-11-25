@@ -1133,3 +1133,17 @@ def test_a_crash_after_the_arrival_commit_does_not_record_it_twice(config):
     assert arrivals(final) == [page.outcome] and final.external_scans.count(page) == 1
     assert all(p.outcome is None for p in final.external_scans if p != page)
     assert final.transfers[0].resolution.received == page.outcome.received
+
+
+def test_an_unattributed_payment_of_another_bridge_concerns_no_transfer_of_this_one(config):
+    from types import SimpleNamespace
+
+    from almanak.connectors.across.settlement_types import followed_by_unattributed
+
+    one, chain = flight(config), here(FILL_DEADLINE + 50)
+    state = settle(proven(config, one), config, chain)
+    refunded(config, chain, chain.head + 3, [5], tx="0x" + "d0" * 32)
+    state = settle(state, config, chain)
+    assert followed_by_unattributed(state, one)
+    other = SimpleNamespace(allocation="another", fill_deadline=one.fill_deadline)
+    assert not followed_by_unattributed(state, other)
