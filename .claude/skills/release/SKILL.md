@@ -1,6 +1,8 @@
 ---
 name: release
 description: "Create a new SDK release: compile changes since the last tag, determine the semver bump, update CHANGELOG.md and pyproject.toml, tag, push, and create the GitHub release. Use when the user says 'release', 'cut a release', 'new version', or 'publish a release'."
+metadata:
+  internal: true
 ---
 
 # Release - SDK Version Release Pipeline
