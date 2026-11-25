@@ -2048,15 +2048,18 @@ The vendor's text is bounded, because a token's symbol and name are whatever its
 deployer chose, anyone can send a token to an account, and agents read this
 report. A `symbol` is at most 24 characters and a `name`, a protocol's `name` and
 a `kind` at most 48: letters, digits and currency signs of any script, with
-`. _ - + / $ *`, and in a name also a space and `( ) & ' , : #`. A value with any
+`. _ - + / $ *`, and in a name also a space and `( ) & ' , #`. A value with any
 other character, a line break or a control or format character among them, or
-past its length, is null. It is never shortened or rewritten, and the row stays,
-named by its `asset`. The vendor's own IDs (`vendor_chain`, `vendor_token`, a
+with two slashes in a row, or past its length, is null. It is never shortened or
+rewritten, and the row stays, named by its `asset`, or by `vendor_chain` and
+`vendor_token` where `asset` is null. The vendor's own IDs (`vendor_chain`, `vendor_token`, a
 protocol's `vendor_id`, `vendor_pool` and the name of a leg) are ASCII letters,
-digits and `. _ - :`, at most 128 characters: a chain, token or protocol ID that
-is not makes the answer `malformed`, and a pool ID that is not is null. The
-vendor's links are not reported. This bounds what such text can carry and does
-not make it trustworthy: a short name can still mislead.
+digits and `. _ - :`, at most 128 characters: a chain, token or protocol ID
+or a leg name that is not makes the answer `malformed`, and a pool ID that is
+not is null. The vendor's link fields are not reported, and since no symbol, name
+or label takes a colon or two slashes in a row, none holds a URL. This bounds
+what such text can carry and does not make it trustworthy: a short name can
+still mislead, and can be a bare domain name.
 
 This is the vendor's own wallet backend, not a documented public interface. It
 can change or refuse without notice, it sees every address asked about, and it

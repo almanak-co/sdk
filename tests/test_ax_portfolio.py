@@ -542,3 +542,32 @@ def test_no_string_of_a_report_is_long_or_holds_a_line_break():
     found = list(strings(report["accounts"]))
     assert found and all(len(text) <= ax_portfolio.MAX_IDENTIFIER for text in found)
     assert not any("\n" in text or "Ignore" in text for text in found)
+
+
+@pytest.mark.parametrize(
+    "link",
+    ["https://a.example", "//a.example/claim", "ipfs://x", "a.example//x", "mailto:a", "x:y"],
+)
+def test_no_symbol_name_or_label_holds_a_url(link):
+    protocol = lending(supply_token_list=[leg(symbol=link, optimized_symbol=link, name=link)])
+    protocol["name"] = link
+    protocol["portfolio_item_list"][0]["name"] = link
+    (position,) = one(Answers([], [protocol]))["positions"]
+    (supplied,) = position["legs"]["supply"]
+    assert position["protocol"]["name"] is None and position["kind"] is None
+    assert supplied["symbol"] is None and supplied["name"] is None
+    # A pair keeps its one slash.
+    paired = one(Answers([token(symbol="USDC/WETH", optimized_symbol=None, name="USDC/WETH LP")]))
+    assert (paired["tokens"][0]["symbol"], paired["tokens"][0]["name"]) == (
+        "USDC/WETH",
+        "USDC/WETH LP",
+    )
+
+
+def test_a_leg_is_named_by_its_key_without_the_suffix_and_never_by_nothing():
+    longest = "a" * ax_portfolio.MAX_IDENTIFIER
+    position = one(Answers([], [lending(**{f"{longest}_token_list": [leg()]})]))["positions"][0]
+    assert set(position["legs"]) == {"supply", longest}
+    for key in ("_token_list", f"{longest}a_token_list"):
+        with pytest.raises(DataError, match="a position leg has no readable name"):
+            one(Answers([], [lending(**{key: [leg()]})]))

@@ -19,8 +19,9 @@ The vendor's text is written by others: a token's symbol and name are whatever i
 deployer chose, and anyone can send a token to an account. A report is read by
 agents, so no string of the vendor's leaves it unbounded. A symbol, a name and a
 label are short runs of letters, digits and a few marks, and an identifier is
-ASCII; a value that is not is absent, never shortened or rewritten. No link is
-reported.
+ASCII; a value that is not is absent, never shortened or rewritten. The vendor's
+link fields are not reported, and no symbol, name or label can hold a URL: none
+takes a colon or two slashes in a row. A bare domain name is still a short name.
 """
 
 import string
@@ -50,7 +51,7 @@ MAX_SYMBOL = 24
 MAX_NAME = 48
 MAX_IDENTIFIER = 128
 SYMBOL_MARKS = "._-+/$*"
-NAME_MARKS = SYMBOL_MARKS + " ()&',:#"
+NAME_MARKS = SYMBOL_MARKS + " ()&',#"
 IDENTIFIER = frozenset(string.ascii_letters + string.digits + "._-:")
 EXACT = Context(prec=4 * MAX_EXPONENT)
 TOKEN_LIST = "_token_list"
@@ -251,11 +252,12 @@ def legs(detail: dict) -> dict:
     for key, value in detail.items():
         if not key.endswith(TOKEN_LIST) or not isinstance(value, list):
             continue
-        if identifier(key) is None:
+        leg = identifier(key.removesuffix(TOKEN_LIST))
+        if leg is None:
             raise DataError("malformed", f"{SOURCE}: a position leg has no readable name")
         if not all(isinstance(row, dict) for row in value):
             raise DataError("malformed", f"{SOURCE}: a position leg is not a token row")
-        found[key.removesuffix(TOKEN_LIST)] = [token_report(row) for row in value]
+        found[leg] = [token_report(row) for row in value]
     return found
 
 
@@ -326,6 +328,9 @@ def display(value: object, limit: int, marks: str) -> str | None:
     absent, and so does a length past the limit: a cut sentence is still a sentence.
     """
     if not isinstance(value, str) or not 0 < len(value) <= limit or value != value.strip():
+        return None
+    # A pair such as USDC/WETH keeps its slash; two in a row begin an address.
+    if "//" in value:
         return None
     return value if all(shown(character, marks) for character in value) else None
 
