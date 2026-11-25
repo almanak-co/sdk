@@ -21,7 +21,7 @@ import pytest
 from almanak.cli_arguments import build_parser, parse_validated
 
 ROOT = Path(__file__).parents[1]
-SKILL = ROOT / "skills/almanak/SKILL.md"
+SKILL = ROOT / "skills/almanak-defi/SKILL.md"
 # What the skill writes for the arguments every action command ends with.
 ENDING = "<wallet and ceilings>"
 USDC = "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
@@ -213,7 +213,7 @@ def parsed(line: str):
 
 
 def test_the_skill_has_front_matter_and_commands():
-    front = re.match(r"---\nname: almanak\ndescription: (.+)\n---\n", text())
+    front = re.match(r"---\nname: almanak-defi\ndescription: (.+)\n---\n", text())
     assert front
     for covered in ("supply", "borrow", "repay", "swap", "liquidity"):
         assert covered in front.group(1), covered
