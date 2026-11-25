@@ -8,6 +8,7 @@ fixture checks the flag as well, and such a test is skipped without it.
 
 import pytest
 
+from almanak.caip import ChainId
 from almanak.gateway.providers import PUBLIC_RPC
 from scripts.live_qa import cli, reads
 from scripts.live_qa.rpc import direct_clients, endpoint_url
@@ -33,7 +34,7 @@ def live_session(request, tmp_path_factory):
     )
 
 
-def served(endpoint: str, chain: str) -> bool:
+def served(endpoint: str, chain: ChainId) -> bool:
     return endpoint_url(endpoint, chain) is not None
 
 

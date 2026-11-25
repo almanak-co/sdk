@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 from eth_abi.exceptions import EncodingError
 
+from almanak.caip import ChainId
 from scripts.live_qa.checks import Check
 from scripts.live_qa.cli import Invocation, Run
 from scripts.live_qa.rpc import Rpc, RpcReverted, RpcUnavailable
@@ -46,17 +47,20 @@ class KnownIssue:
 
     The case still states the correct behavior and still fails. `signature` is the
     part of the failure detail that identifies this defect, so the report can tell
-    it from a new one.
+    it from a new one. `refusal` is the refusal kind the defect shows as, or None
+    where it shows as a check's finding; a failure of any other kind is not it,
+    whatever its text holds.
     """
 
     summary: str
     signature: str
+    refusal: str | None = None
 
 
 @dataclass(frozen=True)
 class ReadCase:
     id: str
-    chain: str
+    chain: ChainId
     # Arguments after `almanak ax`, without the transport.
     arguments: tuple[str, ...]
     check: Check | None = None
@@ -69,6 +73,11 @@ class ReadCase:
     # Endpoints to run on; None means every selected endpoint that serves the chain.
     endpoints: tuple[str, ...] | None = None
 
+    def __post_init__(self) -> None:
+        # The planner, the breaker and the direct clients key on the chain's identity.
+        if not isinstance(self.chain, ChainId):
+            raise TypeError(f"case {self.id}: chain must be a ChainId, not {self.chain!r}")
+
 
 @dataclass(frozen=True)
 class Verdict:
@@ -76,6 +85,8 @@ class Verdict:
     detail: str
     # Each separate thing a failed check found; `detail` joins them for the report.
     findings: tuple[str, ...] = ()
+    # The refusal's `error` kind where the command refused, else None.
+    refusal: str | None = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +115,7 @@ class Result:
     detail: str
     command: str
     findings: tuple[str, ...] = ()
+    refusal: str | None = None
 
     @property
     def known(self) -> str:
@@ -117,7 +129,7 @@ class Result:
             return ""
         if self.status == "pass":
             return f"no longer reproduces, remove the marker: {issue.summary}"
-        if self.status != "fail":
+        if self.status != "fail" or self.refusal != issue.refusal:
             return f"not observed this run: {issue.summary}"
         matched = [issue.signature in finding for finding in self.findings or (self.detail,)]
         if all(matched):
@@ -128,14 +140,17 @@ class Result:
 
 
 def judge_refusal(case: ReadCase, refusal: dict[str, Any]) -> Verdict:
+    kind = refusal.get("error")
+    if not isinstance(kind, str):
+        return Verdict("fail", f"malformed refusal, its error is not a kind: {refusal!r}")
     # A refusal carries a `message`, or `problems` when a request did not validate.
     reason = refusal.get("message") or json.dumps(refusal.get("problems", ""))
-    text = f"{refusal.get('error')}: {reason}"
+    text = f"{kind}: {reason}"
     if any(accepted.matches(refusal) for accepted in case.refusals):
-        return Verdict("pass", f"refused as the case states: {text}")
-    if refusal.get("error") in TRANSIENT_ERRORS:
-        return Verdict("transient", text)
-    return Verdict("fail", text)
+        return Verdict("pass", f"refused as the case states: {text}", refusal=kind)
+    if kind in TRANSIENT_ERRORS:
+        return Verdict("transient", text, refusal=kind)
+    return Verdict("fail", text, refusal=kind)
 
 
 def partial_errors(output: dict[str, Any]) -> list[str]:
@@ -232,11 +247,14 @@ def run_case(
         verdict.detail,
         invocation.command,
         verdict.findings,
+        verdict.refusal,
     )
 
 
 def planned(
-    cases: Iterable[ReadCase], endpoints: Sequence[str], serves: Callable[[str, str], bool]
+    cases: Iterable[ReadCase],
+    endpoints: Sequence[str],
+    serves: Callable[[str, ChainId], bool],
 ) -> list[tuple[ReadCase, str]]:
     """Each case on each selected endpoint it names, or on each that serves its chain.
 
@@ -261,9 +279,9 @@ class Breaker:
     """Consecutive blocked cases per endpoint and chain."""
 
     def __init__(self) -> None:
-        self.streak: dict[tuple[str, str], int] = {}
+        self.streak: dict[tuple[str, ChainId], int] = {}
 
-    def open(self, endpoint: str, chain: str) -> bool:
+    def open(self, endpoint: str, chain: ChainId) -> bool:
         return self.streak.get((endpoint, chain), 0) >= BREAKER_LIMIT
 
     def record(self, result: "Result") -> None:
@@ -276,7 +294,7 @@ class Session:
     """What a run needs besides its plan: the command, direct clients and retry policy."""
 
     run: Run
-    rpc: Callable[[str, str], Rpc]
+    rpc: Callable[[str, ChainId], Rpc]
     workdir: Path
     policy: RetryPolicy = DEFAULT_POLICY
     report: Callable[[Result], None] = lambda result: None
@@ -378,7 +396,7 @@ COLUMNS = (
 def row(result: Result) -> dict[str, Any]:
     return {
         "case": result.case.id,
-        "chain": result.case.chain,
+        "chain": str(result.case.chain),
         "endpoint": result.endpoint,
         "status": result.status,
         "attempts": result.attempts,

@@ -39,9 +39,9 @@ def reverted(error: object) -> bool:
     return error.get("code") == REVERT_CODE or "execution reverted" in str(error.get("message"))
 
 
-def endpoint_url(endpoint: str, chain: str) -> str | None:
+def endpoint_url(endpoint: str, chain: ChainId) -> str | None:
     """The named endpoint's URL for the chain, or None where it serves no such chain."""
-    return PUBLIC_RPC.get(endpoint, {}).get(ChainId(chain))
+    return PUBLIC_RPC.get(endpoint, {}).get(chain)
 
 
 def asset_address(asset: str) -> str:
@@ -52,11 +52,11 @@ def asset_address(asset: str) -> str:
     return reference
 
 
-def direct_clients() -> Callable[[str, str], "Rpc"]:
+def direct_clients() -> Callable[[str, ChainId], "Rpc"]:
     """One direct client per endpoint and chain for a run, instead of one per case."""
-    clients: dict[tuple[str, str], Rpc] = {}
+    clients: dict[tuple[str, ChainId], Rpc] = {}
 
-    def client(endpoint: str, chain: str) -> Rpc:
+    def client(endpoint: str, chain: ChainId) -> Rpc:
         key = (endpoint, chain)
         if key not in clients:
             clients[key] = Rpc(endpoint_url(endpoint, chain))

@@ -460,8 +460,11 @@ behavior. Where practical its output is compared with direct `eth_call`,
 command pinned, made by `scripts/live_qa/rpc.py` without the SDK's reader. A
 reserve is held to what its Pool, Spoke, Comet or Morpho core records for it, and
 each listed market to the same record: an Aave V4 market to its Spoke's reserve
-under that ID, an Aave V3 or SparkLend market to the Pool's reserve list, a Morpho
-market to the core's parameters for its ID. That a market is `verified` is the
+under that ID, an Aave V3 or SparkLend market to the Pool's reserve list, with no
+asset reported twice and as many markets as the limit allows, a Morpho market to
+the requested loan asset and the core's parameters for its ID. A balance or a
+position is held to the asset, account, Spoke and reserve the case requested
+before any direct read, and a native balance to 18 decimals. That a market is `verified` is the
 SDK's own statement; the direct reads check the identity it reports, not every
 fact the SDK verified. The GMX bare-label cases and the HyperCore case have no
 direct read.
@@ -472,7 +475,9 @@ Outcomes. Each case on each endpoint ends as one of:
 - `fail`: it did not. A failure is not retried.
 - `blocked`: the endpoint did not answer: a rate limit, a rejected read, a
   timeout, an unanswered direct read, or a command that exited 0 but reported an
-  endpoint refusal for part of its output (`observation_error`). Such a case is tried three times, 5 and
+  endpoint refusal for part of its output (`observation_error`). A listing entry
+  the endpoint did not answer blocks a case only when nothing the endpoint did
+  answer fails it. Such a case is tried three times, 5 and
   then 15 seconds apart, with 90 seconds per command (`--attempts`,
   `--backoff-seconds`, `--timeout-seconds`). After three consecutive blocked cases
   on one chain, the endpoint's remaining cases on that chain are reported blocked
@@ -487,8 +492,10 @@ report lists those failures all the same.
 Known issues. A defect found by hand stays in the catalog as a case with a
 `KnownIssue`: the case still states the correct behavior and still fails, and the
 report's `known_issue` column says whether the known defect reproduced, was not
-observed, or no longer reproduces, in which case its marker is removed. The
-catalog currently holds two:
+observed, or no longer reproduces, in which case its marker is removed. A known
+issue that shows as a refusal names its refusal kind, and only a refusal of that
+kind reproduces it; one that shows as a check's finding is reproduced by findings
+only. The catalog currently holds two:
 
 - GMX V2 on Avalanche indexes its markets by `BTC.b` and `WAVAX`, so the
   `BTC/USD` and `AVAX/USD` labels match nothing. `BTC.b/USD [BTC.b-USDC]` and
@@ -499,7 +506,8 @@ catalog currently holds two:
   The public endpoint reports that revert with JSON-RPC code -32000, and the
   listing recognizes a revert only by code 3, so it takes the answer for an
   endpoint failure. The case confirms each revert with a direct read before it
-  fails; a Spoke the endpoint really did not answer still blocks it.
+  fails; a Spoke the endpoint really did not answer blocks the case only when no
+  revert was confirmed.
 
 Not covered: `ax lending-markets --connector compound_v3` reads the
 Configurator's whole event history in one request, which the public endpoints

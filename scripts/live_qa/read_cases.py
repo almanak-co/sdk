@@ -20,15 +20,17 @@ Not covered, and why:
   `ax hypercore-markets`.
 """
 
-from almanak.caip import ChainId
+from almanak.caip import AssetType, ChainId
 from almanak.chains import evm_network
 from almanak.connectors.aave_v3.networks import POOLS as AAVE_V3_POOLS
 from almanak.gateway.providers import PUBLIC_RPC
 from scripts.live_qa import checks
 from scripts.live_qa.reads import KnownIssue, ReadCase, Refusal
 
-ETHEREUM = "eip155:1"
-AVALANCHE = "eip155:43114"
+ETHEREUM = ChainId("eip155:1")
+AVALANCHE = ChainId("eip155:43114")
+HYPEREVM = ChainId("eip155:999")
+BASE = ChainId("eip155:8453")
 
 WETH = "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 USDC = "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
@@ -64,6 +66,7 @@ GMX_AVALANCHE_LABELS = KnownIssue(
     "GMX Avalanche markets are indexed by BTC.b and WAVAX, so the BTC/USD and"
     " AVAX/USD labels the help text suggests match nothing",
     "not_found",
+    refusal="not_found",
 )
 
 
@@ -71,32 +74,42 @@ def balance(asset: str, account: str) -> tuple[str, ...]:
     return ("balance", "--asset", asset, "--account", account)
 
 
-def balance_case(case_id: str, chain: str, asset: str, account: str, *options: str) -> ReadCase:
-    """A balance read whose check holds the output to the asset and account it requests."""
-    held = checks.erc20_balance if "/erc20:" in asset else checks.native_balance
-    return ReadCase(case_id, chain, (*balance(asset, account), *options), held(asset, account))
+def balance_case(case_id: str, chain: ChainId, asset: str, account: str, *options: str) -> ReadCase:
+    """A balance read whose check holds the output to the asset and account it requests.
+
+    The command gets the asset as typed; the check gets its validated identity.
+    """
+    identity = AssetType(asset)
+    if identity.chain != chain:
+        raise ValueError(f"case {case_id}: {asset} is not an asset of {chain}")
+    held = checks.erc20_balance if identity.namespace == "erc20" else checks.native_balance
+    return ReadCase(case_id, chain, (*balance(asset, account), *options), held(identity, account))
 
 
-def aave_v4(command: str, chain: str, spoke: str, reserve: int) -> tuple[str, ...]:
-    selector = ("--chain", chain, "--spoke", spoke, "--reserve-id", str(reserve))
+def aave_v4(command: str, chain: ChainId, spoke: str, reserve: int) -> tuple[str, ...]:
+    selector = ("--chain", str(chain), "--spoke", spoke, "--reserve-id", str(reserve))
     return (command, "--connector", "aave_v4", *selector)
 
 
-def reserve(connector: str, chain: str, *selector: str) -> tuple[str, ...]:
-    return ("lending-reserve", "--connector", connector, "--chain", chain, *selector)
+def reserve(connector: str, chain: ChainId, *selector: str) -> tuple[str, ...]:
+    return ("lending-reserve", "--connector", connector, "--chain", str(chain), *selector)
 
 
-def markets(connector: str, chain: str, *options: str) -> tuple[str, ...]:
-    listing = ("lending-markets", "--connector", connector, "--chain", chain)
-    return (*listing, "--limit", "3", *options)
+# Every listing asks for its first markets only.
+LISTING_LIMIT = 3
+
+
+def markets(connector: str, chain: ChainId, *options: str) -> tuple[str, ...]:
+    listing = ("lending-markets", "--connector", connector, "--chain", str(chain))
+    return (*listing, "--limit", str(LISTING_LIMIT), *options)
 
 
 def gmx(query: str) -> tuple[str, ...]:
-    return ("perp-markets", "--connector", "gmx_v2", "--chain", AVALANCHE, "--query", query)
+    return ("perp-markets", "--connector", "gmx_v2", "--chain", str(AVALANCHE), "--query", query)
 
 
-def v3_pool(chain: str, pool: str) -> tuple[str, ...]:
-    return ("pool", "--connector", "uniswap_v3", "--chain", chain, "--pool", pool)
+def v3_pool(chain: ChainId, pool: str) -> tuple[str, ...]:
+    return ("pool", "--connector", "uniswap_v3", "--chain", str(chain), "--pool", pool)
 
 
 ETHEREUM_CASES = (
@@ -123,7 +136,7 @@ ETHEREUM_CASES = (
             "--account",
             ETHEREUM_V3_POOL,
         ),
-        checks.aave_v4_position,
+        checks.aave_v4_position(AAVE_V4_ETHEREUM_SPOKE, 0, ETHEREUM_V3_POOL),
     ),
     ReadCase(
         "lending-markets/aave_v4/ethereum",
@@ -141,7 +154,7 @@ ETHEREUM_CASES = (
         "lending-markets/aave_v3/ethereum",
         ETHEREUM,
         markets("aave_v3", ETHEREUM),
-        checks.pool_reserve_listing,
+        checks.pool_reserve_listing(LISTING_LIMIT),
     ),
     ReadCase(
         "lending-reserve/sparklend/ethereum-weth",
@@ -153,7 +166,7 @@ ETHEREUM_CASES = (
         "lending-markets/sparklend/ethereum",
         ETHEREUM,
         markets("sparklend", ETHEREUM),
-        checks.pool_reserve_listing,
+        checks.pool_reserve_listing(LISTING_LIMIT),
     ),
     ReadCase(
         "lending-reserve/compound_v3/ethereum-usdc",
@@ -171,7 +184,7 @@ ETHEREUM_CASES = (
         "lending-markets/morpho_blue/ethereum-usdc",
         ETHEREUM,
         markets("morpho_blue", ETHEREUM, "--asset", USDC),
-        checks.morpho_listing(MORPHO_CORE),
+        checks.morpho_listing(MORPHO_CORE, USDC),
     ),
     ReadCase(
         "pool/uniswap_v3/ethereum-usdc-weth",
@@ -187,7 +200,7 @@ ETHEREUM_CASES = (
             "--connector",
             "uniswap_v4",
             "--chain",
-            ETHEREUM,
+            str(ETHEREUM),
             "--currency0",
             USDC,
             "--currency1",
@@ -225,7 +238,7 @@ AVALANCHE_CASES = (
             "--account",
             AVALANCHE_V3_POOL,
         ),
-        checks.aave_v4_position,
+        checks.aave_v4_position(AAVE_V4_AVALANCHE_SPOKE, 2, AVALANCHE_V3_POOL),
     ),
     ReadCase(
         "lending-markets/aave_v4/avalanche",
@@ -289,11 +302,13 @@ AVALANCHE_CASES = (
     ),
 )
 
-# Results that do not depend on the endpoint's chain reads, run on one endpoint only.
+# Results that do not depend on which endpoint answers, run on one endpoint only. The
+# vendor-key refusals still open the endpoint and pin a block before they refuse, so
+# they read the chain like any other case and the chain breaker covers them.
 VENUE_AND_REFUSAL_CASES = (
     ReadCase(
         "hypercore-markets/btc",
-        "eip155:999",
+        HYPEREVM,
         ("hypercore-markets", "--query", "BTC"),
         checks.hypercore_market("BTC"),
         endpoints=("publicnode",),
@@ -301,7 +316,7 @@ VENUE_AND_REFUSAL_CASES = (
     ReadCase(
         "refusal/resolve-needs-a-vendor-key",
         ETHEREUM,
-        ("resolve", "--chain", ETHEREUM, "--query", "USDC"),
+        ("resolve", "--chain", str(ETHEREUM), "--query", "USDC"),
         succeeds=False,
         refusals=(Refusal("unavailable", "this lookup uses a vendor key"),),
         endpoints=("publicnode",),
@@ -309,7 +324,7 @@ VENUE_AND_REFUSAL_CASES = (
     ReadCase(
         "refusal/dex-pools-needs-a-vendor-key",
         ETHEREUM,
-        ("dex-pools", "--chain", ETHEREUM, "--token", WETH),
+        ("dex-pools", "--chain", str(ETHEREUM), "--token", WETH),
         succeeds=False,
         refusals=(Refusal("unavailable", "this lookup uses a vendor key"),),
         endpoints=("publicnode",),
@@ -317,7 +332,7 @@ VENUE_AND_REFUSAL_CASES = (
     # No public endpoint is listed for HyperEVM, whichever name is given.
     ReadCase(
         "refusal/hyperevm-has-no-public-endpoint",
-        "eip155:999",
+        HYPEREVM,
         balance(HYPEREVM_WHYPE, DEPOSIT_CONTRACT),
         succeeds=False,
         refusals=(Refusal("invalid_input", "use a provider key instead"),),
@@ -326,7 +341,7 @@ VENUE_AND_REFUSAL_CASES = (
     # A name that serves other chains is refused with the names that serve this one.
     ReadCase(
         "refusal/publicnode-does-not-serve-base",
-        "eip155:8453",
+        BASE,
         balance("eip155:8453/slip44:60", DEPOSIT_CONTRACT),
         succeeds=False,
         refusals=(Refusal("invalid_input", "no public endpoint named publicnode serves"),),
@@ -335,7 +350,7 @@ VENUE_AND_REFUSAL_CASES = (
 )
 
 # Ethereum and Avalanche have their own cases above.
-DETAILED_CHAINS = frozenset({ChainId(ETHEREUM), ChainId(AVALANCHE)})
+DETAILED_CHAINS = frozenset({ETHEREUM, AVALANCHE})
 
 
 def chain_cases(chain: ChainId) -> tuple[ReadCase, ...]:
@@ -347,15 +362,13 @@ def chain_cases(chain: ChainId) -> tuple[ReadCase, ...]:
     network = evm_network(chain)
     native, wrapped = str(network.native_asset), str(network.wrapped_native)
     holder = wrapped.rpartition(":")[2]
-    cases = [
-        balance_case(f"balance/native/{chain}", str(chain), native, holder, "--block", "latest")
-    ]
+    cases = [balance_case(f"balance/native/{chain}", chain, native, holder, "--block", "latest")]
     if chain in AAVE_V3_POOLS:
         cases.append(
             ReadCase(
                 f"lending-reserve/aave_v3/{chain}-wrapped-native",
-                str(chain),
-                reserve("aave_v3", str(chain), "--asset", wrapped),
+                chain,
+                reserve("aave_v3", chain, "--asset", wrapped),
                 checks.pooled_reserve,
             )
         )

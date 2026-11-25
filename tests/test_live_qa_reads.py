@@ -13,7 +13,7 @@ import httpx
 import pytest
 import yaml
 
-from almanak.caip import ChainId
+from almanak.caip import AssetType, ChainId
 from almanak.cli_arguments import build_parser, parse_validated
 from almanak.gateway.providers import PUBLIC_RPC
 from scripts.live_qa import __main__ as entry
@@ -23,6 +23,7 @@ from scripts.live_qa.rpc import Rpc, RpcReverted, RpcUnavailable, asset_address,
 from tests.live import conftest as live_conftest
 
 ROOT = Path(__file__).parents[1]
+ETHEREUM, AVALANCHE = ChainId("eip155:1"), ChainId("eip155:43114")
 BLOCK = {"number": 7, "hash": "0xaa"}
 USDC = "eip155:1/erc20:0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
 ACCOUNT = "0x" + "11" * 20
@@ -96,7 +97,7 @@ def native_output(amount="5"):
 
 NATIVE = "eip155:1/slip44:60"
 CASE = reads.ReadCase(
-    "balance/native", "eip155:1", ("balance",), checks.native_balance(NATIVE, ACCOUNT)
+    "balance/native", ETHEREUM, ("balance",), checks.native_balance(AssetType(NATIVE), ACCOUNT)
 )
 
 
@@ -124,8 +125,8 @@ def test_an_unanswered_direct_read_blocks_instead_of_failing():
 def test_a_direct_read_that_reverts_is_an_answer_so_the_case_fails_without_a_retry():
     """The endpoint answered. Only a read it did not answer is blocked."""
     output = {"observations": [{**native_output()["observations"][0], "asset": USDC}]}
-    check = checks.erc20_balance(USDC, ACCOUNT)
-    case = reads.ReadCase("balance/erc20", "eip155:1", ("balance",), check)
+    check = checks.erc20_balance(AssetType(USDC), ACCOUNT)
+    case = reads.ReadCase("balance/erc20", ETHEREUM, ("balance",), check)
     run, calls = scripted(succeeded(output))
     rpc = FakeRpc(reverting=("balanceOf(address)",))
     result = reads.run_case(case, "publicnode", run, rpc, Path("."), sleep=pytest.fail)
@@ -135,8 +136,11 @@ def test_a_direct_read_that_reverts_is_an_answer_so_the_case_fails_without_a_ret
 
 
 def test_a_balance_read_without_observations_compares_nothing_and_fails():
-    for check in (checks.native_balance(NATIVE, ACCOUNT), checks.erc20_balance(USDC, ACCOUNT)):
-        case = reads.ReadCase("balance", "eip155:1", ("balance",), check)
+    for check in (
+        checks.native_balance(AssetType(NATIVE), ACCOUNT),
+        checks.erc20_balance(AssetType(USDC), ACCOUNT),
+    ):
+        case = reads.ReadCase("balance", ETHEREUM, ("balance",), check)
         verdict = reads.judge(case, succeeded({"observations": []}), FakeRpc())
         assert verdict.status == "fail" and "no observations" in verdict.detail
 
@@ -153,9 +157,10 @@ def test_a_command_that_exits_0_without_its_observation_is_not_a_pass_or_a_wrong
     verdict = reads.judge(CASE, succeeded(changed), FakeRpc())
     assert verdict.status == "fail" and verdict.findings == ("deployment_changed: unverified",)
     # A case without a check does not pass on such output either.
-    bare = reads.ReadCase("bare", "eip155:1", ("lending-reserve",))
+    bare = reads.ReadCase("bare", ETHEREUM, ("lending-reserve",))
     assert reads.judge(bare, succeeded(limited), FakeRpc()).status == "transient"
-    assert reads.judge(bare, succeeded({"observation": {}, "observation_error": None}), FakeRpc())
+    valid = succeeded({"observation": {}, "observation_error": None})
+    assert reads.judge(bare, valid, FakeRpc()).status == "pass"
 
 
 def test_output_the_check_cannot_read_fails():
@@ -164,15 +169,60 @@ def test_output_the_check_cannot_read_fails():
 
 
 def test_a_reported_value_no_call_can_encode_fails_instead_of_stopping_the_run():
-    """A null account reaches the ABI encoder of a real direct client, before any request."""
-    output = {
-        "resolution": {"selection": {"spoke": "0x" + "33" * 20, "reserve_id": 0}},
-        "observation": {"reserve": {"block": BLOCK}, "account": {"address": None}},
+    """A null hook reaches the ABI encoder of the pool ID, before any request."""
+    source = {
+        "currency0": USDC,
+        "currency1": "eip155:1/erc20:0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+        "fee": 500,
+        "tick_spacing": 10,
+        "hooks": None,
+        "state_view": "0x" + "33" * 20,
     }
-    arguments = ("lending-position",)
-    case = reads.ReadCase("lending-position", "eip155:1", arguments, checks.aave_v4_position)
+    output = {"observation": {"source": source, "block": BLOCK}}
+    case = reads.ReadCase("pool-price", ETHEREUM, ("pool-price",), checks.v4_pool_price)
     verdict = reads.judge(case, succeeded(output), Rpc(None))
     assert verdict.status == "fail" and "EncodingTypeError" in verdict.detail
+
+
+SPOKE = "0x" + "33" * 20
+
+
+def position_output(spoke=SPOKE, reserve_id=0, account=ACCOUNT, supplied=0):
+    return {
+        "resolution": {"selection": {"spoke": spoke, "reserve_id": reserve_id}},
+        "observation": {
+            "reserve": {"block": BLOCK},
+            "account": {"address": account},
+            "supplied_assets": supplied,
+        },
+    }
+
+
+def test_an_aave_v4_position_is_read_for_the_requested_account_spoke_and_reserve():
+    """Another account's zero position would agree with a direct read of that account."""
+    asked = []
+
+    class Recording(FakeRpc):
+        def call(self, to, signature, block, outputs, args=()):
+            asked.append((to, args))
+            return super().call(to, signature, block, outputs, args)
+
+    rpc = Recording({"getUserSuppliedAssets(uint256,address)": (0,)})
+    check = checks.aave_v4_position(SPOKE, 0, ACCOUNT)
+    # A zero position of the requested account passes, in any letter case.
+    assert check(position_output(account=ACCOUNT.upper().replace("0X", "0x")), rpc) == []
+    assert asked == [(SPOKE, (0, ACCOUNT))]
+    other = "0x" + "22" * 20
+    for reported, finding in (
+        (position_output(account=other), "account: CLI"),
+        (position_output(account=None), "account: CLI None"),
+        (position_output(spoke=other), "spoke: CLI"),
+        (position_output(reserve_id=1), "reserve_id: CLI 1, requested 0"),
+    ):
+        (difference,) = check(reported, FakeRpc(down=True))
+        assert difference.startswith(finding) and ", requested " in difference
+    held = FakeRpc({"getUserSuppliedAssets(uint256,address)": (5,)})
+    assert check(position_output(), held) == ["supplied_assets: CLI 0, direct read 5"]
 
 
 @pytest.mark.parametrize("error", sorted(reads.TRANSIENT_ERRORS))
@@ -209,7 +259,7 @@ def test_an_event_line_on_standard_error_is_not_the_refusal():
 def test_a_stated_refusal_passes_and_its_absence_fails():
     case = reads.ReadCase(
         "refusal",
-        "eip155:1",
+        ETHEREUM,
         ("resolve",),
         succeeds=False,
         refusals=(reads.Refusal("unavailable", "vendor key"),),
@@ -238,7 +288,7 @@ def test_flake_on_every_attempt_is_blocked_not_failed():
 
 
 def test_a_config_case_writes_its_request_file(tmp_path):
-    case = reads.ReadCase("perp-position/x:y", "eip155:43114", ("perp-position",), config={"a": 1})
+    case = reads.ReadCase("perp-position/x:y", AVALANCHE, ("perp-position",), config={"a": 1})
     arguments = reads.case_arguments(case, "publicnode", tmp_path)
     path = Path(arguments[arguments.index("--config") + 1])
     assert json.loads(path.read_text()) == {"a": 1} and path.parent == tmp_path
@@ -248,12 +298,14 @@ def test_a_config_case_writes_its_request_file(tmp_path):
     assert arguments[-2:] == ("--public-rpc", "publicnode")
 
 
-ISSUE = reads.KnownIssue("pinned revision", "deployment_changed")
-KNOWN = reads.ReadCase("known", "eip155:1", ("lending-reserve",), known_issue=ISSUE)
+ISSUE = reads.KnownIssue("pinned revision", "deployment_changed", refusal="deployment_changed")
+KNOWN = reads.ReadCase("known", ETHEREUM, ("lending-reserve",), known_issue=ISSUE)
 
 
 def result(case, status, detail="", endpoint="publicnode"):
-    return reads.Result(case, endpoint, status, 1, 0.1, detail, "almanak ax")
+    """A failure written `kind: message` is a refusal of that kind, as `judge_refusal` writes it."""
+    refusal = detail.partition(":")[0] if status == "fail" and ":" in detail else None
+    return reads.Result(case, endpoint, status, 1, 0.1, detail, "almanak ax", (), refusal)
 
 
 def test_a_known_issue_still_fails_and_the_report_says_whether_it_reproduced():
@@ -267,11 +319,42 @@ def test_a_known_issue_still_fails_and_the_report_says_whether_it_reproduced():
     assert result(CASE, "fail").known == ""
 
 
+def test_a_known_issue_is_matched_by_its_refusal_kind_not_by_text_alone():
+    """A refusal of another kind whose message holds the signature is a new failure."""
+    issue = reads.KnownIssue("unindexed labels", "not_found", refusal="not_found")
+    case = reads.ReadCase("perp-markets", AVALANCHE, ("perp-markets",), known_issue=issue)
+
+    def ran(error, message):
+        run, _ = scripted(refused(error, message))
+        return reads.run_case(case, "publicnode", run, FakeRpc(), Path("."), sleep=pytest.fail)
+
+    reproduced = ran("not_found", "no GMX market matches BTC/USD")
+    assert reproduced.refusal == "not_found" and reproduced.known.startswith("reproduces")
+    other = ran("malformed", "label not_found in the index")
+    assert other.status == "fail" and other.known.startswith("not observed this run")
+    assert reads.exit_code([other], known_issues_ok=True) == 1
+    # A check's finding is not a refusal, so an issue stated as a refusal never matches it.
+    finding = reads.Result(case, "publicnode", "fail", 1, 0.1, "not_found", "", ("not_found",))
+    assert finding.known.startswith("not observed this run")
+    # An issue stated as a finding is not reproduced by a refusal holding its text.
+    spokes = reads.KnownIssue("empty Spokes", "revert getReserveCount()")
+    listing_case = reads.ReadCase("listing", AVALANCHE, ("lending-markets",), known_issue=spokes)
+    run, _ = scripted(refused("abi", "revert getReserveCount() undecodable"))
+    refusal = reads.run_case(listing_case, "publicnode", run, FakeRpc(), Path("."))
+    assert refusal.known.startswith("not observed this run")
+
+
+def test_a_refusal_whose_error_is_not_a_kind_fails_instead_of_stopping_the_lane():
+    run, calls = scripted(invocation(1, stderr=json.dumps({"error": [], "message": "bad"})))
+    result = reads.run_case(CASE, "publicnode", run, FakeRpc(), Path("."), sleep=pytest.fail)
+    assert (result.status, len(calls)) == ("fail", 1) and "malformed refusal" in result.detail
+
+
 def test_a_new_finding_beside_a_known_issue_is_not_excused_by_the_marker():
     """Only a failure made of nothing but the known issue reproduces it."""
     known, new = "8 Spokes revert getReserveCount()", "market 0 asset: CLI 'a', direct read 'b'"
     issue = reads.KnownIssue("empty Spokes", "revert getReserveCount()")
-    case = reads.ReadCase("listing", "eip155:43114", ("lending-markets",), known_issue=issue)
+    case = reads.ReadCase("listing", AVALANCHE, ("lending-markets",), known_issue=issue)
 
     def failed(*findings):
         return reads.Result(case, "publicnode", "fail", 1, 0.1, "; ".join(findings), "", findings)
@@ -294,7 +377,7 @@ def test_a_check_reports_its_findings_separately_to_the_result():
     )
     issue = reads.KnownIssue("empty Spokes", "revert getReserveCount()")
     case = reads.ReadCase(
-        "listing", "eip155:43114", ("lending-markets",), checks.aave_v4_listing, known_issue=issue
+        "listing", AVALANCHE, ("lending-markets",), checks.aave_v4_listing, known_issue=issue
     )
     wrong_asset = {"getReserve(uint256)": ("0x" + "c3" * 20, HUB, 4, 18)}
     run, _ = scripted(succeeded(listed))
@@ -306,9 +389,9 @@ def test_a_check_reports_its_findings_separately_to_the_result():
 
 
 def test_the_plan_runs_a_case_where_the_endpoint_serves_its_chain():
-    only = reads.ReadCase("named", "eip155:8453", ("balance",), endpoints=("drpc",))
-    other = reads.ReadCase("avalanche", "eip155:43114", ("balance",))
-    serves = lambda endpoint, chain: (endpoint, chain) != ("drpc", "eip155:43114")  # noqa: E731
+    only = reads.ReadCase("named", ChainId("eip155:8453"), ("balance",), endpoints=("drpc",))
+    other = reads.ReadCase("avalanche", AVALANCHE, ("balance",))
+    serves = lambda endpoint, chain: (endpoint, chain) != ("drpc", AVALANCHE)  # noqa: E731
     plan = reads.planned((CASE, other, only), ("drpc", "publicnode"), serves)
     assert [(case.id, endpoint) for case, endpoint in plan] == [
         ("balance/native", "drpc"),
@@ -343,8 +426,8 @@ def test_results_come_back_in_plan_order_across_endpoints(tmp_path):
 
 def test_an_endpoint_that_keeps_blocking_a_chain_is_not_asked_again(tmp_path):
     run, calls = scripted(refused("http", "HTTP 429"))
-    cases = [reads.ReadCase(f"case-{index}", "eip155:43114", ("balance",)) for index in range(5)]
-    cases.append(reads.ReadCase("other-chain", "eip155:1", ("balance",)))
+    cases = [reads.ReadCase(f"case-{index}", AVALANCHE, ("balance",)) for index in range(5)]
+    cases.append(reads.ReadCase("other-chain", ETHEREUM, ("balance",)))
     results = reads.run_lane(cases, "drpc", session(run, tmp_path))
     assert [item.status for item in results] == ["blocked"] * 6
     assert [item.attempts for item in results] == [1, 1, 1, 0, 0, 1]
@@ -355,7 +438,7 @@ def test_an_endpoint_that_keeps_blocking_a_chain_is_not_asked_again(tmp_path):
 def test_a_passing_case_resets_the_breaker(tmp_path):
     blocked, passed = refused("http", "HTTP 429"), succeeded({})
     run, calls = scripted(blocked, blocked, passed, blocked, blocked, blocked)
-    cases = [reads.ReadCase(f"case-{index}", "eip155:1", ("balance",)) for index in range(6)]
+    cases = [reads.ReadCase(f"case-{index}", ETHEREUM, ("balance",)) for index in range(6)]
     results = reads.run_lane(cases, "drpc", session(run, tmp_path))
     assert [item.attempts for item in results] == [1] * 6 and len(calls) == 6
 
@@ -397,7 +480,7 @@ def test_the_breaker_is_shared_by_every_case_a_session_runs(tmp_path):
     """The pytest lane runs cases one by one through the session, with the same breaker."""
     run, calls = scripted(refused("http", "HTTP 429"))
     shared = session(run, tmp_path)
-    case = reads.ReadCase("case", "eip155:43114", ("balance",))
+    case = reads.ReadCase("case", AVALANCHE, ("balance",))
     attempts = [shared.one(case, "drpc").attempts for _ in range(5)]
     assert attempts == [1, 1, 1, 0, 0] and len(calls) == 3
     # Another endpoint, and another chain on the same endpoint, are still asked.
@@ -432,15 +515,15 @@ def test_case_ids_are_unique_and_every_public_chain_is_covered():
     ids = [case.id for case in CASES]
     assert len(ids) == len(set(ids))
     served = {str(chain) for chains in PUBLIC_RPC.values() for chain in chains}
-    assert served <= {case.chain for case in CASES}
+    assert served <= {str(case.chain) for case in CASES}
     # Every listed endpoint has at least one case that reads through it.
     plan = reads.planned(CASES, sorted(PUBLIC_RPC), live_conftest.served)
     assert {endpoint for _, endpoint in plan} == set(PUBLIC_RPC)
     # A case's chain is a CAIP-2 reference, and no case is left without an endpoint to
     # run on, as a mistyped chain would leave it without failing anything.
-    assert all(str(ChainId(case.chain)) == case.chain for case in CASES)
+    assert all(isinstance(case.chain, ChainId) for case in CASES)
     assert {case.id for case, _ in plan} == set(ids)
-    balances = {case.chain for case in CASES if case.id.startswith("balance/native/")}
+    balances = {str(case.chain) for case in CASES if case.id.startswith("balance/native/")}
     assert served <= balances
 
 
@@ -508,7 +591,7 @@ def test_an_erc20_balance_is_compared_with_balance_of_and_decimals():
     }
     output = {"observations": [observation]}
     agreeing = FakeRpc({"balanceOf(address)": (9,), "decimals()": (6,)})
-    check = checks.erc20_balance(USDC, ACCOUNT)
+    check = checks.erc20_balance(AssetType(USDC), ACCOUNT)
     assert check(output, agreeing) == []
     differing = FakeRpc({"balanceOf(address)": (9,), "decimals()": (18,)})
     assert check(output, differing) == ["decimals: CLI 6, direct read 18"]
@@ -522,13 +605,13 @@ def test_a_balance_of_another_account_or_asset_fails_before_any_direct_read():
     for reported, check, finding in (
         ({"account": {"address": other}}, CASE.check, f"account: CLI '{other}'"),
         ({"account": {"address": None}}, CASE.check, "account: CLI None"),
-        ({}, checks.erc20_balance(USDC, ACCOUNT), "asset: CLI 'eip155:1/slip44:60'"),
+        ({}, checks.erc20_balance(AssetType(USDC), ACCOUNT), "asset: CLI 'eip155:1/slip44:60'"),
     ):
         (difference,) = check({"observations": [{**observation, **reported}]}, unread)
         assert difference.startswith(finding) and ", requested " in difference
     # The same address in another letter case is the same account.
     checksummed = {**observation, "account": {"address": "0x" + "AB" * 20}}
-    check = checks.native_balance(NATIVE, "0x" + "ab" * 20)
+    check = checks.native_balance(AssetType(NATIVE), "0x" + "ab" * 20)
     assert check({"observations": [checksummed]}, FakeRpc()) == []
 
 
@@ -573,9 +656,12 @@ def test_a_spoke_called_unreadable_that_reverts_on_a_direct_read_is_a_finding():
     (finding,) = checks.listed_markets(partial, FakeRpc(reverting=("0x1", "0x2")))
     assert finding.startswith("2 Spokes are reported unreadable, but they revert getReserveCount()")
     assert finding.endswith("0x1, 0x2")
-    # One Spoke the endpoint really did not answer still blocks the case.
+    # A Spoke the endpoint really did not answer does not hide the misread beside it.
+    (finding,) = checks.listed_markets(partial, FakeRpc(reverting=("0x1",)))
+    assert finding.startswith("1 Spokes are reported unreadable") and finding.endswith("0x1")
+    # Alone, it blocks the case.
     with pytest.raises(RpcUnavailable, match="1 entries unreadable"):
-        checks.listed_markets(partial, FakeRpc(reverting=("0x1",)))
+        checks.listed_markets(listing([market()], unreadable[1:]), FakeRpc())
     with pytest.raises(RpcUnavailable):
         checks.listed_markets(partial, FakeRpc(down=True))
 
@@ -592,22 +678,50 @@ def test_an_entry_unreadable_for_a_reason_that_is_not_the_endpoint_fails_the_lis
     ]
     verified = market(market_id="0x" + "0d" * 32, loan_asset=market()["asset"])
     core = FakeRpc({"idToMarketParams(bytes32)": (MARKET_ASSET,)})
-    morpho = checks.morpho_listing("0xcore")(listing([verified], unreadable[1:]), core)
+    morpho = checks.morpho_listing("0xcore", LOAN)(listing([verified], unreadable[1:]), core)
     assert morpho == ["comet 0x2 is unreadable: invalid: no base token"]
-    # An endpoint reason beside it still blocks, so the run retries.
-    unanswered = [*unreadable, {"spoke": "0x3", "reason": "rpc: eth_call: rejected"}]
+    # An endpoint reason beside an answered finding does not hide it: the case fails.
+    rejected = {"spoke": "0x3", "reason": "rpc: eth_call: rejected"}
+    assert checks.listed_markets(listing([market()], [*unreadable, rejected]), FakeRpc()) == [
+        "spoke 0x1 is unreadable: malformed: reserve count",
+        "comet 0x2 is unreadable: invalid: no base token",
+    ]
+    limited = market("refused", reason="http: HTTP 429")
+    assert checks.listed_markets(listing([limited], unreadable[:1]), FakeRpc()) == [
+        "spoke 0x1 is unreadable: malformed: reserve count"
+    ]
+    # With nothing else found, the endpoint reason alone blocks, so the run retries.
     with pytest.raises(RpcUnavailable, match="1 entries unreadable"):
-        checks.listed_markets(listing([market()], unanswered), FakeRpc())
+        checks.listed_markets(listing([market()], [rejected]), FakeRpc())
+
+
+OTHER_ASSET = "0x" + "b0" * 20
 
 
 def test_a_pool_listing_is_held_to_the_reserves_the_pool_itself_lists():
-    output = listing([market()])
-    two = FakeRpc({"getReservesList()": ((MARKET_ASSET.upper().replace("0X", "0x"), "0xb"),)})
-    assert checks.pool_reserve_listing(output, two) == []
-    three = FakeRpc({"getReservesList()": (("0xa", "0xb", "0xc"),)})
-    assert checks.pool_reserve_listing(output, three) == [
+    check = checks.pool_reserve_listing(3)
+    output = listing(
+        [market(), other_market := market(asset={"asset": f"eip155:1/erc20:{OTHER_ASSET}"})]
+    )
+    two = FakeRpc({"getReservesList()": ((MARKET_ASSET.upper().replace("0X", "0x"), OTHER_ASSET),)})
+    assert check(output, two) == []
+    three = FakeRpc({"getReservesList()": (("0xa", OTHER_ASSET, "0xc"),)})
+    assert check(output, three) == [
         "listed reserves: CLI 2, direct read 3",
-        f"market 0 asset eip155:1/erc20:{MARKET_ASSET} is not on the Pool's reserve list",
+        "the listing reports 2 distinct markets, where a limit of 3 on 3 reserves gives 3",
+        f"market 0 asset {MARKET_ASSET} is not on the Pool's reserve list",
+    ]
+    # A limit below the reserve count is a valid shorter listing.
+    assert checks.pool_reserve_listing(1)(listing([other_market]), two) == []
+
+
+def test_a_pool_listing_that_repeats_an_asset_fails():
+    """Three rows of one reserve would pass the count and the membership checks."""
+    reserves = FakeRpc({"getReservesList()": ((MARKET_ASSET, OTHER_ASSET, "0xc"),)})
+    output = {**listing([market()] * 3), "source": {"contract": "0xpool", "listed": 3}}
+    assert checks.pool_reserve_listing(3)(output, reserves) == [
+        f"asset {MARKET_ASSET} is reported 3 times",
+        "the listing reports 1 distinct markets, where a limit of 3 on 3 reserves gives 3",
     ]
 
 
@@ -636,8 +750,11 @@ def test_an_aave_v4_market_is_held_to_what_its_spoke_records():
     assert checks.aave_v4_reserve(reserve, wrong_slot) == ["hub_asset_id: CLI 4, direct read 9"]
 
 
+LOAN = f"eip155:1/erc20:{MARKET_ASSET}"
+
+
 def test_a_morpho_listing_is_held_to_the_core_and_may_refuse_some_markets_not_all():
-    check = checks.morpho_listing("0xcore")
+    check = checks.morpho_listing("0xcore", LOAN)
     verified = market(market_id="0x" + "0d" * 32, loan_asset=market()["asset"])
     refused_market = market("refused", reason="revision: runtime differs")
     agreeing = FakeRpc({"idToMarketParams(bytes32)": (MARKET_ASSET,)})
@@ -648,6 +765,18 @@ def test_a_morpho_listing_is_held_to_the_core_and_may_refuse_some_markets_not_al
     assert difference.startswith("loan asset of 0x0d0d0d0d: CLI")
     with pytest.raises(RpcUnavailable):
         check(listing([market("refused", reason="http: HTTP 429")]), agreeing)
+
+
+def test_a_morpho_listing_lends_the_requested_asset():
+    """A listing that ignored --asset would pass on the core agreeing with its own ID."""
+    other = market(
+        market_id="0x" + "0e" * 32, loan_asset={"asset": f"eip155:1/erc20:{OTHER_ASSET}"}
+    )
+    core = FakeRpc({"idToMarketParams(bytes32)": (OTHER_ASSET,)})
+    (difference,) = checks.morpho_listing("0xcore", LOAN)(listing([other]), core)
+    assert difference == (
+        f"loan asset of 0x0e0e0e0e: CLI {OTHER_ASSET!r}, requested {MARKET_ASSET!r}"
+    )
 
 
 def test_a_gmx_lookup_must_name_the_expected_share_and_symbol():
@@ -749,17 +878,17 @@ def test_a_run_keeps_one_direct_client_per_endpoint_and_chain():
     from scripts.live_qa.rpc import direct_clients
 
     client = direct_clients()
-    first = client("publicnode", "eip155:1")
-    assert client("publicnode", "eip155:1") is first
-    assert client("drpc", "eip155:1") is not first
-    assert client("publicnode", "eip155:43114") is not first
+    first = client("publicnode", ChainId("eip155:1"))
+    assert client("publicnode", ChainId("eip155:1")) is first
+    assert client("drpc", ChainId("eip155:1")) is not first
+    assert client("publicnode", ChainId("eip155:43114")) is not first
     assert first.url == "https://ethereum-rpc.publicnode.com"
-    assert client("publicnode", "eip155:999").url is None
+    assert client("publicnode", ChainId("eip155:999")).url is None
 
 
 def test_a_chain_the_endpoint_does_not_serve_has_no_direct_client():
-    assert endpoint_url("publicnode", "eip155:1") == "https://ethereum-rpc.publicnode.com"
-    assert endpoint_url("publicnode", "eip155:8453") is None
+    assert endpoint_url("publicnode", ChainId("eip155:1")) == "https://ethereum-rpc.publicnode.com"
+    assert endpoint_url("publicnode", ChainId("eip155:8453")) is None
     with pytest.raises(RpcUnavailable, match="does not serve"):
         Rpc(None).balance(ACCOUNT, 1)
     assert asset_address(USDC) == "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
@@ -858,8 +987,8 @@ class Config:
 def test_the_live_directory_is_not_collected_without_the_flag():
     assert live_conftest.pytest_ignore_collect(ROOT / "tests/live", Config(False)) is True
     assert live_conftest.pytest_ignore_collect(ROOT / "tests/live", Config(True)) is None
-    assert live_conftest.served("publicnode", "eip155:1")
-    assert not live_conftest.served("publicnode", "eip155:999")
+    assert live_conftest.served("publicnode", ChainId("eip155:1"))
+    assert not live_conftest.served("publicnode", ChainId("eip155:999"))
 
 
 def test_a_live_test_named_by_its_path_is_skipped_without_the_flag():

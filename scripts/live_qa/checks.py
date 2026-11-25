@@ -5,18 +5,21 @@ endpoint, and returns one line per disagreement. Raising `RpcUnavailable` blocks
 the case instead of failing it: the endpoint, not the SDK, did not answer.
 """
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from eth_abi import encode
 from eth_utils import keccak
 
+from almanak.caip import AssetType
 from scripts.live_qa.rpc import Rpc, RpcUnavailable, asset_address
 
 Output = dict[str, Any]
 Check = Callable[[Output, Rpc], list[str]]
 
 ZERO_ADDRESS = "0x" + "00" * 20
+# An EVM chain's native balance is counted in units of 10**-18 of its coin.
+EVM_NATIVE_DECIMALS = 18
 # Refusal prefixes that name the endpoint, as `error: message` reasons carry them.
 ENDPOINT_REASONS = ("rpc:", "http:", "transport:", "unavailable:", "stale:")
 
@@ -41,14 +44,14 @@ def lowered(value: Any) -> Any:
     return value.lower() if isinstance(value, str) else value
 
 
-def other_identity(observation: Output, asset: str, account: str) -> list[str]:
+def other_identity(observation: Output, asset: AssetType, account: str) -> list[str]:
     """Where an observation names another asset or account than the case requested.
 
     A direct read of what the command reported would agree with a correct balance of
     the wrong account, so identity is held to the case before any read.
     """
     pairs = (
-        ("asset", observation["asset"], asset),
+        ("asset", observation["asset"], str(asset)),
         ("account", observation["account"]["address"], account),
     )
     return [
@@ -58,7 +61,7 @@ def other_identity(observation: Output, asset: str, account: str) -> list[str]:
     ]
 
 
-def unrequested(output: Output, asset: str, account: str) -> list[str]:
+def unrequested(output: Output, asset: AssetType, account: str) -> list[str]:
     """Why the output's observations cannot be compared: none, or another identity."""
     observations = output["observations"]
     if not observations:
@@ -66,8 +69,8 @@ def unrequested(output: Output, asset: str, account: str) -> list[str]:
     return [found for item in observations for found in other_identity(item, asset, account)]
 
 
-def native_balance(asset: str, account: str) -> Check:
-    """A native balance of the requested account, held to `eth_getBalance`."""
+def native_balance(asset: AssetType, account: str) -> Check:
+    """A native balance of the requested account, held to `eth_getBalance` and 18 decimals."""
 
     def check(output: Output, rpc: Rpc) -> list[str]:
         if refused := unrequested(output, asset, account):
@@ -76,15 +79,16 @@ def native_balance(asset: str, account: str) -> Check:
         for observation in output["observations"]:
             number = observation["block"]["number"]
             pairs.append(("balance", int(observation["amount"]), rpc.balance(account, number)))
+            pairs.append(("decimals", observation["decimals"], EVM_NATIVE_DECIMALS))
             pairs.append(same_block(observation, rpc))
         return differences(pairs)
 
     return check
 
 
-def erc20_balance(asset: str, account: str) -> Check:
+def erc20_balance(asset: AssetType, account: str) -> Check:
     """An ERC-20 balance of the requested account, held to `balanceOf` and `decimals()`."""
-    token = asset_address(asset)
+    token = asset_address(str(asset))
 
     def check(output: Output, rpc: Rpc) -> list[str]:
         if refused := unrequested(output, asset, account):
@@ -230,18 +234,39 @@ def morpho_reserve(output: Output, rpc: Rpc) -> list[str]:
     ) + reserve_decimals(output, rpc)
 
 
-def aave_v4_position(output: Output, rpc: Rpc) -> list[str]:
-    observation, selection = output["observation"], output["resolution"]["selection"]
-    number = observation["reserve"]["block"]["number"]
-    arguments = (selection["reserve_id"], observation["account"]["address"])
-    (supplied,) = rpc.call(
-        selection["spoke"],
-        "getUserSuppliedAssets(uint256,address)",
-        number,
-        ("uint256",),
-        arguments,
-    )
-    return differences((("supplied_assets", observation["supplied_assets"], supplied),))
+def aave_v4_position(spoke: str, reserve_id: int, account: str) -> Check:
+    """An Aave V4 position of the requested account in the requested Spoke and reserve.
+
+    The direct read asks about what the case requested, not what the command reported,
+    and a reported identity that differs fails before it. A zero position passes when
+    the Spoke agrees.
+    """
+
+    def check(output: Output, rpc: Rpc) -> list[str]:
+        observation, selection = output["observation"], output["resolution"]["selection"]
+        pairs = (
+            ("spoke", selection["spoke"], spoke),
+            ("reserve_id", selection["reserve_id"], reserve_id),
+            ("account", observation["account"]["address"], account),
+        )
+        other = [
+            f"{label}: CLI {reported!r}, requested {requested!r}"
+            for label, reported, requested in pairs
+            if lowered(reported) != lowered(requested)
+        ]
+        if other:
+            return other
+        number = observation["reserve"]["block"]["number"]
+        (supplied,) = rpc.call(
+            spoke,
+            "getUserSuppliedAssets(uint256,address)",
+            number,
+            ("uint256",),
+            (reserve_id, account),
+        )
+        return differences((("supplied_assets", observation["supplied_assets"], supplied),))
+
+    return check
 
 
 def gmx_market(share: str, symbol: str) -> Check:
@@ -271,12 +296,17 @@ def entry_name(item: Output) -> str:
     return ", ".join(f"{key} {value}" for key, value in item.items() if key not in ENTRY_STATE)
 
 
-def unreadable_entries(output: Output, rpc: Rpc) -> list[str]:
-    """Findings on what the listing calls unreadable although the endpoint answered.
+def endpoint_refused(item: Output) -> bool:
+    return str(item.get("reason", "")).startswith(ENDPOINT_REASONS)
+
+
+def entry_findings(output: Output, rpc: Rpc) -> tuple[list[str], list[str]]:
+    """Findings on what the listing calls unreadable, and the reasons it left unanswered.
 
     A Spoke without reserves reverts `getReserveCount()`, so calling it unreadable is a
-    misread. An entry refused for a reason that does not name the endpoint fails too.
-    An entry or a market refused for an endpoint reason blocks the case instead.
+    misread. An entry refused for a reason that does not name the endpoint is a finding
+    too. An entry or a market refused for an endpoint reason is no finding; it is
+    returned so that `unless_answered` can block a case that found nothing else.
     """
     unreadable = output["source"].get("unreadable") or []
     block = output["block"]["number"]
@@ -286,12 +316,6 @@ def unreadable_entries(output: Output, rpc: Rpc) -> list[str]:
         if "spoke" in item and rpc.reverts(item["spoke"], "getReserveCount()", block)
     ]
     others = [item for item in unreadable if item.get("spoke") not in empty]
-    refusals = [*others, *output["markets"]]
-    unanswered = [
-        item["reason"] for item in refusals if item.get("reason", "").startswith(ENDPOINT_REASONS)
-    ]
-    if unanswered:
-        raise RpcUnavailable(f"{len(unanswered)} entries unreadable, first: {unanswered[0]}")
     misread = (
         [
             f"{len(empty)} Spokes are reported unreadable, but they revert getReserveCount()"
@@ -300,23 +324,46 @@ def unreadable_entries(output: Output, rpc: Rpc) -> list[str]:
         if empty
         else []
     )
-    answered = [f"{entry_name(item)} is unreadable: {item.get('reason', '')}" for item in others]
-    return misread + answered
+    answered = [
+        f"{entry_name(item)} is unreadable: {item.get('reason', '')}"
+        for item in others
+        if not endpoint_refused(item)
+    ]
+    unanswered = [
+        item["reason"] for item in [*others, *output["markets"]] if endpoint_refused(item)
+    ]
+    return misread + answered, unanswered
+
+
+def unless_answered(findings: list[str], unanswered: list[str]) -> list[str]:
+    """The findings, or a blocked case where there are none and an entry went unanswered.
+
+    An unanswered entry cannot excuse a finding the endpoint did answer, so a case with
+    both fails. A case with only unanswered entries blocks, and the run retries it.
+    """
+    if unanswered and not findings:
+        raise RpcUnavailable(f"{len(unanswered)} entries unreadable, first: {unanswered[0]}")
+    return findings
 
 
 def unverified(markets: list[Output]) -> list[str]:
+    """Markets that are not verified for a reason that does not name the endpoint."""
     if not markets:
         return ["the listing reports no markets"]
     return [
         f"market {index} is {market['status']}: {market.get('reason', '')}"
         for index, market in enumerate(markets)
-        if market["status"] != "verified"
+        if market["status"] != "verified" and not endpoint_refused(market)
     ]
 
 
-def listed_markets(output: Output, rpc: Rpc) -> list[str]:
-    """A listing of reviewed deployments: nothing unreadable, every market verified."""
-    return unreadable_entries(output, rpc) + unverified(output["markets"])
+def listed_markets(output: Output, rpc: Rpc, found: Sequence[str] = ()) -> list[str]:
+    """A listing of reviewed deployments: nothing unreadable, every market verified.
+
+    `found` holds what a connector's own check already found in the same listing.
+    """
+    findings, unanswered = entry_findings(output, rpc)
+    return unless_answered([*found, *findings, *unverified(output["markets"])], unanswered)
 
 
 def aave_v4_listing(output: Output, rpc: Rpc) -> list[str]:
@@ -328,20 +375,34 @@ def aave_v4_listing(output: Output, rpc: Rpc) -> list[str]:
         asset = asset_address(market["asset"]["asset"])
         pairs.append((f"market {index} asset", asset, underlying.lower()))
         pairs.append((f"market {index} hub", market["hub"], hub.lower()))
-    return differences(pairs) + listed_markets(output, rpc)
+    return listed_markets(output, rpc, differences(pairs))
 
 
-def morpho_listing(core: str) -> Check:
-    """A Morpho Blue listing: the connector may refuse some markets, never all, and each
-    verified market's loan asset is the one the core records under its ID."""
+def morpho_listing(core: str, loan_asset: str) -> Check:
+    """A Morpho Blue listing filtered by a loan asset: the connector may refuse some
+    markets, never all, and each verified market lends the requested asset, as the
+    core itself records under the market's ID."""
+    requested = asset_address(loan_asset)
 
     def check(output: Output, rpc: Rpc) -> list[str]:
-        answered = unreadable_entries(output, rpc)
-        verified = [market for market in output["markets"] if market["status"] == "verified"]
+        findings, unanswered = entry_findings(output, rpc)
+        markets = output["markets"]
+        verified = [market for market in markets if market["status"] == "verified"]
         if not verified:
-            return [*answered, "the listing reports no verified market"]
+            # Markets the endpoint did not answer may be the verified ones.
+            missing = (
+                []
+                if any(map(endpoint_refused, markets))
+                else ["the listing reports no verified market"]
+            )
+            return unless_answered([*findings, *missing], unanswered)
         pairs = []
         for market in verified:
+            name = f"loan asset of {market['market_id'][:10]}"
+            reported = asset_address(market["loan_asset"]["asset"])
+            if reported != requested:
+                findings.append(f"{name}: CLI {reported!r}, requested {requested!r}")
+                continue
             (loan,) = rpc.call(
                 core,
                 "idToMarketParams(bytes32)",
@@ -349,28 +410,47 @@ def morpho_listing(core: str) -> Check:
                 ("address",),
                 (bytes.fromhex(market["market_id"][2:]),),
             )
-            reported = asset_address(market["loan_asset"]["asset"])
-            pairs.append((f"loan asset of {market['market_id'][:10]}", reported, loan.lower()))
-        return answered + differences(pairs)
+            pairs.append((name, reported, loan.lower()))
+        return unless_answered(findings + differences(pairs), unanswered)
 
     return check
 
 
-def pool_reserve_listing(output: Output, rpc: Rpc) -> list[str]:
-    """An Aave V3 or SparkLend listing against the Pool's own reserve list: the same
-    count, and every reported market an asset on that list."""
-    source = output["source"]
-    (reserves,) = rpc.call(
-        source["contract"], "getReservesList()", output["block"]["number"], ("address[]",)
-    )
-    onchain = {reserve.lower() for reserve in reserves}
-    counted = differences((("listed reserves", source["listed"], len(reserves)),))
-    strangers = [
-        f"market {index} asset {market['asset']['asset']} is not on the Pool's reserve list"
-        for index, market in enumerate(output["markets"])
-        if asset_address(market["asset"]["asset"]) not in onchain
-    ]
-    return counted + strangers + listed_markets(output, rpc)
+def pool_reserve_listing(limit: int) -> Check:
+    """An unfiltered Aave V3 or SparkLend listing from its first reserve, held to the
+    Pool's own reserve list: the same count, every reported market a distinct asset on
+    that list, and as many markets as the limit allows."""
+
+    def check(output: Output, rpc: Rpc) -> list[str]:
+        source = output["source"]
+        (reserves,) = rpc.call(
+            source["contract"], "getReservesList()", output["block"]["number"], ("address[]",)
+        )
+        onchain = {reserve.lower() for reserve in reserves}
+        counted = differences((("listed reserves", source["listed"], len(reserves)),))
+        assets = [asset_address(market["asset"]["asset"]) for market in output["markets"]]
+        repeated = [
+            f"asset {asset} is reported {assets.count(asset)} times"
+            for asset in sorted(set(assets))
+            if assets.count(asset) > 1
+        ]
+        expected = min(limit, len(reserves))
+        short = (
+            [
+                f"the listing reports {len(set(assets))} distinct markets, where a limit of"
+                f" {limit} on {len(reserves)} reserves gives {expected}"
+            ]
+            if len(set(assets)) != expected
+            else []
+        )
+        strangers = [
+            f"market {index} asset {asset} is not on the Pool's reserve list"
+            for index, asset in enumerate(assets)
+            if asset not in onchain
+        ]
+        return listed_markets(output, rpc, counted + repeated + short + strangers)
+
+    return check
 
 
 def hypercore_market(coin: str) -> Check:
