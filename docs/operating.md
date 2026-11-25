@@ -1370,7 +1370,9 @@ signed, since Curve calls carry no deadline. Each approval is held to that windo
 from the observed block, and the deposit that follows the last mined approval has the
 same number of seconds from the block that mined it, as a Curve swap has. A coin's
 approval planned after that window is refused `stale_plan`, and the approvals already
-mined stand; the same command run again spends them and approves only the rest. A
+mined stand. The same command run again spends each allowance that still equals its
+stated amount and approves the other coins; a coin whose reset to zero was mined but
+whose exact approval was not is approved again. A
 deposit approves the pool for exactly each stated amount, so a completed one leaves no
 allowance on the coins it deposited. A deposit in other proportions than the pool's, like a one-coin burn,
 trades against the pool and pays its fee; `--slippage-bps` bounds how far the LP
