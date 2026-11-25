@@ -23,6 +23,9 @@ FORK_SOURCES = (ChainId("eip155:42161"),)
 # production EOA rehearsal and the hosted Fork Qualification select a bridge reference
 # from this declaration. The cell's evidence package is not complete.
 PRODUCTION_SOURCES: tuple[ChainId, ...] = FORK_SOURCES
+# What `almanak ax` runs directly from every production source chain. Declared on
+# offline evidence: no fork rehearsal of the direct command has run on any cell.
+DIRECT_ACTIONS = (EconomicAction.BRIDGE, EconomicAction.REVOKE_BRIDGE)
 # The bridge model of economic backtests. It reads no history: it charges the author's
 # whole fee ceiling and credits the arrival after a latency the backtest file states.
 BACKTEST_MODEL: Literal["across-full-fee-ceiling-fixed-latency-v1"] = (
@@ -135,6 +138,7 @@ def candidate_support():
             modes=modes(chain),
             actions=(EconomicAction.BRIDGE, EconomicAction.REVOKE_BRIDGE),
             account_profiles=("eoa",),
+            direct_actions=DIRECT_ACTIONS if chain in PRODUCTION_SOURCES else (),
             restrictions=restrictions(chain),
             historical=historical(chain) if chain in FORK_SOURCES else (),
         )

@@ -54,7 +54,21 @@ PLACEHOLDERS = {
     "<upper tick>": "120",
     "<token id>": "7",
     "<liquidity>": "1000",
+    # A bridge route: the chain and asset it leaves, and where it arrives.
+    "<source chain>": "eip155:42161",
+    "<sent asset>": "eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+    "<destination chain>": "eip155:8453",
+    "<received asset>": "eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+    "<reference>": "7:0x" + "ab" * 32 + ":1795498091",
 }
+# Commands no public endpoint serves: they read two chains, and a bridge asks the
+# venue's quote API. Their `<transport>` is the provider key.
+KEYED = ("bridge", "revoke-bridge", "bridge-status")
+KEY_TRANSPORT = "--env-file .env"
+
+
+def keyed(line: str) -> bool:
+    return line.split()[1:3][-1] in KEYED and line.startswith("almanak ax ")
 
 
 def text() -> str:
@@ -197,9 +211,18 @@ def variants(line: str) -> list[str]:
 
 
 def filled(line: str) -> list[str]:
+    if keyed(line):
+        line = line.replace("<transport>", KEY_TRANSPORT)
     for placeholder, value in PLACEHOLDERS.items():
         line = line.replace(placeholder, value)
     assert "<" not in line, f"unfilled placeholder in: {line}"
+    return shlex.split(line)[1:]
+
+
+def plain(line: str) -> list[str]:
+    """One line with every placeholder filled and its transport left as stated."""
+    for placeholder, value in PLACEHOLDERS.items():
+        line = line.replace(placeholder, value)
     return shlex.split(line)[1:]
 
 
@@ -300,6 +323,8 @@ def test_each_connector_names_its_market_as_the_skill_says():
                 require_bought(args.connector, ax_actions.action_request(args))
             elif args.product in ("ax-pool", "ax-pool-price", "ax-liquidity-position"):
                 ax.parse_request(args)
+            elif args.product == "ax-bridge-status":
+                assert args.connector in connectors_for("bridge")
             elif args.product != "ax-lending-markets":
                 ax.lending_request(args)
             checked.add((args.ax_command, args.connector))
@@ -677,9 +702,16 @@ def permit2_standing() -> dict:
     return uniswap_v4.standing(seen)
 
 
+def bridge_position() -> dict:
+    from almanak.connectors.across.direct import position
+
+    return position(SimpleNamespace(outcomes=(), baseline=()))
+
+
 def test_the_position_paths_of_a_pool_result_exist():
-    """Each `position_after` path the skill names is in a pool action's position."""
-    reported = {**permit2_standing(), **pool_position()}
+    """Each `position_after` path the skill names is in a pool action's position, or
+    in a bridge's."""
+    reported = {**permit2_standing(), **pool_position(), **bridge_position()}
     paths = {name for name in spans(text()) if name.startswith("position_after.")}
     assert "position_after.position.token_id" in paths and len(paths) >= 3
     for path in paths:
@@ -710,6 +742,13 @@ def test_every_chain_command_runs_on_either_transport():
                 continue
         assert whole.count("<transport>") == 1, line
         for variant in variants(line):
+            if keyed(line):
+                # A bridge command takes the key and refuses a public endpoint.
+                parsed(variant)
+                public = variant.replace("<transport>", "--public-rpc publicnode")
+                with pytest.raises(SystemExit):
+                    parse_validated(build_parser(), plain(public))
+                continue
             parsed(variant)
             parsed(variant.replace("<transport>", "--env-file .env"))
     assert recoveries == [

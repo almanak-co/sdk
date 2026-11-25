@@ -43,6 +43,7 @@ The skill covers every direct action the CLI serves for a plain wallet:
 | Lending | `ax supply`, `ax withdraw`, `ax borrow`, `ax repay`, `ax collateral` | [Operator actions](operating.md#operator-actions) |
 | Swaps | `ax swap` | [Swaps](operating.md#swaps) |
 | Liquidity | `ax open-liquidity`, `ax increase-liquidity`, `ax decrease-liquidity`, `ax collect-liquidity-fees`, `ax close-liquidity`, `ax revoke-exchange` | [Liquidity](operating.md#liquidity) |
+| Bridges | `ax bridge`, `ax bridge-status`, `ax revoke-bridge` | [Bridges](operating.md#bridges) |
 
 It holds no list of chains. Before an action the agent runs `almanak support` for
 the connector and chain and goes on only when `direct_actions` lists the action's
@@ -184,8 +185,11 @@ the agent says so once and stops when the user objects.
   refused with `unsupported_pool`. On Curve a coin is named by its CAIP-19 asset,
   never by a symbol or an index.
 - An action takes the token itself: a chain's native coin must already be wrapped.
-- The agent cannot send funds back. Nothing here transfers out of the wallet, so
-  funds leave it only through its key, which the user should keep a copy of.
+- The agent cannot send funds back. It sends nothing to another address: a bridge
+  moves funds only to the wallet's own address on another chain, so funds leave
+  the wallet only through its key, which the user should keep a copy of.
+- A bridge needs the user's provider key. No public endpoint serves it, and
+  without the key the agent says so and bridges nothing.
 - An action has no amount ceiling. The fee ceilings and the wallet balance bound
   it, and the confirmation before `--execute` is an instruction to the agent, not
   an enforced control.

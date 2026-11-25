@@ -60,6 +60,11 @@ ACTIONS = {
     " Permit2 allowances of the router and position manager and the ERC-20 approval of"
     " each pool token to Permit2, which every other application that spends the token"
     " through Permit2 shares",
+    "bridge": "send an exact amount of one asset to a stated recipient on another"
+    " chain, at the venue's own quote held under a stated fee ceiling; the command ends"
+    " when the deposit is mined and reports the transfer's reference",
+    "revoke-bridge": "set the allowance the wallet gave the route's SpokePool in the"
+    " sent asset to zero",
 }
 # Actions whose market is one pool; the others name a lending market, with the flags
 # `ax lending-reserve` takes.
@@ -72,7 +77,11 @@ POOL_ACTIONS = (
     "close-liquidity",
     "revoke-exchange",
 )
-LENDING_ACTIONS = tuple(name for name in ACTIONS if name not in POOL_ACTIONS)
+# A bridge names a route between two chains, not a pool or a lending market.
+BRIDGE_ACTIONS = ("bridge", "revoke-bridge")
+LENDING_ACTIONS = tuple(
+    name for name in ACTIONS if name not in POOL_ACTIONS and name not in BRIDGE_ACTIONS
+)
 # Whether each lending command's --amount is required; one not named here takes none.
 AMOUNTS = {"supply": True, "borrow": True, "withdraw": False, "repay": False}
 AMOUNT_HELP = {
@@ -179,6 +188,10 @@ def command(args) -> int:
 
 def market_request(args):
     """The market a command names, validated as the connector's own market selection."""
+    if args.ax_command in BRIDGE_ACTIONS:
+        from almanak.ax_bridge import market_request as bridge_request
+
+        return bridge_request(args)
     if args.ax_command not in POOL_ACTIONS:
         from almanak.ax import lending_request
 
@@ -201,6 +214,10 @@ def validate_arguments(parser, args) -> None:
     cannot tie the flags to the connector: the connector's own market selection decides
     which of them it takes and which it requires.
     """
+    if args.ax_command in BRIDGE_ACTIONS:
+        from almanak.ax_bridge import validate as validate_bridge
+
+        return validate_bridge(parser, args)
     if args.ax_command not in POOL_ACTIONS:
         return
     fields = resolution(args.connector).MarketSelection.model_fields
@@ -248,6 +265,7 @@ def action_request(args):
         liquidity=getattr(args, "liquidity", None),
         amounts=tuple(stated) if (stated := getattr(args, "amounts", None)) else None,
         receive=getattr(args, "receive", None),
+        recipient=getattr(args, "recipient", None),
     )
 
 
@@ -306,6 +324,10 @@ def production_backend(config, endpoint, wallet):
 def action_config(args, request, action, wallet, provider, endpoint):
     """The operator deployment a command's arguments state."""
     limits = FeeLimits(args.max_gas_price_wei, args.max_transaction_fee, args.max_gas_limit)
+    if args.ax_command in BRIDGE_ACTIONS:
+        from almanak.ax_bridge import deployment as bridge_deployment
+
+        return bridge_deployment(args.env_file, request, action, wallet, provider, endpoint, limits)
     public = args.public_rpc is not None
     return deployment(
         args.connector, request, action, wallet, provider, endpoint, limits, public=public
@@ -643,12 +665,14 @@ def perform(
             return binding.intent(state.config, observed, request)
 
         runtime.submit(admit)
+        first = step(runtime.preview())
         result = {
             "action": request.action,
             "executed": False,
             "position_before": position(before),
-            "first_step": step(runtime.preview()),
+            "first_step": first,
             **noted,
+            **stated_details(binding, service.backend, runtime.journal.load()),
         }
         interrupt()
         if execute:
@@ -662,6 +686,11 @@ def stated_note(binding, config, observed, request) -> dict:
     """The connector's note on an admitted request, as the result carries it."""
     text = None if binding.note is None else binding.note(config, observed, request)
     return {} if text is None else {"note": text}
+
+
+def stated_details(binding, backend, state) -> dict:
+    """The connector's own result fields for an admitted, planned request."""
+    return {} if binding.details is None else binding.details(backend, state)
 
 
 def executed(runtime, start: int, interrupt) -> dict:
@@ -985,6 +1014,10 @@ def arguments(commands, lending_source) -> None:
         )
         if name == "swap":
             swap_arguments(action)
+        elif name in BRIDGE_ACTIONS:
+            from almanak.ax_bridge import arguments as bridge_arguments
+
+            bridge_arguments(name, action)
         elif name in POOL_ACTIONS:
             from almanak.ax_liquidity import arguments as liquidity_arguments
 

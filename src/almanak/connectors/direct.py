@@ -32,6 +32,8 @@ COMMAND_INTENTS: dict[str, tuple[str, ...]] = {
     "collect-liquidity-fees": ("collect_liquidity_fees",),
     "close-liquidity": ("close_liquidity",),
     "revoke-exchange": ("revoke_exchange",),
+    "bridge": ("bridge",),
+    "revoke-bridge": ("revoke_bridge",),
 }
 
 
@@ -74,6 +76,8 @@ class ActionRequest:
     # There `liquidity` is the LP shares a decrease burns, in base units of the LP token.
     amounts: tuple[tuple[str, int], ...] | None = None
     receive: str | None = None
+    # A bridge only: the address on the destination chain that receives.
+    recipient: str | None = None
 
     @property
     def kind(self) -> str:
@@ -115,6 +119,11 @@ class DirectActions:
     # from the observations the request is admitted with and reported as the result's
     # `note`, in a preview as in an execution.
     note: Callable | None = None
+    # `details(backend, state)`: result fields the admitted request rests on and its
+    # first step does not state, such as a venue quote the gateway admitted it with.
+    # It is called once the first step is planned, before anything is signed, and a
+    # refusal it raises ends the command there.
+    details: Callable | None = None
 
 
 # Installed connectors `ax` runs no direct action for, and why.
@@ -124,8 +133,6 @@ NOT_DIRECT: dict[str, str] = {
     "ends with its last receipt",
     "hyperliquid": "HyperCore custody is Safe/Roles only, and a direct action runs "
     "for a plain account",
-    "across": "a bridge arrives after its deposit is mined, on another chain; a direct "
-    "command is one process that ends with its last receipt",
 }
 
 

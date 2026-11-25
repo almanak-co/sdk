@@ -492,8 +492,10 @@ def advanced(products):
     hypercore(commands)
     portfolio(commands)
     from almanak.ax_actions import arguments as operator_actions
+    from almanak.ax_bridge import status_arguments
 
     operator_actions(commands, lending_source)
+    status_arguments(commands)
 
 
 def block_option(command):

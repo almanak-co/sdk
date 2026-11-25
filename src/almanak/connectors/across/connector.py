@@ -39,7 +39,9 @@ def run_facts(state) -> dict:
         "schema_version": state.schema_version,
         "connector": "across",
         "deployment_id": state.deployment_id,
-        "strategy": {"filename": state.strategy.filename, "sha256": state.strategy.sha256},
+        "strategy": None
+        if state.strategy is None
+        else {"filename": state.strategy.filename, "sha256": state.strategy.sha256},
         "mode": state.mode,
         "execution_environment": "production" if state.config.production else "fork",
         "evidence_status": "invalidated" if state.integrity_error else "recorded",

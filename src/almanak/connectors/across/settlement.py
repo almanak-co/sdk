@@ -113,15 +113,13 @@ def matching_fill(rows, relay: str, destination):
     return matches[0] if matches else None
 
 
-def measured_arrival(reader, target, row, fill) -> tuple[dict, int]:
-    """The fill's receipt and the amount it paid the destination fund, held to the event."""
-    fund = target.destination_fund.address
+def paid_by_fill(reader, fund: str, token: str, row, fill) -> tuple[dict, int]:
+    """The fill's receipt and the amount it paid `fund` in `token`, held to the event."""
     if fill["updated_recipient"] != word(fund):
         raise chain.integrity("an Across fill paid another recipient than the destination fund")
     receipt = chain.receipt_of(reader, row)
     payer = row["address"].lower() if FILL_TYPES[fill["fill_type"]] == "slow" else None
-    token, after = target.destination_asset.reference, chain.position(row)[1]
-    paid = chain.paid_to(receipt, token, fund, after, payer)
+    paid = chain.paid_to(receipt, token, fund, chain.position(row)[1], payer)
     if paid is None or paid != fill["updated_output"]:
         raise DataError(
             "accounting",
@@ -129,6 +127,13 @@ def measured_arrival(reader, target, row, fill) -> tuple[dict, int]:
             f"not the {fill['updated_output']} its event states",
         )
     return receipt, paid
+
+
+def measured_arrival(reader, target, row, fill) -> tuple[dict, int]:
+    """The fill's receipt and the amount it paid the destination fund, held to the event."""
+    return paid_by_fill(
+        reader, target.destination_fund.address, target.destination_asset.reference, row, fill
+    )
 
 
 def arrival_outcome(reader, transfer, target, row, fill, block):

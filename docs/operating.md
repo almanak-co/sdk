@@ -782,6 +782,116 @@ production run releases it after the shares are removed: until then each attempt
 to send it is refused for the shares first. The approval that preceded it stays
 standing for as long.
 
+#### Bridges
+
+`almanak ax bridge` sends an exact amount of one asset from the wallet to a stated
+recipient on another chain, through Across, from every chain where `almanak support`
+lists `bridge` under `direct_actions`:
+
+```bash
+almanak ax bridge --connector across --chain eip155:42161 \
+  --asset eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831 \
+  --destination-chain eip155:8453 \
+  --destination-asset eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913 \
+  --amount 25000000 --max-fee-bps 10 \
+  --recipient 0x1111111111111111111111111111111111111111 \
+  --wallet /private/operator --env-file /private/providers.env \
+  --max-gas-price-wei 1000000000 --max-transaction-fee 200000000000000
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--chain`, `--asset` | The chain the asset leaves and the CAIP-19 asset sent. |
+| `--destination-chain`, `--destination-asset` | The chain it arrives on and the CAIP-19 asset received. Both assets must have the same decimals. |
+| `--amount` | Base units sent. The deployment sends exactly this and binds no more of the wallet. |
+| `--max-fee-bps` | Required, 0 to 10000. A venue quote whose whole fee exceeds this many basis points of the amount is refused before anything is signed. |
+| `--recipient` | Required. The address on the destination chain that receives. State the wallet's own address to keep the funds; no default chooses it. |
+
+The output amount is Across's own quote, asked from its API by the command's gateway
+and named in the result as `across_api`. Only the gateway holds the quote to
+`--max-fee-bps`: the SpokePool checks no price, so the ceiling is a gateway check and
+not on-chain enforcement. A direct bridge takes `--env-file` only. `--public-rpc` is
+refused: the command reads two chains and asks the venue's API, and no public
+endpoint stands in for either.
+
+The route is resolved on the chain it leaves and completed on the destination chain,
+with a second reader from the same env file held to that chain's number and genesis
+block. Both SpokePools must run their reviewed implementations. After that the
+deployment has one chain: nothing is read, planned or signed on the destination chain
+while the command runs.
+
+Without `--execute` the result is a preview: `first_step`, the `steps` the request
+takes, and `quote` with its `source`, `output_amount`, `fee`, `fee_ceiling`,
+`timestamp` and `fill_deadline`. The steps are the approval of exactly the amount to
+the SpokePool, then the deposit, which spends the approval whole. An allowance of
+another size the wallet already gave the SpokePool is set to zero first. The deposit
+asks the venue again and signs its own quote, held to the same ceiling, so the
+previewed terms are not a promise.
+
+With `--execute` the command ends when the deposit is mined. It does not wait for
+the arrival, which happens on another chain: `position_after.transfers` lists the
+transfer with its `reference`, the amount `sent`, the amount `offered` and its
+`fill_deadline`, and states no received amount. Keep the reference; nothing else is
+kept once the command ends. A recipient that is not the wallet receives the funds
+on the destination chain, and a refund of an unfilled transfer is paid to the wallet
+on the source chain.
+
+`almanak ax bridge-status` reads what became of a transfer, from both chains, and
+plans and signs nothing:
+
+```bash
+almanak ax bridge-status --connector across --chain eip155:42161 \
+  --destination-chain eip155:8453 --reference <reference> \
+  --env-file /private/providers.env
+```
+
+It takes `--env-file` or the read gateway, and `--block` as other reads do
+(`finalized` unless stated, applied to both chains). The deposit is read again from
+the source SpokePool and held to the reference's relay hash, so a reference that is
+not a deposit of the named route is refused. `status` is one of:
+
+| `status` | Meaning |
+| --- | --- |
+| `arrived` | The destination SpokePool filled the relay. `arrival.received` is the amount of the token transfer to the recipient in the fill transaction, required to equal the fill event's amount. |
+| `in_flight` | Not filled at the block read, and the fill deadline has not passed there. No received amount is stated. |
+| `unfilled` | Not filled at a block past the fill deadline, so no fill can follow. `refund` lists what the wallet was paid since. |
+
+For an unfilled transfer, `refund.payments` lists each payment of the sent asset from
+the SpokePool to the depositor that an executed refund leaf names, from the fill
+deadline on, with `equals_sent` where an amount equals the amount sent. A refund
+names the wallet and the token, never a deposit, and one payment can cover several
+deposits, so the command attributes none of them to the transfer: a payment equal to
+the sent amount is consistent with its refund and may be another deposit's. The scan
+reads at most 200 pages of 2,000 blocks; `refund.complete` says whether it reached
+the block read, and `--refund-from-block` continues it. `deferred_in_spoke_pool` is
+what the SpokePool holds for the wallet because a refund transfer to it failed;
+claiming it is not built.
+
+A deposit that is refused or reverts after its approval was mined leaves that
+approval standing. `ax revoke-bridge` sets it to zero, and takes the route only:
+
+```bash
+almanak ax revoke-bridge --connector across --chain eip155:42161 \
+  --asset eip155:42161/erc20:0xaf88d065e77c8cc2239327c5edb3a432268e5831 \
+  --destination-chain eip155:8453 \
+  --destination-asset eip155:8453/erc20:0x833589fcd6edb6e08f4c7c32d4f71b54bda02913 \
+  --wallet /private/operator --env-file /private/providers.env \
+  --max-gas-price-wei 1000000000 --max-transaction-fee 200000000000000
+```
+
+`ax recover` resolves an interrupted bridge as it does any action. A signed deposit
+carries its quote's timestamp, and the SpokePool reverts it once mined later than
+that timestamp plus its quote buffer. Past that deadline, with no receipt, no copy at
+the provider and the nonce unused, `ax recover` releases the deposit and lists it
+under `released_expired`: nothing was sent to the other chain, the approval before it
+stands until `ax revoke-bridge` or a later bridge of the same amount, and the bridge
+is stated again.
+
+The Across direct actions are declared on offline tests and read-only mainnet
+checks. No fork rehearsal of the direct command has run, so the signed approval and
+deposit of a direct bridge, its receipt reconciliation and its recovery are proven
+at component level only.
+
 #### Liquidity
 
 Concentrated-liquidity positions on Uniswap V3, PancakeSwap V3 and Aerodrome

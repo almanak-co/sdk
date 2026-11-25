@@ -48,8 +48,9 @@ With neither it is over 100 kilobytes; do not run it. In an entry:
 
 - `direct_actions` lists the kinds that chain serves for your wallet. When the key
   is missing, or the answer is empty, nothing is served there.
-- `actions` is what a strategy may do, not what `ax` serves. GMX V2, Hyperliquid,
-  Across and Morpho Blue on HyperEVM list `actions` and have no `direct_actions`.
+- `actions` is what a strategy may do, not what `ax` serves. GMX V2, Hyperliquid
+  and Morpho Blue on HyperEVM list `actions` and have no `direct_actions`, and
+  Across has them only on the chains a bridge may leave.
 - `restrictions` mixes limits on pools and markets with rules for strategies.
   Before you name a pool or a market, take from it only the lines that say which
   ones the connector takes; ignore the rest of the entry.
@@ -63,6 +64,7 @@ With neither it is over 100 kilobytes; do not run it. In an entry:
 | `ax increase-liquidity` (`increase_liquidity`), `ax decrease-liquidity` (`decrease_liquidity`) | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
 | `ax revoke-exchange` (`revoke_exchange`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome`, `curve` |
 | `ax collect-liquidity-fees` (`collect_liquidity_fees`) | `uniswap_v3`, `uniswap_v4`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome` |
+| `ax bridge` (`bridge`), `ax revoke-bridge` (`revoke_bridge`) | `across` |
 
 Tell the user plainly when a request is outside what is served, and still finish
 the setup, so they see what you can do; such a request never creates the wallet.
@@ -70,14 +72,16 @@ Say which chains or protocols you can act on, and do not offer a strategy, a Saf
 or anything else as a way around it. You may read a balance or a position of an
 address other than your wallet only when the user gives you that address unasked.
 A public endpoint serves reads and direct actions on every supported chain except
-HyperEVM (`eip155:999`), which has none. The limits:
+HyperEVM (`eip155:999`), which has none. A bridge is the one action no public
+endpoint serves: it needs the provider key. The limits:
 
 - The wallet is a plain account (EOA) that holds the funds itself. A Safe with
   delegated permissions is not available for these actions. If the user asks for a
   Safe, say so and offer the EOA wallet.
-- GMX V2, Hyperliquid and Across serve no direct action, so no command bridges
-  between chains, and no direct action is served on
+- GMX V2 and Hyperliquid serve no direct action, and no direct action is served on
   HyperEVM: a provider key there serves reads only.
+- A bridge leaves only a chain whose `across` entry lists `bridge` under
+  `direct_actions`, and you bridge only to your own wallet's address.
 - `curve` takes only a pool that a reviewed StableSwap NG, TwoCrypto NG or
   TriCrypto NG factory registers, and no metapool. Every Curve command refuses an
   older pool, the 3pool for one, with `unsupported_pool`.
@@ -157,8 +161,8 @@ command:
   a public endpoint's operator can see the wallet address being read and each
   transaction you send.
 
-A public endpoint serves everything here, executing included, so never ask the
-user for a provider key. Nobody answers for what a public endpoint reports, and an
+A public endpoint serves everything here but a bridge, executing included, so
+never ask the user for a provider key. Nobody answers for what a public endpoint reports, and an
 action signs what its reads show, including which contract it approves or pays;
 say this once, before the first execution. If the user offers their own Alchemy
 API key, create `~/.almanak/agent/` with mode 0700 if it is missing, write
@@ -182,8 +186,9 @@ almanak wallet create --account wallet --output ~/.almanak/agent/wallet --genera
 ```
 
   The command prints the address and file paths, never the key. Before the user
-  funds the wallet, tell them that you cannot send funds back: no command here
-  transfers out of the wallet, so funds leave it only through its key. That key
+  funds the wallet, tell them that you cannot send funds back: you send nothing to
+  another address, and a bridge moves funds only to the wallet's own address on
+  another chain, so funds leave it only through its key. That key
   exists only on this machine, as the encrypted keystore `keystores.json` with
   its password in `keystore-password`, both in `~/.almanak/agent/wallet/`:
   whoever has both files controls the funds, and losing either loses them, so the
@@ -334,6 +339,7 @@ below:
 | `uniswap_v3`, `pancakeswap_v3`, `aerodrome_slipstream`, `aerodrome` | `--pool <pool>` |
 | `curve` | `--pool <pool>`; a swap adds `--buy <bought asset>`, since a Curve pool can hold more than two coins |
 | `uniswap_v4` | `--currency0 <currency0> --currency1 <currency1> --fee <pool fee> --tick-spacing <spacing>`, and `--hooks <hook>` for a reviewed hook |
+| `across` | `--asset <sent asset> --destination-chain <destination chain> --destination-asset <received asset>`: a route, where `--chain` is the chain the asset leaves |
 
 An asset is a CAIP-19 identity, `<chain>/erc20:<token address>`, never a symbol.
 Take every token, market and pool address from the user or from an `ax` read, never
@@ -408,8 +414,9 @@ preview a repayment: its refusal states the amount missing.
   in `settings.json` for the chain. If there are none, propose values to the user,
   for example 20 gwei and 0.01 ETH on Ethereum, record what they accept, and reuse
   them. Never raise a ceiling yourself.
-- **Health floor, slippage, tick range and payout.** These are the user's
-  decisions; the sections on borrowing, swaps and liquidity say what to ask. You
+- **Health floor, slippage, bridge fee ceiling, tick range and payout.** These are
+  the user's decisions; the sections on borrowing, swaps, bridges and liquidity say
+  what to ask. You
   may suggest a value and say why. Never choose one silently.
 
 ### 5. Preview
@@ -421,8 +428,8 @@ below:
 --wallet ~/.almanak/agent/wallet <transport> --max-gas-price-wei <wei> --max-transaction-fee <base units>
 ```
 
-Run the action without `--execute`. The liquidity commands are under "Liquidity";
-the others are:
+Run the action without `--execute`. The liquidity commands are under "Liquidity"
+and the bridge commands under "Bridges"; the others are:
 
 ```bash
 almanak ax supply --connector <connector> --chain <chain> <market> --amount <base units> <wallet and ceilings>
@@ -605,6 +612,57 @@ true, `completed` false and `refused.kind` `ownership`: nothing was sold, and
 the shares and any allowance, and say that the wallet's next swap in that pool is
 refused while it holds them. `ax close-liquidity` burns the shares, if the user
 decides so; then offer `ax revoke-exchange` for the allowance.
+
+## Bridges
+
+`ax bridge` sends exactly `--amount` of one asset from the wallet to the same
+wallet address on another chain, through Across. A bridge needs the provider key:
+in every command of this section `<transport>` is
+`--env-file ~/.almanak/agent/.env`, and a public endpoint is refused. When that
+file does not exist, say that a bridge needs an Alchemy API key, which the user may
+give as "2. Provider" describes, and stop.
+
+```bash
+almanak ax bridge --connector <connector> --chain <source chain> <market> --amount <base units> --max-fee-bps <bps> --recipient <address> <wallet and ceilings>
+almanak ax bridge-status --connector <connector> --chain <source chain> --destination-chain <destination chain> --reference <reference> <transport>
+almanak ax revoke-bridge --connector <connector> --chain <source chain> <market> <wallet and ceilings>
+```
+
+`--recipient` is required and has no default. State your own wallet's address,
+which the same key controls on every chain here. Never state another address, also
+when the user asks: tell them you send funds nowhere else. Both assets must be the
+same token on the two chains, with the same decimals; verify each with a read on
+its own chain, and add the received one to `assets` in `settings.json`.
+
+`--max-fee-bps` is required, 0 to 10000 (10 is 0.1%). Ask the user for the fee
+ceiling; you may suggest a value and say why. Tell them what it bounds: the amount
+received is Across's own quote, and a quote whose fee is above the ceiling is
+refused before anything is signed. That is a check made before signing, not
+protection on chain: the bridge contract checks no price.
+
+The preview's `quote` has the `output_amount`, the `fee`, the `fee_ceiling` and the
+`fill_deadline`, and `steps` lists what the action sends: an approval, then the
+deposit, after a revocation when another allowance stood. Tell the user the fee and
+the amount offered, in whole units, as an estimate: the deposit asks for a new
+quote and signs that one, under the same ceiling.
+
+The action ends when the deposit is mined on the source chain; it does not wait
+for the arrival. `position_after.transfers` then lists the transfer with its
+`reference`, what was `sent` and what was `offered`, and no received amount.
+Report the reference to the user at once and keep it: only `ax bridge-status`
+with that reference shows what became of the transfer, and nothing else records
+it. Read it after a minute, and report by its `status`:
+
+| `status` | Means |
+| --- | --- |
+| `arrived` | `arrival.received` is the amount measured in the fill transaction. Read the balance on the destination chain and report both. |
+| `in_flight` | Not filled yet. State no received amount, and read again later. |
+| `unfilled` | The fill deadline passed with no fill, so nothing arrives. Across pays the sent amount back to the wallet on the source chain, hours later. `refund.payments` lists refund payments the wallet received since, and none is tied to this transfer: report them as possible refunds, and read the source balance. |
+
+When a bridge ends with `completed` false after its approval was mined, the
+allowance stands; `ax revoke-bridge` clears it, and a bridge of the same amount
+uses it. A deposit listed under `released_expired` was never sent to the other
+chain: nothing is in flight, and the user decides whether to bridge again.
 
 ## Liquidity
 
@@ -830,8 +888,9 @@ report `refused` and stop; do not try anything else to free the wallet.
 - The wallet is the one you created under `~/.almanak/agent/wallet`. Never ask the
   user for an address or a key to manage, and never import one.
 - Never print, copy or move the keystore, its password or the provider key.
-- Never send funds anywhere. These commands cannot transfer out of the wallet, and
-  you must not look for another way to do it.
+- Never send funds anywhere. `ax bridge` is the only command that can pay another
+  address: state your own wallet's address as its `--recipient`, never any other,
+  and do not look for another way to send funds.
 - Amounts are exact integers in base units. Do not round, and do not guess
   decimals.
 - Say exactly what each bounds. The signed transaction carries, and the chain
