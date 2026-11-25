@@ -1023,9 +1023,10 @@ deposit
 carries its quote's timestamp, and the SpokePool reverts it once mined later than
 that timestamp plus its quote buffer. Past that deadline, with no receipt, no copy at
 the provider and the nonce unused, `ax recover` releases the deposit and lists it
-under `released_expired`: nothing was sent to the other chain, the approval before it
-stands until `ax revoke-bridge` or a later bridge of the same amount, and the bridge
-is stated again.
+under `released_expired`. The nonce is read again at the block that shows the deadline
+passed, so the two facts come from one block. The release still rests on the
+endpoint's report: the approval before it stands until `ax revoke-bridge` or a later
+bridge of the same amount, and the bridge is stated again only after the check above.
 
 The Across direct actions are declared on offline tests and read-only mainnet
 checks. No fork rehearsal of the direct command has run, so the signed approval and

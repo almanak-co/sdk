@@ -57,6 +57,24 @@ def gateway(config, attempt, head_time, **responses):  # noqa: F811
     return backend
 
 
+def test_a_release_holds_the_nonce_and_the_deadline_to_one_block(config):  # noqa: F811
+    """Nodes behind one endpoint can disagree: a lagging one shows the nonce unused at its
+    own head while another shows a head past the deadline. The nonce is read again at the
+    block that proves the deadline, and a use there keeps the deposit."""
+    _, attempt = signed(config)
+    late = gateway(config, attempt, attempt.operation.deadline + 1)
+    plain = late.reader._rpc
+
+    def disagreeing(method, params, **keywords):
+        pinned = method == "eth_getTransactionCount" and params[1] == hex(FORK_BLOCK.number)
+        return hex(attempt.nonce + 1) if pinned else plain(method, params, **keywords)
+
+    late.reader._rpc = disagreeing
+    with pytest.raises(DataError) as error:
+        late.require_releasable(attempt)
+    assert error.value.kind == "nonce_conflict" and "past the deadline" in str(error.value)
+
+
 def test_a_deposit_past_its_quote_deadline_is_released_on_its_source_chain(config):  # noqa: F811
     state, attempt = signed(config)
     deadline = attempt.operation.deadline

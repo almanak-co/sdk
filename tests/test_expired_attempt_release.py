@@ -54,6 +54,8 @@ def expirable(backend, pending, *, past=True, **responses):
     backend.validate_pending = lambda p: None
     backend.validate_current = lambda p: p.before
     backend.expired_at_head = lambda operation: past
+    # This connector states no deadline; the pinned re-check has its own test on Across.
+    backend.require_unused_past_deadline = lambda p: None
     backend.reader.responses = {
         **CLEAN,
         "eth_getTransactionCount": hex(pending.nonce),

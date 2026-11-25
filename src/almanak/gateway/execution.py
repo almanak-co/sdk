@@ -771,9 +771,40 @@ class EvmGateway:
         if self.submitted(pending):
             raise ValueError("a transaction the provider still holds cannot be released")
         self.require_nonce_unused(pending)
-        if not is_unsent(pending) and not self.expired_at_head(pending.operation):
+        if is_unsent(pending):
+            return
+        if not self.expired_at_head(pending.operation):
             raise ValueError(
                 "only a transaction never sent or past its protocol deadline can be released"
+            )
+        self.require_unused_past_deadline(pending)
+
+    def require_unused_past_deadline(self, pending):
+        """Hold the deadline and the nonce to one pinned block.
+
+        The reads above are separate calls, and nodes behind one endpoint can disagree: one
+        that lags shows no receipt and an unused nonce, another shows a head past the
+        deadline. A block past the deadline whose own state still has the nonce unused shows
+        that the transaction was not mined up to that block, and after it the protocol
+        reverts it. A node that does not hold that block refuses the read.
+        """
+        expired = self.connector.execution.expired
+        submitter = self.config.accounts.binding(pending.operation.account).profile.submitter
+        with self.reader.retained_pin():
+            block = self.reader.pin_block("latest")
+            count = int(
+                self.reader._rpc("eth_getTransactionCount", [submitter.address, hex(block.number)]),
+                16,
+            )
+        if not expired(pending.operation, block):
+            raise ValueError(
+                "only a transaction never sent or past its protocol deadline can be released"
+            )
+        if count != pending.nonce:
+            raise DataError(
+                "nonce_conflict",
+                "the recorded nonce is used at the block past the deadline; reconcile before"
+                " continuing",
             )
 
     def superseded(self, pending):

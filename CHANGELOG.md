@@ -29,6 +29,11 @@ its changelog is on the `v2` branch.
   query when measured, so an arrival on BNB Chain cannot be measured without a
   provider key, and Base needs `drpc` for a status read.
 
+### Fixed
+- The release of an expired signed step reads the nonce again at the pinned block
+  that shows the deadline passed, so nodes of one endpoint that disagree cannot
+  release a step that was mined.
+
 ## [3.4.0] - 2026-11-25
 
 ### Added

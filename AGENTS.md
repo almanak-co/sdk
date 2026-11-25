@@ -197,7 +197,8 @@ independently.
   signed work: a recorded attempt past its connector-declared, calldata-enforced
   deadline, with no canonical receipt, no provider copy and an unused submitter
   nonce, is released and planned afresh at that nonce after the gateway
-  re-proves all four facts. An attempt the gateway durably retains as never sent
+  re-proves all four facts. The deadline and the unused nonce are read at one
+  pinned block. An attempt the gateway durably retains as never sent
   is released on a current-state refusal. A maybe-sent attempt with no calldata
   deadline that current validation refuses stops with
   `signed_attempt_unsendable`.
@@ -1274,11 +1275,13 @@ independently.
   false report from the source endpoint can release a deposit that was mined,
   under the expiry rule or the consumed-nonce proof of "Execution and
   recovery", and a bridge stated again would then send twice. No connector
-  refuses a public endpoint for its records any more. No false report is
-  needed for that release: the expiry rule combines separate reads, the
-  receipt, the provider's copy, the nonce and the head, and a load-balanced
-  public endpoint whose nodes disagree can answer them from different states
-  and so release a deposit that one of its nodes holds as mined. Recovery
+  refuses a public endpoint for its records any more. Nodes behind one
+  load-balanced endpoint can disagree, so the expiry release reads the nonce
+  again at the pinned block that shows the deadline passed: an unused nonce in
+  that block's own state shows the deposit was not mined up to it, and a node
+  that does not hold the block refuses the read. The receipt and the
+  provider's copy stay separate reads. This holds for every connector and
+  every endpoint, and is a gateway check, not on-chain enforcement. Recovery
   through the record's own endpoint, with no flag, is held to the chain number
   and genesis only, not to a recent head, as for every direct action.
 - Proposed, not accepted: `ax bridge-status` pages its log scans by what the

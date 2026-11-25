@@ -714,8 +714,9 @@ only once the read without `--block` says `arrived`. Report by its `status`:
 
 When a bridge ends with `completed` false after its approval was mined, the
 allowance stands; `ax revoke-bridge` clears it, and a bridge of the same amount
-uses it. A deposit listed under `released_expired` was never sent to the other
-chain: nothing is in flight, and the user decides whether to bridge again. A kept
+uses it. A deposit listed under `released_expired` is one the endpoint used reports
+as past its deadline and not mined. That report does not show that nothing is in
+flight: follow the check below before the user decides whether to bridge again. A kept
 record of a bridge is resolved by `ax recover` as any other record is, under
 "A blocked wallet", through an endpoint of the source chain only: a recovery names
 no destination endpoint. A release rests on the report of the endpoint used. Before
