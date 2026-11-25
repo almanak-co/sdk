@@ -704,6 +704,8 @@ def test_the_service_commits_the_answer_a_post_recorded_under_its_lock(world):
     service.route_chain = None
     service.backend = world.gateway
     service.connector = connector_for(world.config)
+    # `__init__` always sets the lease; the send refuses checks older than it.
+    service.lease_seconds = 30
     writes = Writes(state.model_dump_json())
     assert service.submit_prepared(writes, state, state) is True
     recorded = writes.after.pending
