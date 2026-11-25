@@ -245,7 +245,8 @@ def destination_reader(chain, far: Far):
     from almanak.gateway import read_endpoints
 
     if far.public_rpc is not None:
-        return read_endpoints.public_reader(chain, far.public_rpc)
+        with proof_cause(far.public_rpc, chain):
+            return read_endpoints.public_reader(chain, far.public_rpc)
     if far.env_file is None:
         raise ValueError(DESTINATION_REQUIRED)
     reader = read_endpoints.verified_reader(chain, far.env_file)
@@ -330,7 +331,8 @@ def deployment(far: Far, request, action, wallet, provider, endpoint, limits):
     stated = None if action.recipient is None else action.recipient.lower()
     with EthereumReader(chain, endpoint) as reader:
         if isinstance(provider, PublicProvider):
-            prove_public(reader)
+            with proof_cause(provider.name, chain.chain_id):
+                prove_public(reader)
         block = reader.pin_block("latest")
         resolved = resolution(connector).resolve_market(reader, request, block)
         on_source = stated is not None and contract_code(reader, stated, block)
@@ -364,8 +366,13 @@ def account(word: bytes) -> str:
 
 def log_span(public_rpc: str | None) -> int:
     """Blocks one page of a status scan spans: a settlement page, or the fewer a named
-    public endpoint serves in one log query. A status read commits no page, so a
-    smaller one changes what a command costs and nothing it reports."""
+    public endpoint serves in one log query.
+
+    A status read commits no page, so the span changes no fact a completed scan
+    reports. It changes what a command costs, and how far a refund scan reaches in one
+    command: that scan is capped in pages (`MAXIMUM_REFUND_PAGES`), one request each,
+    so through a narrower endpoint it stops earlier with `complete` false and is
+    continued from `scanned.to` + 1."""
     from almanak.connectors.across.settlement_reader import MAXIMUM_EVENT_BLOCK_SPAN
     from almanak.gateway.providers import PUBLIC_LOG_SPAN
 
@@ -682,14 +689,41 @@ def named_deposit(reader, pool: str, destination: int, args, span=None):
     return reference, read_deposit(reader, pool, destination, reference, head, span)
 
 
-def far_reader(args, chain):
-    """The destination chain's reader of a status read: the command's one transport,
-    or the second public endpoint the caller named, proven like the first."""
+def status_reader(args, chain, public_rpc: str | None):
+    """One chain's reader of a status read: the command's one transport, or the public
+    endpoint the caller named for that chain, which gives the public proof first."""
     from almanak import ax
 
     if args.public_rpc is None:
         return ax.observation_reader(args, chain)
-    return ax.public_reader(chain, args.destination_public_rpc)
+    with proof_cause(public_rpc, chain):
+        return ax.public_reader(chain, public_rpc)
+
+
+def named(error: DataError, note: str):
+    """The same refusal with a note after its own words. Its class, kind, code and
+    whatever else it carries, such as a throttle's requested wait, are unchanged."""
+    error.args = (f"{error}; {note}",)
+    return error
+
+
+PROOF_FAILED = (
+    "the public endpoint {name} on {chain} did not give the proof every public endpoint"
+    " must: its chain number, the pinned genesis block and a recent head. Nothing was"
+    " read through it"
+)
+
+
+@contextmanager
+def proof_cause(name: str | None, chain):
+    """Name the public endpoint and its chain when its proof fails. A bridge command
+    proves two endpoints, and a bare `stale` or `chain_mismatch` says neither which."""
+    try:
+        yield
+    except DataError as error:
+        if name is None:
+            raise
+        raise named(error, PROOF_FAILED.format(name=name, chain=chain)) from None
 
 
 PUBLIC_LIMIT = (
@@ -716,26 +750,25 @@ def public_cause(name: str | None, chain):
         # A contract's own revert is an answer, not a limit of the endpoint.
         if name is None or error.reverted or error.kind not in PROVIDER_REFUSALS:
             raise
-        limit = PUBLIC_LIMIT.format(name=name, chain=chain)
-        raise DataError(
-            error.kind, f"{error}; {limit}", code=error.code, transient=error.transient
-        ) from None
+        raise named(error, PUBLIC_LIMIT.format(name=name, chain=chain)) from None
 
 
 def status(args) -> dict:
-    from almanak.ax import observation_reader
     from almanak.caip import ChainId
     from almanak.connectors.across.domain import spoke_pool
     from almanak.gateway.evm import chain_number
 
     source, destination = ChainId(args.chain), ChainId(args.destination_chain)
     pools = (spoke_pool(source).address, spoke_pool(destination).address)
-    with observation_reader(args, source) as near, far_reader(args, destination) as far:
-        with public_cause(args.public_rpc, source):
+    names = (args.public_rpc, args.destination_public_rpc)
+    with (
+        status_reader(args, source, names[0]) as near,
+        status_reader(args, destination, names[1]) as far,
+    ):
+        with public_cause(names[0], source):
             reference, deposit = named_deposit(
-                near, pools[0], chain_number(destination), args, log_span(args.public_rpc)
+                near, pools[0], chain_number(destination), args, log_span(names[0])
             )
-        names = (args.public_rpc, args.destination_public_rpc)
         result = outcome(
             near, far, pools, deposit, reference, args.block, args.refund_from_block, names
         )

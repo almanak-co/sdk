@@ -1152,9 +1152,11 @@ independently.
   needs no key, and no RPC endpoint stands in for it.
 - Accepted on 25 November 2026, in the maintainer's words "I want it to work
   without a key yes, both quote and execution": the direct bridge commands take
-  named public endpoints. This replaces the earlier refusal of `--public-rpc`
-  by `ax bridge`, `ax revoke-bridge` and `ax bridge-status`. A bridge reads two
-  chains, so the caller names two endpoints: `--public-rpc` for the chain the
+  named public endpoints. The maintainer asked for the keyless quote and
+  execution of `ax bridge`. `ax bridge-status` and `ax revoke-bridge` are
+  included as the read and the cleanup an execution needs, a transfer's outcome
+  and a standing approval, and were not named. A bridge reads two chains, so
+  the caller names two endpoints: `--public-rpc` for the chain the
   asset leaves and `--destination-public-rpc` for the chain it arrives on,
   required with it for `ax bridge` and `ax bridge-status`. `ax revoke-bridge`
   reads the source chain only and takes the first alone. Neither is a default
@@ -1272,12 +1274,23 @@ independently.
   false report from the source endpoint can release a deposit that was mined,
   under the expiry rule or the consumed-nonce proof of "Execution and
   recovery", and a bridge stated again would then send twice. No connector
-  refuses a public endpoint for its records any more.
+  refuses a public endpoint for its records any more. No false report is
+  needed for that release: the expiry rule combines separate reads, the
+  receipt, the provider's copy, the nonce and the head, and a load-balanced
+  public endpoint whose nodes disagree can answer them from different states
+  and so release a deposit that one of its nodes holds as mined. Recovery
+  through the record's own endpoint, with no flag, is held to the chain number
+  and genesis only, not to a recent head, as for every direct action.
 - Proposed, not accepted: `ax bridge-status` pages its log scans by what the
   named public endpoint serves in one query. The span is stated in code beside
   the reviewed list (`PUBLIC_LOG_SPAN`): 100 blocks through `drpc`, and a
   settlement page of 2,000 through an endpoint with no entry. The command keeps
-  no page, so a smaller one changes what a read costs and nothing it reports.
+  no page, so the span changes no fact a completed scan reports. It changes
+  what a read costs, and how far a refund scan reaches in one command: that
+  scan is capped at 200 pages, one request each, so it covers 400,000 blocks
+  with whole pages and 20,000 through `drpc`, then stops with `complete` false
+  and is continued with `--refund-from-block` at `scanned.to` plus one. A block
+  budget instead of the page cap would make one `drpc` command 4,000 requests.
   Strategy scans never use it: they refuse a public endpoint. A read a public
   endpoint refuses or leaves unanswered ends the command with the endpoint's
   own refusal, its kind unchanged, and the endpoint and chain named; nothing is

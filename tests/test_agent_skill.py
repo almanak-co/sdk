@@ -1763,3 +1763,14 @@ def test_a_keyless_bridge_names_an_endpoint_for_each_chain_and_its_status_one_th
             assert ChainId(chain) in PUBLIC_RPC[name], (chain, name)
     for name, span in PUBLIC_LOG_SPAN.items():
         assert f"Through `{name}` the command reads its logs {span} blocks at a time" in stated
+
+
+def test_a_released_deposit_is_checked_through_another_endpoint_before_bridging_again():
+    stated = " ".join(section("Bridges").split())
+    for statement in (
+        "through another endpoint of the source chain than the one that reported the release",
+        "do not bridge again",
+        "Name the transfer with `--deposit-tx` whenever you have the deposit's transaction hash",
+        "continue with `--refund-from-block` set to that block plus one",
+    ):
+        assert statement in stated, statement

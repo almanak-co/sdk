@@ -655,10 +655,14 @@ For that command only, name the endpoint this table gives the chain:
 | Robinhood (`eip155:4663`) | `drpc` |
 | BNB (`eip155:56`) | none serves event logs; `blastapi` for the rest |
 
-Through `drpc` the command reads its logs 100 blocks at a time and can take a few
-minutes: give it the time limit of an execution. Name the transfer with
-`--deposit-tx` when you have the deposit's transaction hash, which needs no log
-read on the source chain. A read refused with a message that names `the public
+Through `drpc` the command reads its logs 100 blocks at a time. Name the transfer
+with `--deposit-tx` whenever you have the deposit's transaction hash: it needs no
+log read on the source chain, where finding a deposit by `--reference` can take up
+to 180 requests on Base and 343 on Robinhood. With `--deposit-tx` a read took about
+a minute; give it the time limit of an execution. An `unfilled` result whose
+`refund.complete` is false stopped its scan at the block `refund.scanned.to`:
+nothing later was read, so say that the list of payments ends there, and continue
+with `--refund-from-block` set to that block plus one. A read refused with a message that names `the public
 endpoint <name> on <chain>` was refused by that endpoint: nothing was read, the
 transfer is unchanged, and you state no status. Try the chain's other name in the
 table once; when there is none, say that the status of this transfer cannot be read
@@ -716,7 +720,9 @@ record of a bridge is resolved by `ax recover` as any other record is, under
 "A blocked wallet", through an endpoint of the source chain only: a recovery names
 no destination endpoint. A release rests on the report of the endpoint used. Before
 the user decides to bridge again after one, read `ax bridge-status` with
-`--deposit-tx` and the released step's `transaction`: when it finds a deposit, the
+`--deposit-tx` and the released step's `transaction`, through another endpoint of
+the source chain than the one that reported the release where the table above
+names one, and say so when it names none: when the read finds a deposit, the
 deposit was mined after all, so report that status and do not bridge again.
 
 A bridge refused with `recipient_not_deployed` named an address that is a contract

@@ -985,8 +985,9 @@ transferred them, and `equals_sent` where both hold the amount sent. A refund
 names the wallet and the token, never a deposit, and one payment can cover several
 deposits, so the command attributes none of them to the transfer: a payment equal to
 the sent amount is consistent with its refund and may be another deposit's. The scan
-reads at most 200 pages of 2,000 blocks; `refund.complete` says whether it reached
-the block read, and `--refund-from-block` continues it. `deferred_in_spoke_pool` is
+reads at most 200 pages, of 2,000 blocks unless a public endpoint serves fewer;
+`refund.complete` says whether it reached the block read, and `--refund-from-block`
+continues it from `refund.scanned.to` plus one. `deferred_in_spoke_pool` is
 what the SpokePool holds for the wallet because a refund transfer to it failed;
 claiming it is not built.
 
@@ -1064,18 +1065,31 @@ which every listed pair served:
 | `blastapi` | `eip155:56` | Refused at every span tried, down to one block, with `HTTP 429`. |
 
 So the command pages by what the named endpoint serves: 2,000 blocks, or 100
-through `drpc`, a span stated in code beside the endpoint list. A smaller page
-changes what a read costs and nothing it reports, since the command keeps no page.
-Through `drpc` a status read sends twenty times the log queries: an arrival on Base
-a day old was read through `arbitrum` and `drpc` in 68 seconds, and a refund scan
-covers 200 pages of 100 blocks per command, about an hour of Base, so
-`--refund-from-block` continues it many times. An endpoint with no entry is asked
-for whole pages.
+through `drpc`, a span stated in code beside the endpoint list. An endpoint with
+no entry is asked for whole pages. The command keeps no page, so the span changes
+no fact a completed scan reports. It changes what a read costs and how far a refund
+scan reaches in one command. Through `drpc` a status read sends twenty times the
+log queries: an arrival on Base a day old was read through `arbitrum` and `drpc` in
+68 seconds. The refund scan is capped at 200 pages, one request each, whatever the
+span: 400,000 blocks with whole pages and 20,000 through `drpc`, about an hour of
+Base. A scan that stops at the cap reports `refund.complete` false, and
+`refund.scanned.to` is the last block it read: nothing after that block was read,
+so the payments listed are those up to it and no more. Run the command again with
+`--refund-from-block` set to `scanned.to` plus one, as often as it takes to reach
+`complete` true.
+
+Finding a deposit by `--reference` scans the source SpokePool's logs from the
+quote's timestamp for at most the quote buffer, an hour: through `drpc` that is up
+to 180 queries on Base and 343 on Robinhood Chain, fewer when the deposit is found
+early. `--deposit-tx` reads the deposit's receipt instead and sends none of them,
+so prefer it through `drpc`.
 
 An endpoint that refuses a read, or leaves it unanswered, ends the command with the
 endpoint's own refusal followed by `read through the public endpoint <name> on
 <chain>`: the kind is unchanged, nothing is reported from the part that was read,
-and nothing falls back. That is what `base` and `blastapi` answer whenever the read
+and nothing falls back. An endpoint that fails its proof is named the same way,
+by every bridge command: `stale` or `chain_mismatch`, followed by `the public
+endpoint <name> on <chain> did not give the proof every public endpoint must`. That is what `base` and `blastapi` answer whenever the read
 needs logs there, so through public endpoints:
 
 - Base as either chain of the route needs `drpc` for the status read.

@@ -37,7 +37,7 @@ from almanak.connectors.across.state import Checkpoint, DecisionRecord, Outcome,
 from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
 from almanak.gateway import read_endpoints
 from almanak.gateway.accounts import prepare_call
-from almanak.gateway.ethereum import DataError
+from almanak.gateway.ethereum import DataError, ProviderBusy
 from almanak.gateway.execution import EvmGateway, VenueAnswers
 from almanak.gateway.providers import PUBLIC_RPC, PublicProvider
 from almanak.gateway.service import GatewayService
@@ -939,6 +939,8 @@ def test_a_stale_or_wrong_genesis_destination_endpoint_refuses_before_the_route_
     with pytest.raises(DataError) as error:
         resolving(monkeypatch, keyless=proofs)()
     assert error.value.kind == kind
+    # Two endpoints are proven, so the refusal says which one failed, and on which chain.
+    assert "the public endpoint base on eip155:8453 did not give the proof" in str(error.value)
     # Nothing was completed, so no deployment exists and nothing can be planned.
     assert "complete" not in proofs and proofs[-1] == ("public", "eip155:8453")
 
@@ -1521,7 +1523,7 @@ class Refusing(Ledger):
 
     def _rpc(self, method, params, *, allow_none=False):
         if method == "eth_getLogs":
-            raise DataError("http", "eth_getLogs: HTTP 429", code=429, transient=True)
+            raise ProviderBusy("eth_getLogs", 7.0)
         return super()._rpc(method, params, allow_none=allow_none)
 
 
@@ -1533,7 +1535,9 @@ def test_a_public_endpoint_that_refuses_a_status_read_is_named_with_its_chain(mo
     with pytest.raises(DataError) as error:
         status(monkeypatch, source(), far, **KEYLESS, **by_hash)
     message = str(error.value)
-    assert (error.value.kind, error.value.code, error.value.transient) == ("http", 429, True)
+    # The refusal is the endpoint's own: its class and its requested wait are kept.
+    assert isinstance(error.value, ProviderBusy) and error.value.retry_after == 7.0
+    assert (error.value.kind, error.value.code) == ("http", 429)
     assert message.startswith("eth_getLogs: HTTP 429; ")
     assert "the public endpoint base on eip155:8453" in message and "--env-file" in message
     # The deposit's lookup and the refund scan read the source chain's endpoint.
@@ -1579,3 +1583,65 @@ def test_a_status_scan_pages_by_what_the_named_endpoint_serves_in_one_log_query(
     narrow, wide = refund_queries("drpc"), refund_queries("arbitrum")
     assert len(wide) == 1 and sum(narrow) == wide[0]
     assert max(narrow) == 100 and len(narrow) > 1
+
+
+def widths(ledger) -> list[int]:
+    return [int(q["toBlock"], 16) - int(q["fromBlock"], 16) + 1 for q in ledger.queries]
+
+
+@pytest.mark.parametrize(
+    ("names", "narrow"),
+    [(("drpc", "base"), "source"), (("arbitrum", "drpc"), "destination")],
+)
+def test_each_chain_of_a_status_by_reference_pages_by_its_own_endpoint(monkeypatch, names, narrow):
+    """The deposit lookup pages by the source endpoint's span and the arrival scan by
+    the destination's: neither ignores its span, and neither takes the other's."""
+    near, far = source(), destination(2, head_after=5_000)
+    options = {**KEYLESS, "public_rpc": names[0], "destination_public_rpc": names[1]}
+    assert status(monkeypatch, near, far, **options)["status"] == "arrived"
+    scans = {"source": widths(near), "destination": widths(far)}
+    wide = "destination" if narrow == "source" else "source"
+    assert scans[narrow] and max(scans[narrow]) == 100
+    # Each range is wider than one narrow page, so a whole page shows on the other chain.
+    assert scans[wide] and scans[wide][0] > 100
+
+
+def test_a_public_endpoint_that_fails_its_proof_is_named_with_its_chain(monkeypatch):
+    from almanak import ax
+
+    def stale(reader):
+        raise DataError("stale", "public endpoint head is 500 seconds old")
+
+    # The source endpoint of an action.
+    monkeypatch.setattr(ax_actions, "prove_public", stale)
+    monkeypatch.setattr(
+        "almanak.gateway.ethereum.EthereumReader", lambda chain, endpoint: Resolving(chain, BLOCK)
+    )
+    wallet = {"account": WALLET.account, "address": WALLET.address}
+    provider = PublicProvider(kind="public_rpc", name="arbitrum")
+    with pytest.raises(DataError) as error:
+        ax_bridge.deployment(
+            ax_bridge.Far(public_rpc="base"), SELECTION, BRIDGE, wallet, provider, "e", LIMITS
+        )
+    assert error.value.kind == "stale"
+    assert str(error.value).startswith("public endpoint head is 500 seconds old; ")
+    assert "the public endpoint arbitrum on eip155:42161 did not give the proof" in str(error.value)
+
+    # Either endpoint of a status read.
+    def public_reader(chain, name):
+        if name == "base":
+            raise DataError("chain_mismatch", "public endpoint has a different genesis")
+        return source()
+
+    monkeypatch.setattr(ax, "public_reader", public_reader)
+    args = SimpleNamespace(chain="eip155:42161", destination_chain="eip155:8453", **KEYLESS)
+    with pytest.raises(DataError) as error:
+        ax_bridge.status(args)
+    assert error.value.kind == "chain_mismatch"
+    assert "the public endpoint base on eip155:8453 did not give the proof" in str(error.value)
+    # A provider key's reader is not a public endpoint and is named as none.
+    monkeypatch.setattr(ax, "observation_reader", lambda args, chain: stale(None))
+    keyed = SimpleNamespace(**{**vars(args), "public_rpc": None, "destination_public_rpc": None})
+    with pytest.raises(DataError) as error:
+        ax_bridge.status(keyed)
+    assert str(error.value) == "public endpoint head is 500 seconds old"

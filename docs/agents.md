@@ -196,7 +196,9 @@ the agent says so once and stops when the user objects.
   moves funds only to the wallet's own address on another chain, so funds leave
   the wallet only through its key, which the user should keep a copy of.
 - A bridge without a provider key reads through two public endpoints, one for
-  each chain, and each sees what the agent reads and sends there. Reading what
+  each chain. Each sees what the agent reads on its chain, and the source
+  chain's endpoint sees each transaction; nothing is sent on the destination
+  chain. Reading what
   became of a transfer needs event logs, which no public endpoint serves on BNB
   Chain; there the agent says that the status cannot be read without a key.
 - An action has no amount ceiling. The fee ceilings and the wallet balance bound
