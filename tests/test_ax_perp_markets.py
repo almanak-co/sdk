@@ -364,3 +364,21 @@ def test_perp_markets_passes_request_and_block_through(monkeypatch, tmp_path):
     assert seen["pinned"] == BLOCK
     assert seen["request"].chain == ChainId("eip155:42161")
     assert seen["request"].query == "BTC/USD"
+
+
+def test_an_alias_names_its_own_chains_symbol_and_no_other_chains():
+    """Each chain's table is its own: Arbitrum's wrapped symbol is no alias on Avalanche,
+    and a label still names a token whose on-chain symbol it is."""
+    arbitrum, avalanche = ChainId("eip155:42161"), ChainId("eip155:43114")
+    assert market_request.names_token(arbitrum, "BTC", "WBTC")
+    assert market_request.names_token(avalanche, "btc", "BTC.b")
+    assert not market_request.names_token(avalanche, "BTC", "WBTC")
+    assert not market_request.names_token(arbitrum, "BTC", "BTC.b")
+    assert not market_request.names_token(arbitrum, "AVAX", "WAVAX")
+    # The literal symbol is named with or without an alias, on a chain with no table too.
+    assert market_request.names_token(avalanche, "BTC", "BTC")
+    assert market_request.names_token(ChainId("eip155:1"), "LINK", "link")
+    assert not market_request.names_token(ChainId("eip155:1"), "BTC", "WBTC")
+    assert market_request.venue_label(avalanche, "wavax") == "AVAX"
+    assert market_request.venue_label(arbitrum, "WAVAX") is None
+    assert market_request.venue_label(avalanche, "WBTC") is None

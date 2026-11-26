@@ -76,11 +76,12 @@ its changelog is on the `v2` branch.
   `[LONG-SHORT]` collateral notation takes the same labels beside the on-chain symbols,
   for example `AVAX/USD [AVAX-USDC]`. Aliases are per chain, and a label that matches
   several markets is still refused with its candidates.
-- A direct `ax` action re-sends a transient read failure while it resolves its market
-  and reads the wallet's position, within the bounds execution reads have. A
-  load-balanced endpoint that had not yet served the head (`provider has not served the
-  block`) ended the action before planning. Nothing was signed, and no submission is
-  ever re-sent.
+- A direct `ax` action other than a bridge re-sends a transient read failure while it
+  resolves its market and reads the wallet's position, each read within the budget an
+  execution read has. A load-balanced endpoint that had not yet served the head
+  (`provider has not served the block`) ended the action before planning. Nothing was
+  signed, and no submission is ever re-sent. `ax bridge` and `ax revoke-bridge` resolve
+  their route without this budget.
 
 ## [3.4.1] - 2026-11-25
 
