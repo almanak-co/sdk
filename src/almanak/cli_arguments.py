@@ -139,10 +139,11 @@ BLOCK_FORMS = (
     "block to pin: a decimal block number, 'finalized' or 'latest'; the output"
     " names the resolved number and hash"
 )
-# Each default is stated beside its own parser default below; the two differ.
+# Each default is stated beside its own parser default below.
 AX_BLOCK_HELP = (
-    f"{BLOCK_FORMS}; default 'finalized', which can trail the head by minutes on a"
-    " rollup, so a position just opened is read with --block latest"
+    f"{BLOCK_FORMS}; default 'latest', the head, which can still be reorganized;"
+    " 'finalized' can trail the head by minutes on a rollup and does not show what"
+    " changed since"
 )
 MARKETS_BLOCK_HELP = f"{BLOCK_FORMS}; default 'latest'"
 
@@ -505,7 +506,7 @@ def advanced(products):
 
 
 def block_option(command):
-    command.add_argument("--block", type=block, default="finalized", help=AX_BLOCK_HELP)
+    command.add_argument("--block", type=block, default="latest", help=AX_BLOCK_HELP)
 
 
 def discovery(commands):

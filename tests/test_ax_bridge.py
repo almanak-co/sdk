@@ -32,7 +32,7 @@ from almanak.connectors.across.observations import PoolState, Snapshot
 from almanak.connectors.across.operations import DEPOSIT_TYPES, DepositOperation, plan_call
 from almanak.connectors.across.receipts import opened_transfer
 from almanak.connectors.across.relay import deposited_relay
-from almanak.connectors.across.resolution import MarketSelection, ResolvedRoute
+from almanak.connectors.across.resolution import DirectSelection, ResolvedRoute
 from almanak.connectors.across.state import Checkpoint, DecisionRecord, Outcome, Pending
 from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
 from almanak.gateway import read_endpoints
@@ -87,7 +87,7 @@ BASE_POOL = PoolState(
     deposits_paused=False,
 )
 BASE_BLOCK = Block(chain=BASE, number=30_000_000, hash="0x" + "bc" * 32, timestamp=NOW)
-SELECTION = MarketSelection(
+SELECTION = DirectSelection(
     connector="across",
     chain=ARBITRUM.chain_id,
     asset=USDC,
@@ -348,8 +348,8 @@ def test_the_preview_states_the_admitted_venue_quote_under_the_ceiling():
     config, asked = operator_config(), Venue()
     gateway = backend(asked)
     result = across_direct.details(gateway, planned(config))
+    assert across_direct.steps(planned(config)) == ["approve", "deposit"]
     assert result == {
-        "steps": ["approve", "deposit"],
         "recipient": RECIPIENT,
         "recipient_is_sender": False,
         "quote": {
@@ -467,7 +467,34 @@ def test_a_revocation_asks_no_quote():
     config = operator_config(REVOKE)
     asked = Venue()
     stated = across_direct.details(backend(asked), planned(config, REVOKE, allowance=7))
-    assert stated == {"steps": ["revoke"]} and asked.asked == 0
+    assert stated == {} and asked.asked == 0
+    assert across_direct.steps(planned(config, REVOKE, allowance=7)) == ["revoke"]
+
+
+def test_a_bridge_preview_lists_its_steps_and_quotes_gas_for_the_first_only():
+    config = operator_config()
+
+    class Kept:
+        def load(self):
+            return planned(config)
+
+    stated = ax_actions.stated_steps(across_direct.DIRECT, Kept(), "approve")
+    assert stated["steps"] == ["approve", "deposit"]
+    assert stated["steps_note"] == (
+        "This request plans 2 transactions, in order: approve, then deposit. "
+        "That is what it sends when nothing is refused and nothing changes in between: "
+        "each later step is planned again once the earlier one is mined, and a later step "
+        "that is refused leaves the earlier ones done. " + ax_actions.FIRST_GAS_ONLY
+    )
+    # A revocation alone is one transaction and promises no more.
+    kept = SimpleNamespace(load=lambda: planned(operator_config(REVOKE), REVOKE, allowance=7))
+    alone = ax_actions.stated_steps(across_direct.DIRECT, kept, "revoke")
+    assert alone == {
+        "steps": ["revoke"],
+        "steps_note": "This request plans one transaction: revoke. "
+        "Its gas is quoted in `first_step`.",
+    }
+    assert "cannot be simulated before the earlier one is mined" in ax_actions.FIRST_GAS_ONLY
 
 
 def deposit(config):
@@ -1125,7 +1152,7 @@ def status(monkeypatch, near, far, **options):
         "destination_chain": "eip155:8453",
         "reference": REFERENCE,
         "deposit_tx": None,
-        "block": "finalized",
+        "block": "latest",
         "refund_from_block": None,
         "env_file": Path(".env"),
         "public_rpc": None,
@@ -1154,7 +1181,7 @@ def test_the_status_of_an_arrived_transfer_is_its_measured_fill(monkeypatch):
         "received": "1562446253",
         "fill_type": "fast",
     }
-    assert result["read_at"] == {"block": "finalized", "destination_block": far.head}
+    assert result["read_at"] == {"block": "latest", "destination_block": far.head}
     assert result["reference"] == REFERENCE and "refund" not in result
     # Every log query stays inside the bounded page span.
     for query in (*near.queries, *far.queries):
@@ -1168,7 +1195,11 @@ def test_an_unfilled_transfer_before_its_deadline_is_in_flight_and_states_no_amo
     assert result["status"] == "in_flight"
     assert "arrival" not in result and "refund" not in result
     assert "received" not in json.dumps(result)
-    assert "destination chain's finalized block" in result["note"]
+    # Only a read behind the head says that a later block may hold the fill.
+    assert result["note"] == "No fill is in the destination chain's latest block or before it."
+    final = status(monkeypatch, source(), destination(0, receipts=[]), block="finalized")
+    assert "destination chain's finalized block" in final["note"]
+    assert "a finalized block trails the head by minutes" in final["note"]
 
 
 def test_the_deposit_is_found_at_the_latest_block_and_the_outcome_at_the_named_one(
@@ -1179,13 +1210,13 @@ def test_the_deposit_is_found_at_the_latest_block_and_the_outcome_at_the_named_o
     block the command names."""
     # Neither chain has finalized the deposit's or the fill's block yet.
     near, far = source(finalized_after=-50), destination(0, finalized_after=-5)
-    waiting = status(monkeypatch, near, far)
+    waiting = status(monkeypatch, near, far, block="finalized")
     assert waiting["status"] == "in_flight"
     assert waiting["deposit"]["transaction"] == DEPOSIT["receipt"]["transactionHash"]
     assert waiting["read_at"] == {"block": "finalized", "destination_block": far.finalized}
     assert "latest" in near.pinned and "finalized" not in near.pinned
     assert "finalized" in far.pinned and "latest" not in far.pinned
-    seen = status(monkeypatch, source(finalized_after=-50), destination(2), block="latest")
+    seen = status(monkeypatch, source(finalized_after=-50), destination(2))
     assert seen["status"] == "arrived" and seen["read_at"]["block"] == "latest"
 
 
@@ -1434,7 +1465,7 @@ def test_the_status_command_takes_a_read_transport_or_two_public_endpoints(monke
     args = parse_validated(build_parser(), [*argv, "--env-file", ".env"])
     assert (args.product, args.block, args.refund_from_block) == (
         "ax-bridge-status",
-        "finalized",
+        "latest",
         None,
     )
     # A tag only: one block number names no block of two chains.
@@ -1459,7 +1490,7 @@ def test_the_status_command_takes_a_read_transport_or_two_public_endpoints(monke
     # A public endpoint serves one chain, so the caller names one for each.
     keyless = parse_validated(build_parser(), [*argv, *keyless_flags()])
     assert (keyless.public_rpc, keyless.destination_public_rpc) == ("arbitrum", "base")
-    assert (keyless.env_file, keyless.gateway_url, keyless.block) == (None, None, "finalized")
+    assert (keyless.env_file, keyless.gateway_url, keyless.block) == (None, None, "latest")
     capsys.readouterr()
     for flags, cause in (
         (("--public-rpc", "arbitrum"), ax_bridge.DESTINATION_REQUIRED),

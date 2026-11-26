@@ -43,6 +43,7 @@ from almanak.gateway.ethereum import DataError
 from almanak.gateway.resolution_evm import RetainedResolutionReader
 from almanak.models import ZERO_ADDRESS, AssetAmount
 from tests.aerodrome_support import CAPTURE
+from tests.read_at_support import read_at
 from tests.test_aerodrome_reconciliation import inputs
 from tests.test_ax_liquidity import LiquidityDesk
 from tests.test_ax_swap_aerodrome import (
@@ -1432,7 +1433,7 @@ def test_the_position_read_names_an_account_and_takes_no_token_id(variant, capsy
     for name in ("ALMANAK_AX_GATEWAY_URL", "ALMANAK_AX_GATEWAY_AUTH_FILE"):
         monkeypatch.delenv(name, raising=False)
     args = position_arguments(variant)
-    assert (args.product, args.block) == ("ax-liquidity-position", "finalized")
+    assert (args.product, args.block) == ("ax-liquidity-position", "latest")
     assert ax.parse_request(args) == PositionRequest(
         chain=BASE, pool=POOLS[variant], account=WALLET.address
     )
@@ -1553,10 +1554,8 @@ def test_the_read_command_pins_its_block_and_passes_the_request_on(variant, monk
     monkeypatch.setattr(position_request, "read_liquidity_position", read)
     monkeypatch.setattr(ax, "read_liquidity_position", pytest.fail)
     args = position_arguments(variant, "--block", "latest")
-    assert ax.liquidity_position(args) == {
-        "product": "liquidity_position",
-        "read_at": {"block": "latest"},
-    }
+    stated = read_at(monkeypatch, "latest", market.block)
+    assert ax.liquidity_position(args) == {"product": "liquidity_position", "read_at": stated}
     assert (passed["selector"], passed["block"]) == ("latest", market.block)
     assert passed["request"].account == WALLET.address
     with pytest.raises(ValueError, match="aerodrome declares no support on eip155:31337"):

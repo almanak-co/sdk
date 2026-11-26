@@ -416,9 +416,13 @@ independently.
   equal to the chain, the pool's wrapped native token equal to the network
   definition's, and the installation block of the pinned implementation.
   `scripts/across_pins.py` produces these facts and sends nothing. Accepted
-  risk: such a cell's path has never been run by anyone, on a fork or on
-  mainnet, so a first bridge from it is that path's first run. `almanak
-  support` states this on each such row. The QA catalog and the hosted Fork
+  risk: such a cell's path has never been run in a retained or reviewed run,
+  on a fork or on mainnet, so a first bridge from it is treated as that path's
+  first run. One run is known by report only: the maintainer states that an
+  operator's agent ran a keyless direct bridge from Ethereum to Base on
+  mainnet, approval, deposit and arrival. It is not retained evidence and
+  proves no cell. `almanak support` states on each such row that no reference
+  lifecycle, refund proof or production rehearsal has run from the chain. The QA catalog and the hosted Fork
   Qualification selection leave these cells out by name, from the connector's
   own list, with the reason in the code; they never pass on an empty
   selection. This excepts no other connector, and no other rule than the
@@ -681,10 +685,73 @@ independently.
   observations, where a fork or live run evaluates each chain on its own turn.
   A strategy that picks its step from which allocation it sees must fall
   through to the destination's step when the source's asks for nothing.
-- Proposed, not accepted: the first scope is same-token ERC-20 routes. The
-  connector refuses the wrapped native asset as the sent asset, and as the
-  received asset when the recipient is an EOA, which Across pays in the native
-  asset.
+- Proposed, not accepted: the first scope of a strategy is same-token ERC-20
+  routes. The connector refuses the wrapped native asset as the sent asset,
+  and as the received asset when the recipient is an EOA, which Across pays in
+  the native asset. A strategy names no native asset on either side. The one
+  native route is the direct command's, stated below.
+- Proposed, not accepted: the native route, for the direct command only. Its
+  identity is the native asset's CAIP-19 reference on both chains. The connector
+  alone converts it to the wrapped native token, which each SpokePool must name
+  as its own `wrappedNativeToken()` at the pinned block and which must equal the
+  network definition's; the route retains both. It is admitted between chains
+  whose native coin is ETH: Ethereum, Arbitrum, Base, OP Mainnet and Robinhood
+  Chain. BNB Smart Chain, Polygon and Avalanche, and the native asset on one
+  side only, are refused. An allocation carries the route only with the
+  operator's `adopt` statement and an EOA source, so an author file, a Safe, a
+  composed deployment and a backtest refuse it. The wrapped native token stated
+  as an ERC-20 sent asset stays refused for everyone.
+- Proposed, not accepted: a native deposit is one step with no approval. The
+  operation carries its value, which must equal its amount, and the gateway
+  reads the recorded operation through the same model, so a deposit of the
+  wrapped token with another value or none is refused before signing. Without
+  value the SpokePool would pull the wrapped token by allowance instead. The
+  wallet's native balance must cover the amount plus the transaction fee
+  ceiling, and accounting expects it to fall by the gas paid plus the amount.
+  These are gateway checks, not on-chain enforcement.
+- Proposed, not accepted: the refund asymmetry. A refund of a native deposit is
+  paid in the wrapped native token on the source chain, under an executed
+  refund leaf, never in the native asset. The preview and the status say so,
+  and `equals_sent` keeps its meaning.
+- Proposed, not accepted: the recipient code rule. A native bridge is refused
+  before anything is planned when its recipient holds code on the destination
+  chain, unless that code is an EIP-7702 delegation, which the SpokePool treats
+  as a plain account. Nothing overrides the refusal. The SpokePool decides the
+  payout when the fill lands, so an address that holds contract code other
+  than an EIP-7702 delegation at that time is paid the wrapped token, an
+  address that gained only a delegation is still paid the native asset, and a
+  recipient that rejects native value leaves the
+  transfer unfilled. The check is the command's own, made once, and never
+  on-chain enforcement.
+- Proposed, not accepted: the arrival evidence rule of `ax bridge-status`. A
+  receipt holds no log of a native value transfer, so a fill of a wrapped
+  native output is read from the pool's outflow of exactly the fill event's
+  amount of its wrapped token between the fill event and the pool's next fill.
+  An unwrap of that amount reports the native asset as paid: a `Withdrawal` by
+  the pool, which the WETH9 source emits and which was captured on Base and OP
+  Mainnet, or a transfer from the pool to the zero address, captured on
+  Arbitrum and Robinhood Chain. A transfer of that amount from the pool to the
+  recipient reports the wrapped token, never the native asset. Outflows of the
+  wrapped token to other parties or of other amounts in that window, such as a
+  refund payment after the fill, are ignored. No outflow of the amount in
+  either form, or both an unwrap and a transfer to the recipient of that
+  amount, stops with an integrity cause. The result names the evidence. An
+  unwrap is evidence that the pool paid native value, not a measurement of the
+  recipient's balance. The rule reads every fill of a pool's wrapped native
+  token in `ax bridge-status`, a token route's included. No fill on Ethereum
+  was captured.
+- Current contract: the native route's path has never been run by anyone with
+  this SDK, on a fork or on mainnet. Its readers are held to known answers
+  captured read-only on 25 November 2026 and kept in
+  `tests/fixtures/across-native-captures.json`: a native deposit another party
+  sent from Ethereum whose calldata and value the planner reproduces up to the
+  sender's trailing tag, its Base fill, fills on Arbitrum, Robinhood Chain and
+  OP Mainnet, a fill to a delegating account and a fill to a contract on Base,
+  and a refund on Base paid in the wrapped token. The fill to a contract
+  carried a message, so it is no relay this connector deposits; no fill of a
+  relay without a message to a contract was found. `almanak support` states
+  the route as unrun on each chain it leaves. A first native bridge is that
+  path's first run.
 - Proposed, not accepted: the quote comes from Across's keyless
   `suggested-fees` endpoint, which the vendor labels legacy. An optional
   operator key is read from `ALMANAK_ACROSS_API_KEY` in the gateway's
@@ -978,8 +1045,9 @@ independently.
   has no fork run, because a fork refuses authored ceilings on Base and leaves
   them unenforced only when every policy is on an OP chain, so the standalone
   reference keeps its production gas policy in `config.production.yaml` and
-  its fork runs are gasless; and no mainnet transaction of this connector has
-  been sent.
+  its fork runs are gasless; and no retained run or other evidence of this
+  repository holds a mainnet transaction of this connector, from this cell or
+  any other.
 - Open gates of the Safe/Roles profile on every Across cell, Arbitrum
   included, none of which may be described as complete: no Safe/Roles bridge
   has run on a fork or on mainnet; the generated grants were never installed
@@ -1078,7 +1146,23 @@ independently.
   credentials in its own process and serves only whitelisted reads over
   authenticated loopback. The execution gateway's token is never reused for
   reads. Without a transport flag, `ax` uses `ALMANAK_AX_GATEWAY_URL` and
-  `ALMANAK_AX_GATEWAY_AUTH_FILE`. `--block` defaults to `finalized`.
+  `ALMANAK_AX_GATEWAY_AUTH_FILE`. `--block` defaults to `latest`, the head;
+  `finalized` is stated explicitly, for `ax bridge-status` too.
+- Current contract: every `ax` read that pins a block states `read_at`: `block`,
+  the selector that chose the block, the resolved block's `number` and
+  `timestamp`, and `age_seconds`, the command's clock less that timestamp. It
+  is added by the calling process on every transport and reads no head.
+  `ax bridge-status` keeps its own `read_at`, the tag and a block of each
+  chain, with no age.
+- Current contract: a direct action's preview states `steps_note`, and `steps`
+  where the connector declares them: the kinds of the transactions the request
+  sends, in order. A connector declares `steps` in its `direct.py` only where
+  the observation the first step was planned on decides every step; the list
+  is reported only when its first entry is the step the gateway planned.
+  Across, Aave V4, Aave V3 and SparkLend declare it, and none for a full
+  repayment. Only the first step's gas is quoted. Never estimate the gas of a
+  later step, and never describe the list as a promise: each later step is
+  planned again once the earlier one is mined.
 - `ax resolve`, `ax dex-pools` and `ax lending-markets` name candidates for
   authoring under the discovery rules above.
 - Accepted: operator actions that do not come from a strategy are direct
@@ -1114,6 +1198,13 @@ independently.
   `released_consumed_nonce` with the consuming transaction and its block, and
   the command exits 1 because the step did not happen. A command stopped after
   the drop reports it in its `steps_sent` event.
+- Proposed, not accepted: the native route of `ax bridge`. The direct command
+  sends native ETH and delivers native ETH through Across when `--asset` and
+  `--destination-asset` both name the native asset by its CAIP-19 reference, on
+  two of Ethereum, Arbitrum, Base, OP Mainnet and Robinhood Chain, from a plain
+  wallet to a plain recipient. The rules are stated under "Bridges". It is a
+  route of the direct command only: a strategy, a Safe, a composed deployment
+  and a backtest refuse it.
 - A connector package that serves direct actions declares them in its
   `direct.py`, and each chain's support lists them as `direct_actions`. Every
   other installed connector is named with its reason. Accepted: GMX V2 and
@@ -1250,10 +1341,11 @@ independently.
 - Accepted: the blocks of `ax bridge-status`. The deposit is found
   at the source chain's latest block, because the operator holds its receipt and
   it decides no outcome. The outcome is read at the block `--block` names on each
-  chain, `finalized` by default or `latest`; the command takes no block number,
+  chain, `latest` by default or `finalized`; the command takes no block number,
   since one number names no block of two chains. A fill is therefore reported
-  as `in_flight` until its block is final, unless the operator asks for `latest`,
-  and the result names the tag and the blocks read.
+  as soon as it is mined, in a block that can still be replaced; with
+  `finalized` it is reported as `in_flight` until its block is final. The
+  result names the tag and the blocks read.
 - Current contract: `unfilled` is a destination block stamped after the fill
   deadline in which `fillStatuses` does not hold the relay as filled. It rests on
   the SpokePool refusing a late fill: `fillRelay` reverts with

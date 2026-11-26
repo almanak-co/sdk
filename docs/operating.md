@@ -455,8 +455,10 @@ plain-wallet command.
 Only a bridge that leaves Arbitrum has been run: its reference has fork
 lifecycle, refund and production rehearsal proofs. Every other source chain is
 declared on read-only mainnet reads and offline tests alone, and `almanak
-support` says so on its row. Nobody has run a deposit, an arrival or a refund
-from those chains, on a fork or on mainnet. Treat a first bridge from one of
+support` says so on its row. No retained or reviewed run holds a deposit, an
+arrival or a refund from those chains, on a fork or on mainnet; one direct bridge
+from Ethereum is known by an operator's report only and proves nothing. Treat a
+first bridge from one of
 them as the first run of that path, and send a small amount first. On a fork, a
 refund is defined for a transfer sent from Arbitrum only, and a fork refuses
 authored gas ceilings on Base and OP Mainnet, so a fork run of a strategy with an
@@ -595,6 +597,20 @@ position, plans the first step and prints it; nothing is signed, and the keystor
 not opened. With `--execute` it signs and sends each step, waits for its receipt and
 prints the outcomes with the position before and after. A supply is an approval
 followed by the supply, so the preview shows the approval.
+
+A preview says how many transactions the request sends. `steps` lists them in order
+by kind, such as `["approve", "supply"]`, and `steps_note` says the same in a
+sentence. `first_step` carries the gas and the gas price of the first one only: a
+later step cannot be simulated before the earlier one is mined, so no gas is quoted
+or estimated for it, and each step pays its own gas under the same ceilings. The
+list restates the connector's planner over the block the first step was planned
+on, and each later step is planned again once the earlier one is mined, so it is
+what the request sends when nothing is refused and nothing changes in between, and
+`steps_note` says so. A later step that is refused leaves the earlier ones done.
+`steps` is stated by Across, Aave V4, Aave V3 and SparkLend, and only where that
+block decides every step: a full repayment states none, because the revocation
+after it depends on what the repayment leaves. A result without `steps` names the
+first step in `steps_note` and says that more can follow.
 
 An executed action reports `completed`, true only when the whole request finished,
 and the command exits 1 when it is false. A supply is not atomic: its approval can
@@ -928,12 +944,17 @@ its start, and not on-chain enforcement; it does not show that anyone controls t
 address.
 
 Without `--execute` the result is a preview: `first_step`, the `steps` the request
-takes, the `recipient` with `recipient_is_sender`, and `quote` with its `source`,
+takes with `steps_note`, the `recipient` with `recipient_is_sender`, and `quote` with its `source`,
 `output_amount`, `fee`, `fee_ceiling`, `timestamp` and `fill_deadline`. The `note`
 says so when the recipient is not the sending wallet, and when it was stated in one
 case, which carries no checksum. The steps are the approval of exactly the amount to
 the SpokePool, then the deposit, which spends the approval whole. An allowance of
-another size the wallet already gave the SpokePool is set to zero first. The deposit
+another size the wallet already gave the SpokePool is set to zero first, and an
+allowance of exactly the amount leaves the deposit as the only step. The gas in
+`first_step` is that of the first planned step alone: when an approval or a
+revocation comes first, the deposit is a separate later transaction whose gas is not
+quoted before the earlier ones are mined, and when the deposit is the only step its
+gas is the one quoted. The deposit
 asks the venue again and signs its own quote, held to the same ceiling, so the
 previewed terms are not a promise.
 
@@ -945,6 +966,80 @@ kept once the command ends. A lost reference is rebuilt from the deposit's
 transaction hash, which every result and every kept record names. A recipient that is not the wallet receives the funds
 on the destination chain, and a refund of an unfilled transfer is paid to the wallet
 on the source chain.
+
+##### Native ETH
+
+A bridge whose `--asset` and `--destination-asset` both name the native asset sends
+native ETH and delivers native ETH:
+
+```bash
+almanak ax bridge --connector across --chain eip155:42161 \
+  --asset eip155:42161/slip44:60 \
+  --destination-chain eip155:8453 \
+  --destination-asset eip155:8453/slip44:60 \
+  --amount 10000000000000000 --max-fee-bps 10 \
+  --recipient <your-address-on-base> \
+  --wallet /private/operator --env-file /private/providers.env \
+  --max-gas-price-wei 1000000000 --max-transaction-fee 200000000000000
+```
+
+It is a route of the direct command only, from a plain wallet to a plain recipient,
+between two of Ethereum, Arbitrum, Base, OP Mainnet and Robinhood Chain. BNB Smart
+Chain, Polygon and Avalanche have another native coin and are refused, as is the
+native asset on one side only. A strategy file, a Safe and a backtest refuse the
+route. The wrapped token stated as the ERC-20 sent asset stays refused: to bridge
+ETH, name the native asset.
+
+| What | A native bridge |
+| --- | --- |
+| Steps | One: the deposit, which carries `--amount` as the transaction's own value. There is no approval, so `steps` is `["deposit"]` and `ax revoke-bridge` refuses the route. |
+| Funding | The wallet's native balance must cover `--amount` plus `--max-transaction-fee`. A shorter balance is refused before signing with `funding_unavailable`, naming the shortfall. |
+| Quote | Across is asked with the wrapped tokens of both chains, which each SpokePool names as its own at the pinned block. An amount the venue calls too low for its fees, about 0.0003 ETH when this was written, is refused with `amount_too_low`. |
+| Recipient | Must hold no contract code on the destination chain, or be a plain account that delegates its code. Any other is refused with `recipient_is_contract` before anything is planned: the SpokePool would pay a contract the wrapped token. No option overrides this. |
+| Preview | `native` states `sent_as`, `sent_asset`, `approval` (none), `paid_as`, `paid_as_decided`, `paid_asset` and `refund_asset`, and the `note` states the payout and the refund in words. `paid_as: native` in a preview is what is expected, not a result: `paid_as_decided` is `at_fill`, because the SpokePool decides the form when the fill lands. |
+| Refund | A refund of an unfilled native bridge is paid in the wrapped token (WETH) on the source chain, to the sending wallet, never in ETH. |
+
+The recipient check is the command's, made once on the destination chain before
+signing, and not on-chain enforcement. The SpokePool decides the form of the payout
+when the fill lands: an address that gains contract code other than an EIP-7702
+delegation between the check and the fill is paid the wrapped token, and one that
+gains only a delegation is still paid native ETH. The pool sends native ETH with a plain value
+transfer, so a recipient that rejects ETH leaves the transfer unfilled until its
+refund.
+
+`ax bridge-status` reports a native bridge by the destination SpokePool's outflow
+of exactly the fill event's amount of its wrapped token in the fill transaction,
+between the fill event and the pool's next fill:
+
+| `arrival.paid_as` | `arrival.measured_by` | Evidence |
+| --- | --- | --- |
+| `native` | `wrapped_token_withdrawal` | The pool unwrapped the amount: a `Withdrawal` of the wrapped token by the pool. The WETH9 contract's source emits it; it was captured on Base and OP Mainnet. |
+| `native` | `wrapped_token_burn` | The pool unwrapped the amount: a transfer of the wrapped token from the pool to the zero address, captured on Arbitrum and Robinhood Chain. |
+| `wrapped_token` | `wrapped_token_transfer` | The pool transferred the amount of the wrapped token to the recipient. `arrival.asset` then names the token, never the native asset. |
+
+`arrival.received` is the fill event's amount, and `arrival.asset` names what was
+paid. An unwrap is evidence that the pool sent native value in that transaction; a
+receipt holds no log of the value transfer itself. What the pool moved to other
+parties or in other amounts in the same transaction, such as a refund payment after
+the fill, is not the fill's and is ignored. A fill with no outflow of exactly its
+amount in either form, or with both an unwrap and a transfer to the recipient of
+that amount, stops with an integrity cause and reports nothing as received. The
+same rule reads every fill of a pool's wrapped native token, a token route's
+included. No fill on Ethereum was captured: its wrapped token is the WETH9 contract
+itself. `deposit.sent_as_native_value` says whether the deposit's own transaction
+paid the SpokePool its amount as value; the deposit is recorded by the SpokePool in
+the wrapped token, which `deposit.sent.recorded_as` names. For an unfilled native
+bridge, `refund.paid_in` names the wrapped token the scan reads.
+
+Recovery of a native deposit is that of any signed step: `ax recover` reads its
+receipt or sends the same signed bytes again, and signs nothing. A signed native
+deposit reserves its value beside its fee, so the wallet must still hold both for a
+resend.
+
+No native bridge has been run by this SDK, on a fork or on mainnet. The route is
+declared on read-only mainnet known answers and offline tests: a native deposit and
+its fill, fills on both kinds of chain and to a contract, and a refund, all sent by
+others.
 
 `almanak ax bridge-status` reads what became of a transfer, from both chains, and
 plans and signs nothing:
@@ -966,12 +1061,13 @@ its identifier then.
 The deposit is read at the source chain's latest block, since the operator already
 holds its receipt, and held to the reference's relay hash and quote timestamp, so a
 reference that is not a deposit of the named route is refused. What became of it is
-read at the block `--block` names on each chain, `finalized` unless stated, or
-`latest`. It takes no block number: one number names no block of two chains. A
-finalized block trails the head by minutes, on a rollup by a quarter of an hour or
-more, so a transfer filled within seconds reads as `in_flight` until its fill is
-final. `--block latest` reads the fill at once; a block that is not final can still
-be replaced. `read_at` names the tag and the blocks read. `status` is one of:
+read at the block `--block` names on each chain, `latest` unless stated, or
+`finalized`. It takes no block number: one number names no block of two chains. The
+default reads a fill at once; a block that is not final can still be replaced, so an
+outcome read at `latest` is not final either. `--block finalized` reads only final
+blocks. A finalized block trails the head by minutes, on a rollup by a quarter of an
+hour or more, so there a transfer filled within seconds reads as `in_flight` until
+its fill is final. `read_at` names the tag and the blocks read. `status` is one of:
 
 | `status` | Meaning |
 | --- | --- |
@@ -1179,7 +1275,7 @@ Slipstream NFT held by its pool's gauge is reported with `staked: true`, and its
 `owed` is only what the manager recorded, since a staked position earns no trading
 fees. It takes
 the same transports and `--block` as the other reads; `--block` defaults to
-`finalized`, so read a position that was just opened at `--block latest`. A token ID
+`latest`, which shows a position that was just opened. A token ID
 the position manager does not hold at the pinned block is refused with `holds no NFT
 <token id> at block <number>`. When the selector was `finalized` the message adds
 that this block can trail the head by minutes and that a position just opened is read
@@ -1564,7 +1660,7 @@ is listed under `skipped`. It takes the session's read gateway like `almanak ax`
 `almanak ax` reads one protocol observation at one pinned block. Every
 subcommand but `portfolio` takes one transport and its own request arguments
 after the subcommand, and every one but `portfolio` and the two HyperCore
-subcommands takes `--block` (default `finalized`, which `--help` states):
+subcommands takes `--block` (default `latest`, which `--help` states):
 
 | Subcommand | `--connector` | Request |
 | --- | --- | --- |
@@ -1593,14 +1689,22 @@ concrete number and hash all values came from. A `latest` observation can be
 reorganized away; a later read against a block that is no longer canonical
 fails instead of mixing blocks.
 
-The finalized block trails the head by minutes, on a rollup by a quarter of an hour
-or more. A position read at it does not show what was opened since: `lending-position`
-and `perp-position` then report an empty position with exit 0 and no error, and
-`liquidity-position` refuses an NFT minted since as not held at that block. The three
-position reads therefore state `read_at`, whose `block` is the selector that chose
-the block (`finalized`, `latest` or the stated number), beside the resolved number
-and hash. An empty position with `"read_at": {"block": "finalized"}` may only be older
-than the action; read it again with `--block latest`.
+Without `--block` a read pins the head, so it shows funds just received and a
+position just opened. `--block finalized` is stated when the read must not be
+reorganized away. The finalized block trails the head by minutes, on a rollup by a
+quarter of an hour or more. A read at it does not show what was mined since: a
+balance is the one from before a transfer or a bridge's arrival, `lending-position`
+and `perp-position` report an empty position with exit 0 and no error, and
+`liquidity-position` refuses an NFT minted since as not held at that block. Every
+read that pins a block therefore states `read_at`, beside its other fields. Its
+`block` is the selector that chose the block (`finalized`, `latest` or the stated
+number), `number` and `timestamp` are the resolved block's, and `age_seconds` is the
+command's clock less that timestamp. No head is read for the age, so it is as good as
+the local clock and is negative when that clock is behind the block's. An empty
+position or an old balance with `"read_at": {"block": "finalized", ...}` may only be
+older than the action; read it again without `--block`. `ax bridge-status` reads two
+chains and keeps its own `read_at`, which names the tag and a block of each chain and
+states no age.
 
 On HyperEVM (`eip155:999`), `finalized` is the head, and Alchemy runs a read
 pinned within about 128 to 192 blocks of its head at the next block. There a

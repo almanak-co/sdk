@@ -1,4 +1,5 @@
 """One bridge is an exact approval, the quoted deposit, and a revocation of any residue.
+A native route's bridge is the quoted deposit alone, carrying its amount as value.
 
 The author states no approval or revocation. An approval that an earlier decision left
 standing, because its deposit was never mined, is revoked before this decision's own.
@@ -10,6 +11,7 @@ from almanak.connectors.across.operations import (
     ApproveOperation,
     DepositOperation,
     RevokeOperation,
+    native_value,
 )
 from almanak.external_effects import ExternalEffect
 from almanak.gateway.ethereum import DataError
@@ -41,6 +43,8 @@ def require_scope(config, state, intent, before):
 
 
 def closing_step(before) -> str:
+    if before.target.route.native:
+        raise ValueError("a native Across route gives the SpokePool no approval to revoke")
     if not before.allowance:
         raise ValueError("Across spending authority is already closed")
     return "revoke"
@@ -51,6 +55,11 @@ def bridge_step(state, intent, before) -> str:
         if before.allowance:
             return "revoke"
         raise DataError("incomplete_action", "a recorded Across deposit cannot be sent again")
+    if intent.target.route.native:
+        # One step: the deposit carries its amount as value. No approval is given, and an
+        # allowance of the wrapped token the wallet gave the SpokePool is neither read
+        # nor touched.
+        return "deposit"
     if before.allowance == 0:
         return "approve"
     # Another amount than this decision's is an earlier decision's approval.
@@ -80,4 +89,5 @@ def operation(config, state, intent, before, quote=None):
         amount=intent.amount,
         quote=quote,
         quote_time_buffer=before.pool.quote_time_buffer,
+        value=native_value(intent.target, intent.amount.amount),
     )

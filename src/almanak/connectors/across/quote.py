@@ -42,6 +42,8 @@ MAX_EXCLUSIVITY_OFFSET = 31_536_000
 # copy every plan, pending attempt and outcome retains stays bounded.
 MAX_ANSWER_BYTES = 16_384
 # At most the 78 digits of a uint256, so a long digit string never reaches integer conversion.
+# The code the venue answers, with HTTP 400, for an amount below what its fees allow.
+TOO_LOW_CODE = "AMOUNT_TOO_LOW"
 DIGITS = re.compile(r"[0-9]{1,78}", re.ASCII)
 FIELDS = (
     "outputAmount",
@@ -83,8 +85,10 @@ class Quote(Model):
 def request(target: Target, amount: int) -> dict[str, str]:
     route = target.route
     return {
-        "inputToken": route.asset.reference,
-        "outputToken": route.destination_asset.reference,
+        # The venue quotes token addresses and has no native parameter: a native route
+        # asks with the wrapped native token of each chain.
+        "inputToken": route.input_token,
+        "outputToken": route.output_token,
         "originChainId": str(chain_number(route.chain.chain_id)),
         "destinationChainId": str(chain_number(route.destination_chain)),
         "amount": str(amount),
@@ -96,6 +100,12 @@ def answer(response: httpx.Response) -> dict:
     """The venue's answer, or the category of its refusal."""
     if response.status_code == 429:
         raise DataError("rate_limited", f"{SOURCE}: the venue throttled the quote request")
+    if too_low(response):
+        raise DataError(
+            "amount_too_low",
+            f"{SOURCE}: the venue refuses the amount as too low relative to its fees; the "
+            "minimum is the venue's own and changes with them",
+        )
     if response.status_code >= 400:
         raise DataError(
             "quote_refused", f"{SOURCE}: the venue refused the quote ({response.status_code})"
@@ -113,6 +123,20 @@ def answer(response: httpx.Response) -> dict:
     if not isinstance(body, dict):
         raise DataError("malformed", f"{SOURCE}: the quote is not a JSON object")
     return body
+
+
+def too_low(response: httpx.Response) -> bool:
+    """Whether the venue refused the request with its own `AMOUNT_TOO_LOW` code.
+
+    Only the code is read, from a bounded body; the venue's message is not repeated.
+    """
+    if response.status_code != 400 or len(response.content) > MAX_ANSWER_BYTES:
+        return False
+    try:
+        body = json.loads(response.content)
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("code") == TOO_LOW_CODE
 
 
 def non_finite(name: str):
@@ -281,10 +305,7 @@ def route_refusals(quote: Quote, route):
         yield "quote_mismatch", "the quote names another SpokePool than the pinned one"
     if quote.destination_spoke_pool != spoke_pool(route.destination_chain).address:
         yield "quote_mismatch", "the quote names another destination SpokePool than the pinned one"
-    if (quote.input_token, quote.output_token) != (
-        route.asset.reference,
-        route.destination_asset.reference,
-    ):
+    if (quote.input_token, quote.output_token) != (route.input_token, route.output_token):
         yield "quote_mismatch", "the quote names other tokens than the route's"
     if quote.input_decimals != route.decimals:
         yield "quote_mismatch", "the quote holds other decimals for the sent asset than its chain"

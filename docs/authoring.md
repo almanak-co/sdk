@@ -651,8 +651,8 @@ Reports and dashboards list transfers apart from fund cash, and an open
 transfer has no received amount there, never a zero. See the
 [bridge and lend reference](https://github.com/almanak-co/sdk/tree/main/strategies/arbitrum_base_bridge_and_lend).
 
-Across is the first bridge connector. The sent asset is an ERC-20 other than
-the wrapped native asset, and both assets have the same decimals. Either account
+Across is the first bridge connector. In a strategy the sent asset is an ERC-20
+other than the wrapped native asset, never the native asset itself, and both assets have the same decimals. Either account
 may be an EOA or a Safe with Zodiac Roles, as the operator binds it; the author
 file is the same. An EOA that receives is paid the native asset for a wrapped
 native output, so such a route needs a Safe as its receiving account. See [Supported connectors](support.md) for the chains and run

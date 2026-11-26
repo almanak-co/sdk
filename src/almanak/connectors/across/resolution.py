@@ -9,14 +9,23 @@ completed on its destination. Each SpokePool must run its reviewed implementatio
 import hashlib
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from almanak.caip import AssetType, ChainId
-from almanak.connectors.across.domain import FeeBps, Route, SpokePoolPin, spoke_pool
+from almanak.chains import evm_network
+from almanak.connectors.across.domain import (
+    NATIVE_DIRECT_ONLY,
+    FeeBps,
+    Route,
+    SpokePoolPin,
+    names_native,
+    require_native_pair,
+    spoke_pool,
+)
 from almanak.connectors.across.observations import PoolState, read_pool, require_pinned
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm import erc20_address
-from almanak.models import Asset, Block, Model
+from almanak.models import Address, Asset, Block, Model
 
 
 class MarketSelection(Model):
@@ -34,13 +43,36 @@ class MarketSelection(Model):
 
     @model_validator(mode="after")
     def scope(self):
-        erc20_address(self.asset, self.chain)
-        erc20_address(self.destination_asset, self.destination_chain)
+        self.require_assets()
         if self.chain == self.destination_chain:
             raise ValueError("an Across market requires two different chains")
         spoke_pool(self.chain)
         spoke_pool(self.destination_chain)
         return self
+
+    def require_assets(self) -> None:
+        """A strategy's market names two ERC-20 assets."""
+        if names_native(self.asset, self.destination_asset):
+            raise ValueError(NATIVE_DIRECT_ONLY)
+        erc20_address(self.asset, self.chain)
+        erc20_address(self.destination_asset, self.destination_chain)
+
+    @property
+    def native(self) -> bool:
+        return names_native(self.asset)
+
+
+class DirectSelection(MarketSelection):
+    """The route an operator names for a direct command.
+
+    It may name the native asset, on both chains and only where that is ETH. Nothing
+    else builds one: an author file is read as a `MarketSelection`, which refuses it.
+    """
+
+    def require_assets(self) -> None:
+        if not names_native(self.asset, self.destination_asset):
+            return super().require_assets()
+        require_native_pair(self.chain, self.asset, self.destination_chain, self.destination_asset)
 
 
 class ResolvedRoute(Model):
@@ -57,6 +89,10 @@ class ResolvedRoute(Model):
     # The SpokePool that fills on the destination chain, read at the same anchor. Neither
     # pool is held to its pin when retained facts are loaded or replayed; see `admit_route`.
     destination_pool: PoolState | None = None
+    # A native route only: each SpokePool's own `wrappedNativeToken()`, read with the
+    # pool at its chain's anchor and held to the network definition's wrapped native.
+    wrapped_native: Address | None = Field(default=None, exclude_if=lambda v: v is None)
+    destination_wrapped_native: Address | None = Field(default=None, exclude_if=lambda v: v is None)
 
     @model_validator(mode="after")
     def scope(self):
@@ -72,7 +108,20 @@ class ResolvedRoute(Model):
             raise ValueError("resolved Across route has mixed chain or anchor scope")
         if self.asset.identifier != self.selection.asset:
             raise ValueError("resolved Across route differs from its authored asset")
+        self.wrapped_scope()
         return self
+
+    def wrapped_scope(self):
+        """A native route retains each pool's wrapped native token with that pool, and a
+        token route retains none: a record with one of the two would load as a token route."""
+        native = self.selection.native
+        expected = (native, native and self.destination_pool is not None)
+        retained = (self.wrapped_native is not None, self.destination_wrapped_native is not None)
+        if retained != expected:
+            raise ValueError(
+                "a resolved Across route retains a pool's wrapped native token exactly "
+                "when it is a native route and that pool was read"
+            )
 
     def destination_scope(self, destination: Asset, anchor: Block):
         if (
@@ -94,7 +143,11 @@ class ResolvedRoute(Model):
             raise ValueError("the received asset of an Across route is not verified on its chain")
         filling = self.destination_pool
         selection, source = self.selection, self.block.chain
+        wrapped = None
+        if self.wrapped_native is not None and self.destination_wrapped_native is not None:
+            wrapped = (self.wrapped_native, self.destination_wrapped_native)
         return Route(
+            wrapped=wrapped,
             chain=source,
             asset=selection.asset,
             destination_chain=selection.destination_chain,
@@ -139,6 +192,29 @@ def require_anchor(reader, block: Block) -> None:
         raise DataError("block_mismatch", "an Across resolution anchor is no longer canonical")
 
 
+def wrapped_native(reader, pool: PoolState, selection: MarketSelection, block: Block):
+    """The pool's own wrapped native token on a native route, held to the network's.
+
+    The SpokePool wraps a deposit's value into this token and unwraps it for a plain
+    recipient, so the route's token addresses are the pool's answer, read at the anchor
+    like every other fact of the route. A pool that names another token than the
+    network definition's is refused: one of the two is not what this route assumes.
+    None for a route of two tokens, which reads nothing here.
+    """
+    if not selection.native:
+        return None
+    chain = block.chain.chain_id
+    (named,) = reader.call(pool.address, "wrappedNativeToken()", block, outputs=("address",))
+    expected = evm_network(chain).wrapped_native.reference
+    if named.lower() != expected:
+        raise DataError(
+            "unsupported_route",
+            f"the Across SpokePool on {chain} names {named.lower()} as its wrapped native "
+            f"token, not the network's {expected}; no native route is resolved through it",
+        )
+    return expected
+
+
 def resolve_market(
     reader, selection: MarketSelection, block: Block, pool_address: str | None = None
 ) -> ResolvedRoute:
@@ -152,8 +228,11 @@ def resolve_market(
     require_anchor(reader, block)
     pool = read_pool(reader, pool_address or spoke_pool(selection.chain).address, block)
     asset = reader.asset(selection.asset, block)
+    wrapped = wrapped_native(reader, pool, selection, block)
     require_anchor(reader, block)
-    return ResolvedRoute(selection=selection, block=block, asset=asset, pool=pool)
+    return ResolvedRoute(
+        selection=selection, block=block, asset=asset, pool=pool, wrapped_native=wrapped
+    )
 
 
 def complete_market(
@@ -172,6 +251,7 @@ def complete_market(
     address = pool_address or spoke_pool(selection.destination_chain).address
     pool = read_pool(reader, address, block)
     destination = reader.asset(selection.destination_asset, block)
+    wrapped = wrapped_native(reader, pool, selection, block)
     require_anchor(reader, block)
     return ResolvedRoute(
         **{
@@ -179,6 +259,7 @@ def complete_market(
             "destination": destination,
             "destination_block": block,
             "destination_pool": pool,
+            "destination_wrapped_native": wrapped,
         }
     )
 

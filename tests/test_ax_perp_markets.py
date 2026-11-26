@@ -19,6 +19,7 @@ from almanak.connectors.gmx_v2.market_request import (
 from almanak.connectors.gmx_v2.networks import roles_for
 from almanak.gateway.ethereum import DataError
 from almanak.models import ZERO_ADDRESS, Block, Chain
+from tests.read_at_support import read_at
 
 CHAIN = Chain(chain_id=ChainId("eip155:42161"), environment="mainnet")
 BLOCK = Block(chain=CHAIN, number=25908472, hash="0x" + "ab" * 32, timestamp=1_700_000_000)
@@ -357,8 +358,9 @@ def test_perp_markets_passes_request_and_block_through(monkeypatch, tmp_path):
         gateway_url=None,
         gateway_auth_file=None,
     )
+    stated = read_at(monkeypatch, 25908472, BLOCK)
     result = ax.perp_markets(invocation)
-    assert result == {"product": "gmx_perp_market"}
+    assert result == {"product": "gmx_perp_market", "read_at": stated}
     assert seen["pinned"] == BLOCK
     assert seen["request"].chain == ChainId("eip155:42161")
     assert seen["request"].query == "BTC/USD"

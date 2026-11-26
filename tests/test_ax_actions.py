@@ -80,6 +80,85 @@ def test_preview_plans_the_first_step_and_signs_nothing(desk):
     assert desk.gateway.broadcasts == [] and desk.store.load().pending is None
 
 
+def test_a_preview_lists_the_steps_of_a_supply_and_of_a_single_step_withdrawal(desk):
+    amount = desk.intent("supply").amount.amount
+    preview = ax_actions.perform(desk.service, ActionRequest("supply", amount), execute=False)
+    assert preview["steps"] == ["approve", "supply"]
+    assert preview["steps_note"] == (
+        "This request plans 2 transactions, in order: approve, then supply. "
+        "That is what it sends when nothing is refused and nothing changes in between: "
+        "each later step is planned again once the earlier one is mined, and a later step "
+        "that is refused leaves the earlier ones done. "
+        "Only the first step's gas is quoted, in `first_step`: a later step cannot be "
+        "simulated before the earlier one is mined, so its gas is not known in a preview. "
+        "Each step is its own transaction and pays its own gas."
+    )
+    desk.runtime().discard()
+    supplied = ax_actions.perform(desk.service, ActionRequest("supply", amount), execute=True)
+    # The executed steps are the ones the preview listed.
+    assert [item["operation"] for item in supplied["outcomes"]] == supplied["steps"]
+    single = ax_actions.perform(desk.service, ActionRequest("withdraw"), execute=False)
+    assert single["steps"] == ["withdraw"] and single["first_step"]["operation"]["kind"] == (
+        "withdraw"
+    )
+    assert single["steps_note"] == (
+        "This request plans one transaction: withdraw. Its gas is quoted in `first_step`."
+    )
+
+
+def test_a_request_whose_later_steps_are_not_decided_lists_none(desk):
+    class Kept:
+        def load(self):
+            raise AssertionError("an undeclared connector reads no checkpoint")
+
+    undeclared = SimpleNamespace(steps=None)
+    stated = ax_actions.stated_steps(undeclared, Kept(), "approve")
+    assert "steps" not in stated
+    assert stated["steps_note"].startswith(
+        "The first step is `approve`. The later steps of this request are not listed"
+    ) and stated["steps_note"].endswith(ax_actions.FIRST_GAS_ONLY)
+    # A statement that disagrees with the planned step, or states none, is not reported.
+    for kinds in (["supply"], None):
+        declared = SimpleNamespace(steps=lambda state, kinds=kinds: kinds)
+        assert "steps" not in ax_actions.stated_steps(declared, desk.store, "approve")
+
+
+def test_a_statement_that_disagrees_with_the_planned_step_is_left_out_of_the_preview(
+    desk, monkeypatch
+):
+    from dataclasses import replace
+
+    from almanak.connectors import direct
+
+    declared = direct.binding_for(desk.store.load().config)
+    wrong = replace(declared, steps=lambda state: ["supply", "revoke"])
+    monkeypatch.setattr(direct, "binding_for", lambda config: wrong)
+    amount = desk.intent("supply").amount.amount
+    preview = ax_actions.perform(desk.service, ActionRequest("supply", amount), execute=False)
+    # The gateway planned the approval, so the statement is held to that step.
+    assert preview["first_step"]["operation"]["kind"] == "approve" and "steps" not in preview
+    assert preview["steps_note"].startswith("The first step is `approve`.")
+
+
+def test_aave_v4_states_the_steps_its_planner_takes():
+    def state(kind, **before):
+        seen = SimpleNamespace(**before)
+        return SimpleNamespace(
+            decision=SimpleNamespace(intent=SimpleNamespace(kind=kind)),
+            plan=SimpleNamespace(before=seen),
+        )
+
+    held, none = SimpleNamespace(supplied_shares=5), SimpleNamespace(supplied_shares=0)
+    steps = aave_direct.steps
+    assert steps(state("supply", allowance=7)) == ["supply"]
+    assert steps(state("withdraw", allowance=7, position=held)) == ["withdraw", "revoke"]
+    assert steps(state("withdraw", allowance=7, position=none)) == ["revoke"]
+    backing = (SimpleNamespace(enabled=False), SimpleNamespace(enabled=True))
+    assert steps(state("borrow", collateral=backing)) == ["collateral", "borrow"]
+    # A repayment's revocation and collateral release depend on what the repayment leaves.
+    assert steps(state("repay")) is None
+
+
 def test_execute_runs_the_action_and_reports_the_position(desk):
     amount = desk.intent("supply").amount.amount
     supplied = ax_actions.perform(desk.service, ActionRequest("supply", amount), execute=True)

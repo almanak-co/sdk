@@ -224,3 +224,38 @@ def position(state) -> dict:
         "debt_scaled": str(owned.debt_scaled),
         "collateral_enabled": owned.collateral_enabled,
     }
+
+
+def funded_steps(action: str, before) -> list[str]:
+    """An exact approval, unless the wallet already gave it, then the action that spends it."""
+    return [action] if before.allowance else ["approve", action]
+
+
+def exit_steps(action: str, held: int, before) -> list[str] | None:
+    """The steps of a withdrawal or a partial repayment, None for a full repayment.
+
+    With nothing held the request only revokes a standing allowance. A full repayment
+    approves the held balance, repays and revokes what the repayment left, and what is
+    left is known only once the repayment is mined.
+    """
+    if not held:
+        return ["revoke"]
+    if action == "repay_amount":
+        return funded_steps("repay", before)
+    if action == "repay":
+        return None
+    return ["withdraw", *(["revoke"] if before.allowance else [])]
+
+
+def steps(state) -> list[str] | None:
+    """The steps the admitted request sends, as the Pool connector's planner plans them."""
+    decided, before = state.decision.intent, state.plan.before
+    kind = decided.kind
+    if kind in ("borrow", "collateral"):
+        # The planner revokes an allowance the wallet still gives the Pool afterwards.
+        return [kind, *(["revoke"] if before.allowance else [])]
+    if kind == "supply":
+        return funded_steps("supply", before)
+    position = before.position
+    held = position.debt_scaled if kind.startswith("repay") else position.supplied_scaled
+    return exit_steps(kind, held, before)

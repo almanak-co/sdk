@@ -133,6 +133,13 @@ class DirectActions:
     # It is called once the first step is planned, before anything is signed, and a
     # refusal it raises ends the command there.
     details: Callable | None = None
+    # `steps(state)`: the kinds of the steps the admitted request sends, in order, the
+    # planned first step included, or None. It restates the connector's own planner
+    # over the observation the first step was planned on (`state.plan.before`), so it
+    # is declared only where that observation decides every later step. It returns
+    # None for a request whose later steps depend on what an earlier one leaves, such
+    # as the revocation after a full repayment. It is read before anything is signed.
+    steps: Callable | None = None
 
 
 # Installed connectors `ax` runs no direct action for, and why.
