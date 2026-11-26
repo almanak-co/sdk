@@ -635,9 +635,10 @@ def described(chain_id, deposit: Deposit) -> dict:
     }
 
 
-IN_FLIGHT = (
-    "No fill is in the destination chain's {tag} block or before it. A fill mined in a"
-    " later block is not read yet: a finalized block trails the head by minutes."
+IN_FLIGHT = "No fill is in the destination chain's {tag} block or before it."
+# Only a read at `finalized` can miss a fill that is already mined.
+BEHIND_HEAD = (
+    " A fill mined in a later block is not read yet: a finalized block trails the head by minutes."
 )
 
 
@@ -662,7 +663,8 @@ def outcome(
     if arrival is not None:
         return {"read_at": read_at, "status": "arrived", "arrival": arrival}
     if far_head.timestamp <= deposit.fill_deadline:
-        return {"read_at": read_at, "status": "in_flight", "note": IN_FLIGHT.format(tag=tag)}
+        note = IN_FLIGHT.format(tag=tag) + (BEHIND_HEAD if tag == "finalized" else "")
+        return {"read_at": read_at, "status": "in_flight", "note": note}
     # The refund is paid to the depositor on the source chain, in a later bundle.
     with public_cause(public[0], near.chain.chain_id):
         near_head = near.pin_block(tag)
@@ -826,10 +828,11 @@ def status_arguments(commands) -> None:
     command.add_argument(
         "--block",
         choices=("finalized", "latest"),
-        default="finalized",
+        default="latest",
         help="the block of each chain the outcome is read at; the deposit itself is"
-        " found at the source chain's latest block (default: finalized, which trails"
-        " the head by minutes, so a recent fill reads as in_flight until then)",
+        " found at the source chain's latest block (default: latest, the head, which"
+        " can still be reorganized; finalized trails the head by minutes, so a recent"
+        " fill reads as in_flight until then)",
     )
     # A provider key or the read gateway serves both chains. A public endpoint serves
     # one, so the caller names a second for the destination chain.

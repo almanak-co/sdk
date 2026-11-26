@@ -715,12 +715,13 @@ else records it. When the reference is lost, the second form above rebuilds it f
 the deposit's transaction hash, which is in `outcomes`, or under `unresolved` when
 the command stopped after signing the deposit.
 
-`ax bridge-status` reads the outcome at each chain's finalized block, which trails
-the newest one by minutes and on these chains by a quarter of an hour or more. So
-a transfer that was filled within seconds still reads `in_flight` at first. Read
-it after a minute with `--block latest` to tell the user what the chain shows now,
-and say that this block is not final yet. Report the transfer as arrived for good
-only once the read without `--block` says `arrived`. Report by its `status`:
+`ax bridge-status` reads the outcome at each chain's latest block, so a fill shows
+as soon as it is mined. Read it after a minute, tell the user what the chain shows
+now, and say that this block is not final yet. A read with `--block finalized` sees
+only final blocks, which trail the newest one by minutes and on these chains by a
+quarter of an hour or more. Report the transfer as arrived for good, or as
+`unfilled`, only once the read with `--block finalized` says so. Report by its
+`status`:
 
 | `status` | Means |
 | --- | --- |

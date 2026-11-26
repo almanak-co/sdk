@@ -966,12 +966,13 @@ its identifier then.
 The deposit is read at the source chain's latest block, since the operator already
 holds its receipt, and held to the reference's relay hash and quote timestamp, so a
 reference that is not a deposit of the named route is refused. What became of it is
-read at the block `--block` names on each chain, `finalized` unless stated, or
-`latest`. It takes no block number: one number names no block of two chains. A
-finalized block trails the head by minutes, on a rollup by a quarter of an hour or
-more, so a transfer filled within seconds reads as `in_flight` until its fill is
-final. `--block latest` reads the fill at once; a block that is not final can still
-be replaced. `read_at` names the tag and the blocks read. `status` is one of:
+read at the block `--block` names on each chain, `latest` unless stated, or
+`finalized`. It takes no block number: one number names no block of two chains. The
+default reads a fill at once; a block that is not final can still be replaced, so an
+outcome read at `latest` is not final either. `--block finalized` reads only final
+blocks. A finalized block trails the head by minutes, on a rollup by a quarter of an
+hour or more, so there a transfer filled within seconds reads as `in_flight` until
+its fill is final. `read_at` names the tag and the blocks read. `status` is one of:
 
 | `status` | Meaning |
 | --- | --- |
