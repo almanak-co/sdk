@@ -212,9 +212,10 @@ almanak ax lending-position --connector <connector> --chain <chain> <market> --a
 A balance is `observations[0].amount` in base units; divide by 10 to the power of
 its `decimals`. A chain with no native balance cannot be used until the user sends
 gas; say which chains are usable. A lending position is under `observation`, and
-`read_at.block` names the selector that chose its block. Read at `finalized`, a
-position just opened shows as empty with no error: keep `--block latest` after an
-action. Each
+`read_at.block` names the selector that chose its block. `latest` is the default.
+Read at `finalized`, which can trail the head by a quarter of an hour, funds just
+received are missing and a position just opened shows as empty with no error: never
+read at `finalized` after an action or a deposit. Each
 figure is in base units of the asset whose decimals the last column names, which
 is not always the entry's own asset:
 
@@ -321,12 +322,14 @@ the user again before executing. Where there is no second name, or the chain has
 no public endpoint, tell the user it cannot be done without their own provider
 key, and leave it to them to offer one. Do not ask for the key.
 
-A read without `--block` is the chain's finalized block, on every transport. That
-block trails the newest one by minutes, on a rollup by a quarter of an hour or
+A read without `--block` is the chain's latest block, on every transport, and the
+commands in this skill state `--block latest` all the same. A read with
+`--block finalized` is the finalized block, which
+trails the newest one by minutes, on a rollup by a quarter of an hour or
 more, so it does not show a
 transaction mined a moment ago: a balance read there after an action or an
-arrival can still be the old one. Read with `--block latest` whenever you report
-what the chain shows now, as the commands in this skill do. Each read's result
+arrival can still be the old one. Never read at `finalized` to report
+what the chain shows now. Each read's result
 says which block it is under `read_at`: `block` is the selector that chose it
 (`finalized`, `latest` or a number), `number` the block, and `age_seconds` how old
 that block was when the command ran. When a figure looks stale, check `read_at`
@@ -742,16 +745,17 @@ else records it. When the reference is lost, the second form above rebuilds it f
 the deposit's transaction hash, which is in `outcomes`, or under `unresolved` when
 the command stopped after signing the deposit.
 
-`ax bridge-status` reads the outcome at each chain's finalized block, which trails
-the newest one by minutes and on these chains by a quarter of an hour or more. So
-a transfer that was filled within seconds still reads `in_flight` at first. Read
-it after a minute with `--block latest` to tell the user what the chain shows now,
-and say that this block is not final yet. Report the transfer as arrived for good
-only once the read without `--block` says `arrived`. Report by its `status`:
+`ax bridge-status` reads the outcome at each chain's latest block, so a fill shows
+as soon as it is mined. Read it after a minute, tell the user what the chain shows
+now, and say that this block is not final yet. A read with `--block finalized` sees
+only final blocks, which trail the newest one by minutes and on these chains by a
+quarter of an hour or more. Report the transfer as arrived for good, or as
+`unfilled`, only once the read with `--block finalized` says so. Report by its
+`status`:
 
 | `status` | Means |
 | --- | --- |
-| `arrived` | `arrival.received` is the amount measured in the fill transaction. Read the balance on the destination chain with `--block latest` and report both: a balance read without `--block` is the finalized block and can still show the amount from before the fill. |
+| `arrived` | `arrival.received` is the amount measured in the fill transaction. Read the balance on the destination chain with `--block latest` and report both: a balance read with `--block finalized` can still show the amount from before the fill. |
 | `in_flight` | No fill at the block read, which `read_at` names. State no received amount, and read again later. |
 | `unfilled` | A block after the fill deadline shows no fill, so nothing arrives. Across refunds an unfilled deposit on the source chain, but this result does not show that a refund was paid or when one will be: promise neither an amount nor a time. `refund.payments` lists refund payments the wallet received since, and none is tied to this transfer: report them as possible refunds, report a nonzero `refund.deferred_in_spoke_pool` as held by the bridge contract and not in the wallet, and read the source balance. |
 
@@ -863,10 +867,9 @@ earns nothing.
   and `owed` is only what was recorded. `read_at.block` names the selector that
   chose the block.
 - A read refused with `holds no NFT <token id> at block <number>` found no such
-  NFT at that block. Without `--block latest` the block is the finalized one,
-  and the message then says so: read a position
-  just opened with `--block latest`, and compare the block with the `block` of
-  the open's outcome.
+  NFT at that block. With `--block finalized` the block can trail the head by
+  minutes, and the message then says so: read a position just opened with
+  `--block latest`, and compare the block with the `block` of the open's outcome.
 
 ### A position held as LP tokens
 

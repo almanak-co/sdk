@@ -987,12 +987,13 @@ its identifier then.
 The deposit is read at the source chain's latest block, since the operator already
 holds its receipt, and held to the reference's relay hash and quote timestamp, so a
 reference that is not a deposit of the named route is refused. What became of it is
-read at the block `--block` names on each chain, `finalized` unless stated, or
-`latest`. It takes no block number: one number names no block of two chains. A
-finalized block trails the head by minutes, on a rollup by a quarter of an hour or
-more, so a transfer filled within seconds reads as `in_flight` until its fill is
-final. `--block latest` reads the fill at once; a block that is not final can still
-be replaced. `read_at` names the tag and the blocks read. `status` is one of:
+read at the block `--block` names on each chain, `latest` unless stated, or
+`finalized`. It takes no block number: one number names no block of two chains. The
+default reads a fill at once; a block that is not final can still be replaced, so an
+outcome read at `latest` is not final either. `--block finalized` reads only final
+blocks. A finalized block trails the head by minutes, on a rollup by a quarter of an
+hour or more, so there a transfer filled within seconds reads as `in_flight` until
+its fill is final. `read_at` names the tag and the blocks read. `status` is one of:
 
 | `status` | Meaning |
 | --- | --- |
@@ -1200,7 +1201,7 @@ Slipstream NFT held by its pool's gauge is reported with `staked: true`, and its
 `owed` is only what the manager recorded, since a staked position earns no trading
 fees. It takes
 the same transports and `--block` as the other reads; `--block` defaults to
-`finalized`, so read a position that was just opened at `--block latest`. A token ID
+`latest`, which shows a position that was just opened. A token ID
 the position manager does not hold at the pinned block is refused with `holds no NFT
 <token id> at block <number>`. When the selector was `finalized` the message adds
 that this block can trail the head by minutes and that a position just opened is read
@@ -1585,7 +1586,7 @@ is listed under `skipped`. It takes the session's read gateway like `almanak ax`
 `almanak ax` reads one protocol observation at one pinned block. Every
 subcommand but `portfolio` takes one transport and its own request arguments
 after the subcommand, and every one but `portfolio` and the two HyperCore
-subcommands takes `--block` (default `finalized`, which `--help` states):
+subcommands takes `--block` (default `latest`, which `--help` states):
 
 | Subcommand | `--connector` | Request |
 | --- | --- | --- |
@@ -1614,9 +1615,11 @@ concrete number and hash all values came from. A `latest` observation can be
 reorganized away; a later read against a block that is no longer canonical
 fails instead of mixing blocks.
 
-The finalized block trails the head by minutes, on a rollup by a quarter of an hour
-or more. A read at it does not show what was mined since: a balance is the one from
-before a transfer or a bridge's arrival, `lending-position`
+Without `--block` a read pins the head, so it shows funds just received and a
+position just opened. `--block finalized` is stated when the read must not be
+reorganized away. The finalized block trails the head by minutes, on a rollup by a
+quarter of an hour or more. A read at it does not show what was mined since: a
+balance is the one from before a transfer or a bridge's arrival, `lending-position`
 and `perp-position` report an empty position with exit 0 and no error, and
 `liquidity-position` refuses an NFT minted since as not held at that block. Every
 read that pins a block therefore states `read_at`, beside its other fields. Its
@@ -1625,9 +1628,9 @@ number), `number` and `timestamp` are the resolved block's, and `age_seconds` is
 command's clock less that timestamp. No head is read for the age, so it is as good as
 the local clock and is negative when that clock is behind the block's. An empty
 position or an old balance with `"read_at": {"block": "finalized", ...}` may only be
-older than the action; read it again with `--block latest`, as after any executed
-action or bridge arrival. `ax bridge-status` reads two chains and keeps its own
-`read_at`, which names the tag and a block of each chain and states no age.
+older than the action; read it again without `--block`. `ax bridge-status` reads two
+chains and keeps its own `read_at`, which names the tag and a block of each chain and
+states no age.
 
 On HyperEVM (`eip155:999`), `finalized` is the head, and Alchemy runs a read
 pinned within about 128 to 192 blocks of its head at the next block. There a

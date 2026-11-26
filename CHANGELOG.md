@@ -22,12 +22,18 @@ its changelog is on the `v2` branch.
   more can follow the first step. No gas is estimated for a later step.
 
 ### Changed
+- Every `almanak ax` read defaults to `--block latest`, the head, and
+  `ax bridge-status` reads its outcome there too. `--block finalized` is stated to
+  read only final blocks. A read at the old default reported a balance from before a
+  transfer that had arrived, a quarter of an hour behind the head on a rollup. A
+  block at the head can still be replaced, so an arrival or an unfilled transfer
+  that `ax bridge-status` reports without `--block finalized` is not final. Its
+  `in_flight` note mentions a fill in a later block only for a read at `finalized`.
 - The agent skill reads a balance or a position after an action or a bridge's
   arrival with `--block latest`, reports the step count of a preview, and says that
   the later steps' gas is not quoted up front.
 - A position read says which block it read and why. `--help` of every `ax` read states
-  that `--block` defaults to `finalized`, that this block can trail the head by minutes
-  on a rollup and that a position just opened is read with `--block latest`;
+  its default and that `finalized` can trail the head by minutes on a rollup;
   `almanak markets --help` states its own default, `latest`. `ax lending-position`,
   `ax liquidity-position` and `ax perp-position` report `read_at`, whose `block` is the
   selector that chose the block, so an empty position read at an old block can be told
@@ -35,8 +41,7 @@ its changelog is on the `v2` branch.
   names the block read (`holds no NFT <token id> at block <number>`), and a
   `liquidity-position` read at `finalized` adds how to read the head; a direct action's
   refusal names the block only. Each entry of a direct action's `outcomes` states the
-  `block` its step was mined in. The default stays `finalized` and the accepted
-  selectors are unchanged (#38).
+  `block` its step was mined in. The accepted selectors are unchanged (#38).
 
 ## [3.4.1] - 2026-11-25
 

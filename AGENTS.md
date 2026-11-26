@@ -1083,7 +1083,8 @@ independently.
   credentials in its own process and serves only whitelisted reads over
   authenticated loopback. The execution gateway's token is never reused for
   reads. Without a transport flag, `ax` uses `ALMANAK_AX_GATEWAY_URL` and
-  `ALMANAK_AX_GATEWAY_AUTH_FILE`. `--block` defaults to `finalized`.
+  `ALMANAK_AX_GATEWAY_AUTH_FILE`. `--block` defaults to `latest`, the head;
+  `finalized` is stated explicitly, for `ax bridge-status` too.
 - Current contract: every `ax` read that pins a block states `read_at`: `block`,
   the selector that chose the block, the resolved block's `number` and
   `timestamp`, and `age_seconds`, the command's clock less that timestamp. It
@@ -1270,10 +1271,11 @@ independently.
 - Accepted: the blocks of `ax bridge-status`. The deposit is found
   at the source chain's latest block, because the operator holds its receipt and
   it decides no outcome. The outcome is read at the block `--block` names on each
-  chain, `finalized` by default or `latest`; the command takes no block number,
+  chain, `latest` by default or `finalized`; the command takes no block number,
   since one number names no block of two chains. A fill is therefore reported
-  as `in_flight` until its block is final, unless the operator asks for `latest`,
-  and the result names the tag and the blocks read.
+  as soon as it is mined, in a block that can still be replaced; with
+  `finalized` it is reported as `in_flight` until its block is final. The
+  result names the tag and the blocks read.
 - Current contract: `unfilled` is a destination block stamped after the fill
   deadline in which `fillStatuses` does not hold the relay as filled. It rests on
   the SpokePool refusing a late fill: `fillRelay` reverts with

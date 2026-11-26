@@ -206,7 +206,7 @@ def pinned_reads(probe: Probe, block: Block) -> dict:
 
 
 def reads_at_finalized(probe: Probe) -> dict:
-    """The default `--block finalized` of every `ax` read."""
+    """`--block finalized` of an `ax` read."""
     return pinned_reads(probe, probe.reads.pin_block("finalized"))
 
 

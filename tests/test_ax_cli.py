@@ -364,15 +364,16 @@ def help_text(capsys, *command):
     return " ".join(capsys.readouterr().out.split())
 
 
-def test_ax_help_names_the_block_forms_and_the_finalized_default(capsys):
+def test_ax_help_names_the_block_forms_and_the_latest_default(capsys):
     for subcommand in [*CONNECTORS, "liquidity-position", "balance"]:
         text = help_text(capsys, "ax", subcommand)
         assert "'finalized' or 'latest'" in text
-        assert "default 'finalized'" in text
-        # The default trails the head, so the help says how a fresh position is read.
-        assert "trail the head by minutes on a rollup" in text
-        assert "a position just opened is read with --block latest" in text
-        assert "default 'latest'" not in text
+        assert "default 'latest'" in text
+        # The help says what each tag costs: the head can be replaced, and the
+        # finalized block does not show what changed since.
+        assert "which can still be reorganized" in text
+        assert "'finalized' can trail the head by minutes on a rollup" in text
+        assert "default 'finalized'" not in text
 
 
 def test_markets_help_names_its_own_latest_default(capsys):
@@ -447,8 +448,8 @@ def test_ax_takes_the_read_gateway_from_the_session(monkeypatch, tmp_path):
         "http://127.0.0.1:8400",
         tmp_path / "session.token",
     )
-    # --block defaults to the finalized header.
-    assert args.block == "finalized"
+    # --block defaults to the head.
+    assert args.block == "latest"
     # Flags always win over the session.
     flagged = parse(["ax", "balance", "--asset", ASSET, "--account", ADDRESS, *GATEWAY])
     assert flagged.gateway_url == "http://127.0.0.1:8300"
@@ -523,7 +524,7 @@ def test_lending_markets_parse_with_bounded_counts():
     markets = ["ax", "lending-markets", "--connector", "morpho_blue", "--chain", "eip155:8453"]
     default = parse([*markets, "--asset", ASSET, *GATEWAY])
     assert (default.product, default.limit, default.offset) == ("ax-lending-markets", 10, 0)
-    assert (default.asset, default.collateral, default.block) == (ASSET, None, "finalized")
+    assert (default.asset, default.collateral, default.block) == (ASSET, None, "latest")
     assert default.include_unlisted is False
     assert parse([*markets, "--include-unlisted", *GATEWAY]).include_unlisted is True
     paged = parse([*markets, "--collateral", ASSET, "--limit", "20", "--offset", "500", *GATEWAY])
