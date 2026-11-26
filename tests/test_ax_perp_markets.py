@@ -224,6 +224,119 @@ def test_missing_labels_and_quotes_fail_loudly(resolved):
         read_gmx_market(FakeReader([]), request("BTC/USD"), BLOCK)
 
 
+AVALANCHE = Chain(chain_id=ChainId("eip155:43114"), environment="mainnet")
+AVALANCHE_BLOCK = Block(
+    chain=AVALANCHE, number=100816777, hash="0x" + "cd" * 32, timestamp=1_795_128_492
+)
+BTC_B = "0x" + "15" * 20
+WETH_E = "0x" + "49" * 20
+WAVAX = "0x" + "b3" * 20
+AVALANCHE_USDC = "0x" + "b9" * 20
+BTC_B_USDC_SHARE = "0x" + "fb" * 20
+BTC_B_SINGLE_SHARE = "0x" + "3c" * 20
+WETH_E_SHARE = "0x" + "b7" * 20
+WAVAX_USDC_SHARE = "0x" + "91" * 20
+WAVAX_SINGLE_SHARE = "0x" + "08" * 20
+AVALANCHE_DOGE_SHARE = "0x" + "89" * 20
+# The venue publishes these as BTC/USD, ETH/USD, AVAX/USD and DOGE/USD; the index
+# tokens' own symbols are BTC.b, WETH.e and WAVAX, as read at Avalanche block 100816777.
+AVALANCHE_MARKETS = [
+    (BTC_B_USDC_SHARE, BTC_B, BTC_B, AVALANCHE_USDC),
+    (BTC_B_SINGLE_SHARE, BTC_B, BTC_B, BTC_B),
+    (WETH_E_SHARE, WETH_E, WETH_E, AVALANCHE_USDC),
+    (WAVAX_USDC_SHARE, WAVAX, WAVAX, AVALANCHE_USDC),
+    (WAVAX_SINGLE_SHARE, WAVAX, WAVAX, WAVAX),
+    (AVALANCHE_DOGE_SHARE, synthetic_index(AVALANCHE.chain_id, "DOGE"), WAVAX, AVALANCHE_USDC),
+]
+
+
+class AvalancheReader(FakeReader):
+    symbols = {BTC_B: "BTC.b", WETH_E: "WETH.e", WAVAX: "WAVAX", AVALANCHE_USDC: "USDC"}
+
+    def __init__(self):
+        super().__init__(AVALANCHE_MARKETS)
+        self.chain = AVALANCHE
+
+    def _rpc(self, method, params):
+        assert method == "eth_getCode"
+        return "0x6001" if params[0] in self.symbols else "0x"
+
+    def call(self, target, signature, block, inputs=(), args=(), outputs=()):
+        if signature == "getAddressCount(bytes32)":
+            return (len(self._markets),)
+        if signature == "getMarkets(address,uint256,uint256)":
+            return (tuple(self._markets),)
+        assert signature == "symbol()"
+        return (self.symbols[target],)
+
+
+def avalanche(query):
+    return read_gmx_market(AvalancheReader(), request(query, "eip155:43114"), AVALANCHE_BLOCK)
+
+
+@pytest.mark.parametrize(
+    ("query", "share", "symbol"),
+    [
+        # The venue's own labels, verbatim.
+        ("BTC/USD [BTC-USDC]", BTC_B_USDC_SHARE, "BTC.b"),
+        ("BTC/USD [BTC-BTC]", BTC_B_SINGLE_SHARE, "BTC.b"),
+        ("AVAX/USD [AVAX-USDC]", WAVAX_USDC_SHARE, "WAVAX"),
+        ("AVAX/USD [AVAX-AVAX]", WAVAX_SINGLE_SHARE, "WAVAX"),
+        ("ETH/USD", WETH_E_SHARE, "WETH.e"),
+        # The venue's index label beside the collateral's on-chain symbols.
+        ("BTC/USD [BTC.b-USDC]", BTC_B_USDC_SHARE, "BTC.b"),
+        ("avax/usd [wavax-usdc]", WAVAX_USDC_SHARE, "WAVAX"),
+        # The on-chain symbols alone, as before.
+        ("BTC.b/USD [BTC.b-USDC]", BTC_B_USDC_SHARE, "BTC.b"),
+        ("WAVAX/USD [WAVAX]", WAVAX_SINGLE_SHARE, "WAVAX"),
+        ("DOGE/USD [AVAX-USDC]", AVALANCHE_DOGE_SHARE, "DOGE"),
+    ],
+)
+def test_avalanche_venue_labels_name_the_bridged_and_wrapped_index_tokens(
+    resolved, query, share, symbol
+):
+    output = avalanche(query)
+    assert resolved["selection"].market.reference == share
+    # The reported symbol stays the one read on-chain, never the alias.
+    assert output["observation"]["index_symbol"] == symbol
+
+
+@pytest.mark.parametrize(
+    ("query", "shares"),
+    [
+        ("BTC/USD", (BTC_B_USDC_SHARE, BTC_B_SINGLE_SHARE)),
+        ("AVAX/USD", (WAVAX_USDC_SHARE, WAVAX_SINGLE_SHARE)),
+    ],
+)
+def test_an_avalanche_label_shared_by_several_markets_is_refused_with_its_candidates(
+    resolved, query, shares
+):
+    with pytest.raises(DataError, match="ambiguous") as failure:
+        avalanche(query)
+    assert failure.value.kind == "ambiguous" and "selection" not in resolved
+    for share in shares:
+        assert share in str(failure.value)
+
+
+def test_an_alias_belongs_to_its_chain_and_never_widens_a_label(resolved):
+    # Arbitrum's wrapped symbols are not Avalanche's, and an alias is one-way: the
+    # token symbol does not name another token's market.
+    for query in ("WBTC/USD", "WETH/USD", "BTC/USD [WBTC-USDC]", "AVAX/USD [BTC-USDC]", "SOL/USD"):
+        with pytest.raises(DataError, match="no GMX V2 market matches"):
+            avalanche(query)
+    for query in ("AVAX/USD", "BTC.b/USD", "WETH.e/USD", "ETH/USD [WETH.e-USDC]"):
+        with pytest.raises(DataError, match="no GMX V2 market matches"):
+            read_gmx_market(FakeReader(MARKETS), request(query), BLOCK)
+    assert "selection" not in resolved
+
+
+def test_the_venue_collateral_alias_selects_an_arbitrum_market(resolved):
+    read_gmx_market(FakeReader(MARKETS), request("BTC/USD [BTC-USDC]"), BLOCK)
+    assert resolved["selection"].market.reference == BTC_USDC_SHARE
+    read_gmx_market(FakeReader(MARKETS), request("DOGE/USD [ETH-USDC]"), BLOCK)
+    assert resolved["selection"].market.reference == DOGE_SHARE
+
+
 def test_perp_markets_passes_request_and_block_through(monkeypatch, tmp_path):
     config = tmp_path / "gmx.json"
     config.write_text(json.dumps({"chain": "eip155:42161", "query": "BTC/USD"}))
@@ -251,3 +364,21 @@ def test_perp_markets_passes_request_and_block_through(monkeypatch, tmp_path):
     assert seen["pinned"] == BLOCK
     assert seen["request"].chain == ChainId("eip155:42161")
     assert seen["request"].query == "BTC/USD"
+
+
+def test_an_alias_names_its_own_chains_symbol_and_no_other_chains():
+    """Each chain's table is its own: Arbitrum's wrapped symbol is no alias on Avalanche,
+    and a label still names a token whose on-chain symbol it is."""
+    arbitrum, avalanche = ChainId("eip155:42161"), ChainId("eip155:43114")
+    assert market_request.names_token(arbitrum, "BTC", "WBTC")
+    assert market_request.names_token(avalanche, "btc", "BTC.b")
+    assert not market_request.names_token(avalanche, "BTC", "WBTC")
+    assert not market_request.names_token(arbitrum, "BTC", "BTC.b")
+    assert not market_request.names_token(arbitrum, "AVAX", "WAVAX")
+    # The literal symbol is named with or without an alias, on a chain with no table too.
+    assert market_request.names_token(avalanche, "BTC", "BTC")
+    assert market_request.names_token(ChainId("eip155:1"), "LINK", "link")
+    assert not market_request.names_token(ChainId("eip155:1"), "BTC", "WBTC")
+    assert market_request.venue_label(avalanche, "wavax") == "AVAX"
+    assert market_request.venue_label(arbitrum, "WAVAX") is None
+    assert market_request.venue_label(avalanche, "WBTC") is None

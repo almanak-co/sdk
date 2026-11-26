@@ -64,6 +64,25 @@ its changelog is on the `v2` branch.
   refusal names the block only. Each entry of a direct action's `outcomes` states the
   `block` its step was mined in. The accepted selectors are unchanged (#38).
 
+### Fixed
+- `almanak ax lending-markets --connector aave_v4` counts a Spoke that reverts
+  `getReserveCount()` in `source.without_reserves` whichever JSON-RPC code the node
+  answers the revert with. Avalanche nodes answer a revert without data as `-32000`
+  `execution reverted`, so every empty Spoke there was named in `source.unreadable`. A
+  read the node refused or could not serve under the same code is still unreadable.
+- `almanak ax perp-markets --connector gmx_v2` resolves the venue's Avalanche labels:
+  `BTC/USD`, `ETH/USD` and `AVAX/USD` name the markets indexed by BTC.b, WETH.e and
+  WAVAX, as `BTC/USD` and `ETH/USD` already named WBTC and WETH on Arbitrum. The
+  `[LONG-SHORT]` collateral notation takes the same labels beside the on-chain symbols,
+  for example `AVAX/USD [AVAX-USDC]`. Aliases are per chain, and a label that matches
+  several markets is still refused with its candidates.
+- A direct `ax` action other than a bridge re-sends a transient read failure while it
+  resolves its market and reads the wallet's position, each read within the budget an
+  execution read has. A load-balanced endpoint that had not yet served the head
+  (`provider has not served the block`) ended the action before planning. Nothing was
+  signed, and no submission is ever re-sent. `ax bridge` and `ax revoke-bridge` resolve
+  their route without this budget.
+
 ## [3.4.1] - 2026-11-25
 
 ### Changed

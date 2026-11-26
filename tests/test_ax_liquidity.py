@@ -961,7 +961,8 @@ def test_the_command_builds_the_deployment_through_the_connectors_resolver(conne
             return block if selector == "latest" else super().pin_block(selector)
 
     monkeypatch.setattr(
-        "almanak.gateway.ethereum.EthereumReader", lambda chain, endpoint: Head(market, rows, nfts)
+        "almanak.gateway.ethereum.EthereumReader",
+        lambda chain, endpoint, retry_budget=None: Head(market, rows, nfts),
     )
     wallet = {"account": WALLET.account, "address": WALLET.address}
     model = ax_actions.resolution(connector).MarketSelection
