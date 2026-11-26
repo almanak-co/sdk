@@ -1120,7 +1120,7 @@ def test_the_position_read_is_an_observation_with_the_reads_own_transports(
     assert (args.product, args.ax_command, args.block) == (
         "ax-liquidity-position",
         "liquidity-position",
-        "finalized",
+        "latest",
     )
     stated = ax.parse_request(args)
     assert stated == PositionRequest(
@@ -1914,11 +1914,10 @@ def missing_refusal(connector, monkeypatch, *block):
     return str(refused.value), seen, market
 
 
-@pytest.mark.parametrize("block", [(), ("--block", "finalized")])
 def test_a_missing_nft_read_at_finalized_names_the_block_and_how_to_read_the_head(
-    connector, monkeypatch, block
+    connector, monkeypatch
 ):
-    message, seen, market = missing_refusal(connector, monkeypatch, *block)
+    message, seen, market = missing_refusal(connector, monkeypatch, "--block", "finalized")
     # The selector the caller stated is the first pin; the reader pins its number after.
     assert seen[0] == "finalized"
     assert f"holds no NFT {TOKEN} at block {market.block.number}; " in message
@@ -1926,12 +1925,12 @@ def test_a_missing_nft_read_at_finalized_names_the_block_and_how_to_read_the_hea
     assert message.endswith("a position just opened is read with --block latest")
 
 
-@pytest.mark.parametrize("selector", ["latest", "25908472"])
+@pytest.mark.parametrize("block", [(), ("--block", "latest"), ("--block", "25908472")])
 def test_a_missing_nft_read_at_the_head_or_a_number_gives_no_retry_hint(
-    connector, monkeypatch, selector
+    connector, monkeypatch, block
 ):
-    message, seen, market = missing_refusal(connector, monkeypatch, "--block", selector)
-    assert str(seen[0]) == selector
+    message, seen, market = missing_refusal(connector, monkeypatch, *block)
+    assert str(seen[0]) == (block[1] if block else "latest")
     assert message.endswith(f"holds no NFT {TOKEN} at block {market.block.number}")
     assert "finalized" not in message and "--block" not in message
 

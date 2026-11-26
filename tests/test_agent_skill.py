@@ -1830,11 +1830,13 @@ def test_a_native_bridge_is_stated_with_its_payout_its_refund_and_its_funding():
 
 
 def test_a_read_after_an_action_or_an_arrival_asks_for_the_latest_block():
-    """A read without `--block` is the finalized block; the skill says so once and reads
-    what an action or an arrival changed at `latest`."""
+    """A read without `--block` is the latest block; the skill says so once, says what a
+    read at `finalized` misses, and reads what an action or an arrival changed at
+    `latest`."""
     stated = " ".join(section("Public endpoints").split())
     for statement in (
-        "A read without `--block` is the chain's finalized block, on every transport",
+        "A read without `--block` is the chain's latest block, on every transport",
+        "A read with `--block finalized` is the finalized block",
         "trails the newest one by minutes, on a rollup by a quarter of an hour or more",
         "says which block it is under `read_at`: `block` is the selector that chose it",
         "`age_seconds` how old that block was when the command ran",
