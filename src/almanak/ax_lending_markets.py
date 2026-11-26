@@ -49,10 +49,6 @@ MARKET_STATE = ("uint128",) * 6
 # empty; a listing that would read more than the cap is refused.
 MAX_STATE_READS = 5000
 # The fact fields that name assets; each is reported beside its on-chain symbol.
-# A Spoke without reserves reverts `getReserveCount()` (JSON-RPC 3, as every treasury
-# Spoke on Ethereum does). Throttles, undecodable answers and transport failures are
-# no such answer.
-SPOKE_REVERT = 3
 ASSET_FACTS = ("asset", "base_asset", "collateral_assets", "loan_asset", "collateral_asset")
 
 
@@ -358,8 +354,11 @@ def spoke_counts(reader, block: Block, spokes: list[str]) -> tuple[dict[str, int
     for spoke, answer in zip(spokes, answers, strict=True):
         if not isinstance(answer, DataError):
             counts[spoke] = answer
-        elif answer.kind == "rpc" and answer.code == SPOKE_REVERT:
+        elif answer.kind == "rpc" and answer.reverted:
             # Hubs also serve treasury and tokenization Spokes, which revert the call.
+            # The reader marks a revert whichever code the node answers it with (3, or
+            # -32000 "execution reverted" without data). A throttle, an undecodable
+            # answer, a transport failure or another -32000 refusal is no such answer.
             without_reserves += 1
         else:
             unreadable.append({"spoke": spoke, **refusal(answer)})
