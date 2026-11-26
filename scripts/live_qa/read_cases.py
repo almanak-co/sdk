@@ -4,7 +4,7 @@ Every address here is a public contract. Accounts are contracts too (a pool, a
 wrapped-native token, the deposit contract), chosen because they hold a balance;
 no case names a person's wallet. A case states the correct behavior. Where the
 SDK is known not to meet it yet, the case carries a `KnownIssue` and keeps failing
-until the defect is fixed.
+until the defect is fixed. No case carries one now.
 
 Not covered, and why:
 
@@ -26,7 +26,7 @@ from almanak.connectors.aave_v3.networks import POOLS as AAVE_V3_POOLS
 from almanak.connectors.sparklend.networks import POOLS as SPARKLEND_POOLS
 from almanak.gateway.providers import PUBLIC_RPC
 from scripts.live_qa import checks
-from scripts.live_qa.reads import KnownIssue, ReadCase, Refusal
+from scripts.live_qa.reads import ReadCase, Refusal
 
 ETHEREUM = ChainId("eip155:1")
 AVALANCHE = ChainId("eip155:43114")
@@ -56,19 +56,6 @@ HYPEREVM_WHYPE = "eip155:999/erc20:0x5555555555555555555555555555555555555555"
 
 GMX_BTC_USDC = "0xfb02132333a79c8b5bd0b64e3abcca5f7faf2937"
 GMX_WAVAX_USDC = "0x913c1f46b48b3ed35e7dc3cf754d4ae8499f31cf"
-
-AAVE_V4_EMPTY_SPOKES = KnownIssue(
-    "the Aave V4 listing reports Avalanche Spokes without reserves as unreadable: the"
-    " public endpoint answers their getReserveCount() revert with JSON-RPC -32000, and"
-    " the listing recognizes a revert only by code 3",
-    "revert getReserveCount()",
-)
-GMX_AVALANCHE_LABELS = KnownIssue(
-    "GMX Avalanche markets are indexed by BTC.b and WAVAX, so the BTC/USD and"
-    " AVAX/USD labels the help text suggests match nothing",
-    "not_found",
-    refusal="not_found",
-)
 
 
 def balance(asset: str, account: str) -> tuple[str, ...]:
@@ -246,7 +233,6 @@ AVALANCHE_CASES = (
         AVALANCHE,
         markets("aave_v4", AVALANCHE),
         checks.aave_v4_listing(AVALANCHE),
-        known_issue=AAVE_V4_EMPTY_SPOKES,
     ),
     ReadCase(
         "lending-reserve/aave_v3/avalanche-usdc",
@@ -278,28 +264,33 @@ AVALANCHE_CASES = (
         gmx("WAVAX/USD [WAVAX-USDC]"),
         checks.gmx_market(AVALANCHE, GMX_WAVAX_USDC, "WAVAX"),
     ),
-    # The venue's own labels. Finding the market or naming the candidates is correct;
-    # reporting that nothing matches is the defect.
+    # The venue's own labels, which name the markets indexed by BTC.b and WAVAX. A
+    # label several markets share is refused with its candidates, never bound.
     ReadCase(
         "perp-markets/gmx_v2/avalanche-btc-usd-label",
         AVALANCHE,
         gmx("BTC/USD [BTC.b-USDC]"),
         checks.gmx_market(AVALANCHE, GMX_BTC_USDC, "BTC.b"),
-        known_issue=GMX_AVALANCHE_LABELS,
+    ),
+    ReadCase(
+        "perp-markets/gmx_v2/avalanche-avax-usd-venue-label",
+        AVALANCHE,
+        gmx("AVAX/USD [AVAX-USDC]"),
+        checks.gmx_market(AVALANCHE, GMX_WAVAX_USDC, "WAVAX"),
     ),
     ReadCase(
         "perp-markets/gmx_v2/avalanche-btc-usd-bare-label",
         AVALANCHE,
         gmx("BTC/USD"),
-        refusals=(Refusal("ambiguous", "BTC.b-USDC"),),
-        known_issue=GMX_AVALANCHE_LABELS,
+        succeeds=False,
+        refusals=(Refusal("ambiguous", f"{GMX_BTC_USDC} [BTC.b-USDC]"),),
     ),
     ReadCase(
         "perp-markets/gmx_v2/avalanche-avax-usd-bare-label",
         AVALANCHE,
         gmx("AVAX/USD"),
-        refusals=(Refusal("ambiguous", "WAVAX-USDC"),),
-        known_issue=GMX_AVALANCHE_LABELS,
+        succeeds=False,
+        refusals=(Refusal("ambiguous", f"{GMX_WAVAX_USDC} [WAVAX-USDC]"),),
     ),
 )
 

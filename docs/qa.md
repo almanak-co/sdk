@@ -470,8 +470,8 @@ Aave V3 or SparkLend reserve the Pool the connector pins on the chain, since the
 request names none. A read of another reserve or pool fails, however well its
 data agrees with the chain. A native balance is held to 18 decimals. That a market is `verified` is the
 SDK's own statement; the direct reads check the identity it reports, not every
-fact the SDK verified. The GMX bare-label cases and the HyperCore case have no
-direct read.
+fact the SDK verified. The GMX bare-label cases, which state a refusal, and the HyperCore case have
+no direct read.
 
 Outcomes. Each case on each endpoint ends as one of:
 
@@ -500,19 +500,24 @@ report's `known_issue` column says whether the known defect reproduced, was not
 observed, or no longer reproduces, in which case its marker is removed. A known
 issue that shows as a refusal names its refusal kind, and only a refusal of that
 kind reproduces it; one that shows as a check's finding is reproduced by findings
-only. The catalog currently holds two:
+only. The catalog holds none now. The two it held were fixed on main in 3.4.2,
+and their markers were removed:
 
-- GMX V2 on Avalanche indexes its markets by `BTC.b` and `WAVAX`, so the
-  `BTC/USD` and `AVAX/USD` labels match nothing. `BTC.b/USD [BTC.b-USDC]` and
-  `WAVAX/USD [WAVAX-USDC]` resolve and are held as passing controls.
+- GMX V2 on Avalanche indexes its markets by `BTC.b` and `WAVAX`, and the
+  venue's `BTC/USD` and `AVAX/USD` labels matched nothing. They now resolve. The
+  label with its collateral, `BTC/USD [BTC.b-USDC]` and `AVAX/USD [AVAX-USDC]`,
+  is held to the one market, and each bare label, which names a USDC market and a
+  single-collateral one, is held to an `ambiguous` refusal that names the USDC
+  market among its candidates. The on-chain forms `BTC.b/USD [BTC.b-USDC]` and
+  `WAVAX/USD [WAVAX-USDC]` stay as controls.
 
-- `ax lending-markets --connector aave_v4` on Avalanche reports the Spokes that
-  hold no reserves as `unreadable`. Such a Spoke reverts `getReserveCount()`.
-  The public endpoint reports that revert with JSON-RPC code -32000, and the
-  listing recognizes a revert only by code 3, so it takes the answer for an
-  endpoint failure. The case confirms each revert with a direct read before it
-  fails; a Spoke the endpoint really did not answer blocks the case only when no
-  revert was confirmed.
+- `ax lending-markets --connector aave_v4` on Avalanche named the Spokes that
+  hold no reserves in `source.unreadable`, because the endpoint answers their
+  `getReserveCount()` revert with JSON-RPC code -32000. They are now counted in
+  `source.without_reserves`, and the case is an ordinary listing that names
+  nothing unreadable. Its check still confirms each Spoke the listing calls
+  unreadable with a direct read, so a Spoke without reserves named there again
+  fails as a finding.
 
 Not covered: `ax lending-markets --connector compound_v3` reads the
 Configurator's whole event history in one request, which the public endpoints

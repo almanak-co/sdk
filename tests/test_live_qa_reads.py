@@ -584,18 +584,110 @@ def test_every_case_is_a_command_the_cli_accepts(case, tmp_path, monkeypatch):
     assert args.public_rpc == "publicnode" and args.env_file is None
 
 
-def test_the_bugs_found_by_hand_stay_in_the_catalog_as_known_issues():
+CATALOG = {case.id: case for case in CASES}
+GMX_BTC_USDC = "0xfb02132333a79c8b5bd0b64e3abcca5f7faf2937"
+GMX_WAVAX_USDC = "0x913c1f46b48b3ed35e7dc3cf754d4ae8499f31cf"
+
+
+def test_the_defects_main_fixed_carry_no_known_issue_marker():
+    """Main admits the Aave V3 Pool revision, reads the Aave V4 Spokes without reserves
+    and resolves the GMX Avalanche venue labels, so none of those cases carries a marker."""
     known = {case.id: case.known_issue for case in CASES if case.known_issue is not None}
-    # Main admits the Aave V3 Pool revision the reads refused, so that marker is gone.
-    assert not [name for name in known if "/aave_v3/" in name]
-    gmx = [name for name in known if name.startswith("perp-markets/gmx_v2/avalanche")]
-    assert known["lending-markets/aave_v4/avalanche"].signature == "revert getReserveCount()"
-    assert len(gmx) >= 2
-    queries = {case.arguments[-1] for case in CASES if case.id in gmx}
-    assert {"BTC/USD", "AVAX/USD"} <= queries
-    # The names the venue really uses are held as passing controls beside them.
-    controls = {case.arguments[-1] for case in CASES if "gmx_v2" in case.id} - queries
-    assert {"BTC.b/USD [BTC.b-USDC]", "WAVAX/USD [WAVAX-USDC]"} <= controls
+    fixed = ("/aave_v3/", "lending-markets/aave_v4/", "perp-markets/gmx_v2/avalanche")
+    assert not [name for name in known if any(part in name for part in fixed)]
+    signatures = {issue.signature for issue in known.values()}
+    assert not signatures & {"revert getReserveCount()", "not_found", "deployment_changed"}
+
+
+def test_the_aave_v4_avalanche_listing_is_an_ordinary_complete_listing():
+    """A Spoke that reverts `getReserveCount()` is counted in `source.without_reserves`;
+    the listing names nothing unreadable and every market it lists is verified."""
+    case = CATALOG["lending-markets/aave_v4/avalanche"]
+    assert case.succeeds and case.refusals == () and case.known_issue is None
+    assert case.check is not None
+    avalanche_asset = {"asset": f"eip155:43114/erc20:{MARKET_ASSET}", "symbol": "TKN"}
+    listed = listing([market(spoke="0xspoke", reserve_id=3, hub=HUB, asset=avalanche_asset)])
+    listed["source"]["without_reserves"] = 4
+    agreeing = FakeRpc({"getReserve(uint256)": (MARKET_ASSET, HUB, 4, 18), "decimals()": (18,)})
+    assert case.check(listed, agreeing) == []
+    # An empty Spoke named unreadable again is the defect main fixed, and fails as a finding.
+    misread = {**listed, "source": {**listed["source"], "unreadable": [{"spoke": "0x1"}]}}
+    (finding,) = case.check(misread, FakeRpc(agreeing.answers, reverting=("0x1",)))
+    assert "revert getReserveCount()" in finding and "0x1" in finding
+
+
+def gmx_observation(share, symbol):
+    index = {"BTC.b": "0x" + "15" * 20, "WAVAX": "0x" + "b3" * 20}[symbol]
+    return {
+        "observation": {
+            "share": f"eip155:43114/erc20:{share}",
+            "index": f"eip155:43114/erc20:{index}",
+            "index_symbol": symbol,
+            "block": 7,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("case_id", "query", "share", "symbol"),
+    [
+        ("avalanche-btc-usd-label", "BTC/USD [BTC.b-USDC]", GMX_BTC_USDC, "BTC.b"),
+        ("avalanche-avax-usd-venue-label", "AVAX/USD [AVAX-USDC]", GMX_WAVAX_USDC, "WAVAX"),
+        # The on-chain symbols stay passing controls beside the venue's labels.
+        ("avalanche-btc.b-label", "BTC.b/USD [BTC.b-USDC]", GMX_BTC_USDC, "BTC.b"),
+        ("avalanche-wavax-label", "WAVAX/USD [WAVAX-USDC]", GMX_WAVAX_USDC, "WAVAX"),
+    ],
+)
+def test_a_gmx_avalanche_label_with_its_collateral_resolves_the_one_market(
+    case_id, query, share, symbol
+):
+    case = CATALOG[f"perp-markets/gmx_v2/{case_id}"]
+    assert case.arguments[-1] == query and case.succeeds and case.known_issue is None
+    assert case.check is not None
+    named = FakeRpc({"symbol()": (symbol,)})
+    assert case.check(gmx_observation(share, symbol), named) == []
+    other = GMX_WAVAX_USDC if share == GMX_BTC_USDC else GMX_BTC_USDC
+    assert case.check(gmx_observation(other, symbol), named)
+    # "Nothing matches" is the defect main fixed, and fails.
+    nothing = {"error": "not_found", "message": f"no GMX V2 market matches {query!r}"}
+    assert reads.judge_refusal(case, nothing).status == "fail"
+
+
+@pytest.mark.parametrize(
+    ("case_id", "query", "share", "collateral"),
+    [
+        ("avalanche-btc-usd-bare-label", "BTC/USD", GMX_BTC_USDC, "BTC.b-USDC"),
+        ("avalanche-avax-usd-bare-label", "AVAX/USD", GMX_WAVAX_USDC, "WAVAX-USDC"),
+    ],
+)
+def test_a_bare_gmx_avalanche_label_is_refused_with_its_candidates(
+    case_id, query, share, collateral
+):
+    """Each bare label names a USDC market and a single-collateral one, so binding either
+    silently, or finding nothing, is wrong."""
+    case = CATALOG[f"perp-markets/gmx_v2/{case_id}"]
+    assert case.arguments[-1] == query and not case.succeeds and case.known_issue is None
+    assert {refusal.error for refusal in case.refusals} == {"ambiguous"}
+    message = (
+        f"GMX V2 market query {query!r} is ambiguous: matches 2 markets:"
+        f" {share} [{collateral}], 0x{'3c' * 20} [{collateral.split('-')[0]}-"
+        f"{collateral.split('-')[0]}]"
+    )
+    assert reads.judge_refusal(case, {"error": "ambiguous", "message": message}).status == "pass"
+    elsewhere = message.replace(share, "0x" + "99" * 20)
+    assert reads.judge_refusal(case, {"error": "ambiguous", "message": elsewhere}).status == "fail"
+    nothing = {"error": "not_found", "message": f"no GMX V2 market matches {query!r}"}
+    assert reads.judge_refusal(case, nothing).status == "fail"
+    bound = reads.judge_output(case, gmx_observation(share, "BTC.b"), FakeRpc())
+    assert bound.status == "fail"
+
+
+def test_the_qa_guide_states_the_defects_main_fixed_as_fixed():
+    text = (ROOT / "docs/qa.md").read_text()
+    section = text[text.index("Known issues. A defect") : text.index("Not covered: `ax lending")]
+    assert "The catalog holds none now" in section and "fixed on main in 3.4.2" in section
+    for stale in ("currently holds", "labels match nothing", "recognizes a revert only by"):
+        assert stale not in section, stale
 
 
 def test_a_known_issue_case_states_the_correct_behavior_not_the_bug():
