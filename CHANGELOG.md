@@ -8,6 +8,8 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+## [3.4.2] - 2026-11-26
+
 ### Added
 - `almanak ax bridge` sends native ETH and delivers native ETH through Across, from
   a plain wallet to a plain recipient, when `--asset` and `--destination-asset` both
