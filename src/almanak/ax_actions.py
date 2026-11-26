@@ -674,6 +674,7 @@ def perform(
             "position_before": position(before),
             "first_step": first,
             **noted,
+            **stated_steps(binding, runtime.journal, first["operation"]["kind"]),
             **stated_details(binding, service.backend, runtime.journal),
         }
         interrupt()
@@ -697,6 +698,45 @@ def stated_details(binding, backend, journal) -> dict:
     never costs another connector its preview.
     """
     return {} if binding.details is None else binding.details(backend, journal.load())
+
+
+FIRST_GAS_ONLY = (
+    "Only the first step's gas is quoted, in `first_step`: a later step cannot be"
+    " simulated before the earlier one is mined, so its gas is not known in a preview."
+    " Each step is its own transaction and pays its own gas."
+)
+
+
+def stated_steps(binding, journal, first: str) -> dict:
+    """The steps the admitted request sends, in order by kind, and what gas is quoted.
+
+    `steps` is the connector's own statement, from the observation the first step was
+    planned on, and is present only where that decides every step and agrees with the
+    step the gateway planned. It is the planned sequence, not a promise: a later step
+    can still be refused, which the note says. Elsewhere only the first step is known,
+    and `steps_note` says so. A later step is planned again once the earlier one is
+    mined, and no gas is estimated for it here.
+    """
+    kinds = None if binding.steps is None else binding.steps(journal.load())
+    if not kinds or kinds[0] != first:
+        return {"steps_note": f"The first step is `{first}`. {UNLISTED} {FIRST_GAS_ONLY}"}
+    if len(kinds) == 1:
+        note = f"This request plans one transaction: {first}. Its gas is quoted in `first_step`."
+        return {"steps": list(kinds), "steps_note": note}
+    listed = ", then ".join(kinds)
+    count = f"This request plans {len(kinds)} transactions, in order: {listed}."
+    return {"steps": list(kinds), "steps_note": f"{count} {AS_PLANNED} {FIRST_GAS_ONLY}"}
+
+
+AS_PLANNED = (
+    "That is what it sends when nothing is refused and nothing changes in between: each"
+    " later step is planned again once the earlier one is mined, and a later step that"
+    " is refused leaves the earlier ones done."
+)
+UNLISTED = (
+    "The later steps of this request are not listed in a preview: more can follow, such"
+    " as the action after an approval or a revocation after the action."
+)
 
 
 def executed(runtime, start: int, interrupt) -> dict:

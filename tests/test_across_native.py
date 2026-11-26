@@ -1065,7 +1065,7 @@ def preview(config=CONFIG) -> dict:
     )
     decision = SimpleNamespace(intent=config.bridge(ALLOCATION, AMOUNT), identity="0" * 32)
     planned = SimpleNamespace(decision=decision, plan=SimpleNamespace(before=seen(config)))
-    return across_direct.details(gateway, planned)
+    return {"steps": across_direct.steps(planned), **across_direct.details(gateway, planned)}
 
 
 def test_the_preview_states_what_is_sent_paid_and_refunded_before_anything_is_signed():
