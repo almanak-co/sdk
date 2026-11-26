@@ -1815,3 +1815,33 @@ def test_a_public_endpoint_that_serves_no_transaction_is_named_with_its_chain(mo
     with pytest.raises(DataError) as error:
         status(monkeypatch, near, far)
     assert str(error.value) == "the deposit's transaction is not served by the endpoint"
+
+
+def retained_fields() -> dict:
+    """The record's own values, so the direct selection keeps its type."""
+    return {name: getattr(RESOLVED, name) for name in ResolvedRoute.model_fields}
+
+
+@pytest.mark.parametrize(
+    "dropped",
+    [
+        {"wrapped_native": None},
+        {"destination_wrapped_native": None},
+        {"wrapped_native": None, "destination_wrapped_native": None},
+    ],
+)
+def test_a_native_record_missing_a_wrapped_token_does_not_load_as_a_token_route(dropped):
+    """A record with one address, or none, would otherwise build a route without its
+    wrapped tokens."""
+    with pytest.raises(ValueError, match="retains a pool's wrapped native token exactly"):
+        ResolvedRoute(**{**retained_fields(), **dropped})
+
+
+def test_a_native_record_not_yet_completed_retains_the_source_token_alone():
+    source = retained_fields()
+    for key in ("destination", "destination_block", "destination_pool"):
+        source[key] = None
+    with pytest.raises(ValueError, match="retains a pool's wrapped native token exactly"):
+        ResolvedRoute(**source)
+    source["destination_wrapped_native"] = None
+    assert ResolvedRoute(**source).wrapped_native == WETH.reference

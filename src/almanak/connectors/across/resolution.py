@@ -108,7 +108,20 @@ class ResolvedRoute(Model):
             raise ValueError("resolved Across route has mixed chain or anchor scope")
         if self.asset.identifier != self.selection.asset:
             raise ValueError("resolved Across route differs from its authored asset")
+        self.wrapped_scope()
         return self
+
+    def wrapped_scope(self):
+        """A native route retains each pool's wrapped native token with that pool, and a
+        token route retains none: a record with one of the two would load as a token route."""
+        native = self.selection.native
+        expected = (native, native and self.destination_pool is not None)
+        retained = (self.wrapped_native is not None, self.destination_wrapped_native is not None)
+        if retained != expected:
+            raise ValueError(
+                "a resolved Across route retains a pool's wrapped native token exactly "
+                "when it is a native route and that pool was read"
+            )
 
     def destination_scope(self, destination: Asset, anchor: Block):
         if (

@@ -1001,8 +1001,9 @@ ETH, name the native asset.
 
 The recipient check is the command's, made once on the destination chain before
 signing, and not on-chain enforcement. The SpokePool decides the form of the payout
-when the fill lands: an address that gains contract code between the check and the
-fill is paid the wrapped token. The pool sends native ETH with a plain value
+when the fill lands: an address that gains contract code other than an EIP-7702
+delegation between the check and the fill is paid the wrapped token, and one that
+gains only a delegation is still paid native ETH. The pool sends native ETH with a plain value
 transfer, so a recipient that rejects ETH leaves the transfer unfilled until its
 refund.
 

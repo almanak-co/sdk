@@ -717,8 +717,10 @@ independently.
   before anything is planned when its recipient holds code on the destination
   chain, unless that code is an EIP-7702 delegation, which the SpokePool treats
   as a plain account. Nothing overrides the refusal. The SpokePool decides the
-  payout when the fill lands, so an address that gains code after the check is
-  paid the wrapped token, and a recipient that rejects native value leaves the
+  payout when the fill lands, so an address that holds contract code other
+  than an EIP-7702 delegation at that time is paid the wrapped token, an
+  address that gained only a delegation is still paid the native asset, and a
+  recipient that rejects native value leaves the
   transfer unfilled. The check is the command's own, made once, and never
   on-chain enforcement.
 - Proposed, not accepted: the arrival evidence rule of `ax bridge-status`. A
