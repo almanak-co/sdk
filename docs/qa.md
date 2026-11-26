@@ -629,7 +629,9 @@ position is empty, and writes `summary.md`, with each transaction hash, and
 It stops and exits 1, leaving the rest to you, when:
 
 - the supply preview is refused, or the wallet already holds a position in the
-  market, since the withdrawal would take all of it. Nothing was signed.
+  market, since the withdrawal would take all of it, or the preview's
+  `position_before` lacks `supplied_shares` or `debt_shares`, so the check cannot
+  tell whether it holds one. Nothing was signed.
 - the supply did not complete. Its approval may have been sent, and so may the
   supply itself. Do not run the check again: read `outcomes` and `refused`, and
   resolve a kept record with `almanak ax recover` as
@@ -637,9 +639,16 @@ It stops and exits 1, leaving the rest to you, when:
   signed supply or find it mined, so read the position with
   `ax lending-position` afterwards, and withdraw with `almanak ax withdraw` if
   the amount is supplied.
-- the wallet's position changed between the preview and the supply. The
-  withdrawal is not run, since it would take more than the check supplied. The
-  supplied amount is still in the market.
+- the supply's `position_before` reports shares other than zero: the wallet's
+  position changed between the preview and the supply. The withdrawal is not
+  run, since it would take more than the check supplied. The supplied amount is
+  still in the market.
+- the supply's `position_before` lacks `supplied_shares` or `debt_shares`. The
+  check could not compare it with the preview, and the report says so; that is
+  no evidence that the position changed, nor that it was empty. The withdrawal
+  is not run, since a full withdrawal takes whatever the position holds. The
+  supplied amount may still be in the market: read the position with
+  `ax lending-position` before recovering it with `almanak ax withdraw`.
 - the withdrawal preview was refused. Nothing more was signed and the supplied
   amount is still in the market; `almanak ax withdraw` for that market returns it
   once the reason is resolved.
@@ -661,6 +670,9 @@ It stops and exits 1, leaving the rest to you, when:
   record, which refuses later actions for the wallet: list the kept records with
   `almanak ax recover`, resolve one if kept, then read the position with
   `ax lending-position` before deciding anything.
+- the withdrawal completed, but its `position_after` reports shares other than
+  zero, or lacks them, so the check could not confirm the position is empty.
+  Read the position with `ax lending-position`.
 
 A run stopped by an exception, Ctrl-C included, still writes `summary.md` and
 `writes.json` before it ends: every command that returned, with its transactions,

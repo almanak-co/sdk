@@ -368,6 +368,52 @@ def test_a_position_that_appeared_after_the_preview_is_never_withdrawn(wallet, t
     assert "THE SUPPLIED AMOUNT IS STILL IN THE MARKET" in said
 
 
+def test_missing_shares_before_the_supply_are_not_read_as_a_change(wallet, tmp_path):
+    """A report without shares is no measured position: neither empty nor changed."""
+    request = request_for(wallet, execute=True, confirm=PHRASE)
+    for position_before in (None, {}, {"supplied_shares": "0"}, {"debt_shares": "0"}):
+        supplied = executed(["approve", "supply"], POSITION_HELD)
+        supplied["position_before"] = position_before
+        almanak = round_trip(supply_execute=supplied)
+        code, said, output = check(request, SPEND, almanak, tmp_path)
+        assert code == 1 and almanak.sent == ["supply"] and len(almanak.commands) == 2
+        verdict = json.loads((output / "writes.json").read_text())["verdict"]
+        assert "could not compare" in verdict and "lacks its shares" in verdict
+        assert "THE SUPPLIED AMOUNT MAY STILL BE IN THE MARKET" in verdict
+        assert "almanak ax lending-position" in verdict
+        assert "changed" not in verdict and "IS STILL IN THE MARKET" not in verdict, verdict
+    # One share field other than zero is a position, whatever the other reports.
+    for position_before in ({"supplied_shares": "5"}, {"supplied_shares": "0", "debt_shares": "3"}):
+        supplied = executed(["approve", "supply"], POSITION_HELD)
+        supplied["position_before"] = position_before
+        almanak = round_trip(supply_execute=supplied)
+        code, said, _ = check(request, SPEND, almanak, tmp_path)
+        assert code == 1 and almanak.sent == ["supply"]
+        assert "position changed between the preview and the supply" in said
+
+
+def test_missing_shares_in_the_preview_are_not_read_as_a_held_position(wallet, tmp_path):
+    request = request_for(wallet, execute=True, confirm=PHRASE)
+    for position_before in (None, {}, {"supplied_shares": "0"}):
+        almanak = round_trip(supply_preview=preview(position_before))
+        code, said, _ = check(request, SPEND, almanak, tmp_path)
+        assert code == 1 and almanak.sent == [] and "Nothing was signed" in said
+        assert "could not tell whether the wallet already holds" in said
+        assert "use a wallet with none" not in said
+
+
+def test_missing_shares_after_the_withdrawal_are_not_read_as_a_position(wallet, tmp_path):
+    request = request_for(wallet, execute=True, confirm=PHRASE)
+    for position_after, named in (
+        ({}, "could not confirm the position is empty"),
+        (None, "could not confirm the position is empty"),
+        ({"supplied_shares": "1", "debt_shares": "0"}, "the position is not empty"),
+    ):
+        almanak = round_trip(withdraw_execute=executed(["withdraw"], position_after))
+        code, said, _ = check(request, SPEND, almanak, tmp_path)
+        assert code == 1 and almanak.sent == ["supply", "withdraw"] and named in said
+
+
 def test_shares_that_reached_the_position_after_the_supply_are_never_withdrawn(wallet, tmp_path):
     """The full withdrawal takes what the wallet holds; the confirmation covered the supply."""
     request = request_for(wallet, execute=True, confirm=PHRASE)

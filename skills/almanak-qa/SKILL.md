@@ -206,12 +206,17 @@ When it exits 1, read what it printed and report it exactly. Do not run it again
   are still supplied, and that `almanak ax withdraw` for that market returns them;
   run it only if they ask, preview first, as the `almanak` skill describes.
 - A message that the supplied amount may still be in the market, after the
-  position the withdrawal would take differs from the one the supply left or its
-  shares could not be compared, means the withdrawal was not run. Report the
-  difference exactly as it names it, in whichever direction, or that the shares
-  could not be compared, which shows no change. Read the position with
+  position the withdrawal would take differs from the one the supply left, or
+  after a position report lacked its shares so they could not be compared, means
+  the withdrawal was not run. Report the difference exactly as it names it, in
+  whichever direction. When the shares could not be compared, say the
+  comparison is inconclusive: the reports do not show whether the position
+  changed, and a missing share is not a zero. Either way, read the position with
   `ax lending-position` and tell the user what it holds before proposing a
   withdrawal, since a full withdrawal takes whatever the position holds.
+- A message that the withdrawal completed but the check could not confirm the
+  position is empty means its report lacked the shares. Read the position with
+  `ax lending-position` and tell the user what it holds.
 - A run that was interrupted still writes its report, and its verdict names the
   command that was running. If signing had begun, treat it as a withdrawal that
   did not complete, below.

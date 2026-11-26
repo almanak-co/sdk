@@ -117,3 +117,12 @@ def test_the_skill_repeats_the_cost_and_the_rules_it_must_keep():
     # The preview comes before the execution in the text an agent follows.
     assert text.index("### 2. Preview") < text.index("### 3. Show the preview and wait")
     assert text.index("### 3. Show the preview and wait") < text.index("### 4. Execute")
+
+
+def test_shares_that_could_not_be_compared_are_reported_as_inconclusive():
+    """Missing shares are not a measured zero, so they show neither a change nor none."""
+    text = " ".join(SKILL.read_text().split())
+    assert "shows no change" not in text
+    assert "say the comparison is inconclusive" in text
+    assert "the reports do not show whether the position changed" in text
+    assert "could not confirm the position is empty" in text

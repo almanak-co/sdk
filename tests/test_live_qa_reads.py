@@ -973,10 +973,25 @@ def test_a_gmx_share_or_index_of_another_chain_fails():
         "block": 7,
     }
     assert check({"observation": observation}, symbol) == []
+    # The identity is held to the request before the symbol() read, so a lookup that
+    # names another asset fails even when that read goes unanswered.
+    unanswered = FakeRpc({"symbol()": RpcUnavailable("eth_call symbol(): HTTP 429")})
+    case = reads.ReadCase("gmx", AVALANCHE, ("perp-markets",), check)
     for field in ("share", "index"):
         moved = {**observation, field: observation[field].replace("43114", "1")}
         (finding,) = check({"observation": moved}, symbol)
-        assert "'eip155:1" in finding, field
+        assert "'eip155:1" in finding and "requested" in finding, field
+        verdict = reads.judge_output(case, {"observation": moved}, unanswered)
+        assert verdict.status == "fail" and "'eip155:1" in verdict.findings[0], field
+    other_share = {**observation, "share": f"eip155:43114/erc20:0x{'fc' * 20}"}
+    verdict = reads.judge_output(case, {"observation": other_share}, unanswered)
+    assert verdict.status == "fail" and verdict.findings[0].startswith("share:")
+    other_symbol = {**observation, "index_symbol": "btc.b"}
+    verdict = reads.judge_output(case, {"observation": other_symbol}, unanswered)
+    assert verdict.findings == ("index_symbol: CLI 'btc.b', direct read 'BTC.b'",)
+    # Matching identities still get the symbol() read, so they block when it goes unanswered.
+    verdict = reads.judge_output(case, {"observation": observation}, unanswered)
+    assert verdict.status == "transient", verdict
 
 
 def test_an_answered_reserve_mismatch_is_kept_when_the_decimals_read_is_unanswered():

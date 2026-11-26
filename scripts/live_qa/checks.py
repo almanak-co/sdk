@@ -382,21 +382,26 @@ def aave_v4_position(spoke: str, reserve_id: int, account: str) -> Check:
 
 def gmx_market(chain: ChainId, share: str, symbol: str) -> Check:
     """A GMX market lookup must name this GM share on the requested chain, and its index
-    token this symbol."""
+    token this symbol.
+
+    What the lookup reports is held to the request before the index's `symbol()` read,
+    so a lookup that names another asset fails even when that read goes unanswered.
+    """
 
     def check(output: Output, rpc: Rpc) -> list[str]:
         observation = output["observation"]
-        (onchain,) = rpc.call(
-            asset_address(observation["index"]), "symbol()", observation["block"], ("string",)
-        )
-        return differences(
+        # Asset references compare in any letter case; a symbol compares exactly.
+        if other := not_requested(
             (
                 ("share", reported_asset(observation["share"]), on_chain(chain, share)),
                 ("index chain", str(AssetType(observation["index"]).chain), str(chain)),
-                ("index_symbol", observation["index_symbol"], symbol),
-                ("index symbol()", observation["index_symbol"], onchain),
             )
+        ) + differences((("index_symbol", observation["index_symbol"], symbol),)):
+            return other
+        (onchain,) = rpc.call(
+            asset_address(observation["index"]), "symbol()", observation["block"], ("string",)
         )
+        return differences((("index symbol()", observation["index_symbol"], onchain),))
 
     return check
 

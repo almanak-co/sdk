@@ -288,15 +288,23 @@ def completed(step: Step) -> bool:
     return step.invocation.exit_code == 0 and step.output.get("completed") is True
 
 
-def holds_nothing(position: object) -> bool:
-    """A position report with no supplied shares and no debt shares."""
-    if not isinstance(position, dict):
-        return False
-    return position.get("supplied_shares") == "0" and position.get("debt_shares") == "0"
-
-
 # The fields of a position report that a full withdrawal takes, as `almanak ax` prints them.
 SHARE_FIELDS = ("supplied_shares", "debt_shares")
+
+
+def shares_held(position: object) -> bool | None:
+    """Whether a position report shows shares: False when it reports both as zero, True
+    when it reports a share field other than zero, and None when it shows neither.
+
+    A missing report or share field is not a measured zero, and is no evidence of a
+    position either.
+    """
+    reported = [position.get(name) for name in SHARE_FIELDS] if isinstance(position, dict) else []
+    if any(value is not None and value != "0" for value in reported):
+        return True
+    if len(reported) == len(SHARE_FIELDS) and None not in reported:
+        return False
+    return None
 
 
 # What a refusal to withdraw says about the funds, whatever the shares showed: the
@@ -386,10 +394,17 @@ class WriteCheck:
         step = self.step("supply preview", "supply", execute=False)
         if not planned(step):
             return "the supply preview was refused; nothing was signed"
-        if not holds_nothing(step.output.get("position_before")):
+        held = shares_held(step.output.get("position_before"))
+        if held:
             return (
                 "the wallet already holds a position in this market, and the withdrawal"
                 " would withdraw all of it; use a wallet with none. Nothing was signed"
+            )
+        if held is None:
+            return (
+                "the supply preview's report of the position lacks its shares, so the check"
+                " could not tell whether the wallet already holds a position in this market,"
+                " all of which the withdrawal would take. Nothing was signed"
             )
         return None
 
@@ -403,12 +418,20 @@ class WriteCheck:
                 " can complete the supply, so read the position afterwards and withdraw"
                 " with `almanak ax withdraw` if the amount is supplied"
             )
-        if not holds_nothing(supply.output.get("position_before")):
-            # The supply adopted what the wallet held when it ran, after the preview.
+        # The supply adopted what the wallet held when it ran, after the preview.
+        held = shares_held(supply.output.get("position_before"))
+        if held:
             return (
                 "the wallet's position changed between the preview and the supply, so the"
                 " withdrawal was not run: it would withdraw more than this check supplied."
                 " THE SUPPLIED AMOUNT IS STILL IN THE MARKET, with what was there before"
+            )
+        if held is None:
+            # Missing shares are no evidence of a change, nor that the position was empty.
+            return (
+                "the withdrawal was not run: the supply's report of the position before it"
+                " lacks its shares, so the check could not compare it with the preview, and"
+                " a full withdrawal takes whatever the position holds." + POSITION_UNCERTAIN
             )
         withdraw_preview = self.step("withdraw preview", "withdraw", execute=False)
         if not planned(withdraw_preview):
@@ -433,8 +456,15 @@ class WriteCheck:
                 " Do not withdraw again yet: read `outcomes` and `refused` above, resolve a"
                 " kept record with `almanak ax recover`, then read the position"
             )
-        if not holds_nothing(withdrawal.output.get("position_after")):
+        held = shares_held(withdrawal.output.get("position_after"))
+        if held:
             return "the withdrawal completed but the position is not empty"
+        if held is None:
+            return (
+                "the withdrawal completed, but its report of the position after it lacks its"
+                " shares, so the check could not confirm the position is empty. Read the"
+                " position with `almanak ax lending-position`"
+            )
         return None
 
 
