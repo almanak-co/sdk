@@ -10,4 +10,5 @@ DIRECT = DirectActions(
     positions=partial(pool_lending_direct.positions, "aave_v3"),
     intent=pool_lending_direct.intent,
     position=pool_lending_direct.position,
+    steps=pool_lending_direct.steps,
 )

@@ -348,8 +348,8 @@ def test_the_preview_states_the_admitted_venue_quote_under_the_ceiling():
     config, asked = operator_config(), Venue()
     gateway = backend(asked)
     result = across_direct.details(gateway, planned(config))
+    assert across_direct.steps(planned(config)) == ["approve", "deposit"]
     assert result == {
-        "steps": ["approve", "deposit"],
         "recipient": RECIPIENT,
         "recipient_is_sender": False,
         "quote": {
@@ -467,7 +467,34 @@ def test_a_revocation_asks_no_quote():
     config = operator_config(REVOKE)
     asked = Venue()
     stated = across_direct.details(backend(asked), planned(config, REVOKE, allowance=7))
-    assert stated == {"steps": ["revoke"]} and asked.asked == 0
+    assert stated == {} and asked.asked == 0
+    assert across_direct.steps(planned(config, REVOKE, allowance=7)) == ["revoke"]
+
+
+def test_a_bridge_preview_lists_its_steps_and_quotes_gas_for_the_first_only():
+    config = operator_config()
+
+    class Kept:
+        def load(self):
+            return planned(config)
+
+    stated = ax_actions.stated_steps(across_direct.DIRECT, Kept(), "approve")
+    assert stated["steps"] == ["approve", "deposit"]
+    assert stated["steps_note"] == (
+        "This request plans 2 transactions, in order: approve, then deposit. "
+        "That is what it sends when nothing is refused and nothing changes in between: "
+        "each later step is planned again once the earlier one is mined, and a later step "
+        "that is refused leaves the earlier ones done. " + ax_actions.FIRST_GAS_ONLY
+    )
+    # A revocation alone is one transaction and promises no more.
+    kept = SimpleNamespace(load=lambda: planned(operator_config(REVOKE), REVOKE, allowance=7))
+    alone = ax_actions.stated_steps(across_direct.DIRECT, kept, "revoke")
+    assert alone == {
+        "steps": ["revoke"],
+        "steps_note": "This request plans one transaction: revoke. "
+        "Its gas is quoted in `first_step`.",
+    }
+    assert "cannot be simulated before the earlier one is mined" in ax_actions.FIRST_GAS_ONLY
 
 
 def deposit(config):

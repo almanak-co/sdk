@@ -60,6 +60,7 @@ from almanak.models import ZERO_ADDRESS, AssetAmount
 from almanak.operator_deployment import refuse_adoption
 from almanak.state import Journal
 from almanak.strategy import StrategyDefinition
+from tests.read_at_support import read_at
 from tests.test_ax_swap import (
     CONNECTORS,
     OBSERVED,
@@ -1242,10 +1243,8 @@ def test_the_read_command_pins_its_block_and_passes_the_request_on(connector, mo
     monkeypatch.setattr(ax, "observation_reader", lambda args, chain: Reader())
     monkeypatch.setattr(ax, "read_liquidity_position", read)
     args = position_arguments(connector, "--block", "latest")
-    assert ax.liquidity_position(args) == {
-        "product": "liquidity_position",
-        "read_at": {"block": "latest"},
-    }
+    stated = read_at(monkeypatch, "latest", market.block)
+    assert ax.liquidity_position(args) == {"product": "liquidity_position", "read_at": stated}
     assert (seen["selector"], seen["connector"], seen["block"]) == (
         "latest",
         connector,

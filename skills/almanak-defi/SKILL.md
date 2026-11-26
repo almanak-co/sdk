@@ -322,6 +322,21 @@ the user again before executing. Where there is no second name, or the chain has
 no public endpoint, tell the user it cannot be done without their own provider
 key, and leave it to them to offer one. Do not ask for the key.
 
+A read without `--block` is the chain's latest block, on every transport, and the
+commands in this skill state `--block latest` all the same. A read with
+`--block finalized` is the finalized block, which
+trails the newest one by minutes, on a rollup by a quarter of an hour or
+more, so it does not show a
+transaction mined a moment ago: a balance read there after an action or an
+arrival can still be the old one. Never read at `finalized` to report
+what the chain shows now. Each read's result
+says which block it is under `read_at`: `block` is the selector that chose it
+(`finalized`, `latest` or a number), `number` the block, and `age_seconds` how old
+that block was when the command ran. When a figure looks stale, check `read_at`
+before you suspect the endpoint, and tell the user the age of a finalized read
+you report. `ax bridge-status` is the exception: its `read_at` names the blocks of
+its two chains and states no age.
+
 ## Handling a request
 
 One action is one command. Work through these steps for one action at a time.
@@ -467,7 +482,17 @@ position in the venue. Give it the time limit step 7 states.
 
 Nothing is signed. The result has `position_before` and `first_step`, the first
 transaction the action would send, often an approval. The preview plans only that
-step, so a later one can still be refused once the action runs. A lending
+step, so a later one can still be refused once the action runs. `steps` lists
+the transactions the action plans to send, in order by kind, such as `approve`
+then `supply`, and `steps_note` says the same in words. Report the step count from
+the preview as the planned sequence, not a promise: it is what the action sends
+when nothing is refused and nothing changes in between, and a later step that is
+refused leaves the earlier ones done, such as an approval mined before a refused
+deposit. Only the first step's gas is quoted: a later step cannot be simulated
+before the earlier one is mined, so say that the later steps' gas is not quoted up
+front and never estimate it yourself. A result without `steps` is an action whose
+later steps are not listed in a preview: say that more transactions can follow
+the first, each with its own gas. A lending
 result's `position_before` and `position_after` are in the protocol's own units,
 such as shares: never convert those with decimals, and read amounts with the
 position read. A pool result's `inventory`, `moved`, `allowances` and
@@ -513,7 +538,7 @@ ends it is a kill. To stop it, send an interrupt once and wait: it stops between
 steps and reports what it sent.
 
 Read the result, of an action or of `ax recover`, by these fields, then read the
-position again and report both:
+position again with `--block latest` and report both:
 
 | Field | Means |
 | --- | --- |
@@ -702,7 +727,12 @@ protection on chain: the bridge contract checks no price.
 
 The preview's `quote` has the `output_amount`, the `fee`, the `fee_ceiling` and the
 `fill_deadline`, and `steps` lists what the action sends: an approval, then the
-deposit, after a revocation when another allowance stood. Tell the user the fee and
+deposit, after a revocation when another allowance stood. Tell the user how many
+transactions are planned, that a deposit refused on its own quote leaves the
+approval mined, and that the preview quotes gas for the first one only. When an
+approval or a revocation is listed first, the deposit's gas is not quoted up front:
+it is a separate later transaction that pays its own. When the deposit is the only
+step listed, the gas in `first_step` is the deposit's. Tell the user the fee and
 the amount offered, in whole units, as an estimate: the deposit asks for a new
 quote and signs that one, under the same ceiling.
 
@@ -725,7 +755,7 @@ quarter of an hour or more. Report the transfer as arrived for good, or as
 
 | `status` | Means |
 | --- | --- |
-| `arrived` | `arrival.received` is the amount measured in the fill transaction. Read the balance on the destination chain and report both. |
+| `arrived` | `arrival.received` is the amount measured in the fill transaction. Read the balance on the destination chain with `--block latest` and report both: a balance read with `--block finalized` can still show the amount from before the fill. |
 | `in_flight` | No fill at the block read, which `read_at` names. State no received amount, and read again later. |
 | `unfilled` | A block after the fill deadline shows no fill, so nothing arrives. Across refunds an unfilled deposit on the source chain, but this result does not show that a refund was paid or when one will be: promise neither an amount nor a time. `refund.payments` lists refund payments the wallet received since, and none is tied to this transfer: report them as possible refunds, report a nonzero `refund.deferred_in_spoke_pool` as held by the bridge contract and not in the wallet, and read the source balance. |
 

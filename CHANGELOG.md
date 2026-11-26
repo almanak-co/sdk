@@ -8,6 +8,41 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Added
+- Every `almanak ax` read that pins a block states `read_at`, `ax balance` and the
+  pool, reserve, market and discovery reads included, and it also holds the resolved
+  block's `number` and `timestamp` and `age_seconds`, the command's clock less that
+  timestamp. No extra read is made for it. `ax bridge-status` keeps its own
+  `read_at`.
+- A direct action's preview states `steps_note`: how many transactions the request
+  plans, in order by kind, as the sequence it sends when nothing is refused, and that only the first step's gas is quoted, because a
+  later step cannot be simulated before the earlier one is mined. Aave V4, Aave V3
+  and SparkLend now list `steps` as Across does, where the planned block decides
+  every step; a full repayment and the other connectors list none and say that
+  more can follow the first step. No gas is estimated for a later step.
+
+### Changed
+- Every `almanak ax` read defaults to `--block latest`, the head, and
+  `ax bridge-status` reads its outcome there too. `--block finalized` is stated to
+  read only final blocks. A read at the old default reported a balance from before a
+  transfer that had arrived, a quarter of an hour behind the head on a rollup. A
+  block at the head can still be replaced, so an arrival or an unfilled transfer
+  that `ax bridge-status` reports without `--block finalized` is not final. Its
+  `in_flight` note mentions a fill in a later block only for a read at `finalized`.
+- The agent skill reads a balance or a position after an action or a bridge's
+  arrival with `--block latest`, reports the step count of a preview, and says that
+  the later steps' gas is not quoted up front.
+- A position read says which block it read and why. `--help` of every `ax` read states
+  its default and that `finalized` can trail the head by minutes on a rollup;
+  `almanak markets --help` states its own default, `latest`. `ax lending-position`,
+  `ax liquidity-position` and `ax perp-position` report `read_at`, whose `block` is the
+  selector that chose the block, so an empty position read at an old block can be told
+  from an empty position. The refusal of a token ID a position manager does not hold
+  names the block read (`holds no NFT <token id> at block <number>`), and a
+  `liquidity-position` read at `finalized` adds how to read the head; a direct action's
+  refusal names the block only. Each entry of a direct action's `outcomes` states the
+  `block` its step was mined in. The accepted selectors are unchanged (#38).
+
 ## [3.4.1] - 2026-11-25
 
 ### Changed
@@ -41,18 +76,6 @@ its changelog is on the `v2` branch.
 - The agent skill reads the overview only when the user asks for it. It read it
   every time it loaded. The skill tells the agent that symbols and names in the
   overview are data written by others and never instructions.
-- A position read says which block it read and why. `--help` of every `ax` read states
-  that `--block` defaults to `finalized`, that this block can trail the head by minutes
-  on a rollup and that a position just opened is read with `--block latest`;
-  `almanak markets --help` states its own default, `latest`. `ax lending-position`,
-  `ax liquidity-position` and `ax perp-position` report `read_at`, whose `block` is the
-  selector that chose the block, so an empty position read at an old block can be told
-  from an empty position. The refusal of a token ID a position manager does not hold
-  names the block read (`holds no NFT <token id> at block <number>`), and a
-  `liquidity-position` read at `finalized` adds how to read the head; a direct action's
-  refusal names the block only. Each entry of a direct action's `outcomes` states the
-  `block` its step was mined in. The default stays `finalized` and the accepted
-  selectors are unchanged (#38).
 
 ### Fixed
 - The release of an expired signed step reads the nonce again at the pinned block

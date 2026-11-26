@@ -8,6 +8,7 @@ name the time each answer was received.
 """
 
 import json
+import time
 
 from almanak import ax_bridge, ax_discovery, ax_hypercore, ax_lending_markets, ax_portfolio
 from almanak.balances import parse_balance_request, read_balance
@@ -56,7 +57,7 @@ from almanak.gateway.observation_gateway import gateway_reader
 from almanak.gateway.onchain_lookup import GatewayLookups, VendorLookups
 from almanak.gateway.rabby_portfolio import RabbyPortfolio
 from almanak.gateway.read_endpoints import public_reader, verified_reader
-from almanak.models import ZERO_ADDRESS, Account, Chain, Model
+from almanak.models import ZERO_ADDRESS, Account, Block, Chain, Model
 
 # Request model per (product, connector). The parser's --connector choices in
 # cli_arguments.py must cover exactly these pairs; tests assert they match.
@@ -115,6 +116,7 @@ def pool_price(args):
             },
             "observation": pool.model_dump(mode="json"),
             **describe(reader, request.source, block),
+            **read_at(args, block),
         }
 
 
@@ -122,7 +124,8 @@ def lending_reserve(args):
     request = lending_request(args)
     with observation_reader(args, request.chain) as reader:
         block = reader.pin_block(args.block)
-        return read_lending_reserve(reader, request, block, risk_query(args))
+        reserve = read_lending_reserve(reader, request, block, risk_query(args))
+        return {**reserve, **read_at(args, block)}
 
 
 def risk_query(args) -> RiskQuery:
@@ -134,7 +137,7 @@ def lending_position(args):
     account = Account(chain=live_chain(mainnet(request.chain)), address=args.account)
     with observation_reader(args, request.chain) as reader:
         block = reader.pin_block(args.block)
-        return {**read_lending_position(reader, request, account, block), **read_at(args)}
+        return {**read_lending_position(reader, request, account, block), **read_at(args, block)}
 
 
 FINALIZED_HINT = (
@@ -143,13 +146,28 @@ FINALIZED_HINT = (
 )
 
 
-def read_at(args) -> dict:
-    """The selector that chose a position read's block, beside the block it resolved to.
+def read_at(args, block: Block) -> dict:
+    """The selector that chose a read's block, with the block it resolved to and its age.
 
     An empty position at an old block is a valid answer with no error; the selector is
-    what tells it apart from an empty position at the head.
+    what tells it apart from an empty position at the head. `age_seconds` is this
+    command's clock less the block's own timestamp, so a reader sees how far behind the
+    present the values are. It is negative when the clock is behind the block's. No
+    head is read for it.
     """
-    return {"read_at": {"block": args.block}}
+    return {
+        "read_at": {
+            "block": args.block,
+            "number": block.number,
+            "timestamp": block.timestamp,
+            "age_seconds": now() - block.timestamp,
+        }
+    }
+
+
+def now() -> int:
+    """The command's clock, in whole seconds since the epoch."""
+    return int(time.time())
 
 
 def lending_request(args):
@@ -180,6 +198,7 @@ def balance(args):
     return {
         "product": args.product,
         "observations": [observation.model_dump(mode="json") for observation in observations],
+        **read_at(args, block),
     }
 
 
@@ -189,7 +208,7 @@ def perp_position(args):
     account = Account(chain=chain, address=args.account)
     with observation_reader(args, chain.chain_id) as reader:
         block = reader.pin_block(args.block)
-        return {**read_gmx_position(reader, request, account, block), **read_at(args)}
+        return {**read_gmx_position(reader, request, account, block), **read_at(args, block)}
 
 
 def perp_markets(args):
@@ -197,7 +216,7 @@ def perp_markets(args):
     chain = live_chain(mainnet(request.chain))
     with observation_reader(args, chain.chain_id) as reader:
         block = reader.pin_block(args.block)
-        return read_gmx_market(reader, request, block)
+        return {**read_gmx_market(reader, request, block), **read_at(args, block)}
 
 
 def pool(args):
@@ -210,8 +229,10 @@ def pool(args):
     with observation_reader(args, chain.chain_id) as reader:
         block = reader.pin_block(args.block)
         if resolved_only:
-            return read_resolved_pool(reader, args.connector, request, block)
-        return read_pool_state(reader, args.connector, request, block, args.depth_bps)
+            state = read_resolved_pool(reader, args.connector, request, block)
+        else:
+            state = read_pool_state(reader, args.connector, request, block, args.depth_bps)
+        return {**state, **read_at(args, block)}
 
 
 def liquidity_position(args):
@@ -231,7 +252,7 @@ def liquidity_position(args):
             if args.block != "finalized":
                 raise
             raise NftNotHeld(f"{exc}{FINALIZED_HINT}") from None
-        return {**position, **read_at(args)}
+        return {**position, **read_at(args, block)}
 
 
 def account_position_read(connector: str):
@@ -246,7 +267,8 @@ def token_resolve(args):
     chain = live_chain(mainnet(ChainId(args.chain))).chain_id
     with lookup_source(args) as lookups, observation_reader(args, chain) as reader:
         block = reader.pin_block(args.block)
-        return ax_discovery.resolve(lookups, reader, block, args.query, args.limit)
+        found = ax_discovery.resolve(lookups, reader, block, args.query, args.limit)
+        return {**found, **read_at(args, block)}
 
 
 def pool_discovery(args):
@@ -261,7 +283,7 @@ def pool_discovery(args):
     )
     with lookup_source(args) as lookups, observation_reader(args, chain) as reader:
         block = reader.pin_block(args.block)
-        return ax_discovery.dex_pools(lookups, reader, block, query)
+        return {**ax_discovery.dex_pools(lookups, reader, block, query), **read_at(args, block)}
 
 
 def lending_markets(args):
@@ -278,7 +300,8 @@ def lending_markets(args):
     )
     with lookup_source(args) as lookups, observation_reader(args, chain) as reader:
         block = reader.pin_block(args.block)
-        return ax_lending_markets.lending_markets(reader, lookups, block, query)
+        markets = ax_lending_markets.lending_markets(reader, lookups, block, query)
+        return {**markets, **read_at(args, block)}
 
 
 def hypercore_markets(args):

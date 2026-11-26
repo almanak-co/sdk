@@ -23,6 +23,7 @@ from almanak.connectors.v3_pool_request import (
 )
 from almanak.gateway.ethereum import DataError
 from almanak.models import Asset, Block, Chain
+from tests.read_at_support import read_at
 
 CHAIN = Chain(chain_id=ChainId("eip155:4663"), environment="mainnet")
 BLOCK = Block(chain=CHAIN, number=1_000, hash="0x" + "ab" * 32, timestamp=1_790_000_000)
@@ -338,7 +339,8 @@ def test_pool_handler_passes_request_block_and_depth(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ax, "read_pool_state", read)
     monkeypatch.setattr(ax, "gateway_reader", lambda chain, url, auth: Opened())
-    assert ax.pool(invocation(config)) == {"product": "pool_state"}
+    stated = read_at(monkeypatch, 1000, BLOCK)
+    assert ax.pool(invocation(config)) == {"product": "pool_state", "read_at": stated}
     assert seen == {
         "connector": "uniswap_v3",
         "request": PoolRequest(chain=CHAIN.chain_id, pool=POOL),
@@ -369,7 +371,8 @@ def test_inline_pool_request_validates_as_the_file_form(monkeypatch):
     monkeypatch.setattr(ax, "read_pool_state", read)
     monkeypatch.setattr(ax, "gateway_reader", lambda chain, url, auth: Opened())
     inline = invocation(None, chain="eip155:4663", pool=POOL)
-    assert ax.pool(inline) == {"product": "pool_state"}
+    stated = read_at(monkeypatch, 1000, BLOCK)
+    assert ax.pool(inline) == {"product": "pool_state", "read_at": stated}
     assert seen["request"] == PoolRequest(chain=CHAIN.chain_id, pool=POOL)
 
 
@@ -472,7 +475,8 @@ def test_aerodrome_and_curve_pools_route_to_their_resolution_without_depth(monke
     monkeypatch.setattr(ax, "gateway_reader", lambda chain, url, auth: Opened())
     base = "eip155:8453"
     plain = invocation(None, connector="aerodrome", chain=base, pool=POOL, depth_bps=None)
-    assert ax.pool(plain) == {"product": "pool_resolution"}
+    stated = read_at(monkeypatch, 1000, BLOCK)
+    assert ax.pool(plain) == {"product": "pool_resolution", "read_at": stated}
     assert seen == {
         "connector": "aerodrome",
         "request": PoolRequest(chain=ChainId(base), pool=POOL),

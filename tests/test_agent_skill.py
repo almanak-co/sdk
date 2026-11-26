@@ -689,7 +689,10 @@ def test_the_skill_says_what_a_position_read_at_finalized_can_miss():
     from almanak import ax
 
     text = " ".join(SKILL.read_text().split())
-    assert ax.read_at(SimpleNamespace(block="finalized")) == {"read_at": {"block": "finalized"}}
+    pinned = SimpleNamespace(number=9, timestamp=ax.now())
+    stated = ax.read_at(SimpleNamespace(block="finalized"), pinned)["read_at"]
+    assert (stated["block"], stated["number"]) == ("finalized", 9)
+    assert set(stated) == {"block", "number", "timestamp", "age_seconds"}
     assert "`read_at.block` names the selector that chose its block" in text
     assert "a position just opened shows as empty with no error" in text
     assert "A read refused with `holds no NFT <token id> at block <number>`" in text
@@ -1803,3 +1806,38 @@ def test_a_released_deposit_is_checked_through_another_endpoint_before_bridging_
         "continue with `--refund-from-block` set to that block plus one",
     ):
         assert statement in stated, statement
+
+
+def test_a_read_after_an_action_or_an_arrival_asks_for_the_latest_block():
+    """A read without `--block` is the latest block; the skill says so once, says what a
+    read at `finalized` misses, and reads what an action or an arrival changed at
+    `latest`."""
+    stated = " ".join(section("Public endpoints").split())
+    for statement in (
+        "A read without `--block` is the chain's latest block, on every transport",
+        "A read with `--block finalized` is the finalized block",
+        "trails the newest one by minutes, on a rollup by a quarter of an hour or more",
+        "says which block it is under `read_at`: `block` is the selector that chose it",
+        "`age_seconds` how old that block was when the command ran",
+    ):
+        assert statement in stated, statement
+    arrived = next(row for row in rows(section("Bridges")) if row[0] == "`arrived`")
+    assert "Read the balance on the destination chain with `--block latest`" in arrived[1]
+    assert "then read the position again with `--block latest` and report both" in flat()
+
+
+def test_the_skill_reports_the_step_count_and_that_later_gas_is_not_quoted():
+    preview = " ".join(subsection("5. Preview").split())
+    for statement in (
+        "`steps` lists the transactions the action plans to send, in order by kind",
+        "Report the step count from the preview as the planned sequence, not a promise",
+        "a later step that is refused leaves the earlier ones done",
+        "Only the first step's gas is quoted",
+        "the later steps' gas is not quoted up front and never estimate it yourself",
+        "A result without `steps` is an action whose later steps are not listed",
+    ):
+        assert statement in preview, statement
+    bridge = " ".join(section("Bridges").split())
+    assert "Tell the user how many transactions are planned" in bridge
+    assert "a deposit refused on its own quote leaves the approval mined" in bridge
+    assert "the deposit's gas is not quoted up front" in bridge
