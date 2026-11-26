@@ -1072,7 +1072,7 @@ def test_the_position_read_names_a_uniswap_v4_position_by_key_and_token_id(capsy
     for name in ("ALMANAK_AX_GATEWAY_URL", "ALMANAK_AX_GATEWAY_AUTH_FILE"):
         monkeypatch.delenv(name, raising=False)
     args = parse("liquidity-position", READ)
-    assert (args.product, args.block) == ("ax-liquidity-position", "finalized")
+    assert (args.product, args.block) == ("ax-liquidity-position", "latest")
     request = ax.parse_request(args)
     assert isinstance(request, PositionRequest) and request.token_id == TOKEN
     assert request.selection() == swaps.selection()
@@ -1154,19 +1154,16 @@ def missing_refusal(monkeypatch, *block):
     return str(refused.value), market
 
 
-@pytest.mark.parametrize("block", [(), ("--block", "finalized")])
-def test_a_missing_v4_nft_read_at_finalized_names_the_block_and_how_to_read_the_head(
-    monkeypatch, block
-):
-    message, market = missing_refusal(monkeypatch, *block)
+def test_a_missing_v4_nft_read_at_finalized_names_the_block_and_how_to_read_the_head(monkeypatch):
+    message, market = missing_refusal(monkeypatch, "--block", "finalized")
     assert f"holds no NFT {TOKEN} at block {market.block.number}; " in message
     assert "'finalized' block, which can trail the head by minutes" in message
     assert message.endswith("a position just opened is read with --block latest")
 
 
-@pytest.mark.parametrize("selector", ["latest", "25908472"])
-def test_a_missing_v4_nft_read_at_the_head_or_a_number_gives_no_retry_hint(monkeypatch, selector):
-    message, market = missing_refusal(monkeypatch, "--block", selector)
+@pytest.mark.parametrize("block", [(), ("--block", "latest"), ("--block", "25908472")])
+def test_a_missing_v4_nft_read_at_the_head_or_a_number_gives_no_retry_hint(monkeypatch, block):
+    message, market = missing_refusal(monkeypatch, *block)
     assert message.endswith(f"holds no NFT {TOKEN} at block {market.block.number}")
     assert "finalized" not in message and "--block" not in message
 
@@ -1180,7 +1177,7 @@ def test_the_v4_position_read_names_the_selector_that_chose_its_block(monkeypatc
     monkeypatch.setattr(
         position_request, "read_liquidity_position", lambda *read: {"product": "liquidity_position"}
     )
-    for block, selector in (((), "finalized"), (("--block", "latest"), "latest")):
+    for block, selector in (((), "latest"), (("--block", "finalized"), "finalized")):
         assert ax.liquidity_position(parse("liquidity-position", READ, *block)) == {
             "product": "liquidity_position",
             "read_at": {"block": selector},

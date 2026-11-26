@@ -212,9 +212,10 @@ almanak ax lending-position --connector <connector> --chain <chain> <market> --a
 A balance is `observations[0].amount` in base units; divide by 10 to the power of
 its `decimals`. A chain with no native balance cannot be used until the user sends
 gas; say which chains are usable. A lending position is under `observation`, and
-`read_at.block` names the selector that chose its block. Read at `finalized`, which
-is the default and can trail the head by minutes, a position just opened shows as
-empty with no error: keep `--block latest` after an action. Each
+`read_at.block` names the selector that chose its block. `latest` is the default.
+Read at `finalized`, which can trail the head by a quarter of an hour, funds just
+received are missing and a position just opened shows as empty with no error: never
+read at `finalized` after an action or a deposit. Each
 figure is in base units of the asset whose decimals the last column names, which
 is not always the entry's own asset:
 
@@ -835,10 +836,9 @@ earns nothing.
   and `owed` is only what was recorded. `read_at.block` names the selector that
   chose the block.
 - A read refused with `holds no NFT <token id> at block <number>` found no such
-  NFT at that block. Without `--block latest` the block is the finalized one, which
-  can trail the head by minutes, and the message then says so: read a position
-  just opened with `--block latest`, and compare the block with the `block` of
-  the open's outcome.
+  NFT at that block. With `--block finalized` the block can trail the head by
+  minutes, and the message then says so: read a position just opened with
+  `--block latest`, and compare the block with the `block` of the open's outcome.
 
 ### A position held as LP tokens
 

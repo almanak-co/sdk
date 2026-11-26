@@ -1431,7 +1431,7 @@ def test_the_position_read_names_an_account_and_takes_no_token_id(variant, capsy
     for name in ("ALMANAK_AX_GATEWAY_URL", "ALMANAK_AX_GATEWAY_AUTH_FILE"):
         monkeypatch.delenv(name, raising=False)
     args = position_arguments(variant)
-    assert (args.product, args.block) == ("ax-liquidity-position", "finalized")
+    assert (args.product, args.block) == ("ax-liquidity-position", "latest")
     assert ax.parse_request(args) == PositionRequest(
         chain=BASE, pool=POOLS[variant], account=WALLET.address
     )

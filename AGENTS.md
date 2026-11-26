@@ -1078,7 +1078,9 @@ independently.
   credentials in its own process and serves only whitelisted reads over
   authenticated loopback. The execution gateway's token is never reused for
   reads. Without a transport flag, `ax` uses `ALMANAK_AX_GATEWAY_URL` and
-  `ALMANAK_AX_GATEWAY_AUTH_FILE`. `--block` defaults to `finalized`.
+  `ALMANAK_AX_GATEWAY_AUTH_FILE`. `--block` defaults to `latest`, the head;
+  `finalized` is stated explicitly. `ax bridge-status` keeps its own default,
+  stated below.
 - `ax resolve`, `ax dex-pools` and `ax lending-markets` name candidates for
   authoring under the discovery rules above.
 - Accepted: operator actions that do not come from a strategy are direct

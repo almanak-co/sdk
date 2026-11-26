@@ -840,7 +840,7 @@ def test_the_position_read_names_an_account_for_curve_and_an_nft_elsewhere(capsy
     for name in ("ALMANAK_AX_GATEWAY_URL", "ALMANAK_AX_GATEWAY_AUTH_FILE"):
         monkeypatch.delenv(name, raising=False)
     args = position_arguments()
-    assert (args.product, args.block) == ("ax-liquidity-position", "finalized")
+    assert (args.product, args.block) == ("ax-liquidity-position", "latest")
     assert ax.parse_request(args) == position_request.PositionRequest(
         chain=ChainId("eip155:1"), pool=POOL, account=WALLET.address
     )

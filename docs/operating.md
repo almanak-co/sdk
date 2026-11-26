@@ -1179,7 +1179,7 @@ Slipstream NFT held by its pool's gauge is reported with `staked: true`, and its
 `owed` is only what the manager recorded, since a staked position earns no trading
 fees. It takes
 the same transports and `--block` as the other reads; `--block` defaults to
-`finalized`, so read a position that was just opened at `--block latest`. A token ID
+`latest`, which shows a position that was just opened. A token ID
 the position manager does not hold at the pinned block is refused with `holds no NFT
 <token id> at block <number>`. When the selector was `finalized` the message adds
 that this block can trail the head by minutes and that a position just opened is read
@@ -1564,7 +1564,7 @@ is listed under `skipped`. It takes the session's read gateway like `almanak ax`
 `almanak ax` reads one protocol observation at one pinned block. Every
 subcommand but `portfolio` takes one transport and its own request arguments
 after the subcommand, and every one but `portfolio` and the two HyperCore
-subcommands takes `--block` (default `finalized`, which `--help` states):
+subcommands takes `--block` (default `latest`, which `--help` states):
 
 | Subcommand | `--connector` | Request |
 | --- | --- | --- |
@@ -1593,14 +1593,17 @@ concrete number and hash all values came from. A `latest` observation can be
 reorganized away; a later read against a block that is no longer canonical
 fails instead of mixing blocks.
 
-The finalized block trails the head by minutes, on a rollup by a quarter of an hour
-or more. A position read at it does not show what was opened since: `lending-position`
-and `perp-position` then report an empty position with exit 0 and no error, and
-`liquidity-position` refuses an NFT minted since as not held at that block. The three
-position reads therefore state `read_at`, whose `block` is the selector that chose
-the block (`finalized`, `latest` or the stated number), beside the resolved number
-and hash. An empty position with `"read_at": {"block": "finalized"}` may only be older
-than the action; read it again with `--block latest`.
+Without `--block` a read pins the head, so it shows funds just received and a
+position just opened. `--block finalized` is stated when the read must not be
+reorganized away. The finalized block trails the head by minutes, on a rollup by a
+quarter of an hour or more, and a read at it does not show what changed since: a
+balance just received reads as before, `lending-position` and `perp-position` report
+an empty position with exit 0 and no error, and `liquidity-position` refuses an NFT
+minted since as not held at that block. The three position reads therefore state
+`read_at`, whose `block` is the selector that chose the block (`finalized`, `latest`
+or the stated number), beside the resolved number and hash. An empty position with
+`"read_at": {"block": "finalized"}` may only be older than the action; read it again
+without `--block`.
 
 On HyperEVM (`eip155:999`), `finalized` is the head, and Alchemy runs a read
 pinned within about 128 to 192 blocks of its head at the next block. There a
