@@ -455,8 +455,10 @@ plain-wallet command.
 Only a bridge that leaves Arbitrum has been run: its reference has fork
 lifecycle, refund and production rehearsal proofs. Every other source chain is
 declared on read-only mainnet reads and offline tests alone, and `almanak
-support` says so on its row. Nobody has run a deposit, an arrival or a refund
-from those chains, on a fork or on mainnet. Treat a first bridge from one of
+support` says so on its row. No retained or reviewed run holds a deposit, an
+arrival or a refund from those chains, on a fork or on mainnet; one direct bridge
+from Ethereum is known by an operator's report only and proves nothing. Treat a
+first bridge from one of
 them as the first run of that path, and send a small amount first. On a fork, a
 refund is defined for a transfer sent from Arbitrum only, and a fork refuses
 authored gas ceilings on Base and OP Mainnet, so a fork run of a strategy with an
@@ -595,6 +597,20 @@ position, plans the first step and prints it; nothing is signed, and the keystor
 not opened. With `--execute` it signs and sends each step, waits for its receipt and
 prints the outcomes with the position before and after. A supply is an approval
 followed by the supply, so the preview shows the approval.
+
+A preview says how many transactions the request sends. `steps` lists them in order
+by kind, such as `["approve", "supply"]`, and `steps_note` says the same in a
+sentence. `first_step` carries the gas and the gas price of the first one only: a
+later step cannot be simulated before the earlier one is mined, so no gas is quoted
+or estimated for it, and each step pays its own gas under the same ceilings. The
+list restates the connector's planner over the block the first step was planned
+on, and each later step is planned again once the earlier one is mined, so it is
+what the request sends when nothing is refused and nothing changes in between, and
+`steps_note` says so. A later step that is refused leaves the earlier ones done.
+`steps` is stated by Across, Aave V4, Aave V3 and SparkLend, and only where that
+block decides every step: a full repayment states none, because the revocation
+after it depends on what the repayment leaves. A result without `steps` names the
+first step in `steps_note` and says that more can follow.
 
 An executed action reports `completed`, true only when the whole request finished,
 and the command exits 1 when it is false. A supply is not atomic: its approval can
@@ -928,12 +944,17 @@ its start, and not on-chain enforcement; it does not show that anyone controls t
 address.
 
 Without `--execute` the result is a preview: `first_step`, the `steps` the request
-takes, the `recipient` with `recipient_is_sender`, and `quote` with its `source`,
+takes with `steps_note`, the `recipient` with `recipient_is_sender`, and `quote` with its `source`,
 `output_amount`, `fee`, `fee_ceiling`, `timestamp` and `fill_deadline`. The `note`
 says so when the recipient is not the sending wallet, and when it was stated in one
 case, which carries no checksum. The steps are the approval of exactly the amount to
 the SpokePool, then the deposit, which spends the approval whole. An allowance of
-another size the wallet already gave the SpokePool is set to zero first. The deposit
+another size the wallet already gave the SpokePool is set to zero first, and an
+allowance of exactly the amount leaves the deposit as the only step. The gas in
+`first_step` is that of the first planned step alone: when an approval or a
+revocation comes first, the deposit is a separate later transaction whose gas is not
+quoted before the earlier ones are mined, and when the deposit is the only step its
+gas is the one quoted. The deposit
 asks the venue again and signs its own quote, held to the same ceiling, so the
 previewed terms are not a promise.
 
@@ -1594,13 +1615,19 @@ reorganized away; a later read against a block that is no longer canonical
 fails instead of mixing blocks.
 
 The finalized block trails the head by minutes, on a rollup by a quarter of an hour
-or more. A position read at it does not show what was opened since: `lending-position`
-and `perp-position` then report an empty position with exit 0 and no error, and
-`liquidity-position` refuses an NFT minted since as not held at that block. The three
-position reads therefore state `read_at`, whose `block` is the selector that chose
-the block (`finalized`, `latest` or the stated number), beside the resolved number
-and hash. An empty position with `"read_at": {"block": "finalized"}` may only be older
-than the action; read it again with `--block latest`.
+or more. A read at it does not show what was mined since: a balance is the one from
+before a transfer or a bridge's arrival, `lending-position`
+and `perp-position` report an empty position with exit 0 and no error, and
+`liquidity-position` refuses an NFT minted since as not held at that block. Every
+read that pins a block therefore states `read_at`, beside its other fields. Its
+`block` is the selector that chose the block (`finalized`, `latest` or the stated
+number), `number` and `timestamp` are the resolved block's, and `age_seconds` is the
+command's clock less that timestamp. No head is read for the age, so it is as good as
+the local clock and is negative when that clock is behind the block's. An empty
+position or an old balance with `"read_at": {"block": "finalized", ...}` may only be
+older than the action; read it again with `--block latest`, as after any executed
+action or bridge arrival. `ax bridge-status` reads two chains and keeps its own
+`read_at`, which names the tag and a block of each chain and states no age.
 
 On HyperEVM (`eip155:999`), `finalized` is the head, and Alchemy runs a read
 pinned within about 128 to 192 blocks of its head at the next block. There a

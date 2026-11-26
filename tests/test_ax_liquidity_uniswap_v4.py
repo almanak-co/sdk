@@ -42,6 +42,7 @@ from almanak.operator_deployment import refuse_adoption
 from almanak.strategy import StrategyDefinition
 from tests import test_ax_swap as family
 from tests import test_ax_swap_uniswap_v4 as swaps
+from tests.read_at_support import read_at
 
 CONNECTOR = "uniswap_v4"
 USDC, WETH, NATIVE = swaps.USDC, swaps.WETH, swaps.NATIVE
@@ -1181,7 +1182,8 @@ def test_the_v4_position_read_names_the_selector_that_chose_its_block(monkeypatc
         position_request, "read_liquidity_position", lambda *read: {"product": "liquidity_position"}
     )
     for block, selector in (((), "finalized"), (("--block", "latest"), "latest")):
+        stated = read_at(monkeypatch, selector, market.block)
         assert ax.liquidity_position(parse("liquidity-position", READ, *block)) == {
             "product": "liquidity_position",
-            "read_at": {"block": selector},
+            "read_at": stated,
         }

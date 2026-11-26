@@ -416,9 +416,13 @@ independently.
   equal to the chain, the pool's wrapped native token equal to the network
   definition's, and the installation block of the pinned implementation.
   `scripts/across_pins.py` produces these facts and sends nothing. Accepted
-  risk: such a cell's path has never been run by anyone, on a fork or on
-  mainnet, so a first bridge from it is that path's first run. `almanak
-  support` states this on each such row. The QA catalog and the hosted Fork
+  risk: such a cell's path has never been run in a retained or reviewed run,
+  on a fork or on mainnet, so a first bridge from it is treated as that path's
+  first run. One run is known by report only: the maintainer states that an
+  operator's agent ran a keyless direct bridge from Ethereum to Base on
+  mainnet, approval, deposit and arrival. It is not retained evidence and
+  proves no cell. `almanak support` states on each such row that no reference
+  lifecycle, refund proof or production rehearsal has run from the chain. The QA catalog and the hosted Fork
   Qualification selection leave these cells out by name, from the connector's
   own list, with the reason in the code; they never pass on an empty
   selection. This excepts no other connector, and no other rule than the
@@ -978,8 +982,9 @@ independently.
   has no fork run, because a fork refuses authored ceilings on Base and leaves
   them unenforced only when every policy is on an OP chain, so the standalone
   reference keeps its production gas policy in `config.production.yaml` and
-  its fork runs are gasless; and no mainnet transaction of this connector has
-  been sent.
+  its fork runs are gasless; and no retained run or other evidence of this
+  repository holds a mainnet transaction of this connector, from this cell or
+  any other.
 - Open gates of the Safe/Roles profile on every Across cell, Arbitrum
   included, none of which may be described as complete: no Safe/Roles bridge
   has run on a fork or on mainnet; the generated grants were never installed
@@ -1079,6 +1084,21 @@ independently.
   authenticated loopback. The execution gateway's token is never reused for
   reads. Without a transport flag, `ax` uses `ALMANAK_AX_GATEWAY_URL` and
   `ALMANAK_AX_GATEWAY_AUTH_FILE`. `--block` defaults to `finalized`.
+- Current contract: every `ax` read that pins a block states `read_at`: `block`,
+  the selector that chose the block, the resolved block's `number` and
+  `timestamp`, and `age_seconds`, the command's clock less that timestamp. It
+  is added by the calling process on every transport and reads no head.
+  `ax bridge-status` keeps its own `read_at`, the tag and a block of each
+  chain, with no age.
+- Current contract: a direct action's preview states `steps_note`, and `steps`
+  where the connector declares them: the kinds of the transactions the request
+  sends, in order. A connector declares `steps` in its `direct.py` only where
+  the observation the first step was planned on decides every step; the list
+  is reported only when its first entry is the step the gateway planned.
+  Across, Aave V4, Aave V3 and SparkLend declare it, and none for a full
+  repayment. Only the first step's gas is quoted. Never estimate the gas of a
+  later step, and never describe the list as a promise: each later step is
+  planned again once the earlier one is mined.
 - `ax resolve`, `ax dex-pools` and `ax lending-markets` name candidates for
   authoring under the discovery rules above.
 - Accepted: operator actions that do not come from a strategy are direct

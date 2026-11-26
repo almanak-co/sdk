@@ -124,6 +124,36 @@ def test_adoption_takes_ownership_from_the_observed_position(recorded):
         adopt((other,), (supply.after,))
 
 
+def planned_state(kind, allowance=0, supplied=0, debt=0):
+    position = SimpleNamespace(supplied_scaled=supplied, debt_scaled=debt)
+    return SimpleNamespace(
+        decision=SimpleNamespace(intent=SimpleNamespace(kind=kind)),
+        plan=SimpleNamespace(before=SimpleNamespace(allowance=allowance, position=position)),
+    )
+
+
+def test_a_pool_request_states_the_steps_its_planner_takes():
+    steps = pool.steps
+    assert steps(planned_state("supply")) == ["approve", "supply"]
+    assert steps(planned_state("supply", allowance=5)) == ["supply"]
+    assert steps(planned_state("borrow")) == ["borrow"]
+    assert steps(planned_state("collateral")) == ["collateral"]
+    # An allowance the wallet still gives the Pool is revoked after the action.
+    assert steps(planned_state("borrow", allowance=5)) == ["borrow", "revoke"]
+    assert steps(planned_state("withdraw", supplied=9)) == ["withdraw"]
+    assert steps(planned_state("withdraw_amount", allowance=5, supplied=9)) == [
+        "withdraw",
+        "revoke",
+    ]
+    assert steps(planned_state("withdraw", allowance=5)) == ["revoke"]
+    assert steps(planned_state("repay_amount", debt=9)) == ["approve", "repay"]
+    assert steps(planned_state("repay_amount", allowance=5)) == ["revoke"]
+    # A full repayment revokes what it leaves, known only once it is mined.
+    assert steps(planned_state("repay", debt=9)) is None
+    for name in ("aave_v3", "sparklend"):
+        assert binding(name).steps is pool.steps
+
+
 def test_the_user_bitmap_names_the_reserves_the_account_holds():
     # WETH as collateral, USDC untouched, DAI as debt.
     reader = Reader(bits(weth=pool.COLLATERAL, usdc=0, dai=pool.DEBT))
