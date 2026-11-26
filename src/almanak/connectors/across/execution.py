@@ -15,6 +15,7 @@ from almanak.connectors.funding import funding_rows, summed
 from almanak.connectors.gas_lifecycle import GasLifecycle, KindCounts
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.evm_fees import charged_fees
+from almanak.gateway.production_config import execution_gas
 from almanak.models import AssetAmount
 
 API_KEY_ENV = venue.API_KEY_ENV
@@ -88,13 +89,15 @@ def require_reviewed(before) -> None:
     require_pinned(route.destination_pool, route.destination_chain)
 
 
-def validate_entry(state, operation, before):
-    if not increases_exposure(state.config, operation):
-        return
+def require_open(state) -> None:
     if state.mode != "running" or any(o.accounting_issues for o in state.outcomes):
         raise DataError(
             "entry_unavailable", "a new bridge requires running mode and reconciled accounting"
         )
+
+
+def require_route(state, operation, before) -> None:
+    """The route's pools, payout and pause, before any balance is looked at."""
     require_reviewed(before)
     try:
         state.config.require_payout(operation.allocation)
@@ -102,14 +105,52 @@ def validate_entry(state, operation, before):
         raise DataError("unsupported_route", str(error)) from error
     if before.pool.deposits_paused:
         raise DataError("deposits_paused", "the Across SpokePool has paused deposits")
+
+
+def require_funding(state, operation, before) -> None:
     allocation = state.config.allocation(operation.allocation)
     if before.native_balance.amount < allocation.minimum_native_balance:
         raise DataError("payer_unavailable", "Across gas payer is below its configured minimum")
-    if before.wallet_balance < operation.amount.amount:
+    if before.target.route.native:
+        require_native_funding(state.config, operation, before)
+    elif before.wallet_balance < operation.amount.amount:
         raise DataError(
             "funding_unavailable",
             f"the fund holds {before.wallet_balance} of {operation.amount.asset}, "
             f"less than the {operation.amount.amount} to bridge",
+        )
+
+
+def validate_entry(state, operation, before):
+    if not increases_exposure(state.config, operation):
+        return
+    require_open(state)
+    require_route(state, operation, before)
+    require_funding(state, operation, before)
+
+
+def fee_ceiling(config, account: str) -> int:
+    """The most one transaction of the account may cost under its gas policy; zero where
+    no policy is admitted."""
+    admitted = execution_gas(config)
+    return 0 if admitted is None else admitted.policy(account).max_transaction_fee.amount
+
+
+def require_native_funding(config, operation, before) -> None:
+    """Refuse a native bridge the wallet cannot pay for at its worst admitted fee.
+
+    The amount and the gas leave the same balance. The shared budget check counts a
+    transaction's value only once it is signed, so the amount is held here, before
+    anything is: against the fee ceiling, not the quoted fee, so a deposit admitted
+    here is never refused for its fee alone. A check of the gateway, not of the chain.
+    """
+    amount, ceiling = operation.amount.amount, fee_ceiling(config, operation.account)
+    held, needed = before.native_balance.amount, amount + ceiling
+    if held < needed:
+        raise DataError(
+            "funding_unavailable",
+            f"the wallet holds {held} of {operation.amount.asset}, {needed - held} less "
+            f"than the {amount} to bridge plus the transaction fee ceiling {ceiling}",
         )
 
 
@@ -190,14 +231,26 @@ def validate_simulation(operation, result, before):
 def allowance_after(operation, previous, assets):
     if isinstance(operation, ApproveOperation):
         return operation.amount.amount
-    return 0 if isinstance(operation, RevokeOperation) else previous - assets
+    if isinstance(operation, RevokeOperation):
+        return 0
+    # A native deposit spends value, not an allowance, and its snapshots state none.
+    return previous if operation.target.route.native else previous - assets
 
 
 def accounting_issues(before, after, assets, gas_paid):
+    """Balance changes of the transaction that its receipt does not explain.
+
+    A token deposit takes `assets` from the fund's token balance and gas from the payer.
+    A native deposit takes both from the one native balance, which must fall by exactly
+    the gas paid plus the amount sent; its token balance is that same figure and is not
+    compared a second time.
+    """
+    native = before.target.route.native
     issues = []
-    if after.wallet_balance != before.wallet_balance - assets:
+    if not native and after.wallet_balance != before.wallet_balance - assets:
         issues.append("fund token balance includes unexplained external movements")
-    if after.native_balance.amount != before.native_balance.amount - gas_paid:
+    sent_value = assets if native else 0
+    if after.native_balance.amount != before.native_balance.amount - gas_paid - sent_value:
         issues.append("gas payer balance includes unexplained external movements")
     return tuple(issues)
 
@@ -270,7 +323,7 @@ class AcrossExecution:
     @staticmethod
     def validate_config(config):
         for allocation in config.positions:
-            if allocation.route.spoke_pool == allocation.route.asset.reference:
+            if allocation.route.spoke_pool == allocation.route.input_token:
                 raise ValueError("SpokePool and sent asset must be distinct contracts")
 
     @staticmethod

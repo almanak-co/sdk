@@ -182,7 +182,8 @@ def market_request(args):
         "max_fee_bps": args.max_fee_bps,
         "quote": "across_api",
     }
-    return resolution(args.connector).MarketSelection.model_validate_json(json.dumps(values))
+    # An operator's selection: it may name the native asset, which an author's may not.
+    return resolution(args.connector).DirectSelection.model_validate_json(json.dumps(values))
 
 
 def prove_genesis(reader) -> None:
@@ -223,6 +224,33 @@ def require_receivable(recipient: str, on_source: bool, on_destination: bool, ch
             f" {chains[1]}: a contract account does not exist at the same address on"
             " another chain until it is deployed there, and what it receives before may be"
             " unrecoverable; nothing was planned or signed",
+        )
+
+
+def require_plain(recipient: str, holds_code: bool, chain) -> None:
+    """Refuse a recipient of a native route that holds contract code where it is paid.
+
+    The destination SpokePool pays the native asset to an address with no code, or with
+    a delegation (EIP-7702), and its wrapped token to any other. A native route records
+    a native arrival only, so a contract recipient is refused, with no override. The
+    code is read once, before anything is planned; the pool decides again when the fill
+    lands. A check of the command, not on-chain enforcement.
+    """
+    if holds_code:
+        raise DataError(
+            "recipient_is_contract",
+            f"the recipient {recipient} holds contract code on {chain}: the SpokePool would"
+            " pay it the wrapped token, not the native asset, which a native bridge does"
+            " not record; nothing was planned or signed",
+        )
+
+
+def require_approval_route(request, action) -> None:
+    """A native route gives the SpokePool no approval, so it has none to revoke."""
+    if action.action != "bridge" and request.native:
+        raise ValueError(
+            "a native bridge gives the SpokePool no approval, so there is none to revoke;"
+            " an approval of the wrapped token is not this route's"
         )
 
 
@@ -273,6 +301,8 @@ def completed(connector: str, far: Far, resolved, recipient: str, on_source: boo
     resolver.admit_route(route)
     chains = (selection.chain, selection.destination_chain)
     require_receivable(recipient, on_source, on_destination, chains)
+    if selection.native:
+        require_plain(recipient, on_destination, selection.destination_chain)
     return route
 
 
@@ -326,6 +356,7 @@ def deployment(far: Far, request, action, wallet, provider, endpoint, limits):
     from almanak.models import Chain
 
     connector = request.connector
+    require_approval_route(request, action)
     chain = Chain(chain_id=request.chain, environment="mainnet")
     account = Wallet(account=wallet["account"], address=wallet["address"].lower())
     stated = None if action.recipient is None else action.recipient.lower()
@@ -551,13 +582,10 @@ def read_arrival(
         if found is None:
             continue
         row, fill = found
-        _, paid = settlement.paid_by_fill(
-            reader, deposit.recipient, deposit.output_token, row, fill
-        )
         return {
             "transaction": row["transactionHash"],
             "block": int(row["blockNumber"], 16),
-            "received": str(paid),
+            **payout(reader, pool, deposit, row, fill, head),
             "fill_type": FILL_TYPES[fill["fill_type"]],
         }
     raise DataError(
@@ -565,6 +593,104 @@ def read_arrival(
         "the destination SpokePool holds the relay as filled, but no fill of it is in the"
         " blocks between its quote and its fill deadline; nothing is reported as received",
     )
+
+
+def is_wrapped_native(chain_id, token: str) -> bool:
+    """Whether the token is the network definition's wrapped native token of the chain."""
+    from almanak.chains import evm_network
+
+    return token == evm_network(chain_id).wrapped_native.reference
+
+
+def unwraps(reader, pool: str, token: str, head) -> bool:
+    """Whether the SpokePool treats `token` as its wrapped native token, which it
+    unwraps for a recipient without code. Read from the pool, never from a table alone:
+    the network definition only says when the read is worth making."""
+    from almanak.connectors.across import settlement_reader as chain
+
+    if not is_wrapped_native(reader.chain.chain_id, token):
+        return False
+    block = chain.canonical(reader, head)
+    (named,) = reader.call(pool, "wrappedNativeToken()", block, outputs=("address",))
+    return named.lower() == token
+
+
+PAID_NATIVE = (
+    "Paid in the chain's native asset. The payment itself leaves no log: the amount is"
+    " the fill event's, matched by the SpokePool's unwrap of exactly that amount of its"
+    " wrapped native token after that event and before its next fill."
+)
+PAID_WRAPPED = (
+    "Paid in the wrapped native token, not in the native asset: the SpokePool pays the"
+    " token to a recipient that holds contract code when the fill lands."
+)
+
+
+def payout(reader, pool: str, deposit: Deposit, row, fill, head) -> dict:
+    """The amount the fill paid the recipient, and for the pool's wrapped native token
+    the asset it was paid in and the evidence that measured it."""
+    from almanak.connectors.across import settlement
+
+    if not unwraps(reader, pool, deposit.output_token, head):
+        _, paid = settlement.paid_by_fill(
+            reader, deposit.recipient, deposit.output_token, row, fill
+        )
+        return {"received": str(paid)}
+    return native_payout(reader, deposit, row, fill)
+
+
+def native_payout(reader, deposit: Deposit, row, fill) -> dict:
+    """A fill of the pool's wrapped native token: the event's amount, held to what the
+    pool did with the token after that event. The asset reported is the one paid."""
+    from almanak.chains import evm_network
+    from almanak.connectors.across import settlement_reader as chain
+    from almanak.connectors.across.operations import word
+
+    if fill["updated_recipient"] != word(deposit.recipient):
+        raise chain.integrity("an Across fill paid another recipient than the deposit's")
+    amount, chain_id = fill["updated_output"], reader.chain.chain_id
+    form = chain.native_payout(
+        chain.receipt_of(reader, row), row, deposit.output_token, deposit.recipient, amount
+    )
+    native = form in chain.UNWRAPS
+    token = f"{chain_id}/erc20:{deposit.output_token}"
+    return {
+        "received": str(amount),
+        "asset": str(evm_network(chain_id).native_asset) if native else token,
+        "paid_as": "native" if native else "wrapped_token",
+        "measured_by": form,
+        "note": PAID_NATIVE if native else PAID_WRAPPED,
+    }
+
+
+def sent_as_value(reader, pool: str, deposit: Deposit) -> bool | None:
+    """Whether the deposit's own transaction paid the SpokePool its amount as native
+    value. None for an input token that is not the chain's wrapped native token, which
+    reads nothing. A deposit made through another contract reads as False: what that
+    contract was paid is not this command's to say."""
+    if not is_wrapped_native(reader.chain.chain_id, deposit.input_token):
+        return None
+    sent = reader._rpc("eth_getTransactionByHash", [deposit.transaction], allow_none=True)
+    if sent is None:
+        raise DataError("unavailable", "the deposit's transaction is not served by the endpoint")
+    return (sent.get("to") or "").lower() == pool and int(sent["value"], 16) == deposit.sent
+
+
+WRAPPED_REFUND = (
+    " This deposit's input is the chain's wrapped native token ({asset}), and a refund is"
+    " paid in that token on the source chain, never in the native asset, also when the"
+    " deposit was sent as native value."
+)
+
+
+def wrapped_refund(chain_id, deposit: Deposit, refund: dict) -> dict:
+    """The refund listing, saying which asset a payment is in when that is the wrapped
+    native token; unchanged for any other input token."""
+    if not is_wrapped_native(chain_id, deposit.input_token):
+        return refund
+    asset = f"{chain_id}/erc20:{deposit.input_token}"
+    note = refund["note"] + WRAPPED_REFUND.format(asset=asset)
+    return {**refund, "paid_in": asset, "note": note}
 
 
 def leaf_payment(reader, pool: str, deposit: Deposit, row) -> dict | None:
@@ -623,13 +749,26 @@ def read_refunds(reader, pool: str, deposit: Deposit, head, start: int | None, s
     }
 
 
-def described(chain_id, deposit: Deposit) -> dict:
+def described(chain_id, deposit: Deposit, native: bool | None = None) -> dict:
+    """The deposit as the SpokePool recorded it. `native` is `sent_as_value`: stated
+    only for a deposit of the wrapped native token, and when true the asset sent is the
+    native one, with the token the pool recorded beside it."""
+    from almanak.chains import evm_network
+
+    token = f"{chain_id}/erc20:{deposit.input_token}"
+    sent = {"asset": token, "amount": str(deposit.sent)}
+    stated: dict = {}
+    if native:
+        sent = {**sent, "asset": str(evm_network(chain_id).native_asset), "recorded_as": token}
+    if native is not None:
+        stated = {"sent_as_native_value": native}
     return {
         "transaction": deposit.transaction,
         "block": deposit.block,
         "depositor": deposit.depositor,
         "recipient": deposit.recipient,
-        "sent": {"asset": f"{chain_id}/erc20:{deposit.input_token}", "amount": str(deposit.sent)},
+        "sent": sent,
+        **stated,
         "offered": str(deposit.offered),
         "fill_deadline": deposit.fill_deadline,
     }
@@ -670,6 +809,7 @@ def outcome(
         near_head = near.pin_block(tag)
         span = log_span(public[0])
         refund = read_refunds(near, pools[0], deposit, near_head, refund_from, span)
+    refund = wrapped_refund(near.chain.chain_id, deposit, refund)
     read_at["source_block"] = near_head.number
     return {"read_at": read_at, "status": "unfilled", "refund": refund}
 
@@ -774,6 +914,7 @@ def status(args) -> dict:
             reference, deposit = named_deposit(
                 near, pools[0], chain_number(destination), args, log_span(names[0])
             )
+            native = sent_as_value(near, pools[0], deposit)
         result = outcome(
             near, far, pools, deposit, reference, args.block, args.refund_from_block, names
         )
@@ -783,7 +924,7 @@ def status(args) -> dict:
         "reference": reference.text,
         "source_chain": str(source),
         "destination_chain": str(destination),
-        "deposit": described(source, deposit),
+        "deposit": described(source, deposit, native),
         **result,
     }
 

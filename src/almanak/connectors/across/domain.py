@@ -82,6 +82,49 @@ SPOKE_POOLS: dict[ChainId, SpokePoolPin] = {
 }
 
 
+# SLIP-44 coin type 60 is ETH. A native route needs it on both chains: the SpokePool
+# wraps the deposit's value into its wrapped native token, and pays a plain recipient
+# the destination pool's wrapped native token unwrapped. Where another coin is native
+# (BNB, POL, AVAX) the pool's wrapped native token is that coin's, and ETH is a token.
+ETH_COIN = "60"
+NATIVE_DECIMALS = 18
+NATIVE_DIRECT_ONLY = (
+    "a native Across route is sent by the direct command `almanak ax bridge` only, from a "
+    "plain wallet to a stated recipient; a strategy route names ERC-20 assets"
+)
+NATIVE_PAIR = (
+    "an Across route names the native asset on both chains or on neither: a native "
+    "deposit delivered as a token, or a token delivered as the native asset, is not "
+    "supported"
+)
+
+
+def names_native(*assets: AssetType) -> bool:
+    return any(asset.namespace == "slip44" for asset in assets)
+
+
+def require_native_eth(chain: ChainId, asset: AssetType) -> None:
+    """Refuse an asset that is not ETH as the native coin of its own chain."""
+    native = evm_network(chain).native_asset
+    if asset.namespace != "slip44":
+        raise ValueError(NATIVE_PAIR)
+    if asset != native:
+        raise ValueError(f"{asset} is not the native asset of {chain}, which is {native}")
+    if asset.reference != ETH_COIN:
+        raise ValueError(
+            f"a native Across route needs ETH as the native coin of both chains, and the "
+            f"native asset of {chain} is {native}; ETH is an ERC-20 token there"
+        )
+
+
+def require_native_pair(
+    chain: ChainId, asset: AssetType, destination_chain: ChainId, destination_asset: AssetType
+) -> None:
+    """A native route sends native ETH and delivers native ETH, or it is refused."""
+    require_native_eth(chain, asset)
+    require_native_eth(destination_chain, destination_asset)
+
+
 def spoke_pool(chain: ChainId) -> SpokePoolPin:
     try:
         return SPOKE_POOLS[chain]
@@ -113,21 +156,61 @@ class Route(Model):
     max_fee_bps: FeeBps
     # The one source of the output amount: the venue's own quote. Nothing substitutes it.
     quote: Literal["across_api"]
+    # A native route only: the wrapped native token each SpokePool named in its own
+    # `wrappedNativeToken()` at resolution, on the source and on the destination chain.
+    # The route's identity stays the native asset; these addresses are what the quote
+    # request and the deposit's calldata carry in its place.
+    wrapped: tuple[Address, Address] | None = Field(default=None, exclude_if=lambda v: v is None)
+
+    @property
+    def native(self) -> bool:
+        """Whether the route sends the chain's native coin as the deposit's own value."""
+        return self.wrapped is not None
+
+    @property
+    def input_token(self) -> str:
+        """The token address the SpokePool takes for the sent asset."""
+        return self.asset.reference if self.wrapped is None else self.wrapped[0]
+
+    @property
+    def output_token(self) -> str:
+        """The token address the SpokePool takes for the received asset."""
+        return self.destination_asset.reference if self.wrapped is None else self.wrapped[1]
 
     @model_validator(mode="after")
     def scope(self):
-        erc20_address(self.asset, self.chain.chain_id)
-        erc20_address(self.destination_asset, self.destination_chain)
         if self.chain.chain_id == self.destination_chain:
             raise ValueError("an Across route requires two different chains")
         # A chain must still be one Across is pinned on; which pool it names is not held.
         spoke_pool(self.chain.chain_id)
         spoke_pool(self.destination_chain)
+        if names_native(self.asset, self.destination_asset):
+            self.native_scope()
+            return self
+        if self.wrapped is not None:
+            raise ValueError("only a native Across route retains wrapped native tokens")
+        erc20_address(self.asset, self.chain.chain_id)
+        erc20_address(self.destination_asset, self.destination_chain)
         if self.asset == evm_network(self.chain.chain_id).wrapped_native:
             # A wrapped native deposit refunds as the wrapped token but can arrive as the
             # native asset, which this scope does not record.
             raise ValueError("Across routes of the wrapped native asset are not supported")
         return self
+
+    def native_scope(self):
+        require_native_pair(
+            self.chain.chain_id, self.asset, self.destination_chain, self.destination_asset
+        )
+        if self.decimals != NATIVE_DECIMALS:
+            raise ValueError("a native Across route sends an asset of 18 decimals")
+        if self.wrapped != (
+            evm_network(self.chain.chain_id).wrapped_native.reference,
+            evm_network(self.destination_chain).wrapped_native.reference,
+        ):
+            raise ValueError(
+                "a native Across route retains the wrapped native token of each chain, as "
+                "its SpokePool named it at resolution"
+            )
 
 
 class Target(BridgeTarget):
@@ -157,6 +240,10 @@ def refuse_native_output(route: Route, recipient_kind: str) -> None:
     A Safe is a contract: the SpokePool pays it the wrapped token, which the arrival
     reader measures as it does any other token. A bound Safe account is verified on its
     own chain, with its Roles wiring, before a deployment is created.
+
+    A native route is the other case and passes here: it names the native asset as
+    received, its recipient is a plain account read on the destination chain before
+    anything is signed, and only an operator deployment may hold one.
     """
     wrapped = evm_network(route.destination_chain).wrapped_native
     if route.destination_asset == wrapped and recipient_kind == "eoa":

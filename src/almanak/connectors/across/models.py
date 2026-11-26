@@ -7,7 +7,13 @@ from pydantic import Field, model_validator
 from almanak.bridge_intents import BridgeIntent, Name, RevokeBridgeIntent
 from almanak.caip import AssetType
 from almanak.configuration.gas_parameters import AuthorGas, PreparedConfig
-from almanak.connectors.across.domain import Route, Target, Uint256, refuse_native_output
+from almanak.connectors.across.domain import (
+    NATIVE_DIRECT_ONLY,
+    Route,
+    Target,
+    Uint256,
+    refuse_native_output,
+)
 from almanak.gateway.environments import ForkBinding, validate_environments
 from almanak.gateway.evm import native_asset
 from almanak.gateway.production_config import ProductionExecution
@@ -53,6 +59,10 @@ class Allocation(Model):
             or self.adopt.fund.chain.environment != self.route.chain.environment
         ):
             raise ValueError("a stated Across recipient is on the route's destination chain")
+        if self.route.native and self.adopt is None:
+            # `adopt` is what only an operator deployment may carry, so this keeps a
+            # native route out of every strategy, composed deployment and backtest.
+            raise ValueError(NATIVE_DIRECT_ONLY)
         return self
 
 
@@ -125,6 +135,10 @@ class Parameters(AuthorGas):
         # Roles grants; a backtest's hypothetical account signs nothing. Only the
         # recipient's kind decides anything here.
         kind = self.recipient_kind(allocation)
+        if allocation.route.native and self.profile(allocation.account).kind != "eoa":
+            # The deposit's value leaves the account that signs and pays gas. A Safe's
+            # grant states no native value, and its deposit is not built.
+            raise ValueError("a native Across route is sent from a plain wallet, not a Safe")
         # An operator's allocation may only revoke, which pays nobody: its payout rule is
         # held where a deposit is asked for and again where the gateway admits one.
         if allocation.adopt is None:

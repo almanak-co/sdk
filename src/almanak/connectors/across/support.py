@@ -9,7 +9,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from almanak.caip import ChainId
-from almanak.connectors.across.domain import SPOKE_POOLS
+from almanak.chains import evm_network
+from almanak.connectors.across.domain import ETH_COIN, SPOKE_POOLS
 from almanak.connectors.support import (
     ConnectorChainSupport,
     EconomicAction,
@@ -100,7 +101,8 @@ BACKTEST_STARTS = {
 
 
 SCOPE = (
-    "ERC-20 routes between two bound accounts; no wrapped native asset is sent",
+    "ERC-20 routes between two bound accounts; a strategy sends no native asset and no "
+    "wrapped native asset",
     "a Safe/Roles account deposits under scope-only grants that pin the SpokePool, both "
     "tokens, the destination chain, the Safe as depositor, the destination fund as "
     "recipient and an empty message; Roles cannot relate the output amount to the input",
@@ -154,6 +156,21 @@ CHAIN_NOTES = {
         "transaction consumed is never released on this chain",
     ),
 }
+# The one native route: stated on the chains whose native coin is ETH, and nowhere as
+# more than it is.
+NATIVE_DIRECT = (
+    "the direct command `ax bridge` also sends native ETH from a plain wallet, as the "
+    "deposit's own value with no approval, to a plain recipient on another pinned chain "
+    "whose native coin is ETH; a refund of it is the wrapped token; declared on read-only "
+    "mainnet known answers and offline tests: no native bridge has run on a fork or on "
+    "mainnet",
+)
+
+
+def native_direct(chain: ChainId) -> tuple[str, ...]:
+    return NATIVE_DIRECT if evm_network(chain).native_asset.reference == ETH_COIN else ()
+
+
 WITHOUT_PROOF = (
     "declared on read-only mainnet known answers and offline tests: no reference "
     "lifecycle, refund proof or production rehearsal has run from this chain",
@@ -185,7 +202,8 @@ def restrictions(chain: ChainId) -> tuple[str, ...]:
     scoped = tuple(text for mode in declared for text in mode_scope(mode, chain))
     unproven = WITHOUT_PROOF if chain in declared_without_proof() else ()
     profiles = tuple(PROFILE_WITHOUT_PROOF[profile] for profile in profiles_without_proof())
-    return SCOPE + (source, *scoped, *CHAIN_NOTES.get(chain, ()), *unproven, *profiles)
+    notes = (*native_direct(chain), *CHAIN_NOTES.get(chain, ()))
+    return SCOPE + (source, *scoped, *notes, *unproven, *profiles)
 
 
 def historical(chain: ChainId) -> tuple[HistoricalSupport, ...]:

@@ -144,19 +144,28 @@ def test_the_pool_hook_lists_what_the_pool_planner_plans(
     assert hook == planned == expected
 
 
-def across_sequence(monkeypatch, kind: str, allowance: int) -> list[str]:
+def across_target(native: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        asset="asset", allocation="position", route=SimpleNamespace(native=native)
+    )
+
+
+def across_sequence(monkeypatch, kind: str, allowance: int, native: bool = False) -> list[str]:
     """Drive `planning.step` until the connector's completion rule ends the request."""
     made: dict[str, Any] = {
         "bridge": bridge_intents.BridgeIntent,
         "revoke_bridge": bridge_intents.RevokeBridgeIntent,
     }
-    intent = made[kind].model_construct(kind=kind, target=TARGET, amount=amount(AMOUNT))
+    intent = made[kind].model_construct(
+        kind=kind, target=across_target(native), amount=amount(AMOUNT)
+    )
     wallet = SimpleNamespace(allowance=allowance, deposited=False)
     monkeypatch.setattr(across_planning, "require_scope", lambda *scope: None)
     monkeypatch.setattr(across_planning, "executed", lambda state, decided: wallet.deposited)
     planned = []
     for _ in range(6):
-        step = across_planning.step(None, None, intent, SimpleNamespace(allowance=wallet.allowance))
+        before = SimpleNamespace(allowance=wallet.allowance, target=intent.target)
+        step = across_planning.step(None, None, intent, before)
         # A `clear` is a revocation that does not end the request.
         planned.append("revoke" if step == "clear" else step)
         wallet.allowance = AMOUNT if step == "approve" else 0
@@ -178,10 +187,23 @@ def across_sequence(monkeypatch, kind: str, allowance: int) -> list[str]:
 def test_the_across_hook_lists_what_the_across_planner_plans(
     monkeypatch, kind, allowance, expected
 ):
-    intent = SimpleNamespace(kind=kind, amount=amount(AMOUNT))
+    intent = SimpleNamespace(kind=kind, amount=amount(AMOUNT), target=across_target(False))
     state = SimpleNamespace(
         decision=SimpleNamespace(intent=intent),
         plan=SimpleNamespace(before=SimpleNamespace(allowance=allowance)),
     )
     hook = across_direct.steps(state)
     assert hook == across_sequence(monkeypatch, kind, allowance) == expected
+
+
+@pytest.mark.parametrize("allowance", [0, 7, AMOUNT])
+def test_a_native_bridge_is_the_deposit_alone_whatever_allowance_stands(monkeypatch, allowance):
+    """A native route gives the SpokePool no approval, so the wrapped token's allowance
+    changes neither what the planner plans nor what the hook lists."""
+    intent = SimpleNamespace(kind="bridge", amount=amount(AMOUNT), target=across_target(True))
+    state = SimpleNamespace(
+        decision=SimpleNamespace(intent=intent),
+        plan=SimpleNamespace(before=SimpleNamespace(allowance=allowance)),
+    )
+    planned = across_sequence(monkeypatch, "bridge", allowance, native=True)
+    assert across_direct.steps(state) == planned == ["deposit"]

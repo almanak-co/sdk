@@ -40,6 +40,18 @@ REFUND_ROOT_TOPIC = "0x" + keccak(text=REFUND_ROOT).hex()
 REFUND_TYPES = ("uint256", "uint256[]", "address", "address[]", "bool", "address")
 FILLED = 2
 EMPTY = bytes(32)
+WITHDRAWAL_TOPIC = "0x" + keccak(text="Withdrawal(address,uint256)").hex()
+ZERO = "0x" + "00" * 20
+# How a fill of the pool's wrapped native token left the SpokePool. The first two are
+# the pool unwrapping it to pay the recipient in the native asset, which itself leaves
+# no log: a WETH9 token emits `Withdrawal`, others burn with a transfer to the zero
+# address. The third is the token itself, paid to a recipient that held code.
+WITHDRAWAL, BURN, TOKEN_TRANSFER = (
+    "wrapped_token_withdrawal",
+    "wrapped_token_burn",
+    "wrapped_token_transfer",
+)
+UNWRAPS = frozenset({WITHDRAWAL, BURN})
 
 
 def integrity(message: str) -> DataError:
@@ -191,6 +203,90 @@ def paid_to(receipt, token: str, payee: str, after: int, sender: str | None) -> 
                 )
             return uint_data(row)
     return None
+
+
+def is_fill(row) -> bool:
+    """Whether the log is a `FilledRelay`, whatever case the node states its topic in."""
+    return bool(row["topics"]) and row["topics"][0].lower() == FILLED_RELAY_TOPIC
+
+
+def fill_window(receipt, fill_row) -> list[dict]:
+    """The logs after one `FilledRelay` and before the pool's next one, in log order.
+
+    The SpokePool emits the fill, pulls the output token from the relayer and pays the
+    recipient before it handles anything else, so what the pool moved for this fill
+    lies between its event and the next.
+    """
+    pool, after = fill_row["address"].lower(), position(fill_row)[1]
+    window = []
+    for row in sorted(receipt["logs"], key=position):
+        index = position(row)[1]
+        if index <= after:
+            continue
+        if row["address"].lower() == pool and is_fill(row):
+            break
+        window.append(row)
+    return window
+
+
+def withdrawn_by(row, pool: str) -> bool:
+    """Whether the log is a WETH9 `Withdrawal` whose source is the pool."""
+    topics = row["topics"]
+    return topics[0] == WITHDRAWAL_TOPIC and len(topics) == 2 and topic_address(row, 1) == pool
+
+
+def paid_by_pool(row, pool: str) -> str | None:
+    """The payee of a token transfer from the pool, or None for any other log."""
+    topics = row["topics"]
+    if topics[0] != TRANSFER_TOPIC or len(topics) != 3 or topic_address(row, 1) != pool:
+        return None
+    return topic_address(row, 2)
+
+
+def outflow_form(row, wrapped: str, pool: str, recipient: str) -> str | None:
+    """How one log moved the wrapped native token out of the pool for this recipient:
+    an unwrap, by withdrawal or by a burn to the zero address, or a transfer to the
+    recipient. None for any other log: another token, another source, another payee.
+    """
+    if row["address"].lower() != wrapped or not row["topics"]:
+        return None
+    if withdrawn_by(row, pool):
+        return WITHDRAWAL
+    return {ZERO: BURN, recipient: TOKEN_TRANSFER}.get(paid_by_pool(row, pool) or "")
+
+
+def exact_outflows(receipt, fill_row, wrapped: str, recipient: str, amount: int) -> set[str]:
+    """The forms in which the pool moved exactly `amount` of its wrapped native token
+    in the fill's window, as an unwrap or to the recipient."""
+    pool = fill_row["address"].lower()
+    return {
+        form
+        for row in fill_window(receipt, fill_row)
+        if (form := outflow_form(row, wrapped, pool, recipient)) is not None
+        and uint_data(row) == amount
+    }
+
+
+def native_payout(receipt, fill_row, wrapped: str, recipient: str, amount: int) -> str:
+    """How a fill of the wrapped native token paid `recipient`, from the pool's own logs.
+
+    The fill event names the recipient and the amount. The pool then either unwraps
+    that amount, to pay the native asset, or transfers the token to the recipient: the
+    pool decides by the recipient's code when the fill lands. The evidence is the
+    pool's outflow of exactly the event's amount in the fill's window, in one of those
+    two forms. What the pool moved to other parties or in other amounts there, such as
+    a refund payment batched after the fill, is not this fill's and is ignored. With no
+    such outflow, or with both an unwrap and a transfer to the recipient of that
+    amount, nothing is reported from a guess.
+    """
+    forms = exact_outflows(receipt, fill_row, wrapped, recipient, amount)
+    if not forms or (forms & UNWRAPS and TOKEN_TRANSFER in forms):
+        raise integrity(
+            f"Across fill {receipt['transactionHash']} shows no unwrap and no transfer of "
+            f"exactly the {amount} its event states by the SpokePool after that event, or "
+            "shows both; nothing is reported as received"
+        )
+    return next(form for form in (TOKEN_TRANSFER, WITHDRAWAL, BURN) if form in forms)
 
 
 def fill_status(reader, pool: str, relay_hash: str, block: Block) -> int:
