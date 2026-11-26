@@ -268,18 +268,25 @@ def test_a_transient_failure_of_the_first_renewal_after_a_stall_is_retried(
     gateway = ax_actions.LocalGateway(Desk(tmp_path, recorded).service)
     request = gateway.request
     failures = []
+    stalled = threading.Event()
 
     def flaky(method, **fields):
-        if method == "renew" and not failures:
+        if method == "renew" and stalled.is_set() and not failures:
             failures.append(clock.time())
             raise gateway_client.DataError("gateway_unavailable", "journal lock timed out")
         return request(method, **fields)
 
+    gateway.request = flaky
+    # `flaky` runs only under the lock, so a renewal before the stall passes through and
+    # the first failure is seen once both clocks under test have advanced. A failure seen
+    # before the monotonic stall would open its window on the old clock and lapse.
+    renewals = gated(gateway)
     gateway.acquire()
     try:
         # Admitted before the stall; the first renewal after it fails once.
-        gateway.request = flaky
-        clock.stall(LONG, clocks)
+        with renewals:
+            clock.stall(LONG, clocks)
+            stalled.set()
         assert renewed_after(gateway, clock, clock.time())
         assert len(failures) == 1 and gateway.lease_error is None
         gateway.scoped("renew")
