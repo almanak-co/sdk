@@ -438,6 +438,43 @@ def test_renewal_failure_rereads_a_lease_confirmed_while_it_waited(gateway, monk
     assert gateway.client.lease_error is None
 
 
+@pytest.mark.parametrize("committed", [True, False], ids=["committed", "not_committed"])
+def test_a_refusal_says_whether_its_lease_was_committed(gateway, monkeypatch, committed):
+    """Over loopback the refusal carries `lease_extended` only when the commit that ended
+    the request extended the lease, and the client counts its lease from that answer."""
+    dispatch = gateway.service.dispatch
+
+    def refused(method, request):
+        if method != "audit":
+            return dispatch(method, request)
+        if committed:
+            with gateway.service.journal.authorized(request.coordinator, 2):
+                raise RuntimeError("coordinator refused after the commit")
+        raise RuntimeError("coordinator refused before any commit")
+
+    monkeypatch.setattr(gateway.service, "dispatch", refused)
+    # No heartbeat, so only the request below moves the client's lease count.
+    gateway.client.stopped.set()
+    gateway.client.acquire()
+    admitted = gateway.client.lease_confirmed
+    response = post(
+        gateway,
+        "audit",
+        coordinator=gateway.client.coordinator,
+        deployment_id=gateway.client.deployment_id,
+    )
+    assert response.status_code == 409
+    assert response.json().get("lease_extended") is (True if committed else None)
+    asked = time.monotonic()
+    with pytest.raises(DataError) as error:
+        gateway.client.scoped("audit")
+    assert error.value.kind == "authority"
+    if committed:
+        assert gateway.client.lease_confirmed >= asked
+    else:
+        assert gateway.client.lease_confirmed == admitted
+
+
 def post(gateway, method, **fields):
     return httpx.post(
         gateway.endpoint + "/" + method,

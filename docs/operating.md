@@ -107,7 +107,9 @@ the end of the request, whether the request committed or failed, and the
 coordinator's renewal waits for its own request instead of giving up. The new
 expiry takes effect only when the gateway commits it; storage that fails that
 commit leaves the expiry the request was admitted under, and the commit's own
-time counts against the lease. No other coordinator can be admitted while the
+time counts against the lease. A failed request's refusal says whether that
+commit was made (`lease_extended`), and the coordinator counts its lease from
+the refusal only then. No other coordinator can be admitted while the
 lock is held. A lease that is lost is reported with the renewal failure that
 lost it. A direct action then names the command that resolves its record,
 `almanak ax recover --record <path>` with the record's own path, to run when the

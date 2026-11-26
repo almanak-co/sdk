@@ -16,8 +16,10 @@ its changelog is on the `v2` branch.
   the coordinator its lease, although the transaction had often been mined. Time under
   that lock no longer counts against the lease: it runs for its full duration from the
   end of the request, whether the request committed or failed, and the renewal waits
-  for the coordinator's own request. The send still runs under the lock, so a signed
-  step is recorded and sent exactly as before (#46).
+  for the coordinator's own request. A refusal states `lease_extended` when the commit
+  that ended its request extended the lease, and the coordinator then counts the lease
+  from it as from an answer. The send still runs under the lock, so a signed step is
+  recorded and sent exactly as before (#46).
 - A lost coordinator lease is reported with the renewal failure that lost it, and a
   direct action names `almanak ax recover --record <path>`, with its record's path,
   where it said `resume to recover`.

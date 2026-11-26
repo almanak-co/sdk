@@ -268,7 +268,7 @@ class Journal:
         it before the lock is released. The expiry is written in the commit that releases
         the lock, so that commit's own time does count. A request that raises still loses
         its own writes, and when the lease cannot then be committed either, the expiry it
-        was admitted under stands.
+        was admitted under stands. The exception records which happened (`mark_lease`).
         """
         connection = sqlite3.connect(f"file:{quote(str(self.path))}?mode=rw", uri=True, timeout=0)
         try:
@@ -280,7 +280,7 @@ class Journal:
                 connection.execute("SAVEPOINT request")
                 try:
                     yield connection, checkpoint_body(connection)
-                except Exception:
+                except Exception as exc:
                     try:
                         # Undo only the request's writes; the write lock stays held, so
                         # the lease row is still the one `require_lease` accepted.
@@ -290,7 +290,9 @@ class Journal:
                     except sqlite3.Error:
                         # Storage that cannot keep the lease must not hide the failure
                         # of the request; the lease then runs out by itself.
-                        pass
+                        mark_lease(exc, extended=False)
+                    else:
+                        mark_lease(exc, extended=True)
                     raise
                 extend_lease(connection, duration)
         finally:
@@ -314,6 +316,26 @@ class Journal:
     def renew(self, identity: str, duration: float) -> None:
         with self.authorized(identity, duration):
             pass
+
+
+# The attribute that says whether the commit ending a failed fenced request extended the
+# coordinator's lease. The loopback server reports it as the refusal's `lease_extended`,
+# so the coordinator can count the lease from that answer as from a successful one.
+LEASE_EXTENDED = "lease_extended"
+
+
+def mark_lease(exc: BaseException, *, extended: bool) -> None:
+    """Record on `exc` whether the commit that ended its request extended the lease."""
+    setattr(exc, LEASE_EXTENDED, extended)
+
+
+def lease_extended(exc: BaseException) -> bool:
+    """Whether the gateway committed a lease extension when the request raising `exc` ended.
+
+    Absent means no: a request that failed before any commit, or a transport failure,
+    extended nothing.
+    """
+    return getattr(exc, LEASE_EXTENDED, False) is True
 
 
 def require_lease(connection, identity: str) -> None:

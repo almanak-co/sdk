@@ -17,6 +17,7 @@ from almanak.connectors.composition import (
 from almanak.gateway.auth import loopback_endpoint, read_token
 from almanak.gateway.ethereum import DataError
 from almanak.models import Model
+from almanak.state import lease_extended, mark_lease
 from almanak.strategy import StrategyDefinition
 
 # Creation generates and verifies Roles permissions inside one request. On a new workspace
@@ -165,6 +166,7 @@ class GatewayClient:
                 details=result["details"] if isinstance(result.get("details"), dict) else None,
             )
             refusal.reverted = result.get("reverted") is True
+            mark_lease(refusal, extended=result.get("lease_extended") is True)
             raise refusal
         return result["result"]
 
@@ -175,23 +177,34 @@ class GatewayClient:
                 "gateway coordinator heartbeat failed: the lease was not renewed and is "
                 f"expired or lost ({type(cause).__name__}: {cause}); {self.lease_recovery()}"
             ) from cause
-        with nullcontext() if method == "renew" or method in UNFENCED else self.fenced:
-            result = self.request(
-                method, coordinator=self.coordinator, deployment_id=self.deployment_id, **fields
-            )
+        try:
+            with nullcontext() if method == "renew" or method in UNFENCED else self.fenced:
+                result = self.request(
+                    method, coordinator=self.coordinator, deployment_id=self.deployment_id, **fields
+                )
+        except Exception as exc:
+            # A refusal counts only when the gateway says the commit that ended the request
+            # extended the lease. A request that failed before any commit, a commit that
+            # storage refused and a request that never reached the gateway extended nothing.
+            if method not in UNFENCED and lease_extended(exc):
+                self.confirm_lease()
+            raise
         if method not in UNFENCED:
-            # The gateway extends the lease in the commit of every fenced request it
-            # completes, for its full duration from the end of the request. The answer
-            # follows the commit that releases the journal lock, so the lease is counted
-            # from the answer, not from the start of a request that may have held the
-            # lock for a whole send.
-            # That keeps the lease counted if a renewal then fails transiently. It can
-            # overstate the lease by the time the answer took to arrive, which only
-            # decides how long a renewal is asked again: the gateway refuses an expired
-            # lease whatever this clock says.
-            answered = time.monotonic()
-            self.lease_confirmed = max(self.lease_confirmed or answered, answered)
+            self.confirm_lease()
         return result
+
+    def confirm_lease(self) -> None:
+        # The gateway extends the lease in the commit of every fenced request it
+        # completes, for its full duration from the end of the request. The answer
+        # follows the commit that releases the journal lock, so the lease is counted
+        # from the answer, not from the start of a request that may have held the
+        # lock for a whole send.
+        # That keeps the lease counted if a renewal then fails transiently. It can
+        # overstate the lease by the time the answer took to arrive, which only
+        # decides how long a renewal is asked again: the gateway refuses an expired
+        # lease whatever this clock says.
+        answered = time.monotonic()
+        self.lease_confirmed = max(self.lease_confirmed or answered, answered)
 
     def lease_recovery(self) -> str:
         """What the operator does about a lost lease."""
