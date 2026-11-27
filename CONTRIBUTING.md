@@ -39,7 +39,8 @@ there, so tests that run author code need Linux.
 ```sh
 make lint-check    # Ruff lint and format check
 make typecheck     # mypy over src, strategies and scripts
-make test-ci       # offline test suite, as hosted CI runs it
+make test-ci       # offline test suite, as release tags run it
+make test-changed BASE=origin/main  # what a pull request runs: changed test modules only
 make docs-check    # docs navigation and reference checks
 make hygiene       # no credentials, private names or workstation paths
 ```

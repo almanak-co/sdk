@@ -1461,7 +1461,8 @@ independently.
 - Maximum CRAP score is 30 for every repository-owned Python function. Rewrite
   a function above 30; never grandfather a violation or raise the threshold.
 - Statement coverage over every Python file under `src/` stays at or above 87%
-  (`[tool.crap.coverage-floor]`). Do not lower it to make a check pass.
+  (`[tool.crap.coverage-floor]`). Do not lower it to make a check pass. Only
+  the local `make crap` scores it.
 - `make hygiene` refuses private material in the published tree: credentials,
   internal infrastructure names, workstation paths, tracker references and
   denied wallet addresses.
@@ -1475,13 +1476,19 @@ independently.
   `scripts/evidence_fixtures.py pin`, which refuses URLs, credentials and
   operator env values. Locally, missing evidence is a failure.
 - Hosted CI (`pr.yml`, `release_candidate.yml`, `release_tag.yml`) runs lint,
-  types, the offline suite with `--skip-missing-evidence`, CLI smoke checks
-  and the docs build. Nothing runs these gates on a push to `main`; the pull
-  request already ran them. A skipped case is not a pass, and a green hosted
-  run is not full QA.
-  Pull requests also run the CRAP gate over that reduced coverage, scoped to
-  functions with an executable line the pull request changed.
-- The offline shards run on the org's 8-core `ubuntu-latest-l` runner. Shard
+  types, CLI smoke checks and the docs build. Nothing runs these gates on a
+  push to `main`. A skipped case is not a pass, and a green hosted run is not
+  full QA.
+- A pull request runs only the test modules it added or modified
+  (`make test-changed`), with `--skip-missing-evidence`, in one job on a
+  standard runner. A changed conftest or support module selects nothing. The
+  same job gates CRAP for functions with an executable line the pull request
+  changed, on the coverage of those modules alone, so a changed function that
+  no changed test module exercises scores as uncovered. The coverage floor is
+  not scored there. A green pull request does not show that the rest of the
+  offline suite passes: run `make test` and `make crap` locally before merging.
+- The whole offline suite runs hosted on release candidate and release tags
+  only, in shards on the org's 8-core `ubuntu-latest-l` runner. Shard
   balancing reads the committed `.test_durations`; refresh it with
   `scripts/ci/merge_test_durations.py` when shards drift.
 - The macOS smoke job is advisory: macOS rejects lowering `RLIMIT_AS`, so the

@@ -13,6 +13,7 @@ from scripts.check_crap import (
     Score,
     arguments,
     changed_lines,
+    changed_tests,
     collect_coverage,
     main,
     python_files,
@@ -228,76 +229,15 @@ def test_unparseable_source_is_a_measurement_error(tmp_path):
         score_file(tmp_path, path, Coverage(config_file=False))
 
 
-def test_sharded_runs_score_combined_coverage_without_rerunning_tests(runnable_repository):
-    import sys
-
-    config = runnable_repository / "shard.coveragerc"
-    data = runnable_repository / ".coverage.shard-1"
-    assert main(runnable_repository, coveragerc=config, data_file=data) == 0
-    # The score reads statement hits only, so the shard config must not pay
-    # for branch tracing.
-    assert "branch = true" not in config.read_text()
-    assert str(data.resolve()) in config.read_text()
-    assert "sample.py" in config.read_text()
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-q",
-            "-p",
-            "no:cacheprovider",
-            "--cov",
-            f"--cov-config={config}",
-            "--cov-report=",
-        ],
-        cwd=runnable_repository,
-        check=True,
-    )
-    manifest = data.with_name("coverage.shard-1.sources.json")
-    assert main(runnable_repository, verify_sources=manifest) == 0
-    assert main(runnable_repository, coverage_data=data, manifests=(manifest,)) == 0
-    report = json.loads((runnable_repository / "artifacts/crap/scores.json").read_text())
-    assert report["function_count"] == 2
-    assert all(row["coverage"] == 1 for row in report["functions"])
-    (runnable_repository / "sample.py").write_text("def example():\n    return 2\n")
-    assert main(runnable_repository, verify_sources=manifest) == 2
-    assert main(runnable_repository, coverage_data=data, manifests=(manifest,)) == 2
-    assert not (runnable_repository / "artifacts/crap/scores.json").exists()
-
-
-def test_missing_or_empty_shard_coverage_is_a_measurement_error(runnable_repository):
-    config = runnable_repository / "shard.coveragerc"
-    data = runnable_repository / ".coverage.shard-1"
-    assert main(runnable_repository, coveragerc=config, data_file=data) == 0
-    manifest = data.with_name("coverage.shard-1.sources.json")
-    assert main(runnable_repository, coverage_data=runnable_repository / "absent") == 2
-    assert main(runnable_repository, coverage_data=data, manifests=(manifest,)) == 2
-    assert main(runnable_repository, coveragerc=runnable_repository / "c") == 2
-
-
 def test_command_line_separates_gate_options_from_pytest_arguments():
     options, pytest_args = arguments(
-        [
-            "-n",
-            "auto",
-            "--coverage-data",
-            ".coverage",
-            "--source-manifest",
-            "a.json",
-            "--source-manifest",
-            "b.json",
-            "--skip-missing-evidence",
-            "-p",
-            "no:cov",
-        ]
+        ["-n", "auto", "--changed-since", "base", "--changed-tests", "-p", "no:cov"]
     )
-    assert options.coverage_data == Path(".coverage")
-    assert options.source_manifest == [Path("a.json"), Path("b.json")]
-    assert options.write_coveragerc is None
-    assert options.skip_missing_evidence is True
-    assert options.changed_since is None
+    assert options.changed_since == "base"
+    assert options.changed_tests is True
+    assert options.skip_missing_evidence is False
     assert pytest_args == ("-n", "auto", "-p", "no:cov")
+    assert arguments(["--skip-missing-evidence"])[0].changed_tests is False
 
 
 def commit(repository, message):
@@ -371,6 +311,111 @@ def test_diff_scope_gates_only_functions_with_changed_executable_lines(runnable_
     assert main(runnable_repository, changed_since="no-such-ref") == 2
 
 
+COMPLEX = "def complex(value):\n" + "    if value:\n        value -= 1\n" * 5 + "    return value\n"
+
+
+# The module's own directory is on the path, not the repository root.
+TARGET_TEST = (
+    "import sys\nfrom pathlib import Path\n"
+    "sys.path.insert(0, str(Path(__file__).parents[1]))\n"
+    "from target import complex\n"
+    "def test_complex():\n    assert complex(9) == {expected}\n"
+)
+
+
+@pytest.fixture
+def branched_repository(runnable_repository):
+    """A base commit with one complex function its own test module covers."""
+    (runnable_repository / "tests").mkdir()
+    (runnable_repository / "target.py").write_text(COMPLEX)
+    (runnable_repository / "tests/test_target.py").write_text(TARGET_TEST.format(expected=4))
+    (runnable_repository / "tests/support.py").write_text("VALUE = 1\n")
+    (runnable_repository / "tests/conftest.py").write_text("")
+    commit(runnable_repository, "base")
+    subprocess.run(["git", "branch", "base"], cwd=runnable_repository, check=True)
+    return runnable_repository
+
+
+def test_changed_tests_are_changed_test_modules_only(branched_repository):
+    assert changed_tests(branched_repository, "base") == []
+    tests = branched_repository / "tests"
+    (tests / "support.py").write_text("VALUE = 2\n")
+    (tests / "conftest.py").write_text("# touched\n")
+    (branched_repository / "sample.py").write_text("def example():\n    return 1\n\n")
+    assert changed_tests(branched_repository, "base") == []
+    (tests / "test_target.py").write_text((tests / "test_target.py").read_text() + "\n")
+    (tests / "nested").mkdir()
+    (tests / "nested/test_added.py").write_text("def test_added():\n    pass\n")
+    subprocess.run(
+        ["git", "mv", "test_sample.py", "test_renamed.py"], cwd=branched_repository, check=True
+    )
+    commit(branched_repository, "edit")
+    (tests / "test_untracked.py").write_text("def test_untracked():\n    pass\n")
+    (tests / "test_target.py").unlink()
+    assert changed_tests(branched_repository, "base") == [
+        "test_renamed.py",
+        "tests/nested/test_added.py",
+        "tests/test_untracked.py",
+    ]
+
+
+def test_changed_scope_runs_only_changed_test_modules(branched_repository):
+    tests = branched_repository / "tests"
+    (tests / "test_fails.py").write_text("def test_fails():\n    assert False\n")
+    commit(branched_repository, "failing module on the base")
+    subprocess.run(["git", "branch", "-f", "base"], cwd=branched_repository, check=True)
+    assert main(branched_repository, changed_since="base") == 2
+    (tests / "test_target.py").write_text((tests / "test_target.py").read_text() + "\n")
+    assert main(branched_repository, changed_since="base", changed_tests_only=True) == 0
+    report = json.loads((branched_repository / "artifacts/crap/scores.json").read_text())
+    assert report["selected_tests"] == ["tests/test_target.py"]
+    (tests / "test_fails.py").write_text("def test_fails():\n    assert 0\n")
+    assert main(branched_repository, changed_since="base", changed_tests_only=True) == 2
+
+
+def test_changed_scope_scores_on_the_changed_modules_coverage_alone(branched_repository):
+    target = branched_repository / "target.py"
+    target.write_text(COMPLEX.replace("-= 1", "-= 2", 1))
+    # No test module changed: nothing runs and the changed function has no hits.
+    assert main(branched_repository, changed_since="base", changed_tests_only=True) == 1
+    report = json.loads((branched_repository / "artifacts/crap/scores.json").read_text())
+    assert report["selected_tests"] == []
+    assert report["violation_count"] == 1
+    assert report["functions"][0]["path"] == "target.py"
+    assert report["functions"][0]["coverage"] == 0
+    (branched_repository / "tests/test_target.py").write_text(TARGET_TEST.format(expected=3))
+    assert main(branched_repository, changed_since="base", changed_tests_only=True) == 0
+    assert main(branched_repository, changed_tests_only=True) == 2
+
+
+def test_changed_scope_without_changes_passes_and_runs_nothing(branched_repository):
+    assert main(branched_repository, changed_since="base", changed_tests_only=True) == 0
+    report = json.loads((branched_repository / "artifacts/crap/scores.json").read_text())
+    assert report["selected_tests"] == []
+    assert report["violation_count"] == 0
+
+
+def test_changed_scope_accepts_a_selection_that_collects_no_tests(branched_repository):
+    skipped = 'import pytest\npytest.skip("not here", allow_module_level=True)\n'
+    (branched_repository / "tests/test_target.py").write_text(skipped)
+    assert main(branched_repository, changed_since="base", changed_tests_only=True) == 0
+    report = json.loads((branched_repository / "artifacts/crap/scores.json").read_text())
+    assert report["selected_tests"] == ["tests/test_target.py"]
+    # The whole suite collecting nothing stays a measurement error.
+    (branched_repository / "test_sample.py").write_text(skipped)
+    assert main(branched_repository) == 2
+
+
+def test_changed_scope_leaves_coverage_floors_unscored(branched_repository):
+    (branched_repository / "src").mkdir()
+    (branched_repository / "src/unused.py").write_text("def unused():\n    return 1\n")
+    write_floor(branched_repository, "src = 100\n")
+    assert main(branched_repository, changed_since="base") == 1
+    assert main(branched_repository, changed_since="base", changed_tests_only=True) == 0
+    report = json.loads((branched_repository / "artifacts/crap/scores.json").read_text())
+    assert report["coverage_floors"] == []
+
+
 def test_skip_missing_evidence_leaves_uncollectable_modules_unscored(runnable_repository):
     tests = runnable_repository / "tests"
     tests.mkdir()
@@ -394,6 +439,26 @@ def test_skip_missing_evidence_leaves_uncollectable_modules_unscored(runnable_re
         "test_sample.py",
         "tests/evidence_guard.py",
     }
+    # A changed module that needs absent evidence is not run by name either.
+    commit(runnable_repository, "base")
+    for name in ("test_sample.py", "tests/test_needs_evidence.py"):
+        with (runnable_repository / name).open("a") as module:
+            module.write("\n")
+    assert changed_tests(runnable_repository, "HEAD") == [
+        "test_sample.py",
+        "tests/test_needs_evidence.py",
+    ]
+    assert (
+        main(
+            runnable_repository,
+            changed_since="HEAD",
+            changed_tests_only=True,
+            skip_missing_evidence=True,
+        )
+        != 2
+    )
+    report = json.loads((runnable_repository / "artifacts/crap/scores.json").read_text())
+    assert report["selected_tests"] == ["test_sample.py"]
 
 
 def write_floor(repository, floors):

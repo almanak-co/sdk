@@ -1,6 +1,6 @@
 .PHONY: all help install install-dev lint lint-check typecheck fixtures \
-	test test-ci contract-examples crap crap-ci check security hygiene public-tree check-strategies \
-	crap-from-coverage qa-plan qa-daily docs-cli docs-support docs-generated docs docs-llms docs-serve docs-check docs-clean \
+	test test-ci test-changed contract-examples crap crap-ci check security hygiene public-tree check-strategies \
+	qa-plan qa-daily docs-cli docs-support docs-generated docs docs-llms docs-serve docs-check docs-clean \
 	build build-platform-wheels binaries almanak-code-version publish-pypi version clean
 
 UV := uv run --locked
@@ -55,12 +55,14 @@ crap-ci: fixtures ## CRAP gate over the hosted-CI test scope (BASE=origin/main f
 	$(UV) python scripts/check_crap.py -n auto --skip-missing-evidence \
 		$(if $(BASE),--changed-since $(BASE))
 
-# Hosted CI: shards run scripts/ci/run_pytest_shard.sh, the aggregator combines
-# their data into .coverage, and this scores it without rerunning the suite.
-crap-from-coverage: ## Score combined shard coverage in .coverage (BASE=<ref> for the PR scope)
-	$(UV) python scripts/check_crap.py --coverage-data .coverage --skip-missing-evidence \
-		$(if $(BASE),--changed-since $(BASE)) \
-		$(addprefix --source-manifest ,$(wildcard coverage.shard-*.sources.json))
+# The pull request gate. Runs only the test modules added or modified since the
+# merge base with BASE, and gates CRAP for the functions with an executable line
+# changed since it, on the coverage of those modules alone. The coverage floors
+# are not scored. It does not show that the rest of the suite passes.
+test-changed: fixtures ## Changed test modules and CRAP over changed functions (BASE=origin/main)
+	@test -n "$(BASE)" || { echo "usage: make test-changed BASE=<ref>"; exit 2; }
+	$(UV) python scripts/check_crap.py -n auto --skip-missing-evidence \
+		--changed-since $(BASE) --changed-tests $(ARGS)
 
 check: lint-check typecheck hygiene test crap docs-check ## Every local gate
 

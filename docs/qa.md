@@ -34,12 +34,13 @@ the manifest changes. `make qa-daily` runs it first.
 Use a new output directory for each invocation. Existing output is never reused
 as evidence for a new run. Plan mode performs no provider calls. Linux needs
 Anvil and working Bubblewrap/unprivileged namespaces. macOS uses sandbox-exec;
-Full QA runs locally with retained evidence. Hosted CI runs lint, types, the
-offline suite with evidence-dependent modules skipped, the CRAP gate over that
-reduced coverage scoped to the functions a pull request changed, the 87%
-statement coverage floor over the whole `src/` directory from that same reduced
-coverage, and CLI smoke
-checks on Linux and macOS; it does not run the full QA suite. The
+Full QA runs locally with retained evidence. On a pull request, hosted CI runs
+lint, types, only the test modules the pull request added or modified with
+evidence-dependent modules skipped, the CRAP gate for the functions it changed
+on the coverage of those modules alone, and CLI smoke checks on Linux and
+macOS. It runs neither the rest of the offline suite nor the 87% statement
+coverage floor, which `make test` and `make crap` cover locally; the whole
+offline suite runs hosted on release tags only. The
 `Fork Qualification` workflow (`.github/workflows/fork_qualification.yml`) runs
 the discovered fork lifecycle and, where the checked-out connectors declare
 production EOA support, the production rehearsal for named references on hosted
