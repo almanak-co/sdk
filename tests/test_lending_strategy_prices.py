@@ -19,10 +19,11 @@ from scripts.legacy_configuration.backtest import read_backtest
 from tests.legacy_references import harness_directory
 
 HOUR = 3600
-# Policy digests of the frozen references before strategy series existed.
+# Policy digests of the frozen references without strategy series. A digest covers the
+# model identifier, so it changes with a model version.
 REFERENCES = {
-    "aave_v3": ("aave_v3_base_lending", "aa29879c953f"),
-    "sparklend": ("sparklend_ethereum_lending", "74595c6a1956"),
+    "aave_v3": ("aave_v3_base_lending", "b6c64656e670"),
+    "sparklend": ("sparklend_ethereum_lending", "a7ece3a2a45e"),
     "morpho_blue": ("morpho_blue_base_lending", "4bb53facdd8a"),
     "compound_v3": ("compound_v3_base_lending", "b7d48fb01c87"),
 }

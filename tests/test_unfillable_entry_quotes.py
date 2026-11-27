@@ -159,7 +159,13 @@ def test_v3_economic_entry_beyond_prepared_coverage_keeps_the_exit_quote():
         simulate=model.simulation.simulate,
     )
     observed = model.observe(state)[0]
-    assert observed.entry_quote is None and observed.entry_quote_error == COVERAGE
+    sample = model.book.at(target, state.time).payload
+    assert observed.entry_quote is None
+    # The recorded reason names the coverage the swap left and what stayed unfilled.
+    assert observed.entry_quote_error.startswith(
+        f"{COVERAGE} [{sample.lower}, {sample.upper}]: the price moved from tick "
+    )
+    assert f"of {2**126} input base units unfilled" in observed.entry_quote_error
     assert observed.exit_quote is not None
     assert observed.exit_quote.amount_in.asset == target.counter_currency
     # The exit is still decided and executed from that observation.
@@ -248,7 +254,9 @@ def test_v4_economic_entry_beyond_prepared_coverage_keeps_the_exit_quote(tmp_pat
     model, state, target, _ = v4_economic_state(tmp_path, monkeypatch, entry_size=2**126)
     try:
         observed = model.observe(state)[0]
-        assert observed.entry_quote is None and observed.entry_quote_error == COVERAGE
+        assert observed.entry_quote is None
+        assert observed.entry_quote_error.startswith(f"{COVERAGE} [")
+        assert f"of {2**126} input base units unfilled" in observed.entry_quote_error
         assert observed.exit_quote is not None
         assert observed.exit_quote.amount.asset == target.counter_currency
     finally:

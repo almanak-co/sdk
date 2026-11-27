@@ -23,6 +23,7 @@ def timeline():
         payload_revision="sparklend-revision4-prepared-reserves-v1",
     )
     records = []
+    indexes = (reserve.liquidity_index_ray, reserve.variable_borrow_index_ray)
     for i in range(4):
         at = start + 60 * i
         block = reserve.block.model_copy(update={"timestamp": at})
@@ -31,10 +32,15 @@ def timeline():
                 "block": block,
                 "oracle": reserve.oracle.model_copy(update={"block": block}),
                 "last_update_timestamp": at,
+                "liquidity_index_ray": indexes[0],
+                "variable_borrow_index_ray": indexes[1],
                 "liquidity_rate_ray": RAY // 20 + i,
                 "variable_borrow_rate_ray": RAY // 10 + i,
             }
         )
+        # The reserve is updated at every boundary, so each sample stores the indexes
+        # the previous one accrued to, as a chain's history does.
+        indexes = normalized_indices(payload, at + 60)
         records.append(
             RateRecord(
                 key=requirement.key,

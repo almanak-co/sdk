@@ -52,6 +52,18 @@ def entry_or_reason(measure):
         return {"entry_quote_error": f"entry quote unavailable: {reason}"}
 
 
+def refuse_unmeasured_entry(observed, refusal):
+    """Refuse a swap along an entry quote the observation records as unmeasured.
+
+    The observation already holds why the market could not fill the entry, for example
+    the prepared tick coverage a modeled swap left; the refusal names it instead of
+    reporting only that the quote is absent.
+    """
+    cause = getattr(observed, "entry_quote_error", None)
+    if observed.entry_quote is None and cause is not None:
+        raise ValueError(f"{refusal}: {cause}")
+
+
 def validate_entry_error(entry_quote, entry_quote_error):
     if entry_quote is not None and entry_quote_error is not None:
         raise ValueError("an observation cannot offer an entry quote it records as unmeasured")

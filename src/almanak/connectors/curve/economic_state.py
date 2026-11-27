@@ -13,6 +13,7 @@ from almanak.connectors.curve.models import Intent, Parameters, Target
 from almanak.connectors.curve.observations import Snapshot
 from almanak.connectors.curve.positions import Ownership, Quote
 from almanak.connectors.curve.receipts import Effects
+from almanak.connectors.dex_fill_timing import OnDecisionSample, StateAge
 from almanak.models import AssetAmount, Model
 from almanak.strategy_api import DecisionContext, OutcomeContext, SimulationEvidence
 from almanak.triggers import UtcInstant
@@ -69,6 +70,10 @@ class EconomicResult(Effects):
     gas_paid: AssetAmount
     fill: Quote | None
     steps: tuple[Literal["swap", "mint", "increase", "decrease", "close", "revoke"], ...]
+    # Absent for a step that reads no pool sample, and in results retained before
+    # these fields existed.
+    fill_state_age_seconds: StateAge = None
+    fill_on_decision_sample: OnDecisionSample = None
 
     @property
     def status(self) -> Literal["completed", "intermediate", "failed"]:

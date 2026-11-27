@@ -6,6 +6,18 @@ from almanak.connectors.dex_economic_reporting import payer_reports as payer_rep
 from almanak.connectors.dex_economic_reporting import quantity
 from almanak.connectors.v3_economic_simulation import pending_bound
 from almanak.connectors.v3_economic_valuation import position_claims, valuation_layer
+from almanak.connectors.v3_fee_dilution import estimate
+
+DILUTION = (
+    "diluted_fee_estimate scales each sample interval's credited fees by the pool's active "
+    "liquidity over that liquidity plus the position's, assuming unchanged historical "
+    "swaps; it is an estimate and is credited nowhere"
+)
+TIMING = (
+    "an action executes on the latest sample at or before its eligible time; when that is "
+    "the decision's own sample, fill_on_decision_sample is true and the configured latency "
+    "did not change the price it executed at"
+)
 
 
 def measurement(state, model, payload):
@@ -42,7 +54,23 @@ def position_report(state, model, payload):
     }
     if target.band is not None:
         result |= band_report(target, payload, bound)
-    return result
+    return result | {"diluted_fee_estimate": dilution_report(state, model, target)}
+
+
+def dilution_report(state, model, target):
+    """What the credited fees would be if the position had diluted the pool: an estimate.
+
+    It covers the fees credited so far, collected and uncollected, of every position the
+    allocation held. `interval_fees` re-measures them per sample interval, so it can fall
+    short of the credited fees by the rounding of each interval.
+    """
+    measured = estimate(state, model.book, target)
+    if measured["measurement_status"] != "estimated":
+        return measured
+    return measured | {
+        name: [quantity(a, v) for a, v in zip(target.assets, measured[name], strict=True)]
+        for name in ("interval_fees", "diluted_fees")
+    }
 
 
 def band_report(target, payload, bound):
@@ -83,6 +111,7 @@ def report(state, model, *, valued=None):
         assumptions=[
             "assumed execution access; approvals, inclusion and transaction mechanics excluded",
             "size-dependent integer fills use the latest eligible bounded pool sample",
+            TIMING,
             "hypothetical actions do not change subsequent external market history",
             *fee_assumptions(model),
             "modeled principal settlement excludes NFPM aggregate-position collection rounding",
@@ -121,9 +150,13 @@ def fee_assumptions(model):
     # A fixed-range run keeps its established wording; a run with a band states the
     # shared basis once and then how band fees are attributed, so the two cannot conflict.
     if all(model.config.target(a.name).band is None for a in model.config.allocations):
-        return ("LP fees use fixed historical range growth without dilution or own-trade fees",)
+        return (
+            "LP fees use fixed historical range growth without dilution or own-trade fees",
+            DILUTION,
+        )
     return (
         "LP fees use historical range growth without dilution or own-trade fees",
+        DILUTION,
         "banded LP fees credit only growth that continuously initialized sampled ticks "
         "prove accrued inside each concrete range; the upper bracket is reported, not credited",
         "banded fee growth is measured between the latest prepared samples at or before "

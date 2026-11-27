@@ -1,5 +1,6 @@
 """Shared hypothetical wallet, payer, scheduling and missing-input reporting."""
 
+from almanak.connectors import dex_fill_timing as fill_timing
 from almanak.connectors.dex_economic_parameters import payer_wallet
 from almanak.effects import WalletAsset
 
@@ -69,6 +70,7 @@ def report(state, model, *, position_report, assumptions, evidence):
         "gas_payers": payer_reports(state, model),
         "costs": model.settings.costs.model_dump(mode="json"),
         "cost_interpretation": "excluded or fixed native cost per successful economic operation",
+        "fill_timing": fill_timing.summary(state),
         "failures": [
             c.transition.result.model_dump(mode="json")
             for c in state.completed

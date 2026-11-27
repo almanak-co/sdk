@@ -523,8 +523,10 @@ absent.
 An entry slice the market cannot fill at the observed block, because the
 Quoter reverts, the pool has no liquidity for it or a backtest swap would leave
 the prepared ticks, offers no `entry_quote`. The observation records why as
-`entry_quote_error`, and its exit and rebalance quotes are unaffected. Exit
-observations and teardown in backtests measure no entry quote.
+`entry_quote_error`, and its exit and rebalance quotes are unaffected. A `swap`
+along that absent entry quote raises with the recorded cause; in a backtest it
+names the prepared tick coverage the swap left. Exit observations and teardown
+in backtests measure no entry quote.
 
 ### Bridging between accounts
 

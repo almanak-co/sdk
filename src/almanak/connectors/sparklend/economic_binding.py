@@ -24,8 +24,8 @@ from almanak.connectors.sparklend.state import Decision
 
 
 class Manifest(Envelope[Parameters, EconomicConfig, State]):
-    model: Literal["sparklend-revision4-economic-indices-v1"] = (
-        "sparklend-revision4-economic-indices-v1"
+    model: Literal["sparklend-revision4-economic-indices-v2"] = (
+        "sparklend-revision4-economic-indices-v2"
     )
 
 

@@ -142,6 +142,8 @@ def report(state, model):
         ],
         assumptions=assumptions(model.settings),
     )
+    # GMX requests settle at keeper publications, not on a pool sample.
+    result.pop("fill_timing")
     result["gas_payers"] = payer_reports(state, model)
     result["cost_interpretation"] = (
         "Excluded or fixed native submitter cost per acceptance, owner cancellation, revocation "
