@@ -18,6 +18,7 @@ Without `--execute` the command plans the first step and signs nothing.
 import fcntl
 import json
 import os
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -29,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from almanak import state as durable
-from almanak.gateway.client import GatewayClient
+from almanak.gateway.client import Fenced, GatewayClient
 from almanak.gateway.ethereum import DataError
 from almanak.models import Model
 
@@ -124,6 +125,7 @@ class LocalGateway(GatewayClient):
 
     def __init__(self, service):
         self.service = service
+        self.fenced = Fenced()
         self.coordinator = None
         self.deployment_id = None
         self.stopped = threading.Event()
@@ -151,6 +153,18 @@ class LocalGateway(GatewayClient):
         if isinstance(result, tuple):
             return [item.model_dump(mode="json") for item in result]
         return result
+
+    def lease_recovery(self) -> str:
+        # A direct command has no resume. Its record is the directory of its journal,
+        # and `ax recover` resolves it only when named with `--record`. This is raised
+        # before the command decides whether to keep the record, so it names the event
+        # that says so instead of reading the journal on a failing path. Quoted, so the
+        # command pastes whatever the state directory is called.
+        record = shlex.quote(str(self.service.journal.path.parent))
+        return (
+            "if the command reports `record_kept`, a signed step may be unresolved; "
+            f"then run `almanak ax recover --record {record}`"
+        )
 
     def close(self):
         self.stopped.set()

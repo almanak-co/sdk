@@ -33,7 +33,7 @@ from almanak.operator_deployment import (
     is_operator,
     request_executed,
 )
-from almanak.state import Journal, Lease, decode_checkpoint
+from almanak.state import Journal, Lease, decode_checkpoint, lease_extended, mark_lease
 from almanak.strategy import StrategyDefinition
 from almanak.transaction_family import is_unsent
 
@@ -322,6 +322,8 @@ class GatewayService:
                 )
         # Raised only after the commit, so a retained fault survives its own failure.
         if failure is not None:
+            # The commit that retained it also extended the lease.
+            mark_lease(failure, extended=True)
             raise failure
         return result
 
@@ -1108,9 +1110,10 @@ def http_server(service, token_file: Path, listen: Listen, *, request_type=None,
                     result = [item.model_dump(mode="json") for item in result]
                 self.reply(200, {"result": result})
             except (ValueError, ValidationError, KeyError) as exc:
-                self.reply(
+                self.refuse(
                     400,
                     {"error": "invalid_request", "message": "gateway request refused"},
+                    exc,
                     reason=refusal_reason(exc),
                 )
             except DataError as exc:
@@ -1120,13 +1123,21 @@ def http_server(service, token_file: Path, listen: Listen, *, request_type=None,
                 # A stuck attempt's stop carries the revert it wraps the same way.
                 decoded = "simulation_reverted" in (exc.kind, getattr(exc, "refusal_kind", None))
                 reason = f"{exc.kind}: {exc}" if decoded else None
-                self.reply(status, data_error_reply(exc), reason=reason)
+                self.refuse(status, data_error_reply(exc), exc, reason=reason)
             except RuntimeError as exc:
-                self.reply(409, {"error": "authority", "message": str(exc)})
+                self.refuse(409, {"error": "authority", "message": str(exc)}, exc)
             except (OSError, sqlite3.Error):
+                # The client reads this as unavailability and counts nothing from it.
                 self.reply(503, {"error": "unavailable", "message": "gateway storage unavailable"})
-            except Exception:
-                self.reply(500, {"error": "internal", "message": "gateway operation failed"})
+            except Exception as exc:
+                self.refuse(500, {"error": "internal", "message": "gateway operation failed"}, exc)
+
+        def refuse(self, status, payload, exc, reason=None):
+            # A fenced request whose failure still committed a lease extension says so,
+            # so the coordinator counts its lease from this answer.
+            if lease_extended(exc):
+                payload = {**payload, "lease_extended": True}
+            self.reply(status, payload, reason=reason)
 
     server = loopback_server(listen, Handler)
     # Drain admitted requests before closing their adapters or finalizing native objects.
