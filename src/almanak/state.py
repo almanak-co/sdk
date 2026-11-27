@@ -264,7 +264,7 @@ class Journal:
         The lease runs for `duration` from the end of the request, whether it committed
         or raised. A submission sends under this lock and no renewal can be written
         meanwhile, so the request's time under the lock must not count against the lease:
-        the holder proved a current lease when it took the lock, and nothing can supersede
+        the holder proved the lease was its own when it took the lock, and nothing can supersede
         it before the lock is released. The expiry is written in the commit that releases
         the lock, so that commit's own time does count. A request that raises still loses
         its own writes, and when the lease cannot then be committed either, the expiry it

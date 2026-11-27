@@ -102,7 +102,7 @@ meanwhile, and a broadcast re-checks its envelope, hash and nonce and sends only
 under the lock. Renewals therefore never wait behind a slow plan or signature.
 They do wait behind a send, which can take longer than the lease on a slow
 endpoint. That time does not count against the lease: a request that held the
-lock under a current lease leaves the lease running for its full duration from
+lock as the lease's holder leaves the lease running for its full duration from
 the end of the request, whether the request committed or failed, and the
 coordinator's renewal waits for its own request instead of giving up. The new
 expiry takes effect only when the gateway commits it; storage that fails that

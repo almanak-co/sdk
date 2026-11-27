@@ -49,7 +49,7 @@ class Fenced:
 
     Every fenced request counts, not only one that holds the lock: a running `observe`
     or `plan` also keeps the renewal asking, and a refusal that never reached the lock
-    counts as an answer. The gateway still refuses an expired lease, so this only
+    counts as an answer. The gateway still refuses a superseded lease, so this only
     delays the report of a lease lost for another reason, by up to that request's
     length. A request this client stopped waiting for (its HTTP timeout) is not an
     answer either, although the gateway may still be sending under the lock; a strategy
@@ -201,7 +201,7 @@ class GatewayClient:
         # lock for a whole send.
         # That keeps the lease counted if a renewal then fails transiently. It can
         # overstate the lease by the time the answer took to arrive, which only
-        # decides how long a renewal is asked again: the gateway refuses an expired
+        # decides how long a renewal is asked again: the gateway refuses a superseded
         # lease whatever this clock says.
         answered = time.monotonic()
         self.lease_confirmed = max(self.lease_confirmed or answered, answered)

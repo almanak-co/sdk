@@ -1101,7 +1101,8 @@ def test_a_lease_that_ran_out_before_sending_sends_only_after_checking_again(
     assert is_unsent(retained) == (stalled == "before_recording")
     with journal.connect() as connection:
         holder, expires = connection.execute("SELECT identity, expires FROM coordinator").fetchone()
-    assert holder == "coordinator" and expires < clock.time()
+    # The refusal was raised under the lock, so the commit that ended it extended the lease.
+    assert holder == "coordinator" and expires > clock.time()
 
     result, failure = fenced_run(service)
     assert failure is None and result is True
