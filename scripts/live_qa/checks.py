@@ -425,15 +425,22 @@ def entry_findings(output: Output, rpc: Rpc) -> tuple[list[str], list[str]]:
     A Spoke without reserves reverts `getReserveCount()`, so calling it unreadable is a
     misread. An entry refused for a reason that does not name the endpoint is a finding
     too. An entry or a market refused for an endpoint reason is no finding; it is
-    returned so that `unless_answered` can block a case that found nothing else.
+    returned so that `unless_answered` can block a case that found nothing else, and so
+    is a direct `getReserveCount()` read the endpoint did not answer.
     """
     unreadable = output["source"].get("unreadable") or []
     block = output["block"]["number"]
-    empty = [
-        item["spoke"]
-        for item in unreadable
-        if "spoke" in item and rpc.reverts(item["spoke"], "getReserveCount()", block)
-    ]
+    empty, unread = [], []
+    for item in unreadable:
+        if "spoke" not in item:
+            continue
+        # An unanswered direct read is kept, not raised, so that it cannot hide a
+        # misread of another Spoke or a mismatch the caller already found.
+        try:
+            if rpc.reverts(item["spoke"], "getReserveCount()", block):
+                empty.append(item["spoke"])
+        except RpcUnavailable as exc:
+            unread.append(f"spoke {item['spoke']} getReserveCount(): {exc}")
     others = [item for item in unreadable if item.get("spoke") not in empty]
     misread = (
         [
@@ -451,7 +458,7 @@ def entry_findings(output: Output, rpc: Rpc) -> tuple[list[str], list[str]]:
     unanswered = [
         item["reason"] for item in [*others, *output["markets"]] if endpoint_refused(item)
     ]
-    return misread + answered, unanswered
+    return misread + answered, unanswered + unread
 
 
 def unless_answered(findings: list[str], unanswered: list[str]) -> list[str]:
@@ -508,25 +515,40 @@ def answered(read: Callable[[], tuple[Any, ...]], name: str, unread: list[str]) 
         return ()
 
 
+def other_chain(index: int, asset: str, chain: ChainId) -> list[str]:
+    """A finding where a reported market asset is an asset of another chain than the case's.
+
+    It needs no direct read, so it is kept where the read that would compare the whole
+    asset went unanswered.
+    """
+    reported = AssetType(asset).chain
+    if str(reported) == str(chain):
+        return []
+    return [f"market {index} asset {asset} is not an asset of {chain}"]
+
+
 def aave_v4_listing(chain: ChainId) -> Check:
     """An Aave V4 listing: each market is the reserve its Spoke records under that ID, its
     asset an asset of the requested chain."""
 
     def check(output: Output, rpc: Rpc) -> list[str]:
         block = output["block"]["number"]
-        pairs = []
+        pairs, elsewhere = [], []
         unread: list[str] = []
         for index, market in enumerate(output["markets"]):
+            # Validated before the read, so that output the check cannot read fails and an
+            # asset of another chain is a finding whether or not the Spoke answers.
+            asset = reported_asset(market["asset"]["asset"])
             spoke, reserve_id = market["spoke"], market["reserve_id"]
             read = partial(spoke_reserve, rpc, spoke, reserve_id, block)
             record = answered(read, f"market {index}", unread)
             if not record:
+                elsewhere += other_chain(index, asset, chain)
                 continue
             underlying, hub, _, _ = record
-            asset = reported_asset(market["asset"]["asset"])
             pairs.append((f"market {index} asset", asset, on_chain(chain, underlying)))
             pairs.append((f"market {index} hub", market["hub"], hub.lower()))
-        return listed_markets(output, rpc, differences(pairs), unread)
+        return listed_markets(output, rpc, [*differences(pairs), *elsewhere], unread)
 
     return check
 
@@ -576,17 +598,33 @@ def pool_reserve_listing(chain: ChainId, limit: int) -> Check:
 
     def check(output: Output, rpc: Rpc) -> list[str]:
         source = output["source"]
-        (reserves,) = rpc.call(
-            source["contract"], "getReservesList()", output["block"]["number"], ("address[]",)
-        )
-        onchain = {on_chain(chain, reserve) for reserve in reserves}
-        counted = differences((("listed reserves", source["listed"], len(reserves)),))
         assets = [reported_asset(market["asset"]["asset"]) for market in output["markets"]]
         repeated = [
             f"asset {asset} is reported {assets.count(asset)} times"
             for asset in sorted(set(assets))
             if assets.count(asset) > 1
         ]
+        unread: list[str] = []
+        read = partial(
+            rpc.call,
+            source["contract"],
+            "getReservesList()",
+            output["block"]["number"],
+            ("address[]",),
+        )
+        listed = answered(read, "getReservesList()", unread)
+        if not listed:
+            # What needs no reserve list is still compared, so an unanswered list cannot
+            # turn a repeated asset or an asset of another chain into a blocked case.
+            elsewhere = [
+                found
+                for index, asset in enumerate(assets)
+                for found in other_chain(index, asset, chain)
+            ]
+            return listed_markets(output, rpc, repeated + elsewhere, unread)
+        (reserves,) = listed
+        onchain = {on_chain(chain, reserve) for reserve in reserves}
+        counted = differences((("listed reserves", source["listed"], len(reserves)),))
         expected = min(limit, len(reserves))
         short = (
             [

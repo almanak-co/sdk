@@ -1157,6 +1157,88 @@ def test_an_answered_listing_mismatch_is_kept_when_a_later_market_read_is_unansw
     assert reads.judge_output(morpho, verified, rpc).status == "transient"
 
 
+def test_a_listing_asset_of_another_chain_fails_when_its_market_read_is_unanswered():
+    """The reported chain is wrong before any read, so no unanswered read can block it."""
+    unanswered = RpcUnavailable("eth_call getReserve(uint256): HTTP 429")
+    elsewhere = {"asset": AVALANCHE_LOAN, "symbol": "TKN"}
+    case = reads.ReadCase(
+        "aave-v4", ETHEREUM, ("lending-markets",), checks.aave_v4_listing(ETHEREUM)
+    )
+    two = listing(
+        [
+            market(spoke="0xspoke", reserve_id=3, hub=HUB, asset=elsewhere),
+            market(spoke="0xspoke", reserve_id=4, hub=HUB),
+        ]
+    )
+    for answers in ([unanswered, unanswered], [unanswered, (MARKET_ASSET, HUB, 4, 18)]):
+        verdict = reads.judge_output(case, two, InTurn({"getReserve(uint256)": answers}))
+        assert verdict.status == "fail", verdict
+        assert verdict.findings == (f"market 0 asset {AVALANCHE_LOAN} is not an asset of eip155:1",)
+    # A matching asset whose read went unanswered still blocks, so the run retries it.
+    matching = listing([market(spoke="0xspoke", reserve_id=3, hub=HUB)] * 2)
+    rpc = InTurn({"getReserve(uint256)": [unanswered, unanswered]})
+    assert reads.judge_output(case, matching, rpc).status == "transient"
+    # A value that is no CAIP-19 reference fails as output the check cannot read.
+    unshaped = listing([market(spoke="0xspoke", reserve_id=3, hub=HUB, asset={"asset": "WETH"})])
+    verdict = reads.judge_output(case, unshaped, InTurn({"getReserve(uint256)": [unanswered]}))
+    assert verdict.status == "fail" and "not shaped" in verdict.detail, verdict
+
+
+def test_a_pool_listing_keeps_what_needs_no_reserve_list_when_that_read_is_unanswered():
+    unanswered = FakeRpc({"getReservesList()": RpcUnavailable("eth_call: HTTP 429")})
+    case = reads.ReadCase(
+        "aave-v3", ETHEREUM, ("lending-markets",), checks.pool_reserve_listing(ETHEREUM, 3)
+    )
+    elsewhere = market(asset={"asset": AVALANCHE_LOAN, "symbol": "TKN"})
+    verdict = reads.judge_output(case, listing([elsewhere, market()]), unanswered)
+    assert verdict.status == "fail", verdict
+    assert verdict.findings == (f"market 0 asset {AVALANCHE_LOAN} is not an asset of eip155:1",)
+    repeated = reads.judge_output(case, listing([market(), market()]), unanswered)
+    assert repeated.findings == (f"asset {LOAN} is reported 2 times",), repeated
+    other = market(asset={"asset": OTHER_LOAN})
+    verdict = reads.judge_output(case, listing([market(), other]), unanswered)
+    assert verdict.status == "transient" and "getReservesList()" in verdict.detail, verdict
+
+
+class SilentSpokes(FakeRpc):
+    """A direct read of these Spokes' `getReserveCount()` goes unanswered; others answer."""
+
+    def __init__(self, silent, **fields):
+        super().__init__(**fields)
+        self.silent = silent
+
+    def reverts(self, to, signature, block):
+        if to in self.silent:
+            raise RpcUnavailable(f"eth_call {signature}: HTTP 429")
+        return super().reverts(to, signature, block)
+
+
+def test_an_unanswered_spoke_read_keeps_what_the_listing_check_already_found():
+    unreadable = [
+        {"spoke": "0x1", "reason": "rpc: eth_call: RPC rejected the requested read"},
+        {"spoke": "0x2", "reason": "rpc: eth_call: RPC rejected the requested read"},
+    ]
+    partial = listing([market()], unreadable)
+    # A misread of one Spoke stands beside another Spoke the endpoint did not answer.
+    (finding,) = checks.listed_markets(partial, SilentSpokes(("0x2",), reverting=("0x1",)))
+    assert finding.startswith("1 Spokes are reported unreadable") and finding.endswith("0x1")
+    # So does a mismatch the connector's own check found in the same listing.
+    spoke = SilentSpokes(("0x1", "0x2"), answers={"getReserve(uint256)": (OTHER_ASSET, HUB, 4, 18)})
+    listed = listing([market(spoke="0xspoke", reserve_id=3, hub=HUB)], unreadable)
+    (finding,) = checks.aave_v4_listing(ETHEREUM)(listed, spoke)
+    assert finding.startswith("market 0 asset: CLI")
+    pool = SilentSpokes(("0x1",), answers={"getReservesList()": ((MARKET_ASSET, OTHER_ASSET),)})
+    elsewhere = market(asset={"asset": AVALANCHE_LOAN, "symbol": "TKN"})
+    found = checks.pool_reserve_listing(ETHEREUM, 3)(listing([elsewhere], unreadable[:1]), pool)
+    assert found == [
+        "the listing reports 1 distinct markets, where a limit of 3 on 2 reserves gives 2",
+        f"market 0 asset {AVALANCHE_LOAN} is not on the Pool's reserve list",
+    ]
+    # Alone, the unanswered Spoke read blocks the case.
+    with pytest.raises(RpcUnavailable, match="2 entries unreadable"):
+        checks.listed_markets(listing([market()], unreadable[1:]), SilentSpokes(("0x2",)))
+
+
 def test_a_morpho_listing_is_held_to_the_core_and_may_refuse_some_markets_not_all():
     check = checks.morpho_listing("0xcore", LOAN)
     verified = market(market_id="0x" + "0d" * 32, loan_asset=market()["asset"])
