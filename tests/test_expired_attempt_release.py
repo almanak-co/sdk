@@ -1007,7 +1007,7 @@ def test_a_write_ahead_refuses_a_checkpoint_changed_since_it_was_read(tmp_path):
     assert Journal(tmp_path / "state.sqlite").load() == changed
 
 
-def test_a_lease_lost_between_recording_and_sending_sends_nothing(tmp_path):
+def test_a_lease_taken_over_between_recording_and_sending_sends_nothing(tmp_path):
     import sqlite3
     import time
 
@@ -1022,15 +1022,91 @@ def test_a_lease_lost_between_recording_and_sending_sends_nothing(tmp_path):
     service = fenced_service(tmp_path, state, adapter)
     record = service.record_send
 
-    def record_then_expire(db, state, local):
+    def record_then_lose(db, state, local):
         marked = record(db, state, local)
+        # Another coordinator is admitted: expiry alone does not end the holder.
         with sqlite3.connect(tmp_path / "state.sqlite") as connection:
-            connection.execute("UPDATE coordinator SET expires=?", (time.time() - 1,))
+            connection.execute(
+                "UPDATE coordinator SET identity=?, expires=?", ("successor", time.time() + 30)
+            )
         return marked
 
-    service.record_send = record_then_expire
+    service.record_send = record_then_lose
     with pytest.raises(RuntimeError, match="lease"):
         fenced_run(service)
     assert sent == []
     retained = Journal(tmp_path / "state.sqlite").load().pending
     assert retained is not None and not is_unsent(retained)
+
+
+class StalledClock:
+    """The wall clock the fenced checks and the lease row read, with a stall added."""
+
+    def __init__(self):
+        import time
+
+        self.real, self.offset = time, 0.0
+
+    def __getattr__(self, name):
+        return getattr(self.real, name)
+
+    def time(self):
+        return self.real.time() + self.offset
+
+
+@pytest.mark.parametrize("stalled", ["before_recording", "after_recording"])
+def test_a_lease_that_ran_out_before_sending_sends_only_after_checking_again(
+    tmp_path, monkeypatch, stalled
+):
+    """A stall longer than the lease after the pre-send checks, with no successor: the
+    holder keeps its lease, but nothing is sent on that attempt. The next attempt runs
+    the pre-send checks again and sends."""
+    from almanak import state as durable
+    from almanak.gateway import fenced
+    from almanak.state import Journal
+    from almanak.transaction_family import is_unsent
+
+    clock = StalledClock()
+    monkeypatch.setattr(fenced, "time", clock)
+    monkeypatch.setattr(durable, "time", clock)
+    sent, checked = [], []
+
+    def prepare_submission(state):
+        checked.append(state.pending)
+        if stalled == "before_recording" and len(checked) == 1:
+            clock.offset += 150
+
+    adapter = SimpleNamespace(
+        prepare_submission=prepare_submission,
+        submit=lambda state: (sent.append(state), (state, True))[1],
+    )
+    state, pending, _ = v4_attempt("swap", unsent=True)
+    service = fenced_service(tmp_path, state, adapter)
+    record = service.record_send
+
+    def record_then_stall(db, state, local):
+        marked = record(db, state, local)
+        if stalled == "after_recording" and len(checked) == 1:
+            clock.offset += 150
+        return marked
+
+    service.record_send = record_then_stall
+    with pytest.raises(DataError) as refused:
+        fenced_run(service)
+    assert refused.value.kind == "stale_checks" and refused.value.transient
+    assert sent == []
+    journal = Journal(tmp_path / "state.sqlite")
+    retained = journal.load().pending
+    # Refused before the mark, the attempt keeps its never-sent proof.
+    assert is_unsent(retained) == (stalled == "before_recording")
+    with journal.connect() as connection:
+        holder, expires = connection.execute("SELECT identity, expires FROM coordinator").fetchone()
+    # The refusal was raised under the lock, so the commit that ended it extended the lease.
+    assert holder == "coordinator" and expires > clock.time()
+
+    result, failure = fenced_run(service)
+    assert failure is None and result is True
+    assert len(checked) == 2 and len(sent) == 1
+    with journal.connect() as connection:
+        holder, expires = connection.execute("SELECT identity, expires FROM coordinator").fetchone()
+    assert holder == "coordinator" and expires > clock.time()

@@ -270,17 +270,17 @@ def test_storage_that_cannot_keep_the_lease_does_not_hide_the_request_failure(
     assert lease_row(journal)[1] > admitted[1] + 30
 
 
-def test_an_expired_or_superseded_lease_is_still_refused_at_the_lock(tmp_path, recorded):
+def test_a_superseded_lease_is_still_refused_at_the_lock(tmp_path, recorded):
     journal = Desk(tmp_path, recorded).store
     journal.acquire("first", 0.05)
     outlive(journal)
-    # Time under the lock does not count; time before it does.
-    with pytest.raises(RuntimeError, match="absent, expired or superseded"):
-        journal.renew("first", 5)
+    # The expiry admits a successor; it does not end a holder nobody replaced.
+    journal.renew("first", 0.05)
+    outlive(journal)
     assert lease_row(journal)[1] < time.time()
     journal.acquire("second", 5)
     with (
-        pytest.raises(RuntimeError, match="absent, expired or superseded"),
+        pytest.raises(RuntimeError, match="lease is superseded"),
         journal.authorized("first", 5),
     ):
         raise AssertionError("a superseded coordinator entered the fenced commit")
@@ -334,8 +334,8 @@ def test_a_lost_lease_names_the_renewal_failure_that_lost_it(tmp_path, recorded)
         del desk.service.dispatch
         client.close()
     message = str(refused.value)
-    assert "heartbeat failed" in message and "expired" in message
-    assert "DataError: gateway storage unavailable" in message
+    assert "heartbeat failed: gateway storage unavailable" in message
+    assert "the lease was not renewed" in message
     # The command that resolves a kept record, with this record's own path; without
     # `--record` it only lists them.
     assert f"`almanak ax recover --record {shlex.quote(str(desk.store.path.parent))}`" in message
@@ -575,8 +575,9 @@ def test_the_commit_that_releases_the_lock_counts_against_the_lease(
     tmp_path, recorded, monkeypatch
 ):
     """The documented limit: the expiry is written in the commit that releases the lock,
-    so a commit slower than the lease leaves it expired. Time under the lock before that
-    commit does not count, as the request that raises above shows."""
+    so a commit slower than the lease leaves it expired, and an expired lease admits
+    another coordinator. Time under the lock before that commit does not count, as the
+    request that raises above shows."""
     journal = Desk(tmp_path, recorded).store
     journal.acquire("first", 5)
     connect, slow = sqlite3.connect, threading.Event()
@@ -594,7 +595,9 @@ def test_the_commit_that_releases_the_lock_counts_against_the_lease(
     with journal.authorized("first", 0.4):
         pass
     slow.clear()
-    with pytest.raises(RuntimeError, match="absent, expired or superseded"):
+    assert lease_row(journal)[1] < time.time()
+    journal.acquire("second", 5)
+    with pytest.raises(RuntimeError, match="lease is superseded"):
         journal.renew("first", 5)
 
 

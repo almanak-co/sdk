@@ -306,7 +306,7 @@ class GatewayService:
     def dispatch_fenced(self, method, request):
         """Run one lease-fenced request, holding the journal lock only to commit.
 
-        Provider reads and signing run against the checkpoint read under a current lease.
+        Provider reads and signing run against the checkpoint read as the lease's holder.
         The commit re-checks the lease, refuses a replacement of a checkpoint that changed
         meanwhile and submits only under the lock, so a superseded coordinator can neither
         commit nor broadcast, and renewals do not wait behind slow external calls.
@@ -465,7 +465,8 @@ class GatewayService:
             and getattr(local.pending, "family", None) is None
         ):
             # Authority, simulation and budget checks run now; identity, nonce and the send
-            # repeat under the lock against an unchanged pending transaction.
+            # repeat under the lock against an unchanged pending transaction, and only
+            # while these checks are no older than the lease (`Writes.require_recent`).
             self.adapter.prepare_submission(local)
             if is_unsent(local.pending):
                 local = self.record_send(db, state, local)
@@ -500,6 +501,8 @@ class GatewayService:
         )
 
         def mark(current):
+            # Refused before the mark, so the attempt stays provably never sent.
+            db.require_recent(self.lease_seconds)
             now = project(current, self.route_chain) if self.route_chain else current
             if now.pending != local.pending:
                 raise DataError("conflict", "pending execution changed; reload before broadcasting")
@@ -522,6 +525,7 @@ class GatewayService:
             )
         if now.pending != local.pending:
             raise DataError("conflict", "pending execution changed; reload before broadcasting")
+        db.require_recent(self.lease_seconds)
         changed, sent = self.adapter.submit(local)
         if changed.pending != local.pending:
             # The adapter recorded in the pending attempt what its send returned, such as a

@@ -23,6 +23,43 @@ its changelog is on the `v2` branch.
 - A lost coordinator lease is reported with the renewal failure that lost it, and a
   direct action names `almanak ax recover --record <path>`, with its record's path,
   where it said `resume to recover`.
+- A direct `almanak ax` action, or a strategy run, no longer ends with `coordinator
+  lease is absent, expired or superseded` after its process stalled for longer than the
+  lease (30 s for a direct action), as on a suspended machine or a frozen VM. The lease
+  row still named that coordinator and no other had been admitted, yet nothing took the
+  lease again, so a command whose steps were already mined exited 1 with no result and
+  no kept record. The expiry now decides only when another coordinator may be admitted:
+  a coordinator the lease row still names continues, and its next commit or renewal
+  takes the lease again. A coordinator that was replaced is refused as before, at its
+  read and under the journal lock at every commit and broadcast. The renewal thread
+  asks the gateway after a stall instead of giving up on its own clock, which ended the
+  same stall with `gateway coordinator heartbeat failed`. A renewal that meets an
+  unavailable gateway is retried for one lease from its first failure, so one journal
+  lock timeout or loopback error on the first renewal after a stall no longer ends the
+  command either; only a gateway refusal, or unavailability that outlasts both that
+  window and the confirmed lease, ends it (#60).
+- With the lease no longer ending at its expiry, the age of a broadcast's own checks
+  is bounded instead. The checks it made before the journal lock (authority,
+  simulation, fees, a calldata deadline) are held to the coordinator lease under that
+  lock, before the attempt is marked as possibly sent and again in `submit_prepared`
+  just before the chain adapter is asked to send. After a stall longer than the lease
+  between those checks and that point, as on a machine suspended during `ax swap
+  --execute` on Curve, whose calldata carries no deadline, that attempt sends nothing
+  and is refused as transient with `stale_checks`; the coordinator asks again, and the
+  next attempt checks afresh. A stall inside the adapter's own send, after the last
+  check, is not bounded by it (#60).
+- A direct `almanak ax` action that fails with an error the command names, such as a
+  lost coordinator lease, after an outcome of its request was recorded no longer ends
+  with only that error. It prints the result built from the record, with the mined
+  steps, `completed` and `position_after`, and the failure under `refused`. A request
+  the record already shows closed reports `completed: true` and exits 0. An interrupt,
+  an unexpected failure, or a failure before any outcome still prints the
+  `steps_sent` event and the error (#60).
+- The lease refusal names its cause: `coordinator lease is superseded: another
+  coordinator took it`, or `coordinator lease is absent: it was released or never
+  taken`. When the renewal thread meets it first, the command's error carries it too:
+  `gateway coordinator heartbeat failed: coordinator lease is superseded: ...`, instead
+  of a fixed message that said to resume, which a direct command cannot.
 
 ## [3.4.2] - 2026-11-26
 

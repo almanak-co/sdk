@@ -761,14 +761,22 @@ def executed(runtime, start: int, interrupt) -> dict:
 
     A refusal on a later step, such as a fee quote above the ceiling after the approval
     was mined, is part of the result and never replaces it: the steps already sent stay
-    reported. Any other failure reports them as one event line on standard error before
-    it propagates.
+    reported. So is a failure the command names, such as a lost coordinator lease, once
+    the record holds an outcome of this request: the result is built from the record,
+    with the failure under `refused` unless the request completed. An interrupt, an
+    unexpected failure, or a failure before any outcome reports the steps as one event
+    line on standard error before it propagates.
     """
     refusal = None
     try:
         runtime.execute(interrupt)
     except DataError as exc:
         refusal = exc
+    except Exception as exc:
+        refusal = recorded_failure(runtime, start, exc)
+        if refusal is None:
+            report_sent(runtime, start)
+            raise
     except BaseException:
         report_sent(runtime, start)
         raise
@@ -779,6 +787,27 @@ def executed(runtime, start: int, interrupt) -> dict:
             raise
         raise refusal from None
     return executed_result(state, state.outcomes[start:], refusal or runtime.refused)
+
+
+def recorded_failure(runtime, start: int, exc: Exception) -> DataError | None:
+    """The failure as a refusal of the result, when the record already holds an outcome.
+
+    Only a failure the command would print as its own error document qualifies, under
+    that document's kind; anything else is unexpected and keeps its traceback. Without
+    an outcome of this request there is nothing to report but the failure itself.
+    """
+    from almanak.cli import error_document
+
+    try:
+        outcomes = runtime.journal.load().outcomes[start:]
+    except Exception:
+        return None
+    document = error_document(exc) if outcomes else None
+    if document is None or "message" not in document:
+        return None
+    refusal = DataError(document["error"], document["message"])
+    refusal.__cause__ = exc
+    return refusal
 
 
 def report_sent(runtime, start: int) -> None:

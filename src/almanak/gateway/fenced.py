@@ -1,5 +1,7 @@
 """The checkpoint changes one lease-fenced gateway request commits after its unlocked work."""
 
+import time
+
 from almanak.gateway.ethereum import DataError
 
 
@@ -21,6 +23,8 @@ class Writes:
 
     def __init__(self, body: str, durable=None):
         self.body = body
+        # Wall time, as the lease row's expiry is: a suspended machine advances it.
+        self.started = time.time()
         self.durable = durable
         self.after = None
         self.changes: list = []
@@ -47,6 +51,26 @@ class Writes:
             body = change(decode_checkpoint(current)).model_dump_json()
             db.execute("UPDATE checkpoint SET body=? WHERE id=1", (body,))
         self.body = body
+
+    def require_recent(self, seconds: float) -> None:
+        """Refuse, as transient, once this request's checks are older than `seconds`.
+
+        Checks made before the lock (authority, simulation, fees, a protocol deadline)
+        are not repeated under it. The holder's lease no longer ends at its expiry, so
+        this bounds instead how old those checks may be when the broadcast is admitted:
+        it is called under the journal lock, in `record_send` before the never-sent mark
+        is cleared and in `submit_prepared` just before the adapter is asked to send. A
+        stall after that call, inside the adapter's own send, is not bounded by it. The
+        same request asked again checks afresh.
+        """
+        age = time.time() - self.started
+        if age > seconds:
+            raise DataError(
+                "stale_checks",
+                f"the pre-send checks are {age:.0f}s old, longer than the {seconds:g}s"
+                " coordinator lease; nothing was sent, and the next attempt checks again",
+                transient=True,
+            )
 
     def submit(self, action) -> Deferred:
         self.submission = action

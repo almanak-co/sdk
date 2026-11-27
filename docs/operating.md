@@ -96,13 +96,13 @@ are not served. A failed read at a decision records a hold for that decision;
 teardown decisions read no series.
 
 The gateway holds the journal's write lock only to commit a request. Provider
-reads and remote signing run against the checkpoint read under the current lease;
+reads and remote signing run against the checkpoint read as the lease's holder;
 the commit re-checks the lease and refuses a recording whose checkpoint changed
 meanwhile, and a broadcast re-checks its envelope, hash and nonce and sends only
 under the lock. Renewals therefore never wait behind a slow plan or signature.
 They do wait behind a send, which can take longer than the lease on a slow
 endpoint. That time does not count against the lease: a request that held the
-lock under a current lease leaves the lease running for its full duration from
+lock as the lease's holder leaves the lease running for its full duration from
 the end of the request, whether the request committed or failed, and the
 coordinator's renewal waits for its own request instead of giving up. The new
 expiry takes effect only when the gateway commits it; storage that fails that
@@ -121,6 +121,31 @@ Replacement families keep the lock for their whole request. Each
 `rpc`), HTTP exchanges with the provider (`rpc_round_trips`, a batch counting
 once), provider, signer and lock time (`rpc_ms`, `signer_ms`, `lock_wait_ms`,
 `lock_held_ms`) alongside `duration_ms`.
+
+The lease's expiry decides when another coordinator may be admitted; it does not
+end the coordinator that holds it. An admission writes its own identity to the
+lease row and a release clears it, so a coordinator that the row still names
+after its expiry, as after a suspended machine or a process stall longer than the
+lease (30 seconds for a direct action), continues, and its next commit or renewal
+takes the lease for its full duration again. Once another coordinator has been
+admitted, the former one is refused at its next read and, under the lock, at every
+commit and broadcast: `coordinator lease is superseded`, or `coordinator lease is
+absent` after a release. This is the journal's fence, not on-chain enforcement.
+
+A broadcast's checks before the lock (authority, simulation, fees, a calldata
+deadline) are not repeated under it, so they are held to the lease's duration
+instead. Their age is checked under the journal lock, before the attempt is
+marked as possibly sent and again just before the chain adapter is asked to send:
+when they are older than one lease there, nothing is sent and the broadcast is
+refused as transient (`stale_checks`). A stall after that last check, inside the
+adapter's own send, is not bounded by it. The coordinator asks again, and the
+next attempt runs every check afresh. After a stall the coordinator also continues from its durable
+checkpoint, as every tick does: a plan is signed only while its observation is
+within `max_observation_age_seconds` in production and after its current state,
+simulation and fees are checked at a fresh block, and a signed step is sent only
+after the checks above ran again. A strategy decision that was evaluated before
+the stall and committed after it keeps the observations it was evaluated on; it
+is executed only through those checks.
 
 Fork fixtures fund each declared asset with simulated capital. The chain's
 wrapped native asset is funded by wrapping and transfer, and nothing else is
@@ -633,8 +658,13 @@ and the command exits 1 when it is false. A supply is not atomic: its approval c
 be mined and the supply then be refused, for example on a fee quote above the
 ceiling, or revert. The position is then unchanged and the allowance stays on chain;
 `outcomes` lists the steps that ran, each with its `transaction` hash and the
-`block` it was mined in, and `refused` names the refusal. A failure that
-is not a refusal prints the steps already sent as one
+`block` it was mined in, and `refused` names the refusal. So does a failure
+the command names as its own error, such as a lost coordinator lease, once an
+outcome of the request is recorded: the result is built from the record, with the
+failure under `refused` as its error document would name it (`kind` `runtime` for
+a lease). A request the record already shows closed reports `completed` true and
+the command exits 0. An interrupt, an unexpected failure, or one before any outcome
+prints the steps already sent as one
 `{"event": "steps_sent", "outcomes": ...}` line on standard error before its error.
 A step that was signed and has no reconciled outcome yet is reported apart from
 `outcomes`, as `unresolved` with its operation and transaction hash; it may or may

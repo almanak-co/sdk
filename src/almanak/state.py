@@ -253,7 +253,7 @@ class Journal:
 
     @contextmanager
     def authorized(self, identity: str, duration: float):
-        """Hold the write lock, with a current lease, for one short fenced commit.
+        """Hold the write lock, as the lease's holder, for one short fenced commit.
 
         The same durable lock fences lease changes, checkpoint commits and submission, so
         a superseded coordinator cannot commit or submit after another acquires. Callers
@@ -264,7 +264,7 @@ class Journal:
         The lease runs for `duration` from the end of the request, whether it committed
         or raised. A submission sends under this lock and no renewal can be written
         meanwhile, so the request's time under the lock must not count against the lease:
-        the holder proved a current lease when it took the lock, and nothing can supersede
+        the holder proved the lease was its own when it took the lock, and nothing can supersede
         it before the lock is released. The expiry is written in the commit that releases
         the lock, so that commit's own time does count. A request that raises still loses
         its own writes, and when the lease cannot then be committed either, the expiry it
@@ -299,14 +299,7 @@ class Journal:
             connection.close()
 
     def read_fenced(self, identity: str) -> str:
-        """The checkpoint body under a current lease, read without taking the write lock.
-
-        Unlike `authorized`, this counts time under the lock against the lease: it reads
-        the lease row as committed, so while a request of the same coordinator holds
-        the lock past `expires`, this refuses that coordinator although no other one can
-        be admitted. The runtime sends one request at a time, so only a second request
-        during such a hold meets this refusal.
-        """
+        """The checkpoint body, read as the lease's holder without taking the write lock."""
         with self.connect() as connection:
             # One WAL read snapshot covers both rows and never waits for a writer.
             connection.execute("BEGIN")
@@ -339,9 +332,20 @@ def lease_extended(exc: BaseException) -> bool:
 
 
 def require_lease(connection, identity: str) -> None:
-    row = connection.execute("SELECT identity, expires FROM coordinator WHERE id=1").fetchone()
-    if row is None or row[0] != identity or row[1] <= time.time():
-        raise RuntimeError("coordinator lease is absent, expired or superseded")
+    """Refuse a coordinator that the lease row does not name.
+
+    The expiry admits a successor in `acquire`; it does not end the holder. An admission
+    writes its own identity and a release clears it, both under the write lock, so a row
+    that still names `identity` proves no other coordinator was admitted since. A holder
+    that outlived its expiry, as after a process stall, therefore continues, and its next
+    commit extends the lease again. One that was superseded meanwhile is refused here,
+    at its read and again under the lock at its commit.
+    """
+    row = connection.execute("SELECT identity FROM coordinator WHERE id=1").fetchone()
+    if row is None or row[0] is None:
+        raise RuntimeError("coordinator lease is absent: it was released or never taken")
+    if row[0] != identity:
+        raise RuntimeError("coordinator lease is superseded: another coordinator took it")
 
 
 def extend_lease(connection, duration: float) -> None:
