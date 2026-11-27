@@ -397,6 +397,301 @@ definite even when the next run passes. Read a single failure with that in mind,
 and run the tool again before changing the list. Whether an endpoint accepts a submitted
 transaction is not checked, because the tool sends none.
 
+## Opt-in live checks
+
+Two further levels run against live mainnet. Neither is part of default pytest,
+`make test`, `make check`, the QA bench or any pull request or release
+workflow, and neither may be added to them: public endpoints rate-limit and
+stall, so their result cannot gate a merge. Both live in `scripts/live_qa/` and
+run from a checkout.
+
+They ask a different question from the
+[public endpoint qualification](#public-endpoint-qualification) above. That tool
+decides whether an endpoint belongs in the reviewed list, by driving the SDK's
+readers through the RPC methods a command needs. The live checks take the list as
+given and run the `almanak ax` commands themselves against real markets, to find
+what the SDK gets wrong on today's chain state.
+
+| Level | Costs | Needs | Run it |
+| --- | --- | --- | --- |
+| Live read checks | Nothing | Network access | Any time; weekly is reasonable |
+| Live write check | **Real gas, on mainnet** | Your own funded wallet, fee ceilings, a typed confirmation | For a release or after a protocol upgrade. Never in CI, never scheduled, never often |
+
+The [`almanak-qa` skill](https://github.com/almanak-co/sdk/blob/main/skills/almanak-qa/SKILL.md)
+teaches an agent both levels, with the write level behind the person's
+confirmation of the preview.
+
+### Live read checks (free)
+
+The offline suite reads pinned fixtures and the fork lanes read through a
+provider key, so neither sees what a user without a key sees today: an on-chain
+upgrade the SDK's pins do not know, a market the venue names differently, or a
+public endpoint that answers differently. The read level runs `almanak ax`
+reads as that user would, one process per command, with `--public-rpc` naming
+each endpoint of the reviewed list on each chain it serves. The provider key and the session read gateway are removed from each
+command's environment. It needs no key, wallet or funds.
+
+```bash
+uv run --locked python -m scripts.live_qa reads --list
+uv run --locked python -m scripts.live_qa reads --output artifacts/live-reads
+```
+
+`--list` prints the plan, contacts nothing and writes nothing. Use a new output
+directory for each run. `--endpoint` and `--case <text>` narrow a run. `--almanak-command` selects the
+CLI under test; the default is the checkout's, and the published package runs as
+a user installs it:
+
+```bash
+uv run --locked python -m scripts.live_qa reads --output artifacts/live-reads \
+  --almanak-command "uvx --from almanak==<version> almanak"
+```
+
+Cases. `scripts/live_qa/read_cases.py` names known markets and public contracts.
+On Ethereum and Avalanche: native and ERC-20 balances, Aave V4, Aave V3,
+SparkLend and Morpho Blue reserves and listings, a Compound V3 reserve, Uniswap
+V3 and V4 pools and GMX V2 markets. On every other chain of the reviewed list,
+taken from the SDK's own network record so that a newly listed chain is covered
+without an edit: the native balance, and the wrapped-native Aave V3 reserve where
+Aave V3 has a Pool. Beside them, a HyperCore market and the refusals a public endpoint
+must give (a vendor-key lookup, a chain the named endpoint does not serve, and
+HyperEVM, which no endpoint serves). Each case states the correct
+behavior. Where practical its output is compared with direct `eth_call`,
+`eth_getBalance` and block-header reads of the same endpoint at the block the
+command pinned, made by `scripts/live_qa/rpc.py` without the SDK's reader. A
+reserve is held to what its Pool, Spoke, Comet or Morpho core records for it, and
+each listed market to the same record: an Aave V4 market to its Spoke's reserve
+under that ID, an Aave V3 or SparkLend market to the Pool's reserve list, with no
+asset reported twice and as many markets as the limit allows, a Morpho market to
+the requested loan asset and the core's parameters for its ID. A balance, a
+position, a reserve and a pool are held to what the case requested before any
+direct read: the asset and account, the Spoke and reserve ID, the Comet, the
+Morpho core and market ID, the pool's address or its Uniswap V4 key, and for an
+Aave V3 or SparkLend reserve the Pool the connector pins on the chain, since the
+request names none. A read of another reserve or pool fails, however well its
+data agrees with the chain. A native balance is held to 18 decimals. That a market is `verified` is the
+SDK's own statement; the direct reads check the identity it reports, not every
+fact the SDK verified. The GMX bare-label cases, which state a refusal, and the HyperCore case have
+no direct read.
+
+Outcomes. Each case on each endpoint ends as one of:
+
+- `pass`: the command behaved as the case states and every direct read agreed.
+- `fail`: it did not. A failure is not retried.
+- `blocked`: the endpoint did not answer: a rate limit, a rejected read, a
+  timeout, an unanswered direct read, or a command that exited 0 but reported an
+  endpoint refusal for part of its output (`observation_error`). A listing entry,
+  or a direct read of one of its markets, that the endpoint did not answer blocks
+  a case only when nothing the endpoint did answer fails it; an empty listing beside such an entry blocks too, since the
+  entry may hold the markets, and an empty listing without one fails. Such a case is tried three times, 5 and
+  then 15 seconds apart, with 90 seconds per command (`--attempts`,
+  `--backoff-seconds`, `--timeout-seconds`). After three consecutive blocked cases
+  on one chain, the endpoint's remaining cases on that chain are reported blocked
+  without being run. A blocked case is not a pass and not a finding about the SDK.
+
+The run writes `results.csv` and `summary.md` and exits 0 when every case passed,
+1 when a case failed and 2 when none failed but one was blocked. With
+`--known-issues-ok`, a failure that reproduces its case's known issue does not
+count toward the exit code, so a routine run is red only for something new; the
+report lists those failures all the same.
+
+Known issues. A defect found by hand stays in the catalog as a case with a
+`KnownIssue`: the case still states the correct behavior and still fails, and the
+report's `known_issue` column says whether the known defect reproduced, was not
+observed, or no longer reproduces, in which case its marker is removed. A known
+issue that shows as a refusal names its refusal kind, and only a refusal of that
+kind reproduces it; one that shows as a check's finding is reproduced by findings
+only. The catalog holds none now. The two it held were fixed on main in 3.4.2,
+and their markers were removed:
+
+- GMX V2 on Avalanche indexes its markets by `BTC.b` and `WAVAX`, and the
+  venue's `BTC/USD` and `AVAX/USD` labels matched nothing. They now resolve. The
+  label with its collateral, `BTC/USD [BTC.b-USDC]` and `AVAX/USD [AVAX-USDC]`,
+  is held to the one market, and each bare label, which names a USDC market and a
+  single-collateral one, is held to an `ambiguous` refusal that names the USDC
+  market among its candidates. The on-chain forms `BTC.b/USD [BTC.b-USDC]` and
+  `WAVAX/USD [WAVAX-USDC]` stay as controls.
+
+- `ax lending-markets --connector aave_v4` on Avalanche named the Spokes that
+  hold no reserves in `source.unreadable`, because the endpoint answers their
+  `getReserveCount()` revert with JSON-RPC code -32000. They are now counted in
+  `source.without_reserves`, and the case is an ordinary listing that names
+  nothing unreadable. Its check still confirms each Spoke the listing calls
+  unreadable with a direct read, so a Spoke without reserves named there again
+  fails as a finding.
+
+Not covered: `ax lending-markets --connector compound_v3` reads the
+Configurator's whole event history in one request, which the public endpoints
+tried refuse; `ax resolve` and `ax dex-pools` need a vendor key; and `ax perp-position`
+takes a fully resolved GMX market document that no `ax` command prints.
+
+The same cases run under pytest with an explicit flag. Without `--live-public`
+the `tests/live` directory is not collected at all, and a test file named by its
+path is skipped. Run it serially, since
+parallel workers share each endpoint's rate limit. A blocked case is reported as
+skipped, with the same three-case breaker as the script. A known issue that
+reproduces is an expected failure (`xfail`); one that no longer reproduces fails
+until its marker is removed, and any other failure fails:
+
+```bash
+uv run --locked pytest tests/live --live-public -p no:xdist
+```
+
+The `Live Public Reads (optional)` workflow
+(`.github/workflows/live_public_reads.yml`) runs the read level on a hosted runner
+when dispatched by hand, with `--known-issues-ok`. It uses no secret, is called by
+no other workflow and has no schedule; its file holds a commented weekly cron for a maintainer who
+wants one. There is no workflow for the write level.
+
+### Live write check (spends real funds)
+
+> **This spends real funds on mainnet.** It sends up to four transactions from
+> your own wallet and pays gas for each. Run it for a release or in the days
+> after a protocol upgrade. Do not run it in CI, on a schedule or often. The
+> repository ships no wallet and no key for it, and no workflow runs it.
+
+Fork rehearsals force a fork to look like mainnet, which a user cannot do, so
+they do not prove that `ax supply` and `ax withdraw` work against the live
+protocol. The write level does: a tiny Aave V4 supply followed by a full
+withdrawal through `almanak ax`, with the preview first.
+
+It refuses to start, running no command and contacting nothing, unless all of
+these hold. Every unmet gate is named at once.
+
+1. `ALMANAK_QA_SPEND_REAL_FUNDS=1` is set, on the command line of that run.
+2. `--wallet` names your own wallet directory, written by `almanak wallet create`.
+   The check never creates a wallet and never opens a keystore or a password
+   file; `almanak ax` signs. A wallet created without `--generate-password` or
+   `--password-file` asks for its password on the terminal, once for the supply
+   and once for the withdrawal. Without a terminal, as under an agent, nobody can
+   answer, so the check then requires `wallet.json` to name an existing password
+   file.
+3. `--max-gas-price-wei` and `--max-transaction-fee` are given, as `almanak ax`
+   takes them, and neither exceeds the check's own limit for the chain (100 gwei
+   and 0.02 ETH on Ethereum, 200 gwei and 0.2 AVAX on Avalanche).
+4. `--market` is one of the reviewed markets below and `--amount` is at most its
+   largest accepted size.
+5. Exactly one of `--public-rpc` and `--env-file` names the transport, and a
+   public endpoint serves the market's chain. On Avalanche the one listed
+   endpoint, `publicnode`, does not serve state as old as the
+   [floor](operating.md#public-endpoints) requires: a step not reconciled within
+   about 100 seconds can be refused, and its kept record then needs
+   `ax recover` through `--env-file`.
+6. Neither `CI` nor `GITHUB_ACTIONS` is set, to any value, an empty one included.
+7. `--output` is a new or empty directory that can be created. A report is never written over an
+   earlier one, which may hold the only record of the transactions a run sent.
+   Once the gates pass, the check claims the directory by creating `run.lock` in
+   it exclusively, before the first command, so of two runs started on one empty
+   directory only one proceeds.
+
+| `--market` | Chain | Asset | Suggested `--amount` | Largest accepted |
+| --- | --- | --- | --- | --- |
+| `ethereum-usdc` | `eip155:1` | USDC | `100000` (0.1 USDC) | `1000000` (1 USDC) |
+| `ethereum-weth` | `eip155:1` | WETH | `100000000000000` (0.0001 WETH) | `1000000000000000` (0.001 WETH) |
+| `avalanche-usdc` | `eip155:43114` | USDC | `100000` (0.1 USDC) | `1000000` (1 USDC) |
+| `avalanche-wavax` | `eip155:43114` | WAVAX | `10000000000000000` (0.01 WAVAX) | `100000000000000000` (0.1 WAVAX) |
+
+`--max-transaction-fee` caps each transaction, so a round trip can cost up to
+four times it in gas. The supplied amount returns to the wallet, plus interest.
+
+No gate reads a balance. Before running it, check that the wallet holds the
+amount in the market's asset and gas for every transaction, the withdrawal's
+included. An underfunded wallet passes the gates; one short of gas after the
+supply leaves the amount supplied.
+
+Preview first. Without `--execute` the check plans the supply, prints the
+preview and the confirmation phrase, and signs nothing:
+
+```bash
+ALMANAK_QA_SPEND_REAL_FUNDS=1 uv run --locked python -m scripts.live_qa writes \
+  --market ethereum-usdc --amount 100000 --wallet <wallet directory> \
+  --public-rpc publicnode \
+  --max-gas-price-wei 20000000000 --max-transaction-fee 10000000000000000 \
+  --output artifacts/live-writes
+```
+
+Then execute, on the same transport, with a new output directory. At a terminal
+the check previews again and asks you to type the phrase,
+`supply <amount> <market> and withdraw`; a non-interactive caller passes it with
+`--confirm`. Anything else signs nothing. The phrase is predictable from the
+market and amount, and a `--confirm` given at the start is accepted after the
+preview without a further answer. Passing it approves the round trip before this
+run's preview is shown, so pass it only after reading the first run's preview.
+
+```bash
+ALMANAK_QA_SPEND_REAL_FUNDS=1 uv run --locked python -m scripts.live_qa writes \
+  --market ethereum-usdc --amount 100000 --wallet <wallet directory> \
+  --public-rpc publicnode \
+  --max-gas-price-wei 20000000000 --max-transaction-fee 10000000000000000 \
+  --output artifacts/live-writes-executed --execute
+```
+
+After the confirmation it supplies, previews the withdrawal and withdraws the
+whole supplied balance, waiting for each transaction; it does not time out or
+kill an executing command. It exits 0 only when both actions completed and the
+position is empty, and writes `summary.md`, with each transaction hash, and
+`writes.json`.
+
+It stops and exits 1, leaving the rest to you, when:
+
+- the supply preview is refused, or the wallet already holds a position in the
+  market, since the withdrawal would take all of it, or the preview's
+  `position_before` lacks `supplied_shares` or `debt_shares`, so the check cannot
+  tell whether it holds one. Nothing was signed.
+- the supply did not complete. Its approval may have been sent, and so may the
+  supply itself. Do not run the check again: read `outcomes` and `refused`, and
+  resolve a kept record with `almanak ax recover` as
+  [Operating](operating.md#operator-actions) describes. Recovery can send a
+  signed supply or find it mined, so read the position with
+  `ax lending-position` afterwards, and withdraw with `almanak ax withdraw` if
+  the amount is supplied.
+- the supply's `position_before` reports shares other than zero: the wallet's
+  position changed between the preview and the supply. The withdrawal is not
+  run, since it would take more than the check supplied. The supplied amount is
+  still in the market.
+- the supply's `position_before` lacks `supplied_shares` or `debt_shares`. The
+  check could not compare it with the preview, and the report says so; that is
+  no evidence that the position changed, nor that it was empty. The withdrawal
+  is not run, since a full withdrawal takes whatever the position holds. The
+  supplied amount may still be in the market: read the position with
+  `ax lending-position` before recovering it with `almanak ax withdraw`.
+- the withdrawal preview was refused. Nothing more was signed and the supplied
+  amount is still in the market; `almanak ax withdraw` for that market returns it
+  once the reason is resolved.
+- the withdrawal preview's `position_before` does not report the same
+  `supplied_shares` and `debt_shares` as the supply's `position_after`, or either
+  report lacks them. The withdrawal is not run, since a full withdrawal takes
+  whatever the position holds and the confirmation covered only the supply. When
+  both reports carry the shares and they differ, the position changed after the
+  supply, in either direction, and the report names the difference as observed.
+  When either report lacks them, the check could not compare the shares, and the
+  report says so; that is no evidence that the position changed. Either way the
+  supplied amount may still be in the market: read the position with
+  `ax lending-position` before recovering it with `almanak ax withdraw`. The
+  position can still change between that preview and the withdrawal; the check
+  does not close that window.
+- the withdrawal was executed but did not complete. Its outcome is not known:
+  the amount may still be supplied, or the withdrawal may have been mined. Do
+  not request another withdrawal yet. A signed step left unresolved keeps its
+  record, which refuses later actions for the wallet: list the kept records with
+  `almanak ax recover`, resolve one if kept, then read the position with
+  `ax lending-position` before deciding anything.
+- the withdrawal completed, but its `position_after` reports shares other than
+  zero, or lacks them, so the check could not confirm the position is empty.
+  Read the position with `ax lending-position`.
+
+A run stopped by an exception, Ctrl-C included, still writes `summary.md` and
+`writes.json` before it ends: every command that returned, with its transactions,
+and a verdict that names the command that was running. Once an executing command
+has started, the verdict says that its outcome is not known and that the supplied
+amount may still be in the market; resolve it as for a withdrawal that did not
+complete. Its transactions in `summary.md` then name the interrupted command as
+one whose submission is not known, and say "none sent" only when no command
+signed.
+
+Only the gates and the flow have tests, offline and against a fake command
+(`tests/test_live_qa_writes.py`). No test and no workflow runs the write level for
+real.
+
 ## Local evidence and scheduling
 
 Generated captures under `docs/internal/reports/evidence/` and bench output under
@@ -408,6 +703,7 @@ required cases.
 Hosted daily QA and its GitHub watchdog have been removed. There is no hosted
 daily coverage or automatic replacement local schedule; the only hosted schedule
 is the [weekly fork qualification](#hosted-weekly-fork-qualification), which
-covers the fork lifecycle and the rehearsal only. Operators can invoke
+covers the fork lifecycle and the rehearsal only. The
+[opt-in live checks](#opt-in-live-checks) have no schedule. Operators can invoke
 the commands above with explicit provider bindings and retained results. Hosted
 CI skips evidence-dependent tests and reports that scope in its job summary.

@@ -8,6 +8,14 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Added
+- Opt-in live QA under `scripts/live_qa`, outside default pytest and CI. The read
+  level runs `almanak ax` reads on the public endpoints without a key, compares them
+  with direct reads and reports each case as pass, fail or blocked. The write level
+  runs a tiny Aave V4 supply and full withdrawal with real funds, behind
+  `ALMANAK_QA_SPEND_REAL_FUNDS=1`, an operator's own wallet, fee ceilings and a typed
+  confirmation of the preview. `skills/almanak-qa` teaches an agent both.
+
 ### Fixed
 - A direct `almanak ax --execute` action, or a strategy run, no longer ends with
   `gateway coordinator heartbeat failed` because its own send was slow. A broadcast

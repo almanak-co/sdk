@@ -59,6 +59,17 @@ explicit provider env file (copy `.env.example` to `.env`):
 uv run --locked pytest tests/strategy_fork -n auto -m strategy_fork --fork-env=.env
 ```
 
+Live mainnet checks are opt-in and never part of these checks or of pull request
+CI. The read level is free and needs no key:
+
+```sh
+uv run --locked python -m scripts.live_qa reads --output artifacts/live-reads
+```
+
+The write level spends real gas from your own wallet and is for releases or after
+a protocol upgrade only. Read
+[Opt-in live checks](docs/qa.md#opt-in-live-checks) before running either.
+
 Some tests read retained evidence that is not in the repository. `make test-ci`
 skips them and reports the count; a skipped test is not a pass. `make test` and
 `make crap` expect that evidence and fail without it, so they are maintainer

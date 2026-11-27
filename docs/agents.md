@@ -221,3 +221,14 @@ instruction.
 - A wallet that holds a pool's LP shares on Aerodrome or Curve is refused a swap in
   that pool, and anyone can send such shares. The agent cannot transfer them; it
   can burn them with `ax close-liquidity` when the user decides so.
+
+## The live QA skill
+
+A second skill,
+[`skills/almanak-qa/SKILL.md`](https://github.com/almanak-co/sdk/blob/main/skills/almanak-qa/SKILL.md),
+is for maintainers. It runs the [opt-in live checks](qa.md#opt-in-live-checks) from
+a checkout of the repository: the free read checks on public endpoints, and the
+write check, which spends real funds from a wallet the person names and runs only
+after they confirm its preview. It is not needed to manage positions, so the
+`skills` installer hides it unless `INSTALL_INTERNAL_SKILLS` is set; copy
+`skills/almanak-qa` as above to install it.
