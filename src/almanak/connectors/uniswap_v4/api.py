@@ -1,6 +1,7 @@
 """Public exchange actions retain the selected allocation and observation evidence."""
 
 from almanak.author_capabilities import declared
+from almanak.connectors.dex_residual import refuse_unmeasured_entry
 from almanak.connectors.uniswap_v4.authoring import close_liquidity, open_liquidity, swap
 from almanak.connectors.uniswap_v4.models import Target
 from almanak.connectors.uniswap_v4.state import Decision, DecisionInput, OutcomeInput
@@ -36,6 +37,10 @@ class Actions:
             quote = observed.rebalance_quote
         else:
             quote = observed.exit_quote if exit else observed.entry_quote
+            if not exit:
+                refuse_unmeasured_entry(
+                    observed, "swap requires its explicit exact-size quote at the decision block"
+                )
         return swap(allocation, observed, quote)
 
     def open_liquidity(self, name):

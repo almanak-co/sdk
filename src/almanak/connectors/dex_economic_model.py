@@ -8,6 +8,7 @@ from typing import ClassVar
 from almanak.backtest.dataset import InputUnavailable
 from almanak.backtest.engine import Transition
 from almanak.backtest.types import UnixTime
+from almanak.connectors import dex_fill_timing as fill_timing
 from almanak.connectors.dex_economic_parameters import payer_wallet, wallet
 from almanak.connectors.v3_pool_lifecycle import increases_exposure
 from almanak.dex_intents import ExitExchange
@@ -272,6 +273,7 @@ class EconomicModel:
             **self.result_measurements(target, deltas, fees, delta),
             steps=(kind,),
             fill=fill,
+            **self.fill_timing(target, pending, kind),
             gas_paid=AssetAmount(asset=allocation.native_asset, amount=cost),
         )
         return Transition(
@@ -281,6 +283,12 @@ class EconomicModel:
             result=result,
             complete=complete,
         )
+
+    def fill_timing(self, target, pending, kind):
+        """Additive timing labels of a step that executed on a pool sample."""
+        if kind == "revoke":
+            return {}
+        return fill_timing.measured(self.book, target, pending)
 
     def evidence(self, target, pending):
         inputs = self.book.at(target, pending.eligible_at).evidence

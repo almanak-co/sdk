@@ -81,13 +81,16 @@ that run. Do not replace datasets or silently change sampling on resume.
   repayment and liquidation, or bounded integer Uniswap pool state with price
   impact and tick crossings. LP fees use explicit fixed historical fee growth.
   The Aave V3 model and its datasets carry `revision11` in their identifiers
-  (`aave-v3-revision11-economic-indices-v1`, `immediate_underlying_v3_revision11`).
+  (`aave-v3-revision11-economic-indices-v2`, `immediate_underlying_v3_revision11`).
   The name is the accounting model's: Pool revision 12 runs the same supply,
   borrow and liquidation logic, so the model serves history under either revision
   and a window may span a Pool's upgrade from one to the other.
 
 Hypothetical trades and liquidity do not change later external market history.
 LP fees exclude hypothetical dilution and fees from the strategy's own trades.
+MEV is not modeled: no sandwiching, backrunning or transaction ordering affects a
+fill, so a large public swap or a rebalance that a live run would expose to
+searchers executes at the sampled pool state.
 Explicit vendor prices may approximate economic risk but never replace a requested
 oracle or venue observation. Missing measurements and model exclusions remain
 reported. No model here establishes production execution authority.
@@ -98,6 +101,15 @@ decisions. Keep sampling interval, maximum source age, collection limits, tick
 coverage, latency, costs and end treatment explicit. Collection-limit failures
 require an author decision; the SDK does not coarsen resolution automatically.
 
+A modeled swap that the prepared ticks cannot fill is refused, never extrapolated.
+The refusal names the coverage bounds, the tick the price started from, the bound
+it reached and how much of the input stayed unfilled, for example
+`swap requires liquidity outside prepared tick coverage [-199000, -196000]: the
+price moved from tick -197310 to the upper bound with 3120450000000 of
+5000000000000 input base units unfilled`. An entry observation records it as
+`entry_quote_error`, and the author's `swap` raises with that cause instead of
+reporting only a missing quote. Widen `data.coverage` or reduce the swap.
+
 Progress appears on stderr; redirected stdout remains JSON. `--progress json`
 produces versioned snapshots, also retained beside the run directory. ETA is a
 heuristic from comparable timings and current throughput; unsupported estimates
@@ -105,6 +117,102 @@ remain absent. Observer failures do not affect financial state.
 
 Contract comparisons, sampled-path fidelity and measured preparation and execution
 timings are separate kinds of evidence. Component replay and fork execution are different evidence.
+
+### Lending interest between samples
+
+The Aave V3 and SparkLend economic models read each reserve at every
+`sample_seconds` boundary. A sample holds the reserve's own liquidity and
+variable borrow indexes and its current rates. The accounting curve starts again
+from those indexes at every boundary and accrues them at that sample's rates
+until the next one, as the Pool's normalized income and debt do while the reserve
+is not updated. A rate change between two samples is therefore corrected at the
+next boundary; it does not compound over the window. Inside one interval the
+curve still assumes the rates of the interval's first sample, so choose
+`sample_seconds` for the accuracy a strategy needs within an interval.
+
+At every sample boundary the curve equals the indexes read on chain there, at
+any `sample_seconds`. Between two boundaries it is the latest sample accrued at
+that sample's rates, and no earlier sample has any effect.
+
+The curve can step down at a boundary. When rates fell inside an interval, the
+interval's first rates accrue more than the reserve did, and at the next boundary
+the curve drops to the lower indexes read there. When rates rose it steps up
+instead. The on-chain index itself never decreases: a step down removes the
+model's own excess of that one interval. A strategy sees it as a supplied balance
+or a debt that is slightly smaller at a boundary than one second before it, with
+no protocol event. Steps down are ordinary, not rare: on a reconstruction of one
+week of Base USDC rates about half of the boundaries stepped down, by at most 0.7
+parts per million of the balance with hourly samples, 8.3 with six-hourly samples
+and 63 with daily samples.
+
+Consequences for a strategy:
+
+- A full withdrawal or a full repayment follows the owned shares and is
+  unaffected.
+- A stated amount taken from an observation before a boundary can exceed the
+  balance or the debt after it. The model refuses a withdrawal or a repayment
+  above what is owned, and the action is recorded as failed with that cause. A
+  decision evaluated on a sample boundary and executed inside the same interval
+  never crosses one. To exit, use the full intents.
+- Health is computed from the indexes at one second, so it is exact at a
+  boundary and can move at one by the size of the step, in either direction.
+- Do not derive interest earned from the difference of two observations less
+  than one interval apart: across a boundary it can be negative.
+
+The models carry this in their identifiers
+(`aave-v3-revision11-economic-indices-v2`,
+`sparklend-revision4-economic-indices-v2`). A dataset prepared under `-v1` is
+refused; prepare it again.
+
+### Latency and sampled pool state
+
+A modeled exchange action executes on the latest prepared sample at or before its
+eligible time, the decision time plus `execution.latency`. When `sample_seconds`
+is longer than the latency, that sample is usually the one the strategy decided
+on: the latency moves the action's timestamp and not the price it executes at.
+Each successful Uniswap V3, PancakeSwap V3, Aerodrome Slipstream, Aerodrome
+and Curve economic result states this:
+
+| Field | Meaning |
+| --- | --- |
+| `fill_state_age_seconds` | The eligible time less the source time of the sample the action executed on. |
+| `fill_on_decision_sample` | `true` when that sample is the one the decision observed. |
+
+A revocation and an exit that settles without a step read no sample and carry
+neither field. The report's `fill_timing` block gives the configured latency, the
+number of steps, how many ran on their decision sample and the largest state
+age. Uniswap V4 results and reports carry neither the fields nor the block,
+although its actions execute on the latest sample in the same way. The
+fields are labels only. No fill changes, and nothing is interpolated between
+samples. To make latency take effect, sample at least as often as the latency.
+
+### Diluted fee estimate
+
+Credited LP fees multiply historical fee growth by the position's liquidity, as if
+it had earned beside the pool without taking a share of its fees. A real position
+of liquidity `L` joins the active liquidity `A`, so the same swap fees are split
+over `A + L`. The overstatement grows with size and is negligible only for a
+position that is small beside the pool.
+
+Each position of a Uniswap V3, PancakeSwap V3 or Aerodrome Slipstream economic
+report therefore carries `diluted_fee_estimate` beside its credited fees:
+
+| Field | Meaning |
+| --- | --- |
+| `measurement_status` | `estimated`, or `unavailable` with a `reason`. |
+| `interval_fees` | The credited fees, collected and uncollected, measured again per sample interval. Rounding each interval can leave it a few base units below the credited total. |
+| `diluted_fees` | The same intervals, each multiplied by `A / (A + L)`. |
+| `max_pool_liquidity_share` | The largest `L / (A + L)` among those intervals. |
+| `fee_intervals` | Sample intervals that earned fees. |
+| `fee_intervals_without_active_liquidity` | Of those, intervals whose two samples both priced the pool outside the range. Their fees stay undiluted, because no active liquidity was measured for them. |
+
+`A` is the pool's active liquidity at the interval's first sample when the price
+there is inside the range, otherwise at its second. The estimate assumes the
+historical swaps would have happened unchanged beside the position, which
+overstates the dilution where added depth would have drawn more volume. A band
+position uses its credited lower bracket. The estimate is credited nowhere:
+balances, `uncollected_fees`, `collected_fees`, the equity curve and
+`performance` keep the undiluted fees.
 
 ### Liquidity bands
 

@@ -344,6 +344,11 @@ independently.
 - Hypothetical trades and liquidity do not change later external market
   history. LP fees use fixed historical fee growth without dilution. Quote
   provenance distinguishes modeled calculations from archival Quoter results.
+- Accepted: the Aave V3 and SparkLend accounting curve equals the reserve's
+  sampled on-chain indexes at every sample boundary and accrues the latest
+  sample at its own rates in between. It may step down at a boundary, by the
+  excess the earlier sample's rates accrued. Never hold or smooth the curve to
+  keep it non-decreasing. Reports state the step-down as a model assumption.
 - Band allocations run in economic mode with bracketed historical fee growth:
   the lower bracket is credited and the upper bracket reported, never
   interpolated. A liquidity band's `lower`/`upper` envelope is optional; without

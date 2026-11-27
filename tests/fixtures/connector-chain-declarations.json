@@ -30,7 +30,7 @@
    ],
    "historical": [
     {
-     "model": "aave-v3-revision11-economic-indices-v1",
+     "model": "aave-v3-revision11-economic-indices-v2",
      "mode": "economic",
      "actions": [
       "supply",
@@ -101,7 +101,7 @@
    ],
    "historical": [
     {
-     "model": "aave-v3-revision11-economic-indices-v1",
+     "model": "aave-v3-revision11-economic-indices-v2",
      "mode": "economic",
      "actions": [
       "supply",
@@ -172,7 +172,7 @@
    ],
    "historical": [
     {
-     "model": "aave-v3-revision11-economic-indices-v1",
+     "model": "aave-v3-revision11-economic-indices-v2",
      "mode": "economic",
      "actions": [
       "supply",
@@ -242,7 +242,7 @@
    ],
    "historical": [
     {
-     "model": "aave-v3-revision11-economic-indices-v1",
+     "model": "aave-v3-revision11-economic-indices-v2",
      "mode": "economic",
      "actions": [
       "supply",
@@ -312,7 +312,7 @@
    ],
    "historical": [
     {
-     "model": "aave-v3-revision11-economic-indices-v1",
+     "model": "aave-v3-revision11-economic-indices-v2",
      "mode": "economic",
      "actions": [
       "supply",
@@ -382,7 +382,7 @@
    ],
    "historical": [
     {
-     "model": "aave-v3-revision11-economic-indices-v1",
+     "model": "aave-v3-revision11-economic-indices-v2",
      "mode": "economic",
      "actions": [
       "supply",
@@ -452,7 +452,7 @@
    ],
    "historical": [
     {
-     "model": "aave-v3-revision11-economic-indices-v1",
+     "model": "aave-v3-revision11-economic-indices-v2",
      "mode": "economic",
      "actions": [
       "supply",
@@ -3543,7 +3543,7 @@
    ],
    "historical": [
     {
-     "model": "sparklend-revision4-economic-indices-v1",
+     "model": "sparklend-revision4-economic-indices-v2",
      "mode": "economic",
      "actions": [
       "supply",

@@ -105,13 +105,10 @@ class Book:
         return Market(record.payload, supply_index, debt_index, time)
 
     def evidence(self, source, time):
+        # The accounting curve is the latest sample alone, so that sample and the
+        # selected risk observation are every input of a value at this time.
         records = (self.rates[source].records.at(time), self.risks[source].at(time))
-        # Earlier accounting boundaries determine the integrated index. Retain
-        # their evidence as well as the currently selected risk observation.
-        rates = tuple(r for r in self.rates[source].records.rows if r.available_at <= time)
-        return tuple(
-            sorted({digest for record in (*rates, *records) for digest in record.evidence})
-        )
+        return tuple(sorted({digest for record in records for digest in record.evidence}))
 
     def next_boundary(self, time, until):
         candidates: list[int] = []

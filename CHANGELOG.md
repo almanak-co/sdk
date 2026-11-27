@@ -8,6 +8,42 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Added
+- Economic exchange results state how old their pool state was. Each successful
+  Uniswap V3, PancakeSwap V3, Aerodrome Slipstream, Aerodrome and Curve action
+  carries `fill_state_age_seconds`, the eligible time less the source time of
+  the sample it executed on, and `fill_on_decision_sample`, true when that sample is
+  the one the decision observed. With `sample_seconds` longer than
+  `execution.latency` an action executes on its decision sample, so the latency does
+  not change its price. The report's `fill_timing` block counts those steps. No fill
+  changes. Uniswap V4 results do not carry the fields.
+- Uniswap V3, PancakeSwap V3 and Aerodrome Slipstream economic reports carry
+  `diluted_fee_estimate` on each position: the credited fees of every sample interval
+  multiplied by the pool's active liquidity over that liquidity plus the position's,
+  with `max_pool_liquidity_share`. It is an estimate that assumes unchanged historical
+  swaps. Credited fees, balances and the valuation are unchanged.
+- `docs/backtesting.md` states that MEV is not modeled.
+
+### Changed
+- The Aave V3 and SparkLend backtest accounting curve equals each sample's own
+  on-chain indexes at its boundary, instead of integrating sampled rates from the
+  first sample alone, so a rate change between two samples no longer compounds over
+  the window. Between boundaries it accrues the latest sample at that sample's
+  rates. It can step down at a boundary: when rates fell inside an interval the
+  curve drops to the indexes read on chain, so a supplied balance or a debt can be
+  slightly smaller than one second before, with no protocol event. A stated
+  withdrawal or repayment amount observed before such a boundary can be refused
+  after it; full withdrawals and repayments are unaffected. The simulation
+  evidence retained with a value names the accounting sample it was read from, no
+  longer every earlier sample. The models are
+  `aave-v3-revision11-economic-indices-v2` and
+  `sparklend-revision4-economic-indices-v2`; a dataset prepared under `-v1` is
+  refused and must be prepared again.
+- A modeled swap beyond the prepared tick coverage names the coverage bounds, the
+  starting tick, the bound reached and the unfilled input in its refusal, and the
+  author's `swap` raises with that cause when the entry quote is unmeasured. It
+  reported only `swap requires its exact-size source quote at the decision block`.
+
 ## [3.4.2] - 2026-11-26
 
 ### Added

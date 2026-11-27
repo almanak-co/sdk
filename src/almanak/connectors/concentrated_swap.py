@@ -28,6 +28,23 @@ class SwapCalculation:
     steps: int = 0
 
 
+COVERAGE_REFUSAL = "swap requires liquidity outside prepared tick coverage"
+
+
+def coverage_refusal(sample, amount, remaining, zero_for_one):
+    """The refusal of a swap the prepared ticks cannot fill, with the coverage and the cause.
+
+    The text is a function of the sample and the input alone, so a replayed observation
+    that records it as an unmeasured entry quote reproduces it.
+    """
+    bound = "lower" if zero_for_one else "upper"
+    return (
+        f"{COVERAGE_REFUSAL} [{sample.lower}, {sample.upper}]: the price moved from tick "
+        f"{sample.pool.tick} to the {bound} bound with {remaining} of {amount} input base "
+        "units unfilled; widen the prepared tick coverage or reduce the swap"
+    )
+
+
 def cross(result, next_value, initialized, ticks, zero_for_one):
     if initialized:
         if next_value not in ticks:
@@ -54,6 +71,10 @@ def exact_input(sample, amount, zero_for_one, fee, step):
     result = SwapCalculation(0, pool.sqrt_price_x96, pool.tick, pool.liquidity)
     remaining = amount
     while remaining:
+        if result.sqrt_price_x96 == limit:
+            # The prepared ticks cannot fill the input: a market fact about this sample,
+            # which an entry observation records as unmeasured instead of failing.
+            raise QuoteUnfillable(coverage_refusal(sample, amount, remaining, zero_for_one))
         remaining = advance(
             result,
             remaining,
@@ -74,10 +95,6 @@ def exact_input(sample, amount, zero_for_one, fee, step):
 
 
 def advance(result, remaining, limit, fee, spacing, words, ticks, direction, step):
-    if result.sqrt_price_x96 == limit:
-        # The prepared ticks cannot fill the input: a market fact about this sample,
-        # which an entry observation records as unmeasured instead of failing.
-        raise QuoteUnfillable("swap requires liquidity outside prepared tick coverage")
     tick, initialized = next_tick(words, result.tick, spacing, direction)
     boundary = sqrt_at_tick(tick)
     target = max(boundary, limit) if direction else min(boundary, limit)

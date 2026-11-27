@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+from almanak.connectors.concentrated_swap import COVERAGE_REFUSAL
 from almanak.connectors.uniswap_v4.economic_acquisition import tick_state
 from almanak.connectors.uniswap_v4.pool import read_pool
 from almanak.connectors.uniswap_v4.swap_math import exact_input
@@ -86,7 +87,7 @@ def fee_exercise_plan(sample, target, exercise_amount, maximum_amount):
     try:
         result = exact_input(sample, amount, zero_for_one)
     except ValueError as exc:
-        if str(exc) == "swap requires liquidity outside prepared tick coverage":
+        if str(exc).startswith(COVERAGE_REFUSAL):
             raise ValueError(
                 "fee exercise sample coverage is insufficient for the bounded trade"
             ) from exc
@@ -132,7 +133,7 @@ def reaches_boundary(sample, boundary, zero_for_one, amount):
     try:
         result = exact_input(limited, amount, zero_for_one)
     except ValueError as exc:
-        if str(exc) == "swap requires liquidity outside prepared tick coverage":
+        if str(exc).startswith(COVERAGE_REFUSAL):
             return True
         raise
     return result.tick < boundary if zero_for_one else result.tick >= boundary

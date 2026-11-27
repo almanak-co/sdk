@@ -7,6 +7,7 @@ from pydantic import Field, model_validator
 
 from almanak.backtest.dataset import InputGap
 from almanak.backtest.types import UnixTime
+from almanak.connectors.dex_fill_timing import OnDecisionSample, StateAge
 from almanak.connectors.v3_pool_domain import ConcentratedObservation
 from almanak.connectors.v3_pool_models import Target
 from almanak.connectors.v3_pool_observations import Snapshot
@@ -90,6 +91,10 @@ class EconomicResult[I: DexIntent, S: EconomicSnapshot, W: Ownership, Q: Quote](
     gas_paid: AssetAmount
     fill: Q | None
     steps: tuple[Literal["swap", "mint", "increase", "decrease", "collect", "close", "revoke"], ...]
+    # Absent for a step that reads no pool sample, and in results retained before
+    # these fields existed.
+    fill_state_age_seconds: StateAge = None
+    fill_on_decision_sample: OnDecisionSample = None
 
     @property
     def status(self) -> Literal["completed", "intermediate", "failed"]:

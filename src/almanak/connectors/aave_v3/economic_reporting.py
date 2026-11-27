@@ -127,6 +127,9 @@ def report(state, model):
             "assumed execution access; approvals, inclusion and transaction mechanics excluded",
             "sampled historical rates integrate hypothetical scaled balances "
             "without changing future history",
+            "accounting indexes equal each sample's on-chain indexes at its boundary "
+            "and accrue at that sample's rates until the next; a balance or a debt can "
+            "step down at a boundary by the excess those rates accrued",
             "configured Pool oracle and reserve risk changes become visible at end of block",
             "liquidation uses Pool revision 11 underlying settlement, "
             "which revision 12 runs unchanged, "

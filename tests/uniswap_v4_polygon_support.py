@@ -73,9 +73,11 @@ REVIEWED_SUCCESSORS = {
     ),
     # Shared exchange reporting adds residual entries only for families that measure
     # exit residuals; the Uniswap V4 report does not use this module.
+    # The shared report then gains a `fill_timing` block read from result fields that
+    # Uniswap V4 results do not carry; no Uniswap V4 module imports this one.
     "src/almanak/connectors/dex_economic_reporting.py": (
         "5e564861ce675ef8b30f40bb8b54192efc54087aa62ef0bdd77162e2ff142f00",
-        "b559fc7ca17b77ae0348c7ebde1b27e26b75a0ded8af5bb3fc904c9e204520c0",
+        "43b5615c2282f98d27ad22ffb07eefa7ecd10d6dd94faeb0cd9791fac4ce3498",
     ),
     # The references gain only the reviewed optional-hold (PR 175) and optional-collect
     # (PR 193) guards, which `tests.legacy_references.before_hold_guard` reverses exactly.

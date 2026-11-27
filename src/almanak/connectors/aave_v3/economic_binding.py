@@ -24,8 +24,8 @@ from almanak.connectors.aave_v3.state import Decision
 
 
 class Manifest(Envelope[Parameters, EconomicConfig, State]):
-    model: Literal["aave-v3-revision11-economic-indices-v1"] = (
-        "aave-v3-revision11-economic-indices-v1"
+    model: Literal["aave-v3-revision11-economic-indices-v2"] = (
+        "aave-v3-revision11-economic-indices-v2"
     )
 
 

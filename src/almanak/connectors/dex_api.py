@@ -4,7 +4,7 @@ from collections.abc import Callable
 from types import ModuleType
 from typing import ClassVar
 
-from almanak.connectors.dex_residual import counter_settled
+from almanak.connectors.dex_residual import counter_settled, refuse_unmeasured_entry
 
 
 class Actions:
@@ -29,6 +29,10 @@ class Actions:
             quote = getattr(observed, "rebalance_quote", None)
         else:
             quote = observed.exit_quote if exit else observed.entry_quote
+            if not exit:
+                refuse_unmeasured_entry(
+                    observed, "swap requires its exact-size source quote at the decision block"
+                )
         return self.authoring.swap(self.context.config.allocation(name), observed, quote)
 
     def open_liquidity(self, name, *, fraction_bps=10000):

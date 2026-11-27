@@ -146,6 +146,50 @@ def test_full_repayment_follows_the_debt_past_the_borrowed_amount(parameters):
     assert repayment.assets > 1000 * 10**6
 
 
+def test_a_step_down_of_the_indexes_shrinks_balances_and_keeps_every_exit(parameters):
+    # The anchored curve can step down at a sample boundary: the previous sample's rates
+    # accrued more than the reserve did, and the next sample states the lower index.
+    positions, market = borrowed(parameters)
+    accrued = (
+        replace(market[0], supply_index=RAY * 101 // 100),
+        replace(market[1], debt_index=RAY * 102 // 100),
+    )
+    read = (
+        replace(market[0], supply_index=RAY * 1005 // 1000),
+        replace(market[1], debt_index=RAY * 101 // 100),
+    )
+    # Valuation and health are functions of the indexes at one second, in either order.
+    assert accrued[0].supplied(positions[0].supply_scaled) == 101 * 10**16
+    assert read[0].supplied(positions[0].supply_scaled) == 1005 * 10**15
+    assert accrued[1].borrowed(positions[1].debt_scaled) == 1020 * 10**6
+    assert read[1].borrowed(positions[1].debt_scaled) == 1010 * 10**6
+    before, after = risk(positions, accrued).risk, risk(positions, read).risk
+    assert 0 < after.total_debt_base < before.total_debt_base
+    assert 0 < after.total_collateral_base < before.total_collateral_base
+    # An amount stated from the value before the boundary exceeds what is owned after it,
+    # and is refused as any excess is; owned shares are untouched.
+    with pytest.raises(ValueError, match="at most that debt"):
+        transition(
+            parameters, parameters.repay_amount("loan", 1020 * 10**6), positions, read, 2 * 10**9
+        )
+    with pytest.raises(ValueError, match="exceeds the owned reserve shares"):
+        transition(
+            parameters, parameters.withdraw_amount("collateral", 101 * 10**16), positions, read, 0
+        )
+    # Full exits follow the shares, so they settle at the lower values and leave nothing.
+    repayment = transition(parameters, parameters.repay("loan"), positions, read, 2 * 10**9)
+    assert repayment.assets == 1010 * 10**6
+    assert repayment.positions[1].debt_scaled == 0
+    withdrawal = transition(
+        parameters, parameters.withdraw("collateral"), repayment.positions, read, 0
+    )
+    assert withdrawal.assets == 1005 * 10**15
+    assert withdrawal.positions[0].supply_scaled == 0
+    # The fund keeps the interest it earned and paid at those lower values.
+    assert withdrawal.positions[0].withdrawn - withdrawal.positions[0].supplied == 5 * 10**15
+    assert withdrawal.positions[1].repaid - withdrawal.positions[1].borrowed == 10 * 10**6
+
+
 def test_risk_combines_reserves_and_repayment_can_reduce_risk_without_a_price(parameters):
     positions, market = borrowed(parameters)
     assert risk(positions, market).risk.health_factor_wad == 255 * 10**16

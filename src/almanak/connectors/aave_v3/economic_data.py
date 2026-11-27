@@ -1,6 +1,5 @@
 """Prepared V3 market evidence and cadence-independent sampled accounting curves."""
 
-from bisect import bisect_right
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -9,11 +8,8 @@ from pydantic import Field, model_validator
 from almanak.backtest.dataset import DataKey, DataRequirement, InputRecord, Timeline
 from almanak.connectors.aave_v3.domain import Reserve, ReserveObservation, Uint256
 from almanak.connectors.aave_v3.math import (
-    compounded_interest,
     debt_assets,
-    linear_interest,
     normalized_indices,
-    ray_mul,
     supplied_assets,
     uint,
 )
@@ -21,7 +17,7 @@ from almanak.connectors.identifiers import ConnectorId
 from almanak.models import Block, Model
 
 CONNECTOR = ConnectorId("aave_v3")
-MODEL = "aave-v3-revision11-economic-indices-v1"
+MODEL = "aave-v3-revision11-economic-indices-v2"
 REVISION = "aave-v3-revision11-prepared-reserves-v1"
 
 
@@ -84,6 +80,22 @@ def requirement(source, settings, product):
 
 
 class RateCurve:
+    """Supply and borrow indexes at any second, anchored at every sample.
+
+    Each sample carries the reserve's own indexes at its block. The curve is the
+    latest sample at or before the asked second, accrued at that sample's rates to
+    that second, as the Pool's normalized income and debt views do while the reserve
+    is not updated. At every sample boundary it therefore equals the indexes read on
+    chain there, and no earlier sample has any effect after it.
+
+    The curve may step down at a boundary. When the rates fell between two samples,
+    the earlier sample's rates accrue more than the reserve did, and the next sample
+    replaces that value with the lower one read on chain. The on-chain index never
+    decreases; the step is the model's own excess of one interval, removed. A
+    balance or a debt valued across such a boundary shrinks by that excess with no
+    protocol event.
+    """
+
     def __init__(self, records: Timeline[RateRecord]):
         requirement = records.requirement
         if requirement.sample_seconds is None:
@@ -92,22 +104,9 @@ class RateCurve:
         if records.times != expected:
             raise ValueError("V3 accounting is missing a fixed sample boundary")
         self.records = records
-        self.times = records.times
-        first = records.rows[0]
-        self.supply, self.borrow = [], []
-        supply, borrow = normalized_indices(first.payload, int(first.available_at))
-        source = first.payload.source
-        for index, record in enumerate(records.rows):
+        source = records.rows[0].payload.source
+        for record in records.rows:
             self.validate_record(record, source)
-            if index:
-                prior = records.rows[index - 1]
-                elapsed = record.available_at - prior.available_at
-                supply = ray_mul(supply, linear_interest(prior.payload.liquidity_rate_ray, elapsed))
-                borrow = ray_mul(
-                    borrow, compounded_interest(prior.payload.variable_borrow_rate_ray, elapsed)
-                )
-            self.supply.append(uint(supply, 128))
-            self.borrow.append(uint(borrow, 128))
 
     @staticmethod
     def validate_record(record, source):
@@ -120,24 +119,8 @@ class RateCurve:
             raise ValueError("V3 accounting differs from its pinned historical evidence")
 
     def at(self, time):
-        record = self.records.at(time)
-        index = bisect_right(self.times, time) - 1
-        elapsed = time - record.available_at
-        return (
-            uint(
-                ray_mul(
-                    self.supply[index], linear_interest(record.payload.liquidity_rate_ray, elapsed)
-                ),
-                128,
-            ),
-            uint(
-                ray_mul(
-                    self.borrow[index],
-                    compounded_interest(record.payload.variable_borrow_rate_ray, elapsed),
-                ),
-                128,
-            ),
-        )
+        supply, borrow = normalized_indices(self.records.at(time).payload, int(time))
+        return uint(supply, 128), uint(borrow, 128)
 
 
 @dataclass(frozen=True)
