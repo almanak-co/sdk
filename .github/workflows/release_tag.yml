@@ -60,9 +60,6 @@ jobs:
   test_pytest:
     needs: [guard]
     uses: ./.github/workflows/template_pytest.yml
-    with:
-      # No CRAP gate runs on release tags, so the shard coverage has no consumer.
-      coverage: false
 
   test_linux:
     needs: [guard]

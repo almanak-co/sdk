@@ -11,8 +11,6 @@ dist/
 /artifacts/
 test-results*.xml
 pytest-*.log
-shard-*.coveragerc
-coverage.shard-*.sources.json
 /.local/
 *.egg-info/
 .env

@@ -1,0 +1,88 @@
+name: Test Pytest (changed)
+
+on:
+  workflow_call:
+    inputs:
+      skip:
+        description: "Skip the run (no-op success, used by path-based filtering)."
+        type: boolean
+        required: false
+        default: false
+      base_ref:
+        description: "Base branch: only test modules and functions changed since it are run and gated."
+        type: string
+        required: true
+
+# The pull request scope. One job runs only the test modules the pull request
+# added or modified, and scores CRAP for the functions with an executable line
+# it changed, on the coverage of those modules alone. A changed function that
+# no changed test module exercises has no coverage here. The coverage floors
+# are not scored: they are a statement about the whole suite. The whole offline
+# suite and the full CRAP gate run locally (`make test`, `make crap`) and the
+# suite again on release tags.
+jobs:
+  # Job id stays `test` so the required check context is `test_pytest / test`.
+  test:
+    # A standard 2-core runner: a selection is a few modules, and a larger
+    # runner bills its setup minutes at four times the rate.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    # Hang protection. A pull request that touches most of the suite would need
+    # over an hour here; run it locally instead of raising this.
+    timeout-minutes: 60
+    steps:
+      - name: Skip notice
+        if: ${{ inputs.skip }}
+        run: echo "Skipping pytest; no relevant file changes detected by the path filter."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: ${{ !inputs.skip }}
+        with:
+          persist-credentials: false
+          # The selection needs the merge base with origin/<base_ref>; a full
+          # checkout carries every branch, so no credentialed fetch is needed.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-repo
+        if: ${{ !inputs.skip }}
+        with:
+          install-bwrap: "true"
+
+      - name: Run changed test modules and score changed functions
+        if: ${{ !inputs.skip }}
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+        run: |
+          set -o pipefail
+          make test-changed BASE="origin/$BASE_REF" \
+            ARGS="-p no:cacheprovider -rfEs --junitxml=test-results.xml" 2>&1 | tee pytest.log
+
+      - name: Report verification scope
+        if: ${{ !inputs.skip && always() }}
+        run: |
+          {
+            echo '## Changed test modules and CRAP over the changed functions'
+            echo
+            echo '```'
+            grep -hE '^(Tests:|  [^ ]+\.py$|CRAP:|CRAP measurement failed|Excluded |evidence-skips:)' pytest.log || echo 'No summary line found; the run did not reach its report.'
+            grep -hE '^(=+ .*(passed|failed|error|skipped).* =+)$' pytest.log || true
+            grep -hE '^(FAILED|ERROR) ' pytest.log || true
+            echo '```'
+            echo
+            echo 'Only test modules this pull request added or modified ran. No other test ran, so this job does not show that the rest of the offline suite still passes. CRAP is scored for functions with a changed executable line, on the coverage of those modules alone; the coverage floors are not scored. Evidence-dependent cases are skipped, and a skipped case is not a pass. The whole suite, the full CRAP gate and the floors are the local `make test` and `make crap`.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: ${{ !inputs.skip && always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pytest-changed
+          overwrite: true
+          path: |
+            test-results.xml
+            pytest.log
+            artifacts/crap/scores.json
+            artifacts/crap/coverage.json
+          if-no-files-found: warn
+          retention-days: 7

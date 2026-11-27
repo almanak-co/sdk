@@ -149,15 +149,52 @@ def score_file(root, path, coverage, changed=None):
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 
+def merge_base(root, reference):
+    return subprocess.run(
+        ["git", "-C", str(root), "merge-base", reference, "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+TEST_MODULE = re.compile(r"(?:.*/)?test_[^/]*\.py")
+
+
+def changed_tests(root, reference):
+    """Test modules added, modified or renamed since the merge base with reference.
+
+    Untracked modules count. A changed conftest or support module selects
+    nothing: only a module that is itself changed runs.
+    """
+    git = ["git", "-C", str(root)]
+    commands = (
+        ["diff", "--name-only", "--diff-filter=AMR", "--no-relative", "-z"],
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+    )
+    names: set[str] = set()
+    for index, command in enumerate(commands):
+        revision = [merge_base(root, reference)] if index == 0 else []
+        listed = subprocess.run(
+            [*git, *command, *revision, "--", "*.py"], check=True, capture_output=True
+        ).stdout.decode()
+        names.update(filter(None, listed.split("\0")))
+    return sorted(
+        name
+        for name in names
+        if TEST_MODULE.fullmatch(name)
+        and not in_nested_project(root, name)
+        and (root / name).is_file()
+    )
+
+
 def changed_lines(root, reference):
     """Lines added or modified per file since the merge base with reference.
 
     Untracked files are entirely new, so every line of them counts.
     """
     git = ["git", "-C", str(root)]
-    base = subprocess.run(
-        [*git, "merge-base", reference, "HEAD"], check=True, capture_output=True, text=True
-    ).stdout.strip()
+    base = merge_base(root, reference)
     diff = subprocess.run(
         [
             *git,
@@ -229,38 +266,10 @@ def check_sources_unchanged(root, before):
         raise ValueError(f"Python sources changed during tests; rerun the CRAP check: {changed}")
 
 
-def manifest_path(data_file):
-    # coverage erases every `<data_file>.*` sibling as stale parallel data, so the
-    # manifest must not share the data file's prefix.
-    data_file = Path(data_file)
-    return data_file.with_name(data_file.name.lstrip(".") + ".sources.json")
-
-
-def write_manifest(root, snapshot, data_file):
-    manifest = {path.relative_to(root).as_posix(): digest for path, digest in snapshot.items()}
-    manifest_path(data_file).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-
-
-def check_manifests(root, snapshot, manifests):
-    """Precomputed coverage only scores the sources it was collected from."""
-    if not manifests:
-        raise ValueError("Precomputed coverage needs at least one source manifest")
-    current = {path.relative_to(root).as_posix(): digest for path, digest in snapshot.items()}
-    for manifest in manifests:
-        recorded = json.loads(Path(manifest).read_text(encoding="utf-8"))
-        changed = sorted(
-            name
-            for name in recorded.keys() | current.keys()
-            if recorded.get(name) != current.get(name)
-        )
-        if changed:
-            raise ValueError(f"Python sources differ from shard manifest {manifest}: {changed}")
-
-
 def write_config(files, config, data_file):
     # A unique data file prevents stale or concurrent runs from supplying hits.
     # The score reads statement hits only (analysis2 statements/missing), so
-    # branch tracing stays off: it would slow every shard without changing the
+    # branch tracing stays off: it would slow the run without changing the
     # metric.
     config.write_text(
         "[run]\ndata_file = "
@@ -273,32 +282,37 @@ def write_config(files, config, data_file):
     return config
 
 
-def load_coverage(config):
+def collect_coverage(root, files, directory, pytest_args, selection=None):
+    """Statement hits of one fresh pytest run.
+
+    selection, when given, names the only test modules that run. An empty one
+    runs nothing, so every statement counts as missed.
+    """
+    config = write_config(files, directory / ".coveragerc", directory / ".coverage")
+    if selection is None or selection:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                *pytest_args,
+                "--cov",
+                f"--cov-config={config}",
+                "--cov-report=",
+                *(selection or ()),
+            ],
+            cwd=root,
+            check=False,
+        )
+        if result.returncode:
+            raise ValueError(f"pytest exited {result.returncode}; no valid CRAP report produced")
     coverage = Coverage(config_file=str(config))
     coverage.load()
-    if not coverage.get_data().measured_files():
+    # A whole-suite run that measured nothing is a broken run. A selection can
+    # consist of modules that are skipped, which is reported, not refused.
+    if selection is None and not coverage.get_data().measured_files():
         raise ValueError("No coverage data collected")
     return coverage
-
-
-def collect_coverage(root, files, directory, pytest_args):
-    config = write_config(files, directory / ".coveragerc", directory / ".coverage")
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            *pytest_args,
-            "--cov",
-            f"--cov-config={config}",
-            "--cov-report=",
-        ],
-        cwd=root,
-        check=False,
-    )
-    if result.returncode:
-        raise ValueError(f"pytest exited {result.returncode}; no valid CRAP report produced")
-    return load_coverage(config)
 
 
 def load_settings(root):
@@ -357,7 +371,10 @@ def measure_floors(root, files, coverage, floors):
     return results
 
 
-def write_report(scores, maximum, output, changed_since=None, excluded=(), floors=()):
+def write_report(
+    scores, maximum, output, changed_since=None, excluded=(), floors=(), selection=None
+):
+    """selection is the list of test modules that ran, or None for the whole suite."""
     if not scores:
         raise ValueError("No Python functions found")
     scores = sorted(scores, key=lambda item: (-item.crap, item.path, item.line))
@@ -369,6 +386,7 @@ def write_report(scores, maximum, output, changed_since=None, excluded=(), floor
         "formula": "complexity**2 * (1 - coverage)**3 + complexity",
         "coverage_metric": "function body statement coverage in pytest processes",
         "changed_since": changed_since,
+        "selected_tests": selection,
         "excluded_modules": sorted(excluded),
         "function_count": len(scores),
         "above_maximum_count": len(above),
@@ -380,6 +398,13 @@ def write_report(scores, maximum, output, changed_since=None, excluded=(), floor
     output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     scope = f", {len(violations)} on lines changed since {changed_since}" if changed_since else ""
     print(f"CRAP: {len(scores)} functions, {len(above)} above {maximum}{scope}.")
+    if selection is not None:
+        print(
+            f"Tests: {len(selection)} test modules changed since {changed_since} ran; "
+            "coverage is theirs alone and the coverage floors are not scored."
+        )
+        for name in selection:
+            print(f"  {name}")
     if excluded:
         print(f"Excluded {len(excluded)} test modules that need absent retained evidence.")
     for floor in floors:
@@ -401,35 +426,23 @@ def write_report(scores, maximum, output, changed_since=None, excluded=(), floor
 def main(
     root=ROOT,
     pytest_args=(),
-    coverage_data=None,
-    coveragerc=None,
-    data_file=None,
-    manifests=(),
-    verify_sources=None,
     changed_since=None,
+    changed_tests_only=False,
     skip_missing_evidence=False,
 ):
-    """Score the repository; coverage_data scores hits collected by sharded runs.
+    """Run the tests and score the repository.
 
-    coveragerc writes the shard configuration plus a source manifest and exits;
-    verify_sources checks a manifest against the checkout after a shard ran;
-    coverage_data requires every shard manifest to match the scored sources.
     changed_since gates only functions with an executable line changed since the
-    merge base with that reference; skip_missing_evidence passes the pytest option
-    through and leaves the modules it refuses to collect out of the score.
+    merge base with that reference. changed_tests_only also runs only the test
+    modules changed since it, so a changed function is scored on the coverage of
+    those modules alone, and leaves the coverage floors unscored: they are a
+    statement about the whole suite. skip_missing_evidence passes the pytest
+    option through and leaves the modules it refuses to collect out of the score
+    and out of the changed test modules that run.
     """
     try:
-        if coveragerc is not None:
-            if data_file is None:
-                raise ValueError("--write-coveragerc requires --data-file")
-            snapshot = source_snapshot(root)
-            write_config(list(snapshot), Path(coveragerc), Path(data_file).resolve())
-            write_manifest(root, snapshot, Path(data_file).resolve())
-            return 0
-        if verify_sources is not None:
-            check_manifests(root, source_snapshot(root), [verify_sources])
-            print(f"Sources match {verify_sources}")
-            return 0
+        if changed_tests_only and not changed_since:
+            raise ValueError("--changed-tests requires --changed-since")
         output = root / "artifacts/crap"
         output.mkdir(parents=True, exist_ok=True)
         report = output / "scores.json"
@@ -442,14 +455,17 @@ def main(
         if skip_missing_evidence:
             pytest_args = ("--skip-missing-evidence", *pytest_args)
         changed = changed_lines(root, changed_since) if changed_since else None
+        # pytest collects a module named on its command line even when the
+        # evidence guard would ignore it, so a changed module that needs absent
+        # evidence is left out here and reported with the excluded modules.
+        selection = (
+            [name for name in changed_tests(root, changed_since) if root / name not in excluded]
+            if changed_tests_only
+            else None
+        )
         with TemporaryDirectory(prefix="crap-") as temporary:
-            if coverage_data is not None:
-                check_manifests(root, snapshot, manifests)
-                config = write_config(files, Path(temporary) / ".coveragerc", Path(coverage_data))
-                coverage = load_coverage(config)
-            else:
-                coverage = collect_coverage(root, files, Path(temporary), pytest_args)
-                check_sources_unchanged(root, snapshot)
+            coverage = collect_coverage(root, files, Path(temporary), pytest_args, selection)
+            check_sources_unchanged(root, snapshot)
             scores = [
                 score
                 for path in files
@@ -457,7 +473,9 @@ def main(
                     root, path, coverage, None if changed is None else changed.get(path, set())
                 )
             ]
-            measured_floors = measure_floors(root, files, coverage, floors)
+            measured_floors = (
+                measure_floors(root, files, coverage, floors) if selection is None else []
+            )
             coverage.json_report(
                 morfs=[str(path) for path in files], outfile=str(output / "coverage.json")
             )
@@ -468,6 +486,7 @@ def main(
             changed_since,
             [path.relative_to(root).as_posix() for path in excluded],
             measured_floors,
+            selection,
         )
     except (
         OSError,
@@ -483,25 +502,16 @@ def main(
 
 def arguments(argv):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument("--coverage-data", type=Path, help="score combined shard coverage data")
-    parser.add_argument(
-        "--write-coveragerc", type=Path, help="write the shard coverage configuration and exit"
-    )
-    parser.add_argument("--data-file", type=Path, help="coverage data file for the shard")
-    parser.add_argument(
-        "--source-manifest",
-        type=Path,
-        action="append",
-        default=[],
-        help="shard source manifest that must match the scored checkout (repeatable)",
-    )
-    parser.add_argument(
-        "--verify-sources", type=Path, help="check one shard manifest against the checkout and exit"
-    )
     parser.add_argument(
         "--changed-since",
         metavar="REF",
         help="gate only functions with an executable line changed since the merge base with REF",
+    )
+    parser.add_argument(
+        "--changed-tests",
+        action="store_true",
+        help="with --changed-since: run only the test modules changed since REF, "
+        "score on their coverage alone and leave the coverage floors unscored",
     )
     parser.add_argument(
         "--skip-missing-evidence",
@@ -524,12 +534,8 @@ if __name__ == "__main__":
         main(
             root=OPTIONS.root.resolve(),
             pytest_args=PYTEST_ARGS,
-            coverage_data=OPTIONS.coverage_data,
-            coveragerc=OPTIONS.write_coveragerc,
-            data_file=OPTIONS.data_file,
-            manifests=tuple(OPTIONS.source_manifest),
-            verify_sources=OPTIONS.verify_sources,
             changed_since=OPTIONS.changed_since,
+            changed_tests_only=OPTIONS.changed_tests,
             skip_missing_evidence=OPTIONS.skip_missing_evidence,
         )
     )

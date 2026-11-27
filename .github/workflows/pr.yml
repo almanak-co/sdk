@@ -57,18 +57,14 @@ jobs:
   # test_pytest / test, test_linux / smoke, test_macos / smoke, test_strat / test
   # and docs / docs are the required status checks. They are gated through the
   # template `skip` input, never a job-level `if:`, so they always report.
+  #
+  # test_pytest runs only the test modules the PR added or modified, and in the
+  # same job fails when the PR changes an executable line inside a function
+  # whose CRAP score exceeds the limit on the coverage of those modules. The
+  # whole offline suite does not run on a pull request.
   test_pytest:
     needs: changes
-    uses: ./.github/workflows/template_pytest.yml
-    with:
-      skip: ${{ needs.changes.outputs.code_relevant != 'true' }}
-
-  # Diff-scoped: fails when the PR changes an executable line inside a function
-  # whose CRAP score exceeds the limit under the hosted-CI coverage scope, and
-  # when src/ statement coverage falls below its `[tool.crap]` floor.
-  crap_gate:
-    needs: [changes, test_pytest]
-    uses: ./.github/workflows/template_crap.yml
+    uses: ./.github/workflows/template_pytest_changed.yml
     with:
       skip: ${{ needs.changes.outputs.code_relevant != 'true' }}
       base_ref: ${{ github.base_ref }}

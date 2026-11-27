@@ -8,19 +8,11 @@ on:
         type: boolean
         required: false
         default: false
-      coverage:
-        description: >-
-          Record shard coverage for the CRAP gate. The PR crap_gate job is the
-          only consumer of the combined data, so callers that never score CRAP
-          (release flows) can run the suite without tracing overhead.
-        type: boolean
-        required: false
-        default: true
 
-# The offline suite spawns sandboxed workers and needs over an hour on one
-# hosted 2-core runner, so it is split across shards. Each shard records
-# coverage under the CRAP configuration; the aggregator combines the data for
-# the CRAP gate and is the required check `test_pytest / test`.
+# The whole offline suite, run on release tags. It spawns sandboxed workers and
+# needs over an hour on one hosted 2-core runner, so it is split across shards.
+# The aggregator is the check `test_pytest / test`. Pull requests run
+# `template_pytest_changed.yml` instead.
 jobs:
   shard:
     name: "unit shard ${{ matrix.group }}"
@@ -30,8 +22,7 @@ jobs:
     runs-on: ubuntu-latest-l
     permissions:
       contents: read
-    # Shards measure 6-10 minutes end to end with coverage on; the limit is
-    # hang protection with ample headroom.
+    # Hang protection with ample headroom.
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -54,7 +45,7 @@ jobs:
         run: make fixtures
 
       - name: Run test shard
-        run: bash scripts/ci/run_pytest_shard.sh "${{ strategy.job-total }}" "${{ matrix.group }}" "${{ inputs.coverage }}"
+        run: bash scripts/ci/run_pytest_shard.sh "${{ strategy.job-total }}" "${{ matrix.group }}"
 
       - name: Upload shard artifacts
         if: always()
@@ -65,8 +56,6 @@ jobs:
           # downloads by name resolve the oldest same-named artifact in the run.
           overwrite: true
           path: |
-            .coverage.shard-${{ matrix.group }}
-            coverage.shard-${{ matrix.group }}.sources.json
             test-results-${{ matrix.group }}.xml
             pytest-${{ matrix.group }}.log
           if-no-files-found: warn
@@ -128,42 +117,18 @@ jobs:
             exit 1
           fi
 
-      - name: Combine shard coverage
-        if: ${{ !inputs.skip && inputs.coverage }}
-        run: |
-          ls .coverage.shard-* test-results-*.xml
-          uv run --locked coverage combine --keep --data-file=.coverage .coverage.shard-*
-          test -s .coverage
-
-      # The refreshed file is the balancing input for future runs; commit it
-      # from a coverage-on (PR) run so the weights match PR shard conditions.
+      # The refreshed file is the balancing input for future runs.
       - name: Merge shard durations
-        if: ${{ !inputs.skip && inputs.coverage }}
+        if: ${{ !inputs.skip }}
         run: uv run --locked python scripts/ci/merge_test_durations.py .test_durations.new .
 
       - name: Upload merged test durations
-        if: ${{ !inputs.skip && inputs.coverage }}
+        if: ${{ !inputs.skip }}
         uses: actions/upload-artifact@v7
         with:
           name: test-durations
           path: .test_durations.new
           if-no-files-found: error
           # The dot-prefixed file is otherwise silently excluded.
-          include-hidden-files: true
-          retention-days: 30
-
-      - name: Upload combined coverage and results
-        # The CRAP gate downloads `pytest-coverage` and scores `.coverage`.
-        if: ${{ !inputs.skip && inputs.coverage && always() }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: pytest-coverage
-          overwrite: true
-          path: |
-            .coverage
-            coverage.shard-*.sources.json
-            test-results-*.xml
-            pytest-*.log
-          if-no-files-found: warn
           include-hidden-files: true
           retention-days: 30

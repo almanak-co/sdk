@@ -3,7 +3,7 @@
 # `ubuntu-latest-l` is a GitHub-hosted *larger* runner provisioned at the org
 # level (the `-l` suffix = large: 8 cores instead of the standard 2-core
 # `ubuntu-latest`). It is load-bearing:
-# `template_pytest.yml` relies on it to keep each unit-test shard fast.
+# `template_pytest.yml` (release tags) relies on it to keep each unit-test shard fast.
 #
 # actionlint (and CodeRabbit, which runs actionlint) only know the *default*
 # hosted-runner labels, so they flag this org-defined label as "unknown".
