@@ -479,9 +479,9 @@ Outcomes. Each case on each endpoint ends as one of:
 - `fail`: it did not. A failure is not retried.
 - `blocked`: the endpoint did not answer: a rate limit, a rejected read, a
   timeout, an unanswered direct read, or a command that exited 0 but reported an
-  endpoint refusal for part of its output (`observation_error`). A listing entry
-  the endpoint did not answer blocks a case only when nothing the endpoint did
-  answer fails it; an empty listing beside such an entry blocks too, since the
+  endpoint refusal for part of its output (`observation_error`). A listing entry,
+  or a direct read of one of its markets, that the endpoint did not answer blocks
+  a case only when nothing the endpoint did answer fails it; an empty listing beside such an entry blocks too, since the
   entry may hold the markets, and an empty listing without one fails. Such a case is tried three times, 5 and
   then 15 seconds apart, with 90 seconds per command (`--attempts`,
   `--backoff-seconds`, `--timeout-seconds`). After three consecutive blocked cases

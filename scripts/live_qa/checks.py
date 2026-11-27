@@ -6,13 +6,14 @@ the case instead of failing it: the endpoint, not the SDK, did not answer.
 """
 
 from collections.abc import Callable, Iterable, Sequence
+from functools import partial
 from typing import Any
 
 from eth_abi import encode
 from eth_utils import keccak
 
 from almanak.caip import AssetType, ChainId
-from scripts.live_qa.rpc import Rpc, RpcUnavailable, asset_address
+from scripts.live_qa.rpc import Rpc, RpcReverted, RpcUnavailable, asset_address
 
 Output = dict[str, Any]
 Check = Callable[[Output, Rpc], list[str]]
@@ -473,17 +474,38 @@ def unverified(markets: list[Output]) -> list[str]:
     ]
 
 
-def listed_markets(output: Output, rpc: Rpc, found: Sequence[str] = ()) -> list[str]:
+def listed_markets(
+    output: Output, rpc: Rpc, found: Sequence[str] = (), unread: Sequence[str] = ()
+) -> list[str]:
     """A listing of reviewed deployments: nothing unreadable, every market verified.
 
-    `found` holds what a connector's own check already found in the same listing. An
-    empty listing fails, unless an entry the endpoint did not answer may hold the
-    markets: then the case blocks and the run retries it.
+    `found` holds what a connector's own check already found in the same listing, and
+    `unread` the direct reads of its markets the endpoint did not answer. An empty
+    listing fails, unless an entry the endpoint did not answer may hold the markets:
+    then the case blocks and the run retries it.
     """
     findings, unanswered = entry_findings(output, rpc)
     markets = output["markets"]
     empty = [] if markets or unanswered else ["the listing reports no markets"]
-    return unless_answered([*found, *findings, *empty, *unverified(markets)], unanswered)
+    return unless_answered(
+        [*found, *findings, *empty, *unverified(markets)], [*unanswered, *unread]
+    )
+
+
+def answered(read: Callable[[], tuple[Any, ...]], name: str, unread: list[str]) -> tuple[Any, ...]:
+    """A market's direct read, or an empty tuple where the endpoint did not answer it.
+
+    The unanswered read is kept in `unread` rather than raised, so that it cannot hide
+    a mismatch the endpoint answered for another market of the same listing. A revert
+    is an answer and still raises.
+    """
+    try:
+        return read()
+    except RpcReverted:
+        raise
+    except RpcUnavailable as exc:
+        unread.append(f"{name}: {exc}")
+        return ()
 
 
 def aave_v4_listing(chain: ChainId) -> Check:
@@ -493,13 +515,18 @@ def aave_v4_listing(chain: ChainId) -> Check:
     def check(output: Output, rpc: Rpc) -> list[str]:
         block = output["block"]["number"]
         pairs = []
+        unread: list[str] = []
         for index, market in enumerate(output["markets"]):
             spoke, reserve_id = market["spoke"], market["reserve_id"]
-            underlying, hub, _, _ = spoke_reserve(rpc, spoke, reserve_id, block)
+            read = partial(spoke_reserve, rpc, spoke, reserve_id, block)
+            record = answered(read, f"market {index}", unread)
+            if not record:
+                continue
+            underlying, hub, _, _ = record
             asset = reported_asset(market["asset"]["asset"])
             pairs.append((f"market {index} asset", asset, on_chain(chain, underlying)))
             pairs.append((f"market {index} hub", market["hub"], hub.lower()))
-        return listed_markets(output, rpc, differences(pairs))
+        return listed_markets(output, rpc, differences(pairs), unread)
 
     return check
 
@@ -523,21 +550,20 @@ def morpho_listing(core: str, loan_asset: str) -> Check:
                 else ["the listing reports no verified market"]
             )
             return unless_answered([*findings, *missing], unanswered)
-        pairs = []
+        pairs, block = [], output["block"]["number"]
         for market in verified:
             name = f"loan asset of {market['market_id'][:10]}"
             reported = reported_asset(market["loan_asset"]["asset"])
             if reported != requested:
                 findings.append(f"{name}: CLI {reported!r}, requested {requested!r}")
                 continue
-            (loan,) = rpc.call(
-                core,
-                "idToMarketParams(bytes32)",
-                output["block"]["number"],
-                ("address",),
-                (bytes.fromhex(market["market_id"][2:]),),
+            market_id = bytes.fromhex(market["market_id"][2:])
+            read = partial(
+                rpc.call, core, "idToMarketParams(bytes32)", block, ("address",), (market_id,)
             )
-            pairs.append((name, reported, on_chain(chain, loan)))
+            params = answered(read, name, unanswered)
+            if params:
+                pairs.append((name, reported, on_chain(chain, params[0])))
         return unless_answered(findings + differences(pairs), unanswered)
 
     return check

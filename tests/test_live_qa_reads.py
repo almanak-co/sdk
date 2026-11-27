@@ -1109,6 +1109,54 @@ def test_an_answered_reserve_mismatch_is_kept_when_the_decimals_read_is_unanswer
         assert verdict.findings[0] == "decimals: CLI 18, direct read 6", field
 
 
+class InTurn(FakeRpc):
+    """Direct reads of one signature answered in turn, one answer per call."""
+
+    def call(self, to, signature, block, outputs, args=()):
+        answer = self.answers[signature].pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+def test_an_answered_listing_mismatch_is_kept_when_a_later_market_read_is_unanswered():
+    """A market the endpoint answered is compared whatever a later market's read does."""
+    unanswered = RpcUnavailable("eth_call getReserve(uint256): HTTP 429")
+    other_asset = ("0x" + "c3" * 20, HUB, 4, 18)
+    agreeing = (MARKET_ASSET, HUB, 4, 18)
+    two = listing(
+        [
+            market(spoke="0xspoke", reserve_id=3, hub=HUB),
+            market(spoke="0xspoke", reserve_id=4, hub=HUB),
+        ]
+    )
+    case = reads.ReadCase(
+        "aave-v4", ETHEREUM, ("lending-markets",), checks.aave_v4_listing(ETHEREUM)
+    )
+    rpc = InTurn({"getReserve(uint256)": [other_asset, unanswered]})
+    verdict = reads.judge_output(case, two, rpc)
+    assert verdict.status == "fail", verdict
+    (finding,) = verdict.findings
+    assert finding.startswith("market 0 asset: CLI")
+    # Without an answered mismatch the unanswered read still blocks the case.
+    rpc = InTurn({"getReserve(uint256)": [agreeing, unanswered]})
+    verdict = reads.judge_output(case, two, rpc)
+    assert verdict.status == "transient" and "market 1: eth_call" in verdict.detail, verdict
+    # The same holds for a Morpho listing's markets, each read from the core.
+    morpho = reads.ReadCase(
+        "morpho", ETHEREUM, ("lending-markets",), checks.morpho_listing("0xcore", LOAN)
+    )
+    ids = ("0x" + "0d" * 32, "0x" + "0e" * 32)
+    verified = listing([market(market_id=i, loan_asset=market()["asset"]) for i in ids])
+    rpc = InTurn({"idToMarketParams(bytes32)": [("0x" + "c3" * 20,), unanswered]})
+    verdict = reads.judge_output(morpho, verified, rpc)
+    assert verdict.status == "fail", verdict
+    (finding,) = verdict.findings
+    assert finding.startswith("loan asset of 0x0d0d0d0d: CLI")
+    rpc = InTurn({"idToMarketParams(bytes32)": [(MARKET_ASSET,), unanswered]})
+    assert reads.judge_output(morpho, verified, rpc).status == "transient"
+
+
 def test_a_morpho_listing_is_held_to_the_core_and_may_refuse_some_markets_not_all():
     check = checks.morpho_listing("0xcore", LOAN)
     verified = market(market_id="0x" + "0d" * 32, loan_asset=market()["asset"])
