@@ -37,7 +37,7 @@ from almanak.connectors.aerodrome.position_request import (
 from almanak.connectors.aerodrome.positions import Position, Quote
 from almanak.connectors.aerodrome.receipts import Effects
 from almanak.connectors.composition import connector_from_wire
-from almanak.connectors.direct import ALLOCATION, ActionRequest
+from almanak.connectors.direct import ALLOCATION, ActionRequest, AlreadyComplete
 from almanak.dex_intents import SwapExactInput
 from almanak.gateway.ethereum import DataError
 from almanak.gateway.resolution_evm import RetainedResolutionReader
@@ -46,6 +46,7 @@ from tests.aerodrome_support import CAPTURE
 from tests.read_at_support import read_at
 from tests.test_aerodrome_reconciliation import inputs
 from tests.test_ax_liquidity import LiquidityDesk
+from tests.test_ax_swap import Planned, performed, untouched
 from tests.test_ax_swap_aerodrome import (
     BASE,
     CONNECTOR,
@@ -1186,7 +1187,7 @@ def test_a_burn_spends_its_share_approval_whole_and_a_deposit_leaves_what_it_did
     assert reconciliation.allowances_after(approved, mint, taken, False) == approved.allowances
 
 
-def test_a_revocation_zeroes_each_allowance_shares_included_and_refuses_when_there_is_none(
+def test_a_revocation_zeroes_each_allowance_shares_included_and_is_complete_with_none(
     variant,
 ):
     request = stated("revoke-exchange")
@@ -1206,8 +1207,64 @@ def test_a_revocation_zeroes_each_allowance_shares_included_and_refuses_when_the
     assert [item.asset for item in cleared] == [*target.assets, target.pool.shares_asset]
     # The wallet's shares are owned and untouched: a revocation only approves zero.
     clean = seen(config, owned, market, position=owned.position)
-    with pytest.raises(ValueError, match="no allowance in either pool currency or in the pool"):
+    with pytest.raises(AlreadyComplete) as done:
         direct.binding(CONNECTOR).intent(config, (clean,), request)
+    assert str(done.value) == NOTHING_TO_REVOKE
+
+
+NOTHING_TO_REVOKE = (
+    "nothing to revoke: the wallet has given the pool's router no allowance in either "
+    "pool currency or in the pool's shares"
+)
+
+
+def revoking_desk(variant, tmp_path, allowed=(0, 0, 0)):
+    """A revocation deployment over a wallet that left the router `allowed`."""
+    market = resolved(variant)
+    config = deployed(market, stated("revoke-exchange"))
+
+    def build(owned):
+        return seen(config, owned, market, allowed=allowed)
+
+    return LiquidityDesk(tmp_path, config, build)
+
+
+@pytest.mark.parametrize("execute", [False, True])
+def test_a_revocation_with_nothing_to_clear_completes_without_a_step(
+    variant, tmp_path, monkeypatch, execute
+):
+    desk = revoking_desk(variant, tmp_path)
+    result = performed(monkeypatch, desk, stated("revoke-exchange"), execute=execute)
+    assert result == {
+        "action": "revoke-exchange",
+        "executed": False,
+        "completed": True,
+        "position_before": direct.binding(CONNECTOR).position(desk.store.load()),
+        "note": NOTHING_TO_REVOKE,
+    }
+    assert result["position_before"]["allowances"] == []
+    assert untouched(desk)
+
+
+@pytest.mark.parametrize("allowed", [(1, 0, 0), (0, 0, 1)])
+@pytest.mark.parametrize("execute", [False, True])
+def test_a_revocation_of_a_standing_allowance_is_still_admitted_and_planned(
+    variant, tmp_path, monkeypatch, execute, allowed
+):
+    # One base unit of a currency, or of the pool's shares alone, is enough to revoke.
+    desk = revoking_desk(variant, tmp_path, allowed=allowed)
+    with pytest.raises(Planned):
+        performed(monkeypatch, desk, stated("revoke-exchange"), execute=execute)
+    assert desk.store.load().decision.intent.kind == "revoke_exchange"
+
+
+def test_a_collection_with_no_fees_stays_a_refusal(variant):
+    request = stated("collect-liquidity-fees")
+    market, config, state = started(variant, request)
+    clean = seen(config, state.owned[0], market)
+    with pytest.raises(ValueError) as refused:
+        direct.binding(CONNECTOR).intent(config, (clean,), request)
+    assert not isinstance(refused.value, AlreadyComplete)
 
 
 def test_the_report_holds_the_shares_what_moved_the_inventory_and_the_allowances(variant):

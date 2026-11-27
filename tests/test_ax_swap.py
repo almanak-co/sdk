@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from almanak import ax_actions
+from almanak import ax_actions, operator_runtime
 from almanak.caip import ChainId
 from almanak.chains import evm_network
 from almanak.cli_arguments import build_parser, parse_validated
@@ -589,6 +589,41 @@ class SwapDesk:
         runtime.fault = lambda *arguments: None
         runtime.poll = 0
         return runtime
+
+
+class Planned(Exception):
+    """An admitted request reached planning, which a desk's gateway double does not serve."""
+
+
+def performed(monkeypatch, desk, request, *, execute):
+    """The command's own `perform` over a desk's service and coordinator.
+
+    A request the coordinator admits ends in `Planned`, with its decision retained. A
+    request that is already complete returns its result and retains none.
+    """
+
+    def planned():
+        raise Planned
+
+    def coordinator(*, gateway, create):
+        runtime = desk.runtime()
+        runtime.close = lambda: None
+        runtime.preview = planned
+        return runtime
+
+    monkeypatch.setattr(operator_runtime, "OperatorRuntime", coordinator)
+    return ax_actions.perform(desk.service, request, execute=execute)
+
+
+def untouched(desk) -> bool:
+    """Whether the deployment started and then admitted, signed and recorded nothing."""
+    state = desk.store.load()
+    return state.initialized and (state.decision, state.plan, state.pending, state.outcomes) == (
+        None,
+        None,
+        None,
+        (),
+    )
 
 
 def swap_desk(connector, tmp_path):

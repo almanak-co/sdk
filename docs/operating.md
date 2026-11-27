@@ -1403,7 +1403,7 @@ them. It clears an allowance that holds an amount, and a Permit2 allowance that
 holds none and has not expired. A completed swap leaves one of those until its
 deadline: it grants nothing, the result lists it under `permit2_unexpired` apart from
 `allowances`, and a strategy's start in the same wallet is refused while it stands.
-With nothing of either kind the command is refused.
+With nothing of either kind there is nothing to revoke, as stated below.
 
 The ERC-20 approval to Permit2 is not Uniswap's alone: every application that spends
 that token through Permit2 relies on it, so after the command each of them needs the
@@ -1417,6 +1417,32 @@ The steps run in the order above and each must be mined before the next is plann
 A token whose `approve` of zero reverts therefore stops the command at that step,
 and the allowances after it are not reached: they are cleared with another tool.
 The same holds for `revoke-exchange` on the other pool connectors.
+
+On every pool connector, a `revoke-exchange` that finds nothing to clear at its
+pinned block has already reached the state it exists for. It plans and signs
+nothing and exits 0, in a preview as with `--execute`, with this result:
+
+```json
+{
+  "action": "revoke-exchange",
+  "executed": false,
+  "completed": true,
+  "position_before": {"...": "..."},
+  "note": "nothing to revoke: the wallet has given the pool no allowance in any of its coins"
+}
+```
+
+`note` starts with `nothing to revoke:` and names what the connector read: the
+pool's coins on Curve, the router and the position manager in the two pool
+currencies on the V3 family, the router in the two currencies and the pool's shares
+on Aerodrome classic, and the approvals to Permit2 and the Permit2 allowances on
+Uniswap V4. The result has no `first_step`, `steps`, `outcomes` or
+`position_after`, and `completed` is stated in the preview too. A script that ends
+with this command can therefore tell a wallet that was already clean, exit 0 with
+`executed` false, from a refusal such as a malformed flag, `invalid_input` and
+exit 1. The statement is the command's reading of one block through the endpoint
+used, and not on-chain enforcement: an allowance granted afterwards is not covered
+by it.
 
 ```bash
 almanak ax revoke-exchange --connector uniswap_v4 --chain eip155:8453 \

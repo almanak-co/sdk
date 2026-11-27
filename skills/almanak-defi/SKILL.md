@@ -830,6 +830,10 @@ position adds below. For every kind:
   alone: tell the user, before they confirm, that every other application that
   spends that token through Permit2 needs it approved again afterwards. The
   preview's `note` names the tokens this applies to; read it to the user.
+  When nothing is left to clear, the preview and the execution alike exit 0 with
+  `executed` false, `completed` true, no `first_step` and a `note` that starts
+  with `nothing to revoke:`. Nothing was signed: report that the wallet was
+  already clean and do not run it again with `--execute`.
 
 ```bash
 almanak ax revoke-exchange --connector <connector> --chain <chain> <market> <wallet and ceilings>

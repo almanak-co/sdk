@@ -39,7 +39,7 @@ from almanak.connectors.concentrated_math import (
     liquidity_for,
     sqrt_at_tick,
 )
-from almanak.connectors.direct import ALLOCATION, ActionRequest, NftNotHeld
+from almanak.connectors.direct import ALLOCATION, ActionRequest, AlreadyComplete, NftNotHeld
 from almanak.connectors.v3_pool_position_request import PositionRequest, read_liquidity_position
 from almanak.connectors.v3_pool_positions import Position
 from almanak.connectors.v3_pool_reader import position_key
@@ -66,11 +66,14 @@ from tests.test_ax_swap import (
     OBSERVED,
     POOLS,
     WALLET,
+    Planned,
     SwapDesk,
     configuration,
     created,
+    performed,
     resolved,
     retained,
+    untouched,
 )
 
 pytestmark = pytest.mark.parametrize("connector", CONNECTORS)
@@ -860,11 +863,12 @@ def test_an_emptied_position_builds_no_collection_and_no_close(connector, action
         v3_pool_direct.intent(config, (seen,), naming(action))
 
 
-def test_a_revocation_zeroes_each_allowance_and_refuses_when_there_is_none(connector):
+def test_a_revocation_zeroes_each_allowance_and_is_complete_when_there_is_none(connector):
     market = resolved(connector)
     config, state, bare = started(connector, market, request("revoke-exchange"))
-    with pytest.raises(ValueError, match="no allowance in either pool currency"):
+    with pytest.raises(AlreadyComplete) as done:
         v3_pool_direct.intent(config, (bare,), request("revoke-exchange"))
+    assert str(done.value) == NOTHING_TO_REVOKE
     target = config.target(ALLOCATION)
     spenders = (target.contracts.router, target.contracts.position_manager)
     left = {(0, spenders[1]): 5, (1, spenders[0]): 2**256 - 1}
@@ -1617,6 +1621,64 @@ def liquidity_desk(connector, tmp_path, stated, chain=None, wallets=(9000, 9000)
         return observation(connector, config, owned, market, wallets=wallets, position=found)
 
     return market, LiquidityDesk(tmp_path, config, build)
+
+
+NOTHING_TO_REVOKE = (
+    "nothing to revoke: the wallet has given the pool's router and position manager no "
+    "allowance in either pool currency"
+)
+
+
+def revoking_desk(connector, tmp_path, allowed=None):
+    """A revocation deployment over a wallet that left the pool's contracts `allowed`."""
+    market = resolved(connector)
+    config = deployed(connector, market, request("revoke-exchange"))
+
+    def build(owned):
+        return observation(connector, config, owned, market, allowed=allowed)
+
+    return LiquidityDesk(tmp_path, config, build)
+
+
+@pytest.mark.parametrize("execute", [False, True])
+def test_a_revocation_with_nothing_to_clear_completes_without_a_step(
+    connector, tmp_path, monkeypatch, execute
+):
+    desk = revoking_desk(connector, tmp_path)
+    result = performed(monkeypatch, desk, request("revoke-exchange"), execute=execute)
+    assert result == {
+        "action": "revoke-exchange",
+        "executed": False,
+        "completed": True,
+        "position_before": direct.binding(connector).position(desk.store.load()),
+        "note": NOTHING_TO_REVOKE,
+    }
+    assert result["position_before"]["allowances"] == []
+    # Nothing was admitted, so nothing can be planned, signed or left in a record.
+    assert untouched(desk)
+
+
+@pytest.mark.parametrize("execute", [False, True])
+def test_a_revocation_of_a_standing_allowance_is_still_admitted_and_planned(
+    connector, tmp_path, monkeypatch, execute
+):
+    market = resolved(connector)
+    target = deployed(connector, market, request("revoke-exchange")).target(ALLOCATION)
+    # One base unit of one currency to one spender is enough to revoke.
+    desk = revoking_desk(connector, tmp_path, allowed={(1, target.contracts.router): 1})
+    with pytest.raises(Planned):
+        performed(monkeypatch, desk, request("revoke-exchange"), execute=execute)
+    assert desk.store.load().decision.intent.kind == "revoke_exchange"
+
+
+def test_only_a_revocation_is_ever_already_complete(connector):
+    """Every other refusal of the family's liquidity commands stays a refusal."""
+    market = resolved(connector)
+    emptied = held(market, liquidity=0)
+    config, _, seen = on_position(connector, market, "increase-liquidity", emptied)
+    with pytest.raises(ValueError, match="holds no liquidity") as refused:
+        v3_pool_direct.intent(config, (seen,), naming("close-liquidity"))
+    assert not isinstance(refused.value, AlreadyComplete)
 
 
 def test_the_gateway_admits_an_open_over_the_inventory_it_adopted_itself(connector, tmp_path):

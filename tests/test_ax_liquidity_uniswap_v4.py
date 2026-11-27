@@ -19,7 +19,7 @@ from almanak.cli_arguments import build_parser, parse_validated
 from almanak.configuration.composed import Parameters as ComposedParameters
 from almanak.connectors import direct
 from almanak.connectors.composition import connector_from_wire
-from almanak.connectors.direct import ALLOCATION, ActionRequest, NftNotHeld
+from almanak.connectors.direct import ALLOCATION, ActionRequest, AlreadyComplete, NftNotHeld
 from almanak.connectors.support import RunMode, uniswap_candidate_entry, uniswap_support
 from almanak.connectors.uniswap_v4 import (
     abi,
@@ -767,15 +767,16 @@ def test_a_revocation_zeroes_the_approvals_to_permit2_and_both_permit2_allowance
         validating(config, state, closed, after)[1](after)
 
 
-def test_a_revocation_is_refused_only_when_the_cleanup_has_nothing_to_clear():
+def test_a_revocation_is_already_complete_only_when_the_cleanup_has_nothing_to_clear():
     market = swaps.resolved()
     now = market.block.timestamp
     # Nothing at all, and Permit2 allowances that hold no amount and have expired.
     for granted in ({}, {"permits": ((0, now), (0, 0)), "routed": ((0, 0), (0, now - 1))}):
         _, config, _, bare = revoking(**granted)
         assert not bare.needs_cleanup
-        with pytest.raises(ValueError, match="nothing to revoke: no approval of a pool token"):
+        with pytest.raises(AlreadyComplete) as done:
             liquidity_direct.intent(config, (bare,), stated("revoke-exchange"))
+        assert str(done.value) == NOTHING_TO_REVOKE
     # A single base unit left to Permit2 is revoked.
     _, config, state, seen = revoking(tokens=(0, 1))
     assert [s.kind for s in revoked(config, state, seen)[0]] == ["revoke_erc20"]
@@ -975,6 +976,56 @@ def desk_over(tmp_path, config, build):
     desk = family.SwapDesk(tmp_path, config, build)
     desk.gateway = desk.service.backend = Holding(build, desk.store)
     return desk
+
+
+NOTHING_TO_REVOKE = (
+    "nothing to revoke: no approval of a pool token to Permit2 holds an amount, and no "
+    "Permit2 allowance to the pool's router or position manager holds an amount or has "
+    "yet to expire"
+)
+
+
+def revoking_desk(tmp_path, **granted):
+    market, config, _, _ = revoking()
+    return desk_over(tmp_path, config, lambda owned: observed(config, owned, market, **granted))
+
+
+@pytest.mark.parametrize("execute", [False, True])
+@pytest.mark.parametrize("expired", [False, True])
+def test_a_revocation_with_nothing_to_clear_completes_without_a_step(
+    tmp_path, monkeypatch, execute, expired
+):
+    # Nothing at all, or only Permit2 allowances that hold no amount and have expired.
+    now = swaps.resolved().block.timestamp
+    lapsed = {"permits": ((0, now), (0, 0)), "routed": ((0, 0), (0, now - 1))}
+    desk = revoking_desk(tmp_path, **(lapsed if expired else {}))
+    result = family.performed(monkeypatch, desk, stated("revoke-exchange"), execute=execute)
+    assert result == {
+        "action": "revoke-exchange",
+        "executed": False,
+        "completed": True,
+        "position_before": direct.binding(CONNECTOR).position(desk.store.load()),
+        "note": NOTHING_TO_REVOKE,
+    }
+    # The Permit2 note is for approvals the command will zero, and there are none.
+    assert result["position_before"]["allowances"] == []
+    assert "permit2_unexpired" not in result["position_before"]
+    assert family.untouched(desk)
+
+
+@pytest.mark.parametrize(
+    "granted",
+    [{"tokens": (0, 1)}, {"permits": ((0, 2**47), (0, 0))}],
+    ids=["approval_to_permit2", "unexpired_empty_permit2_allowance"],
+)
+@pytest.mark.parametrize("execute", [False, True])
+def test_a_revocation_of_what_the_wallet_left_is_still_admitted_and_planned(
+    tmp_path, monkeypatch, execute, granted
+):
+    desk = revoking_desk(tmp_path, **granted)
+    with pytest.raises(family.Planned):
+        family.performed(monkeypatch, desk, stated("revoke-exchange"), execute=execute)
+    assert desk.store.load().decision.intent.kind == "revoke_exchange"
 
 
 def test_the_gateway_admits_an_open_and_a_collection_of_an_adopted_position(tmp_path):
