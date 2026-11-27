@@ -395,6 +395,17 @@ def test_changed_scope_without_changes_passes_and_runs_nothing(branched_reposito
     assert report["violation_count"] == 0
 
 
+def test_changed_scope_accepts_a_selection_that_collects_no_tests(branched_repository):
+    skipped = 'import pytest\npytest.skip("not here", allow_module_level=True)\n'
+    (branched_repository / "tests/test_target.py").write_text(skipped)
+    assert main(branched_repository, changed_since="base", changed_tests_only=True) == 0
+    report = json.loads((branched_repository / "artifacts/crap/scores.json").read_text())
+    assert report["selected_tests"] == ["tests/test_target.py"]
+    # The whole suite collecting nothing stays a measurement error.
+    (branched_repository / "test_sample.py").write_text(skipped)
+    assert main(branched_repository) == 2
+
+
 def test_changed_scope_leaves_coverage_floors_unscored(branched_repository):
     (branched_repository / "src").mkdir()
     (branched_repository / "src/unused.py").write_text("def unused():\n    return 1\n")

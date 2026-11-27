@@ -304,7 +304,11 @@ def collect_coverage(root, files, directory, pytest_args, selection=None):
             cwd=root,
             check=False,
         )
-        if result.returncode:
+        # Exit 5 is "no tests collected": a selection whose modules all skip at
+        # module level. That is reported, not refused. For the whole suite it
+        # stays a broken run.
+        collected_nothing = selection is not None and result.returncode == 5
+        if result.returncode and not collected_nothing:
             raise ValueError(f"pytest exited {result.returncode}; no valid CRAP report produced")
     coverage = Coverage(config_file=str(config))
     coverage.load()
