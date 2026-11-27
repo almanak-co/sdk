@@ -29,11 +29,13 @@ from almanak.connectors.curve.pool_abi import layout
 from almanak.connectors.curve.positions import Position
 from almanak.connectors.curve.simulation import validate_simulation
 from almanak.connectors.curve.validation import validate_current
-from almanak.connectors.direct import ALLOCATION, ActionRequest
+from almanak.connectors.direct import ALLOCATION, ActionRequest, AlreadyComplete
 from almanak.dex_intents import SwapExactInput
 from almanak.gateway.ethereum import DataError
 from almanak.models import AssetAmount
 from tests.read_at_support import read_at
+from tests.test_ax_liquidity import LiquidityDesk
+from tests.test_ax_swap import Planned, performed, untouched
 from tests.test_ax_swap_curve import (
     MARKETS,
     WALLET,
@@ -406,9 +408,118 @@ def test_the_observation_decides_again_what_the_wallets_balance_serves(market):
     stated, config, state, seen = adopted(market, "decrease-liquidity", shares=BURNED)
     with pytest.raises(ValueError, match=f"must be below the wallet's {BURNED} base units"):
         curve_direct.intent(config, (seen,), stated)
-    stated, config, state, seen = adopted(market, "revoke-exchange")
-    with pytest.raises(ValueError, match="no allowance in any of its coins"):
+
+
+NOTHING_TO_REVOKE = (
+    "nothing to revoke: the wallet has given the pool no allowance in any of its coins"
+)
+
+
+def test_a_revocation_with_no_allowance_is_already_complete_and_no_other_refusal_is(market):
+    stated, config, _, seen = adopted(market, "revoke-exchange")
+    with pytest.raises(AlreadyComplete) as done:
         curve_direct.intent(config, (seen,), stated)
+    assert str(done.value) == NOTHING_TO_REVOKE
+    stated, config, _, seen = adopted(market, "close-liquidity", shares=0)
+    with pytest.raises(ValueError, match="holds none of this pool's LP token") as refused:
+        curve_direct.intent(config, (seen,), stated)
+    assert not isinstance(refused.value, AlreadyComplete)
+
+
+def revoking_desk(market, tmp_path, allowances=None):
+    """A revocation deployment over a wallet that left the pool `allowances`."""
+    config = config_for(market, request("revoke-exchange"))
+
+    def build(owned):
+        return observation(market, config, owned, allowances=allowances)
+
+    return LiquidityDesk(tmp_path, config, build)
+
+
+@pytest.mark.parametrize("execute", [False, True])
+def test_a_revocation_with_nothing_to_clear_completes_without_a_step(
+    market, tmp_path, monkeypatch, execute
+):
+    desk = revoking_desk(market, tmp_path)
+    result = performed(monkeypatch, desk, request("revoke-exchange"), execute=execute)
+    assert result == {
+        "action": "revoke-exchange",
+        "executed": False,
+        "completed": True,
+        "position_before": direct.binding("curve").position(desk.store.load()),
+        "note": NOTHING_TO_REVOKE,
+    }
+    assert result["position_before"]["allowances"] == []
+    assert untouched(desk)
+
+
+@pytest.mark.parametrize("execute", [False, True])
+def test_a_revocation_of_a_standing_allowance_is_still_admitted_and_planned(
+    market, tmp_path, monkeypatch, execute
+):
+    # One base unit of the pool's last coin is enough to revoke.
+    desk = revoking_desk(market, tmp_path, allowances={market.pool.coins[-1]: 1})
+    with pytest.raises(Planned):
+        performed(monkeypatch, desk, request("revoke-exchange"), execute=execute)
+    assert desk.store.load().decision.intent.kind == "revoke_exchange"
+
+
+def revoke_through_main(monkeypatch, chain, *flags):
+    """The command line's own entry point over a Curve `revoke-exchange` on `chain`."""
+    from almanak import cli
+
+    named = {
+        "--connector": "curve",
+        "--chain": chain,
+        "--pool": POOL,
+        "--wallet": "wallet",
+        "--env-file": ".env",
+        "--max-gas-price-wei": "7",
+        "--max-transaction-fee": "9",
+    }
+    stated = [part for pair in named.items() for part in pair]
+    monkeypatch.setattr("sys.argv", ["almanak", "ax", "revoke-exchange", *stated, *flags])
+    return cli.main()
+
+
+@pytest.mark.parametrize("flags", [(), ("--execute",)])
+def test_the_command_exits_zero_with_one_result_when_nothing_is_left_to_revoke(
+    market, tmp_path, monkeypatch, capsys, flags
+):
+    desk = revoking_desk(market, tmp_path)
+
+    def run(config, backend, action, *, execute):
+        assert execute is bool(flags)
+        return performed(monkeypatch, desk, action, execute=execute)
+
+    monkeypatch.setattr(ax_actions, "read_wallet", lambda directory: {})
+    monkeypatch.setattr(ax_actions, "transport", lambda args, chain: (None, "endpoint"))
+    monkeypatch.setattr(ax_actions, "action_config", lambda *a: desk.config)
+    monkeypatch.setattr(
+        ax_actions, "production_backend", lambda *a: SimpleNamespace(close=lambda: None)
+    )
+    monkeypatch.setattr(ax_actions, "run", run)
+    assert revoke_through_main(monkeypatch, "eip155:1", *flags) == 0
+    streams = capsys.readouterr()
+    result = json.loads(streams.out)
+    assert streams.err == ""
+    assert (result["action"], result["executed"], result["completed"], result["note"]) == (
+        "revoke-exchange",
+        False,
+        True,
+        NOTHING_TO_REVOKE,
+    )
+    assert set(result) == {"action", "executed", "completed", "position_before", "note"}
+
+
+def test_a_revocation_the_chain_does_not_serve_is_still_invalid_input(monkeypatch, capsys):
+    monkeypatch.setattr(ax_actions, "read_wallet", pytest.fail)
+    assert revoke_through_main(monkeypatch, "eip155:31337", "--execute") == 1
+    streams = capsys.readouterr()
+    assert streams.out == ""
+    refusal = json.loads(streams.err)
+    assert refusal["error"] == "invalid_input"
+    assert "curve serves no direct revoke-exchange on eip155:31337" in refusal["message"]
 
 
 def test_the_gateway_admits_one_exact_approval_per_coin_then_the_deposit_and_nothing_larger(

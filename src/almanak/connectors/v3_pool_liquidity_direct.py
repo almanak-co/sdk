@@ -49,7 +49,13 @@ The heavy imports stay inside the functions: the command line imports each conne
 `direct` module to build its choices.
 """
 
-from almanak.connectors.direct import ALLOCATION, ActionRequest, NftNotHeld, Wallet
+from almanak.connectors.direct import (
+    ALLOCATION,
+    ActionRequest,
+    AlreadyComplete,
+    NftNotHeld,
+    Wallet,
+)
 
 # Commands that act on an existing position, named by its token ID.
 NFT_ACTIONS = (
@@ -317,9 +323,9 @@ def require_held_liquidity(seen, request) -> None:
 
 def revoke_exchange(actions, allocation, seen, request):
     if not seen.needs_cleanup:
-        raise ValueError(
-            "the wallet has given the pool's router and position manager no allowance "
-            "in either pool currency"
+        raise AlreadyComplete(
+            "nothing to revoke: the wallet has given the pool's router and position "
+            "manager no allowance in either pool currency"
         )
     return actions.revoke_intent(target=seen.target)
 

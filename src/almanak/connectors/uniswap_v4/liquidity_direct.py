@@ -58,7 +58,8 @@ PositionManager are set to zero and expired. What it clears is what the connecto
 own cleanup counts (`Allowance.needs_cleanup`): an allowance that holds an amount, and
 a Permit2 allowance that holds none and has not expired, which a completed swap leaves
 until its deadline and on which a strategy's start in the wallet is refused. With
-neither, the command is refused. The ERC-20 approval to Permit2 is not this venue's
+neither, the request is already complete (`AlreadyComplete`): nothing is planned or
+signed, and the command says so and succeeds. The ERC-20 approval to Permit2 is not this venue's
 alone: every application that spends the token through Permit2 relies on it, and needs
 it approved again afterwards; the result's `note` says so before anything is signed.
 Permit2 allowances to any other spender are neither read nor changed. The cleanup
@@ -274,12 +275,13 @@ def close_liquidity(allocation, seen):
 
 
 def revoke_exchange(allocation, seen):
-    """The connector's allowance cleanup, refused when it would have nothing to clear."""
+    """The connector's allowance cleanup, already complete when it has nothing to clear."""
+    from almanak.connectors.direct import AlreadyComplete
     from almanak.connectors.uniswap_v4.models import Target
     from almanak.dex_intents import RevokeExchange
 
     if not seen.needs_cleanup:
-        raise ValueError(
+        raise AlreadyComplete(
             "nothing to revoke: no approval of a pool token to Permit2 holds an amount, "
             "and no Permit2 allowance to the pool's router or position manager holds an "
             "amount or has yet to expire"

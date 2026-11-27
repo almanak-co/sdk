@@ -226,10 +226,13 @@ def close_liquidity(allocation, seen, request):
 
 def revoke_exchange(allocation, seen, request):
     from almanak.connectors.curve.models import Target
+    from almanak.connectors.direct import AlreadyComplete
     from almanak.dex_intents import RevokeExchange
 
     if not seen.needs_cleanup:
-        raise ValueError("the wallet has given the pool no allowance in any of its coins")
+        raise AlreadyComplete(
+            "nothing to revoke: the wallet has given the pool no allowance in any of its coins"
+        )
     return RevokeExchange[Target](target=seen.target)
 
 

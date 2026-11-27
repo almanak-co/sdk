@@ -667,7 +667,7 @@ def perform(
     create=None,
     interrupt=lambda: None,
 ) -> dict:
-    from almanak.connectors.direct import binding_for
+    from almanak.connectors.direct import AlreadyComplete, binding_for
     from almanak.operator_runtime import OperatorRuntime
 
     runtime = OperatorRuntime(gateway=LocalGateway(service), create=create)
@@ -683,7 +683,10 @@ def perform(
             noted.update(stated_note(binding, state.config, observed, request))
             return binding.intent(state.config, observed, request)
 
-        runtime.submit(admit)
+        try:
+            runtime.submit(admit)
+        except AlreadyComplete as done:
+            return already_complete(request, before, done)
         first = step(runtime.preview())
         result = {
             "action": request.action,
@@ -700,6 +703,23 @@ def perform(
         return result
     finally:
         runtime.close()
+
+
+def already_complete(request, before, done) -> dict:
+    """The result of a request whose admitting observation shows its goal reached.
+
+    Nothing was admitted, planned or signed, so the result has no step and no outcome,
+    and the record holds nothing. `completed` is stated in a preview too: the request
+    is over either way, and stating it again would end the same way while the state
+    holds. `note` is the connector's sentence on what it found.
+    """
+    return {
+        "action": request.action,
+        "executed": False,
+        "completed": True,
+        "position_before": position(before),
+        "note": str(done),
+    }
 
 
 def stated_note(binding, config, observed, request) -> dict:

@@ -24,6 +24,17 @@ class NftNotHeld(ValueError):
     """
 
 
+class AlreadyComplete(ValueError):
+    """The admitting observation already shows the state the request exists to reach.
+
+    A connector raises it in place of an intent, with the sentence the result carries as
+    its `note`. The command then plans and signs nothing and reports the request as
+    completed, in a preview as in an execution. It is for a cleanup whose whole purpose
+    is that state, such as a revocation with no allowance left. A request for an effect
+    that cannot happen, such as a repayment with no debt, stays a refusal.
+    """
+
+
 # The intent kinds each `ax` command can admit. A chain serves a command when its
 # support declares one of them as a direct action; the gateway admits only a declared
 # kind. A command with two kinds admits the first without an amount, the whole balance

@@ -47,7 +47,7 @@ The heavy imports stay inside the functions: the command line imports each conne
 `direct` module to build its choices.
 """
 
-from almanak.connectors.direct import ALLOCATION, ActionRequest, Wallet
+from almanak.connectors.direct import ALLOCATION, ActionRequest, AlreadyComplete, Wallet
 from almanak.connectors.v3_pool_liquidity_direct import ADDITIONS, ADMISSION_SECONDS, flag
 
 ACTIONS = (
@@ -250,9 +250,9 @@ def collect_liquidity_fees(actions, allocation, seen, request):
 
 def revoke_exchange(actions, allocation, seen, request):
     if not seen.needs_cleanup:
-        raise ValueError(
-            "the wallet has given the pool's router no allowance in either pool currency "
-            "or in the pool's shares"
+        raise AlreadyComplete(
+            "nothing to revoke: the wallet has given the pool's router no allowance in "
+            "either pool currency or in the pool's shares"
         )
     return actions.revoke_intent(target=seen.target)
 

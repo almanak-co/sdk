@@ -8,6 +8,16 @@ its changelog is on the `v2` branch.
 
 ## [Unreleased]
 
+### Changed
+- `almanak ax revoke-exchange` on a wallet with nothing left to revoke exits 0 instead
+  of failing with `invalid_input` and exit 1. It plans and signs nothing and reports
+  `executed: false`, `completed: true`, `position_before` and a `note` that starts
+  with `nothing to revoke:` and names what the connector read, in a preview as with
+  `--execute`. This holds for Curve, the V3 family (Uniswap V3, PancakeSwap V3,
+  Aerodrome Slipstream), Aerodrome classic and Uniswap V4. A cleanup step at the end
+  of a script no longer needs to match message text to tell a clean wallet from a bad
+  command. The result is the command's reading of one block, not on-chain enforcement.
+
 ### Fixed
 - A direct `almanak ax --execute` action, or a strategy run, no longer ends with
   `gateway coordinator heartbeat failed` because its own send was slow. A broadcast
